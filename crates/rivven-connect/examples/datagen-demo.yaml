@@ -1,0 +1,62 @@
+# Example: Datagen source to stdout sink
+#
+# Run with: rivven-connect run --config examples/datagen-demo.yaml
+#
+# This generates synthetic order data and prints to stdout.
+# Perfect for testing and demos without external dependencies.
+
+version: "1.0"
+
+broker:
+  address: localhost:9092
+
+sources:
+  # Generate fake e-commerce orders (regular records)
+  orders:
+    connector: datagen
+    topic: demo-orders
+    config:
+      pattern: orders
+      events_per_second: 5
+      max_events: 100
+      stream_name: orders
+      seed: 42  # Reproducible data
+
+  # Generate fake user signups with CDC simulation
+  # (INSERT/UPDATE/DELETE cycles like a real database)
+  users-cdc:
+    connector: datagen
+    topic: demo-users-cdc
+    config:
+      pattern: users
+      events_per_second: 2
+      max_events: 50
+      stream_name: users
+      cdc_mode: true  # Generates INSERT/UPDATE/DELETE events
+
+  # Generate metrics (always regular records, not CDC)
+  metrics:
+    connector: datagen
+    topic: demo-metrics
+    config:
+      pattern: metrics
+      events_per_second: 10
+      stream_name: system_metrics
+      custom_fields:
+        service: "demo-app"
+        environment: "local"
+
+sinks:
+  # Print to console for debugging
+  console:
+    connector: stdout
+    config:
+      format: pretty
+      include_timestamp: true
+
+# Uncomment to enable pipelines
+# pipelines:
+#   orders-to-console:
+#     source: orders
+#     sink: console
+#     enabled: true

@@ -1,0 +1,41 @@
+[package]
+name = "rivven-python"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Python bindings for Rivven event streaming platform"
+readme = "README.md"
+keywords = ["kafka", "streaming", "event-driven", "python", "pyo3"]
+categories = ["asynchronous", "network-programming", "api-bindings"]
+
+[lib]
+name = "rivven"
+crate-type = ["cdylib"]
+
+[dependencies]
+# PyO3 for Python bindings (0.27+ fixes RUSTSEC-2025-0020)
+pyo3 = { version = "0.27", features = ["extension-module"] }
+pyo3-async-runtimes = { version = "0.27", features = ["tokio-runtime"] }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Internal crates
+rivven-client = { path = "../rivven-client" }
+rivven-core = { path = "../rivven-core" }
+
+# Serialization for message conversion
+bytes = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# Python testing support
+pyo3 = { version = "0.27", features = ["auto-initialize"] }
+
+[features]
+default = []
+# Enable TLS support
+tls = ["rivven-client/tls"]

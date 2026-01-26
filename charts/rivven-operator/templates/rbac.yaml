@@ -1,0 +1,75 @@
+{{- if .Values.rbac.create -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "rivven-operator.fullname" . }}
+  labels:
+    {{- include "rivven-operator.labels" . | nindent 4 }}
+rules:
+  # Core resources
+  - apiGroups: [""]
+    resources: ["configmaps", "services", "secrets", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  
+  # Apps resources
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  
+  # Policy resources
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  
+  # Rivven Cluster CRDs
+  - apiGroups: ["rivven.io"]
+    resources: ["rivvenclusters"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["rivven.io"]
+    resources: ["rivvenclusters/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["rivven.io"]
+    resources: ["rivvenclusters/finalizers"]
+    verbs: ["update"]
+  
+  # Rivven Connect CRDs
+  - apiGroups: ["rivven.io"]
+    resources: ["rivvenconnects"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["rivven.io"]
+    resources: ["rivvenconnects/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["rivven.io"]
+    resources: ["rivvenconnects/finalizers"]
+    verbs: ["update"]
+  
+  # Coordination for leader election
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  
+  {{- with .Values.rbac.extraRules }}
+  {{- toYaml . | nindent 2 }}
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "rivven-operator.fullname" . }}
+  labels:
+    {{- include "rivven-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "rivven-operator.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "rivven-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

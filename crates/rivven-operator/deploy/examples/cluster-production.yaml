@@ -1,0 +1,128 @@
+apiVersion: rivven.io/v1alpha1
+kind: RivvenCluster
+metadata:
+  name: production-cluster
+  namespace: rivven-production
+spec:
+  replicas: 5
+  image: ghcr.io/hupe1980/rivven:1.0.0
+  
+  broker:
+    clientPort: 9092
+    clusterPort: 9093
+    metricsPort: 9094
+    adminPort: 9095
+    segmentSizeBytes: 2147483648        # 2GB - larger segments for high throughput
+    retentionSizeBytes: 107374182400    # 100GB
+    retentionDurationSecs: 2592000      # 30 days
+    compressionEnabled: true
+    compressionLevel: 5                 # Higher compression for storage efficiency
+    maxMessageSizeBytes: 10485760       # 10MB
+    ackTimeoutMs: 60000                 # 60s timeout for production
+    indexIntervalBytes: 8192            # Larger index interval for performance
+  
+  storage:
+    storageClassName: fast-ssd          # Use SSD-backed storage
+    size: "500Gi"
+    accessModes:
+      - ReadWriteOnce
+  
+  resources:
+    requests:
+      cpu: "2"
+      memory: "8Gi"
+    limits:
+      cpu: "8"
+      memory: "32Gi"
+  
+  # Production TLS configuration
+  tls:
+    enabled: true
+    secretName: rivven-tls
+    certFile: /etc/rivven/certs/tls.crt
+    keyFile: /etc/rivven/certs/tls.key
+    caFile: /etc/rivven/certs/ca.crt
+    clientAuth: true                    # Require client certificates
+  
+  # Monitoring
+  metrics:
+    enabled: true
+    path: "/metrics"
+    serviceMonitor: true
+    serviceMonitorNamespace: monitoring
+  
+  # High availability PDB
+  pdb:
+    enabled: true
+    maxUnavailable: 1                   # Only 1 pod down at a time
+  
+  # Pod scheduling - spread across zones
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: rivven-cluster
+              app.kubernetes.io/instance: production-cluster
+          topologyKey: topology.kubernetes.io/zone
+  
+  tolerations:
+    - key: "dedicated"
+      operator: "Equal"
+      value: "rivven"
+      effect: "NoSchedule"
+  
+  nodeSelector:
+    node-type: high-memory
+    disk-type: ssd
+  
+  # Security hardening
+  securityContext:
+    runAsNonRoot: true
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+    runAsUser: 1000
+    runAsGroup: 1000
+    capabilities:
+      drop:
+        - ALL
+  
+  # Conservative probes for production
+  livenessProbe:
+    initialDelaySeconds: 60
+    periodSeconds: 15
+    timeoutSeconds: 10
+    failureThreshold: 5
+  
+  readinessProbe:
+    initialDelaySeconds: 20
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  
+  imagePullSecrets:
+    - ghcr-credentials
+  
+  serviceAccountName: rivven-broker
+  
+  env:
+    - name: RUST_LOG
+      value: "rivven=info,rivven_cluster=debug"
+    - name: RIVVEN_CLUSTER_ID
+      value: "production-cluster"
+  
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9094"
+    cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+  
+  labels:
+    app: rivven
+    environment: production
+    tier: data
+    compliance: pci-dss

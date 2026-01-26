@@ -1,0 +1,64 @@
+apiVersion: rivven.io/v1alpha1
+kind: RivvenCluster
+metadata:
+  name: my-cluster
+  namespace: default
+spec:
+  replicas: 3
+  image: ghcr.io/hupe1980/rivven:latest
+  broker:
+    clientPort: 9092
+    clusterPort: 9093
+    metricsPort: 9094
+    adminPort: 9095
+    segmentSizeBytes: 1073741824        # 1GB
+    retentionSizeBytes: 10737418240     # 10GB
+    retentionDurationSecs: 604800       # 7 days
+    compressionEnabled: true
+    compressionLevel: 3
+    maxMessageSizeBytes: 1048576        # 1MB
+  storage:
+    storageClassName: standard
+    size: "50Gi"
+    accessModes:
+      - ReadWriteOnce
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+  tls:
+    enabled: false
+  metrics:
+    enabled: true
+    path: "/metrics"
+    serviceMonitor: true
+  pdb:
+    enabled: true
+    minAvailable: 2
+  livenessProbe:
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    failureThreshold: 3
+  readinessProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    failureThreshold: 3
+  securityContext:
+    runAsNonRoot: true
+    fsGroup: 1000
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: false
+    runAsUser: 1000
+    capabilities:
+      drop:
+        - ALL
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9094"
+  labels:
+    app: rivven
+    environment: production

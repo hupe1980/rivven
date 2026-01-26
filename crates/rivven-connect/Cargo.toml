@@ -1,0 +1,81 @@
+[package]
+name = "rivven-connect"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Connector SDK and runtime for Rivven - sources, sinks, and transforms"
+readme = "README.md"
+
+[lib]
+name = "rivven_connect"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rivven-connect"
+path = "src/main.rs"
+
+[features]
+default = ["postgres", "mysql"]
+postgres = ["rivven-cdc/postgres", "tokio-postgres"]
+mysql = ["rivven-cdc/mysql"]
+tls = ["rivven-client/tls"]
+http = []  # HTTP connector is now built-in, just feature-gated
+full = ["postgres", "mysql", "tls", "http"]
+
+[dependencies]
+# Internal crates
+rivven-cdc = { workspace = true }
+rivven-core = { workspace = true }
+rivven-client = { workspace = true }
+
+# Async
+tokio = { workspace = true }
+tokio-stream = "0.1"
+futures = { workspace = true }
+async-trait = "0.1"
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = "0.9"
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Utils
+async-stream = "0.3"
+bytes = { workspace = true }
+clap = { workspace = true }
+url = { workspace = true }
+chrono = { workspace = true }
+regex = "1.10"
+tokio-postgres = { version = "0.7", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# SDK dependencies (merged from rivven-connect-sdk)
+schemars = "0.8"
+validator = { version = "0.20", features = ["derive"] }
+uuid = { version = "1.0", features = ["v4"] }
+secrecy = { version = "0.10", features = ["serde"] }
+zeroize = "1.8"
+parking_lot = "0.12"
+
+# Schema registry and plugin support
+base64 = "0.22"
+lru = "0.12"
+arc-swap = "1.7"
+wasmparser = "0.224"
+
+[dev-dependencies]
+tokio-test = "0.4"
+rivven-server = { workspace = true }
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
+tokio-postgres = "0.7"

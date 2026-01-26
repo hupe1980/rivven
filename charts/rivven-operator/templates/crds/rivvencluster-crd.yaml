@@ -1,0 +1,247 @@
+{{- if .Values.crds.install }}
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: rivvenclusters.rivven.io
+  labels:
+    {{- include "rivven-operator.labels" . | nindent 4 }}
+  {{- if .Values.crds.keep }}
+  annotations:
+    "helm.sh/resource-policy": keep
+    {{- with .Values.crds.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- else if .Values.crds.annotations }}
+  annotations:
+    {{- toYaml .Values.crds.annotations | nindent 4 }}
+  {{- end }}
+spec:
+  group: rivven.io
+  names:
+    kind: RivvenCluster
+    listKind: RivvenClusterList
+    plural: rivvenclusters
+    singular: rivvencluster
+    shortNames:
+      - rc
+      - rivven
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              required:
+                - replicas
+              properties:
+                replicas:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+                image:
+                  type: string
+                  default: "{{ .Values.defaultCluster.image }}"
+                broker:
+                  type: object
+                  properties:
+                    clientPort:
+                      type: integer
+                      default: {{ .Values.defaultCluster.broker.clientPort }}
+                    clusterPort:
+                      type: integer
+                      default: {{ .Values.defaultCluster.broker.clusterPort }}
+                    metricsPort:
+                      type: integer
+                      default: {{ .Values.defaultCluster.broker.metricsPort }}
+                    adminPort:
+                      type: integer
+                      default: {{ .Values.defaultCluster.broker.adminPort }}
+                    segmentSizeBytes:
+                      type: integer
+                    retentionSizeBytes:
+                      type: integer
+                    retentionDurationSecs:
+                      type: integer
+                    compressionEnabled:
+                      type: boolean
+                    compressionLevel:
+                      type: integer
+                    indexIntervalBytes:
+                      type: integer
+                    ackTimeoutMs:
+                      type: integer
+                    maxMessageSizeBytes:
+                      type: integer
+                storage:
+                  type: object
+                  properties:
+                    storageClassName:
+                      type: string
+                    size:
+                      type: string
+                      default: "{{ .Values.defaultCluster.storage.size }}"
+                    accessModes:
+                      type: array
+                      items:
+                        type: string
+                resources:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                affinity:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                tolerations:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                imagePullSecrets:
+                  type: array
+                  items:
+                    type: string
+                nodeSelector:
+                  type: object
+                  additionalProperties:
+                    type: string
+                serviceAccountName:
+                  type: string
+                env:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                tls:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                    secretName:
+                      type: string
+                    certFile:
+                      type: string
+                    keyFile:
+                      type: string
+                    caFile:
+                      type: string
+                    clientAuth:
+                      type: boolean
+                metrics:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                    path:
+                      type: string
+                    serviceMonitor:
+                      type: boolean
+                    serviceMonitorNamespace:
+                      type: string
+                pdb:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                    minAvailable:
+                      x-kubernetes-int-or-string: true
+                    maxUnavailable:
+                      x-kubernetes-int-or-string: true
+                securityContext:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                containerSecurityContext:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                livenessProbe:
+                  type: object
+                  properties:
+                    initialDelaySeconds:
+                      type: integer
+                    periodSeconds:
+                      type: integer
+                    timeoutSeconds:
+                      type: integer
+                    failureThreshold:
+                      type: integer
+                    successThreshold:
+                      type: integer
+                readinessProbe:
+                  type: object
+                  properties:
+                    initialDelaySeconds:
+                      type: integer
+                    periodSeconds:
+                      type: integer
+                    timeoutSeconds:
+                      type: integer
+                    failureThreshold:
+                      type: integer
+                    successThreshold:
+                      type: integer
+                annotations:
+                  type: object
+                  additionalProperties:
+                    type: string
+                labels:
+                  type: object
+                  additionalProperties:
+                    type: string
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                readyReplicas:
+                  type: integer
+                currentReplicas:
+                  type: integer
+                observedGeneration:
+                  type: integer
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                message:
+                  type: string
+                endpoints:
+                  type: object
+                  properties:
+                    client:
+                      type: string
+                    cluster:
+                      type: string
+                    metrics:
+                      type: string
+      additionalPrinterColumns:
+        - name: Replicas
+          type: integer
+          jsonPath: .spec.replicas
+        - name: Ready
+          type: integer
+          jsonPath: .status.readyReplicas
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+{{- end }}

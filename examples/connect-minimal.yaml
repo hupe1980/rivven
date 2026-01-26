@@ -1,0 +1,37 @@
+# Rivven Connect - Minimal Test Configuration
+#
+# This is a simple config for testing the connect architecture.
+# Run with: rivven-connect run -c examples/connect-minimal.yaml
+#
+# Prerequisites:
+# 1. Start a Rivven broker: rivven-server
+# 2. Run this connect instance: rivven-connect run -c examples/connect-minimal.yaml
+
+version: "1.0"
+
+# Broker connection
+broker:
+  address: localhost:9092
+  tls:
+    enabled: false
+
+# No sources - this config is for testing sinks
+# In production, you'd have postgres-cdc or other sources
+sources: {}
+
+# Sinks
+sinks:
+  # Stdout sink - prints messages to console
+  # Great for debugging and verifying messages flow
+  console:
+    connector: stdout
+    topics:
+      - test-topic
+    consumer_group: console-debug
+    start_offset: earliest
+    config:
+      format: pretty
+
+settings:
+  state_dir: ./data/connect-state
+  log_level: debug

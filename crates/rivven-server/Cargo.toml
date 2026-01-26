@@ -1,0 +1,53 @@
+[package]
+name = "rivven-server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["dashboard"]
+cedar = ["rivven-core/cedar"]
+oidc = ["rivven-core/oidc"]
+tls = ["rivven-core/tls"]
+dashboard = ["rust-embed", "mime_guess"]
+
+[[bin]]
+name = "rivven-server"
+path = "src/main.rs"
+
+[dependencies]
+rivven-core = { workspace = true }
+rivven-cluster = { path = "../rivven-cluster", features = ["raft"] }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_bytes = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { version = "4.4", features = ["derive", "env"] }
+gethostname = "0.4"
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+openraft = { version = "0.9", features = ["serde"] }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rustls = "0.23"
+rustls-pemfile = "2.0"
+tokio-rustls = "0.26"
+
+# Dashboard (optional)
+rust-embed = { version = "8.3", optional = true }
+mime_guess = { version = "2.0", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+proptest = "1.4"

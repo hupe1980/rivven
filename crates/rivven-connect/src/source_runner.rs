@@ -1,0 +1,395 @@
+//! Source runner - reads from external systems, publishes to broker topics
+//!
+//! Features:
+//! - Automatic reconnection with exponential backoff
+//! - Status tracking for health checks
+//! - Graceful shutdown support
+//! - Per-source metrics
+//! - Auto-create topics with configurable settings
+
+use crate::broker_client::SharedBrokerClient;
+use crate::config::{ConnectConfig, SourceConfig, TopicSettings};
+use crate::error::{ConnectError, ConnectorStatus, Result};
+use bytes::Bytes;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use tokio::sync::{broadcast, RwLock};
+use tracing::{debug, error, info, warn};
+
+/// Source runner state
+pub struct SourceRunner {
+    name: String,
+    config: SourceConfig,
+    global_topic_settings: TopicSettings,
+    broker: SharedBrokerClient,
+    status: RwLock<ConnectorStatus>,
+    events_published: AtomicU64,
+    errors_count: AtomicU64,
+}
+
+// Methods for health monitoring - reserved for future integration with health.rs
+#[allow(dead_code)]
+impl SourceRunner {
+    /// Get current status
+    pub async fn status(&self) -> ConnectorStatus {
+        *self.status.read().await
+    }
+
+    /// Get error count
+    pub fn errors_count(&self) -> u64 {
+        self.errors_count.load(Ordering::Relaxed)
+    }
+}
+
+impl SourceRunner {
+    /// Create a new source runner
+    pub fn new(
+        name: String, 
+        config: SourceConfig, 
+        global_topic_settings: TopicSettings,
+        broker: SharedBrokerClient,
+    ) -> Self {
+        Self {
+            name,
+            config,
+            global_topic_settings,
+            broker,
+            status: RwLock::new(ConnectorStatus::Starting),
+            events_published: AtomicU64::new(0),
+            errors_count: AtomicU64::new(0),
+        }
+    }
+
+    /// Get events published count
+    pub fn events_published(&self) -> u64 {
+        self.events_published.load(Ordering::Relaxed)
+    }
+
+    /// Run the source connector
+    pub async fn run(&self, mut shutdown_rx: broadcast::Receiver<()>) -> Result<()> {
+        info!(
+            "Source '{}' starting, publishing to topic: {}",
+            self.name, self.config.topic
+        );
+
+        // Ensure topic exists
+        self.ensure_topic_exists().await?;
+
+        // Run connector-specific logic
+        let result = match self.config.connector.as_str() {
+            "datagen" => self.run_datagen(&mut shutdown_rx).await,
+            "postgres-cdc" => {
+                #[cfg(feature = "postgres")]
+                {
+                    self.run_postgres_cdc(&mut shutdown_rx).await
+                }
+                #[cfg(not(feature = "postgres"))]
+                {
+                    Err(ConnectError::config(
+                        "PostgreSQL CDC support not compiled in. Enable 'postgres' feature.",
+                    ))
+                }
+            }
+            "http" => self.run_http_source(&mut shutdown_rx).await,
+            other => Err(ConnectError::config(format!(
+                "Unknown source connector type: {}",
+                other
+            ))),
+        };
+
+        *self.status.write().await = match &result {
+            Ok(()) => ConnectorStatus::Stopped,
+            Err(e) if e.is_shutdown() => ConnectorStatus::Stopped,
+            Err(_) => ConnectorStatus::Failed,
+        };
+
+        result
+    }
+
+    /// Ensure the target topic exists (with auto-create if enabled)
+    async fn ensure_topic_exists(&self) -> Result<()> {
+        let topic = &self.config.topic;
+        
+        // Determine if auto-create is enabled for this source
+        let auto_create = self.config.topic_config
+            .as_ref()
+            .and_then(|tc| tc.auto_create)
+            .unwrap_or(self.global_topic_settings.auto_create);
+        
+        // Determine partition count
+        let partitions = self.config.topic_config
+            .as_ref()
+            .and_then(|tc| tc.partitions)
+            .unwrap_or(self.global_topic_settings.default_partitions);
+
+        if !auto_create {
+            // Check if topic exists when auto-create is disabled
+            if self.global_topic_settings.require_topic_exists {
+                match self.broker.topic_exists(topic).await {
+                    Ok(true) => {
+                        info!("Source '{}': topic '{}' exists", self.name, topic);
+                        return Ok(());
+                    }
+                    Ok(false) => {
+                        return Err(ConnectError::Topic(format!(
+                            "Topic '{}' does not exist and auto_create is disabled", 
+                            topic
+                        )));
+                    }
+                    Err(e) => {
+                        warn!("Source '{}': failed to check topic existence: {}", self.name, e);
+                        // Proceed anyway - topic might exist
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        // Auto-create enabled - create topic
+        match self.broker.create_topic(topic, partitions).await {
+            Ok(_) => {
+                info!(
+                    "Source '{}': created topic '{}' with {} partition(s)", 
+                    self.name, topic, partitions
+                );
+                Ok(())
+            }
+            Err(e) => {
+                // Topic might already exist, which is fine
+                let err_str = e.to_string().to_lowercase();
+                if err_str.contains("already exists") || err_str.contains("exists") {
+                    debug!(
+                        "Source '{}': topic '{}' already exists", 
+                        self.name, topic
+                    );
+                    Ok(())
+                } else {
+                    warn!(
+                        "Source '{}': topic creation returned: {} (may already exist)", 
+                        self.name, e
+                    );
+                    // Don't fail - topic might exist, we'll find out when we publish
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    /// Publish an event to the broker
+    async fn publish(&self, data: Bytes) -> Result<()> {
+        match self.broker.publish(&self.config.topic, data).await {
+            Ok(_) => {
+                self.events_published.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(e) => {
+                self.errors_count.fetch_add(1, Ordering::Relaxed);
+                Err(e)
+            }
+        }
+    }
+
+    #[cfg(feature = "postgres")]
+    async fn run_postgres_cdc(
+        &self,
+        shutdown_rx: &mut broadcast::Receiver<()>,
+    ) -> Result<()> {
+        use crate::connectors::postgres_cdc::PostgresCdcConfig as SdkPgConfig;
+        use rivven_cdc::common::CdcSource;
+        use rivven_cdc::postgres::{PostgresCdc, PostgresCdcConfig};
+        use validator::Validate;
+
+        // Parse and validate using the SDK config struct
+        let sdk_config: SdkPgConfig = serde_yaml::from_value(self.config.config.clone())
+            .map_err(|e| ConnectError::config(format!("Invalid postgres config: {}", e)))?;
+
+        // Validate configuration
+        sdk_config.validate()
+            .map_err(|e| ConnectError::config(format!("Config validation failed: {}", e)))?;
+
+        // Build connection string - password is explicitly exposed here for connection
+        let connection_string = format!(
+            "host={} port={} dbname={} user={} password={}",
+            sdk_config.host,
+            sdk_config.port,
+            sdk_config.database,
+            sdk_config.user,
+            sdk_config.password.expose() // Explicit password exposure for DB connection
+        );
+
+        let cdc_config = PostgresCdcConfig::builder()
+            .connection_string(connection_string)
+            .slot_name(sdk_config.slot_name.clone())
+            .publication_name(sdk_config.publication_name.clone())
+            .buffer_size(1000)
+            .build()
+            .map_err(|e| ConnectError::source(&self.name, e.to_string()))?;
+
+        let mut cdc = PostgresCdc::new(cdc_config);
+
+        cdc.start()
+            .await
+            .map_err(|e| ConnectError::source(&self.name, e.to_string()))?;
+
+        let mut event_rx = cdc
+            .take_event_receiver()
+            .ok_or_else(|| ConnectError::source(&self.name, "Failed to get event receiver"))?;
+
+        *self.status.write().await = ConnectorStatus::Running;
+        info!(
+            "Source '{}' connected to PostgreSQL, streaming CDC events",
+            self.name
+        );
+
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.recv() => {
+                    info!(
+                        "Source '{}' shutting down after {} events",
+                        self.name,
+                        self.events_published()
+                    );
+                    cdc.stop().await.ok();
+                    return Ok(());
+                }
+                event = event_rx.recv() => {
+                    match event {
+                        Some(cdc_event) => {
+                            let json = serde_json::to_vec(&cdc_event)
+                                .map_err(|e| ConnectError::Serialization(e.to_string()))?;
+                            
+                            if let Err(e) = self.publish(Bytes::from(json)).await {
+                                error!("Source '{}' publish error: {}", self.name, e);
+                                *self.status.write().await = ConnectorStatus::Unhealthy;
+                                // Don't fail, let reconnection logic handle it
+                            }
+
+                            let count = self.events_published();
+                            if count.is_multiple_of(1000) && count > 0 {
+                                debug!("Source '{}' published {} events", self.name, count);
+                            }
+                        }
+                        None => {
+                            info!("Source '{}' CDC channel closed", self.name);
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn run_http_source(
+        &self,
+        _shutdown_rx: &mut broadcast::Receiver<()>,
+    ) -> Result<()> {
+        Err(ConnectError::source(
+            &self.name,
+            "HTTP source not yet implemented",
+        ))
+    }
+
+    async fn run_datagen(&self, shutdown_rx: &mut broadcast::Receiver<()>) -> Result<()> {
+        use crate::connectors::datagen::{DatagenConfig, DatagenSource};
+        use futures::StreamExt;
+        use super::prelude::*;
+
+        // Parse and validate configuration
+        let config: DatagenConfig = serde_yaml::from_value(self.config.config.clone())
+            .map_err(|e| ConnectError::config(format!("Invalid datagen config: {}", e)))?;
+
+        config
+            .validate()
+            .map_err(|e| ConnectError::config(format!("Config validation failed: {}", e)))?;
+
+        let source = DatagenSource::new();
+        let catalog = ConfiguredCatalog::default();
+
+        let mut stream = source
+            .read(&config, &catalog, None)
+            .await
+            .map_err(|e| ConnectError::source(&self.name, e.to_string()))?;
+
+        *self.status.write().await = ConnectorStatus::Running;
+        info!(
+            "Source '{}' started datagen with pattern: {:?}, rate: {} events/sec",
+            self.name, config.pattern, config.events_per_second
+        );
+
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.recv() => {
+                    info!(
+                        "Source '{}' shutting down after {} events",
+                        self.name,
+                        self.events_published()
+                    );
+                    return Ok(());
+                }
+                event = stream.next() => {
+                    match event {
+                        Some(Ok(source_event)) => {
+                            let json = serde_json::to_vec(&source_event)
+                                .map_err(|e| ConnectError::Serialization(e.to_string()))?;
+
+                            if let Err(e) = self.publish(Bytes::from(json)).await {
+                                error!("Source '{}' publish error: {}", self.name, e);
+                                *self.status.write().await = ConnectorStatus::Unhealthy;
+                            }
+
+                            let count = self.events_published();
+                            if count.is_multiple_of(1000) && count > 0 {
+                                debug!("Source '{}' published {} events", self.name, count);
+                            }
+                        }
+                        Some(Err(e)) => {
+                            error!("Source '{}' datagen error: {}", self.name, e);
+                            self.errors_count.fetch_add(1, Ordering::Relaxed);
+                        }
+                        None => {
+                            info!(
+                                "Source '{}' datagen completed after {} events",
+                                self.name,
+                                self.events_published()
+                            );
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Shared source runner for health checks
+#[allow(dead_code)]
+pub type SharedSourceRunner = Arc<SourceRunner>;
+
+/// Run a source connector
+pub async fn run_source(
+    name: &str,
+    source_config: &SourceConfig,
+    config: &ConnectConfig,
+    shutdown_rx: &mut broadcast::Receiver<()>,
+) -> Result<()> {
+    use crate::broker_client::BrokerClient;
+
+    // Create broker client with retry config
+    let broker = Arc::new(BrokerClient::new(
+        config.broker.clone(),
+        config.settings.retry.clone(),
+    ));
+
+    // Connect to broker
+    broker.connect().await?;
+
+    // Create and run source with global topic settings
+    let runner = SourceRunner::new(
+        name.to_string(),
+        source_config.clone(),
+        config.settings.topic.clone(),
+        broker.clone(),
+    );
+
+    runner.run(shutdown_rx.resubscribe()).await
+}

@@ -1,0 +1,201 @@
+# Rivven Operator Helm Chart Values
+
+# Number of operator replicas
+replicaCount: 1
+
+image:
+  repository: ghcr.io/hupe1980/rivven-operator
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+# Pod annotations
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "8080"
+
+# Pod labels
+podLabels: {}
+
+# Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+# Container security context
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# Operator configuration
+operator:
+  # Enable leader election for running multiple replicas
+  leaderElection: true
+  # Metrics bind address
+  metricsAddr: "0.0.0.0:8080"
+  # Health probe bind address
+  healthAddr: "0.0.0.0:8081"
+  # Namespaces to watch (empty means all namespaces)
+  watchNamespace: ""
+  # Log level (trace, debug, info, warn, error)
+  logLevel: "info"
+  # Reconciliation interval
+  reconcileInterval: "30s"
+  # Maximum concurrent reconciles
+  maxConcurrentReconciles: 3
+
+# Resource limits and requests
+resources:
+  limits:
+    cpu: 500m
+    memory: 128Mi
+  requests:
+    cpu: 10m
+    memory: 64Mi
+
+# Node selector
+nodeSelector: {}
+
+# Tolerations
+tolerations: []
+
+# Affinity rules
+affinity: {}
+
+# Service configuration for metrics
+service:
+  type: ClusterIP
+  port: 8080
+  annotations: {}
+
+# ServiceMonitor for Prometheus Operator
+serviceMonitor:
+  enabled: false
+  namespace: ""
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+  annotations: {}
+
+# Pod Disruption Budget
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+  # maxUnavailable: 1
+
+# Network policies
+networkPolicy:
+  enabled: false
+  # Ingress rules
+  ingress: []
+  # Egress rules  
+  egress: []
+
+# RBAC configuration
+rbac:
+  # Create RBAC resources
+  create: true
+  # Additional rules for the ClusterRole
+  extraRules: []
+
+# CRD management
+crds:
+  # Install CRDs with the chart
+  install: true
+  # Keep CRDs on chart uninstall (recommended for production)
+  keep: true
+  # Annotations to add to CRDs
+  annotations: {}
+
+# Priority class for the operator pods
+priorityClassName: ""
+
+# Topology spread constraints
+topologySpreadConstraints: []
+
+# Extra environment variables
+extraEnv: []
+#  - name: MY_VAR
+#    value: "my-value"
+
+# Extra volume mounts
+extraVolumeMounts: []
+
+# Extra volumes
+extraVolumes: []
+
+# Liveness probe configuration
+livenessProbe:
+  httpGet:
+    path: /
+    port: health
+  initialDelaySeconds: 15
+  periodSeconds: 20
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+# Readiness probe configuration
+readinessProbe:
+  httpGet:
+    path: /
+    port: health
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# Default values for RivvenCluster instances
+defaultCluster:
+  image: ghcr.io/hupe1980/rivven:latest
+  broker:
+    clientPort: 9092
+    clusterPort: 9093
+    metricsPort: 9094
+    adminPort: 9095
+  storage:
+    size: "10Gi"
+    accessModes:
+      - ReadWriteOnce
+  pdb:
+    enabled: true
+    minAvailable: 1
+
+# Default values for RivvenConnect instances
+defaultConnect:
+  version: "0.1.0"
+  image: ghcr.io/hupe1980/rivven-connect:latest
+  replicas: 1
+  stateDir: "/data/connect-state"
+  logLevel: "info"
+  settings:
+    topic:
+      autoCreate: true
+      defaultPartitions: 1
+      defaultReplicationFactor: 1
+    retry:
+      maxRetries: 10
+      initialBackoffMs: 100
+      maxBackoffMs: 30000
+    health:
+      enabled: false
+      port: 8080
+    metrics:
+      enabled: false
+      port: 9091

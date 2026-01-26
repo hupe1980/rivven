@@ -1,0 +1,51 @@
+[package]
+name = "rivven-warehouse"
+version = "0.0.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Data warehouse connectors for Rivven Connect (Snowflake, BigQuery, Redshift)"
+repository = "https://github.com/hupe1980/rivven"
+keywords = ["rivven", "streaming", "snowflake", "bigquery", "redshift"]
+categories = ["database", "asynchronous"]
+
+[features]
+default = []
+# Individual warehouse providers
+snowflake = ["dep:reqwest", "dep:rsa", "dep:base64", "dep:jsonwebtoken"]
+bigquery = []  # Future: Google BigQuery
+redshift = []  # Future: AWS Redshift
+# Enable all providers
+full = ["snowflake", "bigquery", "redshift"]
+
+[dependencies]
+rivven-connect = { path = "../rivven-connect" }
+
+# Core
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tracing = "0.1"
+thiserror = "1"
+chrono = { version = "0.4", features = ["serde"] }
+
+# Validation
+validator = { version = "0.20", features = ["derive"] }
+schemars = "0.8"
+
+# Secrets
+secrecy = { version = "0.8", features = ["serde"] }
+
+# Snowflake dependencies (optional)
+reqwest = { version = "0.11", features = ["json"], optional = true }
+rsa = { version = "0.9", optional = true }
+base64 = { version = "0.22", optional = true }
+jsonwebtoken = { version = "9", optional = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[package.metadata.docs.rs]
+all-features = true

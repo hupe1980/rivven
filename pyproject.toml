@@ -1,0 +1,66 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "rivven"
+description = "High-performance Python client for Rivven distributed streaming platform"
+readme = "python/README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.8"
+keywords = ["streaming", "kafka", "messaging", "distributed", "async"]
+dynamic = ["version"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Distributed Computing",
+    "Framework :: AsyncIO",
+    "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "mypy>=1.0",
+    "ruff>=0.1",
+]
+
+[project.urls]
+Homepage = "https://hupe1980.github.io/rivven"
+Documentation = "https://hupe1980.github.io/rivven"
+Repository = "https://github.com/hupe1980/rivven"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+python-source = "python"
+module-name = "rivven._rivven"
+manifest-path = "crates/rivven-python/Cargo.toml"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["python/tests"]
+
+[tool.mypy]
+python_version = "3.8"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py38"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "ANN", "B", "C4", "SIM"]
+ignore = ["ANN101", "ANN102"]

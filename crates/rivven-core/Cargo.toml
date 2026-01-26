@@ -1,0 +1,82 @@
+[package]
+name = "rivven-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["compression", "cedar", "tls", "metrics"]
+compression = ["dep:lz4", "dep:zstd"]
+cedar = ["dep:cedar-policy"]
+oidc = ["dep:openidconnect", "dep:oauth2", "dep:jsonwebtoken", "dep:reqwest"]
+tls = ["dep:rustls", "dep:rustls-pemfile", "dep:rustls-native-certs", "dep:tokio-rustls", "dep:rcgen", "dep:x509-parser", "dep:humantime-serde"]
+metrics = ["dep:metrics-exporter-prometheus"]
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+apache-avro = "0.16"
+memmap2 = "0.9"
+crc32fast = "1.3"
+serde_bytes = { workspace = true }
+async-trait = "0.1.89"
+dashmap = "6.1"
+parking_lot = "0.12"
+once_cell = "1.19"
+crossbeam-channel = "0.5"
+memchr = "2.7"
+regex = "1.11"
+
+# Metrics - unified observability
+metrics = "0.24"
+metrics-exporter-prometheus = { version = "0.16", optional = true }
+
+# Authentication & Security
+ring = "0.17"
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+base64 = "0.22"
+
+# Authorization - Cedar policy engine
+cedar-policy = { workspace = true, optional = true }
+
+# OIDC/OAuth2 authentication
+openidconnect = { workspace = true, optional = true }
+oauth2 = { workspace = true, optional = true }
+jsonwebtoken = { workspace = true, optional = true }
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false, optional = true }
+
+# TLS/mTLS support
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
+rustls-pemfile = { version = "2.1", optional = true }
+rustls-native-certs = { version = "0.8", optional = true }
+tokio-rustls = { version = "0.26", optional = true }
+rcgen = { version = "0.13", optional = true }
+x509-parser = { version = "0.16", optional = true }
+humantime-serde = { version = "1.1", optional = true }
+
+# Compression (high-performance)
+lz4 = { version = "1.24", optional = true }
+zstd = { version = "0.13", features = ["zstdmt"], optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+uuid = { version = "1.6", features = ["v4"] }
+criterion = { version = "0.5", features = ["async_tokio", "html_reports"] }
+tempfile = "3"
+
+[[bench]]
+name = "performance"
+harness = false
+

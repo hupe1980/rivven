@@ -1,0 +1,28 @@
+apiVersion: v2
+name: rivven-operator
+description: A Helm chart for deploying the Rivven Kubernetes Operator
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+keywords:
+  - rivven
+  - streaming
+  - operator
+  - kafka-alternative
+  - event-streaming
+home: https://github.com/hupe1980/rivven
+sources:
+  - https://github.com/hupe1980/rivven
+maintainers:
+  - name: hupe1980
+    url: https://github.com/hupe1980
+annotations:
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/operatorCapabilities: Full Lifecycle
+  artifacthub.io/crds: |
+    - kind: RivvenCluster
+      version: v1alpha1
+      name: rivvenclusters.rivven.io
+      displayName: Rivven Cluster
+      description: Represents a Rivven streaming cluster

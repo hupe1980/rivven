@@ -1,0 +1,39 @@
+# Cargo Audit Configuration
+# https://rustsec.org/
+
+[advisories]
+# Advisory IDs to ignore (unfixable or documented risk)
+ignore = [
+    # RUSTSEC-2023-0071: rsa timing sidechannel (Marvin Attack)
+    # Impact: Key recovery through timing analysis
+    # Source: openidconnect -> rsa
+    # Status: No fix available in openidconnect 3.x
+    # Mitigation: OIDC is an optional feature behind `oidc` flag
+    # Risk Assessment: Medium - requires active MITM position
+    "RUSTSEC-2023-0071",
+
+    # RUSTSEC-2025-0111: tokio-tar PAX header file smuggling  
+    # Impact: Malicious tar files could write outside extraction path
+    # Source: testcontainers -> tokio-tar
+    # Status: No fix available
+    # Mitigation: testcontainers is DEV-ONLY dependency
+    # Risk Assessment: Low - only affects test environments, not production
+    "RUSTSEC-2025-0111",
+]
+
+# Show warnings for informational advisories (unmaintained crates)
+informational_warnings = ["unmaintained"]
+
+[database]
+# Auto-fetch advisory database
+fetch = true
+# Use local database if fetch fails  
+stale = true
+
+[output]
+# Don't suppress output
+quiet = false
+# Output format
+format = "terminal"
+# Show dependency trees
+show_tree = true

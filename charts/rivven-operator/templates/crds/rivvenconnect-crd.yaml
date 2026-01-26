@@ -1,0 +1,392 @@
+{{- if .Values.crds.install }}
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: rivvenconnects.rivven.io
+  labels:
+    {{- include "rivven-operator.labels" . | nindent 4 }}
+  {{- if .Values.crds.keep }}
+  annotations:
+    "helm.sh/resource-policy": keep
+    {{- with .Values.crds.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- else if .Values.crds.annotations }}
+  annotations:
+    {{- toYaml .Values.crds.annotations | nindent 4 }}
+  {{- end }}
+spec:
+  group: rivven.io
+  names:
+    kind: RivvenConnect
+    listKind: RivvenConnectList
+    plural: rivvenconnects
+    singular: rivvenconnect
+    shortNames:
+      - rconn
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Cluster
+          type: string
+          jsonPath: .spec.clusterRef.name
+        - name: Replicas
+          type: integer
+          jsonPath: .spec.replicas
+        - name: Sources
+          type: integer
+          jsonPath: .status.sourcesRunning
+        - name: Sinks
+          type: integer
+          jsonPath: .status.sinksRunning
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              required:
+                - clusterRef
+              properties:
+                clusterRef:
+                  type: object
+                  required:
+                    - name
+                  properties:
+                    name:
+                      type: string
+                      description: Name of the RivvenCluster to connect to
+                    namespace:
+                      type: string
+                      description: Namespace of the RivvenCluster (defaults to same namespace)
+                replicas:
+                  type: integer
+                  minimum: 1
+                  maximum: 10
+                  default: 1
+                  description: Number of connect worker replicas
+                version:
+                  type: string
+                  default: "{{ .Values.defaultConnect.version | default "0.1.0" }}"
+                image:
+                  type: string
+                  description: Custom container image (overrides version-based default)
+                imagePullPolicy:
+                  type: string
+                  enum: ["Always", "IfNotPresent", "Never"]
+                  default: "IfNotPresent"
+                imagePullSecrets:
+                  type: array
+                  items:
+                    type: string
+                resources:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                config:
+                  type: object
+                  properties:
+                    stateDir:
+                      type: string
+                      default: "/data/connect-state"
+                    logLevel:
+                      type: string
+                      enum: ["trace", "debug", "info", "warn", "error"]
+                      default: "info"
+                sources:
+                  type: array
+                  maxItems: 50
+                  items:
+                    type: object
+                    required:
+                      - name
+                      - connector
+                      - topic
+                    properties:
+                      name:
+                        type: string
+                        description: Unique name for this source connector
+                      connector:
+                        type: string
+                        description: Connector type (postgres-cdc, mysql-cdc, http, datagen)
+                      topic:
+                        type: string
+                        description: Target topic to publish events to
+                      topicRouting:
+                        type: string
+                        description: Topic pattern with placeholders ({schema}, {table}, {database})
+                      enabled:
+                        type: boolean
+                        default: true
+                      config:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                        description: Connector-specific configuration
+                      configSecretRef:
+                        type: string
+                        description: Secret reference for sensitive configuration
+                      tables:
+                        type: array
+                        maxItems: 100
+                        items:
+                          type: object
+                          required:
+                            - table
+                          properties:
+                            schema:
+                              type: string
+                            table:
+                              type: string
+                            topic:
+                              type: string
+                      topicConfig:
+                        type: object
+                        properties:
+                          partitions:
+                            type: integer
+                            minimum: 1
+                            maximum: 1000
+                          replicationFactor:
+                            type: integer
+                            minimum: 1
+                            maximum: 10
+                          autoCreate:
+                            type: boolean
+                sinks:
+                  type: array
+                  maxItems: 50
+                  items:
+                    type: object
+                    required:
+                      - name
+                      - connector
+                      - topics
+                      - consumerGroup
+                    properties:
+                      name:
+                        type: string
+                        description: Unique name for this sink connector
+                      connector:
+                        type: string
+                        description: Connector type (stdout, s3, http, elasticsearch)
+                      topics:
+                        type: array
+                        minItems: 1
+                        maxItems: 100
+                        items:
+                          type: string
+                        description: Topics to consume from (supports wildcards)
+                      consumerGroup:
+                        type: string
+                        description: Consumer group for offset tracking
+                      enabled:
+                        type: boolean
+                        default: true
+                      startOffset:
+                        type: string
+                        enum: ["earliest", "latest"]
+                        default: "latest"
+                      config:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                        description: Connector-specific configuration
+                      configSecretRef:
+                        type: string
+                        description: Secret reference for sensitive configuration
+                      rateLimit:
+                        type: object
+                        properties:
+                          eventsPerSecond:
+                            type: integer
+                            minimum: 0
+                            default: 0
+                            description: Rate limit (0 = unlimited)
+                          burstCapacity:
+                            type: integer
+                            minimum: 0
+                settings:
+                  type: object
+                  properties:
+                    topic:
+                      type: object
+                      properties:
+                        autoCreate:
+                          type: boolean
+                          default: true
+                        defaultPartitions:
+                          type: integer
+                          minimum: 1
+                          maximum: 1000
+                          default: 1
+                        defaultReplicationFactor:
+                          type: integer
+                          minimum: 1
+                          maximum: 10
+                          default: 1
+                        requireTopicExists:
+                          type: boolean
+                          default: true
+                    retry:
+                      type: object
+                      properties:
+                        maxRetries:
+                          type: integer
+                          minimum: 0
+                          maximum: 100
+                          default: 10
+                        initialBackoffMs:
+                          type: integer
+                          minimum: 10
+                          default: 100
+                        maxBackoffMs:
+                          type: integer
+                          minimum: 100
+                          default: 30000
+                        backoffMultiplier:
+                          type: number
+                          default: 2.0
+                    health:
+                      type: object
+                      properties:
+                        enabled:
+                          type: boolean
+                          default: false
+                        port:
+                          type: integer
+                          minimum: 1024
+                          maximum: 65535
+                          default: 8080
+                        path:
+                          type: string
+                          default: "/health"
+                    metrics:
+                      type: object
+                      properties:
+                        enabled:
+                          type: boolean
+                          default: false
+                        port:
+                          type: integer
+                          minimum: 1024
+                          maximum: 65535
+                          default: 9091
+                tls:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    certSecretName:
+                      type: string
+                    mtlsEnabled:
+                      type: boolean
+                      default: false
+                    caSecretName:
+                      type: string
+                    insecure:
+                      type: boolean
+                      default: false
+                podAnnotations:
+                  type: object
+                  additionalProperties:
+                    type: string
+                podLabels:
+                  type: object
+                  additionalProperties:
+                    type: string
+                env:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                nodeSelector:
+                  type: object
+                  additionalProperties:
+                    type: string
+                tolerations:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                affinity:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                serviceAccount:
+                  type: string
+                securityContext:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                containerSecurityContext:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum: ["Pending", "Starting", "Running", "Degraded", "Failed", "Terminating"]
+                replicas:
+                  type: integer
+                readyReplicas:
+                  type: integer
+                sourcesRunning:
+                  type: integer
+                sinksRunning:
+                  type: integer
+                sourcesTotal:
+                  type: integer
+                sinksTotal:
+                  type: integer
+                observedGeneration:
+                  type: integer
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                      lastTransitionTime:
+                        type: string
+                connectorStatuses:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      name:
+                        type: string
+                      connectorType:
+                        type: string
+                      kind:
+                        type: string
+                      state:
+                        type: string
+                      eventsProcessed:
+                        type: integer
+                      lastError:
+                        type: string
+                      lastSuccessTime:
+                        type: string
+                lastUpdated:
+                  type: string
+                message:
+                  type: string
+{{- end }}

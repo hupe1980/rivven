@@ -1,0 +1,29 @@
+[package]
+name = "rivven-client"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+tls = ["rivven-core/tls"]
+
+[dependencies]
+rivven-core = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_bytes = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+rand = "0.8"
+sha2 = "0.10"
+base64 = "0.22"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+hex = "0.4"

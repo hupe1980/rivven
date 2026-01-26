@@ -1,0 +1,52 @@
+[package]
+name = "rivven-storage"
+version = "0.0.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Object storage connectors for Rivven Connect (S3, GCS, Azure Blob, MinIO, HDFS)"
+repository = "https://github.com/hupe1980/rivven"
+keywords = ["rivven", "streaming", "s3", "gcs", "azure", "minio", "object-storage"]
+categories = ["database", "asynchronous"]
+
+[features]
+default = []
+# Individual cloud providers
+s3 = ["dep:aws-sdk-s3", "dep:aws-config"]
+gcs = []  # Future: Google Cloud Storage
+azure = [] # Future: Azure Blob Storage
+# Enable all providers
+full = ["s3", "gcs", "azure"]
+
+[dependencies]
+rivven-connect = { path = "../rivven-connect" }
+
+# Core
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tracing = "0.1"
+thiserror = "1"
+chrono = { version = "0.4", features = ["serde"] }
+
+# Validation (must match rivven-connect)
+validator = { version = "0.20", features = ["derive"] }
+schemars = "0.8"
+
+# Secrets
+secrecy = { version = "0.8", features = ["serde"] }
+
+# Compression
+flate2 = "1"
+
+# AWS S3 (optional)
+aws-sdk-s3 = { version = "1.65", optional = true }
+aws-config = { version = "1.5", features = ["behavior-version-latest"], optional = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[package.metadata.docs.rs]
+all-features = true
