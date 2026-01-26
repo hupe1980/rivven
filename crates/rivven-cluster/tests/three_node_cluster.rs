@@ -9,13 +9,13 @@
 //!
 //! These tests use actual Raft consensus (not standalone mode).
 
+use openraft::BasicNode;
 use rivven_cluster::{
     metadata::{MetadataCommand, MetadataResponse},
     node::NodeInfo,
     partition::TopicConfig,
     raft::{hash_node_id, RaftNode, RaftNodeConfig},
 };
-use openraft::BasicNode;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -95,7 +95,8 @@ async fn create_three_node_cluster() -> Vec<Arc<RwLock<RaftNode>>> {
         for peer_config in configs.iter() {
             if peer_config.node_id != config.node_id {
                 let peer_node_id = hash_node_id(&peer_config.node_id);
-                raft.add_peer(peer_node_id, peer_config.basic_node().addr).await;
+                raft.add_peer(peer_node_id, peer_config.basic_node().addr)
+                    .await;
             }
         }
 
@@ -194,10 +195,7 @@ async fn test_multiple_topics_concurrent_creation() {
             let config = TopicConfig::new(&format!("concurrent-topic-{}", i), 2, 1);
             let cmd = MetadataCommand::CreateTopic {
                 config,
-                partition_assignments: vec![
-                    vec!["node-1".to_string()],
-                    vec!["node-2".to_string()],
-                ],
+                partition_assignments: vec![vec!["node-1".to_string()], vec!["node-2".to_string()]],
             };
             let n = node.read().await;
             n.propose(cmd).await
@@ -279,7 +277,9 @@ async fn test_node_registration_across_cluster() {
         };
 
         match response {
-            MetadataResponse::NodeRegistered { node_id: registered_id } => {
+            MetadataResponse::NodeRegistered {
+                node_id: registered_id,
+            } => {
                 assert_eq!(registered_id, node_id);
             }
             other => panic!("Expected NodeRegistered, got: {:?}", other),
@@ -305,7 +305,9 @@ async fn test_consumer_group_persistence_across_nodes() {
 
     let response = {
         let node = nodes[0].read().await;
-        node.propose(cmd).await.expect("Failed to create consumer group")
+        node.propose(cmd)
+            .await
+            .expect("Failed to create consumer group")
     };
 
     match response {
@@ -363,10 +365,7 @@ async fn test_batch_topic_creation() {
             let config = TopicConfig::new(&format!("batch-topic-{}", i), 2, 1);
             MetadataCommand::CreateTopic {
                 config,
-                partition_assignments: vec![
-                    vec!["node-1".to_string()],
-                    vec!["node-2".to_string()],
-                ],
+                partition_assignments: vec![vec!["node-1".to_string()], vec!["node-2".to_string()]],
             }
         })
         .collect();
@@ -426,7 +425,10 @@ async fn test_partition_leader_assignment() {
 
     // Leader update should succeed
     match response {
-        MetadataResponse::PartitionLeaderUpdated { partition: p, leader } => {
+        MetadataResponse::PartitionLeaderUpdated {
+            partition: p,
+            leader,
+        } => {
             assert_eq!(p.topic, "leader-election-topic");
             assert_eq!(p.partition, 1);
             assert_eq!(leader, "node-3");
@@ -503,7 +505,7 @@ async fn test_raft_state_persistence() {
 
         // Verify state was persisted (topics should exist)
         let metadata_guard = raft.metadata().await;
-        
+
         // In current implementation, state may not persist across restarts
         // This is a known limitation tracked in the backlog
         if !metadata_guard.topics.is_empty() {
@@ -673,12 +675,8 @@ async fn test_majority_failure_blocks_writes() {
 /// This tests Raft log persistence and state machine under pressure
 #[tokio::test]
 async fn test_standalone_stress() {
-    use rivven_cluster::{
-        metadata::MetadataCommand,
-        partition::TopicConfig,
-        raft::RaftNode,
-    };
-    
+    use rivven_cluster::{metadata::MetadataCommand, partition::TopicConfig, raft::RaftNode};
+
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let config = rivven_cluster::raft::RaftNodeConfig {
         node_id: "stress-test-node".to_string(),
@@ -707,7 +705,7 @@ async fn test_standalone_stress() {
             config: topic_config,
             partition_assignments: vec![vec!["stress-test-node".to_string()]],
         };
-        
+
         if raft.propose(cmd).await.is_ok() {
             success_count += 1;
         }
@@ -725,7 +723,8 @@ async fn test_standalone_stress() {
     assert!(
         success_count >= total_ops * 98 / 100,
         "Expected >=98% success in standalone mode, got {}/{}",
-        success_count, total_ops
+        success_count,
+        total_ops
     );
 
     // Verify state consistency
@@ -740,15 +739,11 @@ async fn test_standalone_stress() {
 /// Test snapshot and recovery in standalone mode
 #[tokio::test]
 async fn test_standalone_snapshot_recovery() {
-    use rivven_cluster::{
-        metadata::MetadataCommand,
-        partition::TopicConfig,
-        raft::RaftNode,
-    };
+    use rivven_cluster::{metadata::MetadataCommand, partition::TopicConfig, raft::RaftNode};
 
     let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
     let data_path = temp_dir.path().to_path_buf();
-    
+
     // Phase 1: Create state
     let topic_count = 100;
     {
@@ -780,7 +775,11 @@ async fn test_standalone_snapshot_recovery() {
 
         // Verify state before snapshot
         let metadata = raft.metadata().await;
-        assert_eq!(metadata.topics.len(), topic_count, "Pre-snapshot topic count");
+        assert_eq!(
+            metadata.topics.len(),
+            topic_count,
+            "Pre-snapshot topic count"
+        );
 
         // Trigger snapshot explicitly
         raft.snapshot().await.expect("Failed to create snapshot");
@@ -808,14 +807,15 @@ async fn test_standalone_snapshot_recovery() {
         sleep(Duration::from_millis(200)).await;
 
         let metadata = raft.metadata().await;
-        
+
         // Note: Full persistence may not be implemented yet
         if metadata.topics.len() == topic_count {
             println!("✅ Full snapshot recovery verified: {} topics", topic_count);
         } else if !metadata.topics.is_empty() {
             println!(
                 "⚠️ Partial recovery: {}/{} topics (persistence incomplete)",
-                metadata.topics.len(), topic_count
+                metadata.topics.len(),
+                topic_count
             );
         } else {
             println!("ℹ️ No recovery - snapshot persistence not yet implemented");

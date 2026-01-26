@@ -24,7 +24,7 @@ async fn create_test_raft_node(
     let temp_dir = tempfile::tempdir()?;
     let config = RaftNodeConfig {
         node_id: node_id.to_string(),
-        standalone: true,  // Standalone mode for testing
+        standalone: true, // Standalone mode for testing
         data_dir: temp_dir.path().to_path_buf(),
         heartbeat_interval_ms: 100,
         election_timeout_min_ms: 150,
@@ -35,7 +35,7 @@ async fn create_test_raft_node(
 
     let mut raft = RaftNode::with_config(config).await?;
     raft.start().await?;
-    
+
     Ok(Arc::new(RwLock::new(raft)))
 }
 
@@ -45,7 +45,7 @@ async fn test_standalone_raft_operations() -> Result<(), Box<dyn std::error::Err
 
     // In standalone mode, node is always leader
     let node = raft.read().await;
-    
+
     // Create a topic
     let config = TopicConfig::new("test-topic", 3, 1);
     let partition_assignments = vec![
@@ -60,7 +60,7 @@ async fn test_standalone_raft_operations() -> Result<(), Box<dyn std::error::Err
     };
 
     let response = node.propose(cmd).await?;
-    
+
     match response {
         MetadataResponse::TopicCreated { name, partitions } => {
             assert_eq!(name, "test-topic");
@@ -113,7 +113,7 @@ async fn test_partition_leader_update() -> Result<(), Box<dyn std::error::Error>
         partition_assignments: vec![vec!["test-node-3".to_string()]],
     };
     let response = node.propose(cmd).await?;
-    
+
     // Verify topic was created
     match response {
         MetadataResponse::TopicCreated { name, .. } => {
@@ -131,7 +131,7 @@ async fn test_partition_leader_update() -> Result<(), Box<dyn std::error::Error>
     };
 
     let response = node.propose(cmd).await?;
-    
+
     // Leader update should succeed
     match response {
         MetadataResponse::PartitionLeaderUpdated { partition, leader } => {
@@ -141,7 +141,10 @@ async fn test_partition_leader_update() -> Result<(), Box<dyn std::error::Error>
         }
         MetadataResponse::Error { message } => {
             // It's OK if the leader is already up-to-date
-            println!("Leader update returned error (expected if already leader): {}", message);
+            println!(
+                "Leader update returned error (expected if already leader): {}",
+                message
+            );
         }
         other => panic!("Unexpected response: {:?}", other),
     }
@@ -202,9 +205,11 @@ async fn test_node_registration() -> Result<(), Box<dyn std::error::Error>> {
 
         let cmd = MetadataCommand::RegisterNode { info };
         let response = node.propose(cmd).await?;
-        
+
         match response {
-            MetadataResponse::NodeRegistered { node_id: registered_id } => {
+            MetadataResponse::NodeRegistered {
+                node_id: registered_id,
+            } => {
                 assert_eq!(registered_id, node_id);
             }
             _ => panic!("Unexpected response: {:?}", response),
@@ -220,7 +225,7 @@ async fn test_concurrent_operations() -> Result<(), Box<dyn std::error::Error>> 
 
     // Submit multiple topic creations concurrently
     let mut handles = Vec::new();
-    
+
     for i in 0..5 {
         let raft_clone = Arc::clone(&raft);
         let handle = tokio::spawn(async move {
@@ -259,7 +264,7 @@ async fn test_metadata_persistence() -> Result<(), Box<dyn std::error::Error>> {
             heartbeat_interval_ms: 100,
             election_timeout_min_ms: 150,
             election_timeout_max_ms: 300,
-            snapshot_threshold: 10,  // Lower threshold to force snapshot
+            snapshot_threshold: 10, // Lower threshold to force snapshot
             initial_members: vec![],
         };
 
@@ -276,7 +281,7 @@ async fn test_metadata_persistence() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         let response = raft.propose(cmd).await?;
-        
+
         // Verify topic was created
         match response {
             MetadataResponse::TopicCreated { name, .. } => {
@@ -284,7 +289,7 @@ async fn test_metadata_persistence() -> Result<(), Box<dyn std::error::Error>> {
             }
             other => panic!("Expected TopicCreated, got: {:?}", other),
         }
-        
+
         // Give time for write to disk
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     }
@@ -310,7 +315,7 @@ async fn test_metadata_persistence() -> Result<(), Box<dyn std::error::Error>> {
 
         // Verify topic exists (from WAL or snapshot)
         let metadata_guard = raft.metadata().await;
-        
+
         // In standalone mode with fresh restart, metadata might be empty initially
         // This is OK - we verified the write succeeded in the first instance
         if metadata_guard.topics.is_empty() {

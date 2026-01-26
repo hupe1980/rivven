@@ -30,12 +30,12 @@
 //! # }
 //! ```
 
-pub mod protocol;
 pub mod decoder;
+pub mod protocol;
 pub mod source;
 pub mod type_mapper;
 
-pub use protocol::*;
 pub use decoder::*;
+pub use protocol::*;
 pub use source::*;
 pub use type_mapper::*;

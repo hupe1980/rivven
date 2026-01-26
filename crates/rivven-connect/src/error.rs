@@ -143,10 +143,7 @@ impl ConnectorError {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            Self::Connection(_)
-                | Self::RateLimited(_)
-                | Self::Timeout(_)
-                | Self::Transient(_)
+            Self::Connection(_) | Self::RateLimited(_) | Self::Timeout(_) | Self::Transient(_)
         )
     }
 

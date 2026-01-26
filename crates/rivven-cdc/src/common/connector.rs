@@ -16,18 +16,17 @@
 //!              Topic/Partition
 //! ```
 
-use crate::common::{CdcEvent, CdcError, Result};
-use rivven_core::{Partition, schema_registry::SchemaRegistry};
+use crate::common::{CdcError, CdcEvent, Result};
 use apache_avro::Schema as AvroSchema;
+use rivven_core::{schema_registry::SchemaRegistry, Partition};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 /// Schema generator function type for database-specific Avro schema generation
-pub type SchemaGenerator = Box<
-    dyn Fn(&str, &str, &[(String, i32, String)]) -> Result<AvroSchema> + Send + Sync,
->;
+pub type SchemaGenerator =
+    Box<dyn Fn(&str, &str, &[(String, i32, String)]) -> Result<AvroSchema> + Send + Sync>;
 
 /// CDC Connector that routes database events to Rivven topics.
 ///
@@ -204,9 +203,7 @@ impl CdcConnector {
         let avro_schema = match &self.schema_generator {
             Some(generator) => generator(schema, table, columns)?,
             None => {
-                return Err(CdcError::Schema(
-                    "No schema generator configured".into(),
-                ));
+                return Err(CdcError::Schema("No schema generator configured".into()));
             }
         };
 
@@ -394,9 +391,9 @@ mod tests {
     #[tokio::test]
     async fn test_schema_cache_operations() {
         let connector = CdcConnector::new();
-        
+
         assert!(!connector.has_schema("public", "users").await);
-        
+
         // Clear should work even when empty
         connector.clear_schema_cache().await;
     }
@@ -404,7 +401,7 @@ mod tests {
     #[tokio::test]
     async fn test_topic_registration() {
         let connector = CdcConnector::new();
-        
+
         // Initially no topics
         assert!(connector.topics().await.is_empty());
     }

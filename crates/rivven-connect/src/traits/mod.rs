@@ -45,7 +45,7 @@ pub mod testing;
 pub mod transform;
 
 // Re-export source types
-pub use source::{CheckResult, CheckResultBuilder, CheckDetail, Source, SourceConfig, SourceExt};
+pub use source::{CheckDetail, CheckResult, CheckResultBuilder, Source, SourceConfig, SourceExt};
 
 // Re-export sink types
 pub use sink::{BatchConfig, BatchSink, Sink, SinkConfig, WriteResult};
@@ -57,7 +57,9 @@ pub use transform::{Transform, TransformConfig, TransformOutput};
 pub use event::{EventMetadata, LogLevel, SourceEvent, SourceEventBuilder, SourceEventType};
 
 // Re-export catalog types
-pub use catalog::{Catalog, ConfiguredCatalog, ConfiguredStream, DestinationSyncMode, Stream, SyncMode};
+pub use catalog::{
+    Catalog, ConfiguredCatalog, ConfiguredStream, DestinationSyncMode, Stream, SyncMode,
+};
 
 // Re-export state types
 pub use state::{State, StateBuilder, StreamState};
@@ -66,32 +68,30 @@ pub use state::{State, StateBuilder, StreamState};
 pub use spec::{ConnectorSpec, ConnectorSpecBuilder, SyncModeSpec};
 
 // Re-export retry types
-pub use retry::{RetryConfig, RetryGuard, RetryResult, retry, retry_result};
+pub use retry::{retry, retry_result, RetryConfig, RetryGuard, RetryResult};
 
 // Re-export registry types
 pub use registry::{
-    AnySource, AnySink, AnyTransform,
-    SourceFactory, SinkFactory, TransformFactory,
-    SourceRegistry, SinkRegistry, TransformRegistry,
+    AnySink, AnySource, AnyTransform, SinkFactory, SinkRegistry, SourceFactory, SourceRegistry,
+    TransformFactory, TransformRegistry,
 };
 
 // Re-export batch types
-pub use batch::{Batch, Batcher, BatcherConfig, AsyncBatcher, chunk_events, partition_events};
+pub use batch::{chunk_events, partition_events, AsyncBatcher, Batch, Batcher, BatcherConfig};
 
 // Re-export circuit breaker types
 pub use circuit_breaker::{
-    CircuitBreaker, CircuitBreakerConfig, CircuitBreakerError, 
-    CircuitState, SharedCircuitBreaker,
+    CircuitBreaker, CircuitBreakerConfig, CircuitBreakerError, CircuitState, SharedCircuitBreaker,
 };
 
 // Re-export metrics types
 pub use metrics::{
-    Metrics, MetricsCollector, MetricsSnapshot, MetricValue,
-    HistogramSnapshot, Label, Timer, NoopMetrics, metric_names,
+    metric_names, HistogramSnapshot, Label, MetricValue, Metrics, MetricsCollector,
+    MetricsSnapshot, NoopMetrics, Timer,
 };
 
 // Re-export testing utilities
 pub use testing::{
-    MockSource, MockSourceConfig, MockSink, MockSinkConfig, MockTransform,
-    TestHarness, TestResult, events, assertions,
+    assertions, events, MockSink, MockSinkConfig, MockSource, MockSourceConfig, MockTransform,
+    TestHarness, TestResult,
 };

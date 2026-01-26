@@ -54,7 +54,7 @@ impl CheckDetail {
             duration_ms: None,
         }
     }
-    
+
     /// Create a failed check
     pub fn failed(name: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
@@ -64,13 +64,13 @@ impl CheckDetail {
             duration_ms: None,
         }
     }
-    
+
     /// Add a message to this check
     pub fn with_message(mut self, message: impl Into<String>) -> Self {
         self.message = Some(message.into());
         self
     }
-    
+
     /// Add duration to this check
     pub fn with_duration_ms(mut self, duration_ms: u64) -> Self {
         self.duration_ms = Some(duration_ms);
@@ -101,18 +101,18 @@ impl CheckResult {
     pub fn is_success(&self) -> bool {
         self.success
     }
-    
+
     /// Create a builder for detailed checks
     pub fn builder() -> CheckResultBuilder {
         CheckResultBuilder::new()
     }
-    
+
     /// Add a check detail
     pub fn with_check(mut self, check: CheckDetail) -> Self {
         self.checks.push(check);
         self
     }
-    
+
     /// Get all failed checks
     pub fn failed_checks(&self) -> impl Iterator<Item = &CheckDetail> {
         self.checks.iter().filter(|c| !c.passed)
@@ -129,7 +129,7 @@ impl fmt::Display for CheckResult {
                 write!(f, ": {}", msg)?;
             }
         }
-        
+
         if !self.checks.is_empty() {
             writeln!(f)?;
             for check in &self.checks {
@@ -158,27 +158,27 @@ impl CheckResultBuilder {
     pub fn new() -> Self {
         Self { checks: Vec::new() }
     }
-    
+
     /// Add a passed check
     pub fn check_passed(mut self, name: impl Into<String>) -> Self {
         self.checks.push(CheckDetail::passed(name));
         self
     }
-    
+
     /// Add a failed check
     pub fn check_failed(mut self, name: impl Into<String>, message: impl Into<String>) -> Self {
         self.checks.push(CheckDetail::failed(name, message));
         self
     }
-    
+
     /// Add a check detail
     pub fn check(mut self, detail: CheckDetail) -> Self {
         self.checks.push(detail);
         self
     }
-    
+
     /// Add a conditional check
-    pub fn check_if<F>(mut self, name: impl Into<String>, condition: F) -> Self 
+    pub fn check_if<F>(mut self, name: impl Into<String>, condition: F) -> Self
     where
         F: FnOnce() -> std::result::Result<(), String>,
     {
@@ -189,14 +189,16 @@ impl CheckResultBuilder {
         }
         self
     }
-    
+
     /// Build the final CheckResult
     pub fn build(self) -> CheckResult {
         let all_passed = self.checks.iter().all(|c| c.passed);
         let message = if all_passed {
             None
         } else {
-            let failed: Vec<_> = self.checks.iter()
+            let failed: Vec<_> = self
+                .checks
+                .iter()
                 .filter(|c| !c.passed)
                 .filter_map(|c| c.message.clone())
                 .collect();
@@ -206,7 +208,7 @@ impl CheckResultBuilder {
                 Some(failed.join("; "))
             }
         };
-        
+
         CheckResult {
             success: all_passed,
             message,
@@ -340,7 +342,7 @@ mod tests {
         assert!(!failure.is_success());
         assert_eq!(failure.message, Some("connection refused".to_string()));
     }
-    
+
     #[test]
     fn test_check_result_builder() {
         let result = CheckResult::builder()
@@ -348,16 +350,16 @@ mod tests {
             .check_passed("authentication")
             .check_failed("permissions", "missing SELECT permission on table users")
             .build();
-        
+
         assert!(!result.is_success());
         assert!(result.message.is_some());
         assert_eq!(result.checks.len(), 3);
-        
+
         let failed: Vec<_> = result.failed_checks().collect();
         assert_eq!(failed.len(), 1);
         assert_eq!(failed[0].name, "permissions");
     }
-    
+
     #[test]
     fn test_check_result_builder_all_passed() {
         let result = CheckResult::builder()
@@ -365,35 +367,35 @@ mod tests {
             .check_passed("authentication")
             .check_passed("permissions")
             .build();
-        
+
         assert!(result.is_success());
         assert!(result.message.is_none());
     }
-    
+
     #[test]
     fn test_check_detail() {
         let detail = CheckDetail::passed("test")
             .with_message("all good")
             .with_duration_ms(150);
-        
+
         assert!(detail.passed);
         assert_eq!(detail.message, Some("all good".to_string()));
         assert_eq!(detail.duration_ms, Some(150));
     }
-    
+
     #[test]
     fn test_check_result_display() {
         let result = CheckResult::builder()
             .check_passed("connectivity")
             .check_failed("auth", "invalid credentials")
             .build();
-        
+
         let display = format!("{}", result);
         assert!(display.contains("Connection check failed"));
         assert!(display.contains("connectivity"));
         assert!(display.contains("auth"));
     }
-    
+
     #[test]
     fn test_check_if() {
         let result = CheckResult::builder()
@@ -414,7 +416,7 @@ mod tests {
                 }
             })
             .build();
-        
+
         assert!(!result.is_success());
         assert_eq!(result.checks.len(), 2);
         assert!(result.checks[0].passed); // port_valid

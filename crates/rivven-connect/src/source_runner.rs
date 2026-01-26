@@ -44,8 +44,8 @@ impl SourceRunner {
 impl SourceRunner {
     /// Create a new source runner
     pub fn new(
-        name: String, 
-        config: SourceConfig, 
+        name: String,
+        config: SourceConfig,
         global_topic_settings: TopicSettings,
         broker: SharedBrokerClient,
     ) -> Self {
@@ -109,15 +109,19 @@ impl SourceRunner {
     /// Ensure the target topic exists (with auto-create if enabled)
     async fn ensure_topic_exists(&self) -> Result<()> {
         let topic = &self.config.topic;
-        
+
         // Determine if auto-create is enabled for this source
-        let auto_create = self.config.topic_config
+        let auto_create = self
+            .config
+            .topic_config
             .as_ref()
             .and_then(|tc| tc.auto_create)
             .unwrap_or(self.global_topic_settings.auto_create);
-        
+
         // Determine partition count
-        let partitions = self.config.topic_config
+        let partitions = self
+            .config
+            .topic_config
             .as_ref()
             .and_then(|tc| tc.partitions)
             .unwrap_or(self.global_topic_settings.default_partitions);
@@ -132,12 +136,15 @@ impl SourceRunner {
                     }
                     Ok(false) => {
                         return Err(ConnectError::Topic(format!(
-                            "Topic '{}' does not exist and auto_create is disabled", 
+                            "Topic '{}' does not exist and auto_create is disabled",
                             topic
                         )));
                     }
                     Err(e) => {
-                        warn!("Source '{}': failed to check topic existence: {}", self.name, e);
+                        warn!(
+                            "Source '{}': failed to check topic existence: {}",
+                            self.name, e
+                        );
                         // Proceed anyway - topic might exist
                     }
                 }
@@ -149,7 +156,7 @@ impl SourceRunner {
         match self.broker.create_topic(topic, partitions).await {
             Ok(_) => {
                 info!(
-                    "Source '{}': created topic '{}' with {} partition(s)", 
+                    "Source '{}': created topic '{}' with {} partition(s)",
                     self.name, topic, partitions
                 );
                 Ok(())
@@ -158,14 +165,11 @@ impl SourceRunner {
                 // Topic might already exist, which is fine
                 let err_str = e.to_string().to_lowercase();
                 if err_str.contains("already exists") || err_str.contains("exists") {
-                    debug!(
-                        "Source '{}': topic '{}' already exists", 
-                        self.name, topic
-                    );
+                    debug!("Source '{}': topic '{}' already exists", self.name, topic);
                     Ok(())
                 } else {
                     warn!(
-                        "Source '{}': topic creation returned: {} (may already exist)", 
+                        "Source '{}': topic creation returned: {} (may already exist)",
                         self.name, e
                     );
                     // Don't fail - topic might exist, we'll find out when we publish
@@ -190,10 +194,7 @@ impl SourceRunner {
     }
 
     #[cfg(feature = "postgres")]
-    async fn run_postgres_cdc(
-        &self,
-        shutdown_rx: &mut broadcast::Receiver<()>,
-    ) -> Result<()> {
+    async fn run_postgres_cdc(&self, shutdown_rx: &mut broadcast::Receiver<()>) -> Result<()> {
         use crate::connectors::postgres_cdc::PostgresCdcConfig as SdkPgConfig;
         use rivven_cdc::common::CdcSource;
         use rivven_cdc::postgres::{PostgresCdc, PostgresCdcConfig};
@@ -204,7 +205,8 @@ impl SourceRunner {
             .map_err(|e| ConnectError::config(format!("Invalid postgres config: {}", e)))?;
 
         // Validate configuration
-        sdk_config.validate()
+        sdk_config
+            .validate()
             .map_err(|e| ConnectError::config(format!("Config validation failed: {}", e)))?;
 
         // Build connection string - password is explicitly exposed here for connection
@@ -257,7 +259,7 @@ impl SourceRunner {
                         Some(cdc_event) => {
                             let json = serde_json::to_vec(&cdc_event)
                                 .map_err(|e| ConnectError::Serialization(e.to_string()))?;
-                            
+
                             if let Err(e) = self.publish(Bytes::from(json)).await {
                                 error!("Source '{}' publish error: {}", self.name, e);
                                 *self.status.write().await = ConnectorStatus::Unhealthy;
@@ -279,10 +281,7 @@ impl SourceRunner {
         }
     }
 
-    async fn run_http_source(
-        &self,
-        _shutdown_rx: &mut broadcast::Receiver<()>,
-    ) -> Result<()> {
+    async fn run_http_source(&self, _shutdown_rx: &mut broadcast::Receiver<()>) -> Result<()> {
         Err(ConnectError::source(
             &self.name,
             "HTTP source not yet implemented",
@@ -290,9 +289,9 @@ impl SourceRunner {
     }
 
     async fn run_datagen(&self, shutdown_rx: &mut broadcast::Receiver<()>) -> Result<()> {
+        use super::prelude::*;
         use crate::connectors::datagen::{DatagenConfig, DatagenSource};
         use futures::StreamExt;
-        use super::prelude::*;
 
         // Parse and validate configuration
         let config: DatagenConfig = serde_yaml::from_value(self.config.config.clone())

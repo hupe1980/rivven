@@ -56,26 +56,26 @@ impl std::str::FromStr for SslMode {
 pub struct TlsConfig {
     /// SSL mode (disable, prefer, require, verify-ca, verify-full)
     pub mode: SslMode,
-    
+
     /// Path to CA certificate file (PEM format)
     /// Required for verify-ca and verify-full modes
     pub ca_cert_path: Option<PathBuf>,
-    
+
     /// Path to client certificate file (PEM format)
     /// Used for client certificate authentication (mTLS)
     pub client_cert_path: Option<PathBuf>,
-    
+
     /// Path to client private key file (PEM format)
     /// Required if client_cert_path is specified
     pub client_key_path: Option<PathBuf>,
-    
+
     /// Server hostname for SNI (Server Name Indication)
     /// Defaults to the connection hostname
     pub server_name: Option<String>,
-    
+
     /// Accept invalid/self-signed certificates (DANGEROUS - testing only)
     pub accept_invalid_certs: bool,
-    
+
     /// Accept invalid hostnames (DANGEROUS - testing only)
     pub accept_invalid_hostnames: bool,
 }
@@ -142,7 +142,9 @@ impl TlsConfig {
 
         // If client cert is provided, key must also be provided
         if self.client_cert_path.is_some() && self.client_key_path.is_none() {
-            return Err("Client key path required when client certificate is specified".to_string());
+            return Err(
+                "Client key path required when client certificate is specified".to_string(),
+            );
         }
 
         Ok(())
@@ -166,7 +168,7 @@ pub fn build_rustls_config(config: &TlsConfig) -> anyhow::Result<rustls::ClientC
         let certs = rustls_pemfile::certs(&mut reader)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| anyhow::anyhow!("Failed to parse CA certs: {}", e))?;
-        
+
         for cert in certs {
             root_store
                 .add(cert)
@@ -178,8 +180,7 @@ pub fn build_rustls_config(config: &TlsConfig) -> anyhow::Result<rustls::ClientC
     }
 
     // Build client config builder
-    let builder = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store);
+    let builder = rustls::ClientConfig::builder().with_root_certificates(root_store);
 
     // Add client certificate if specified (mTLS)
     let client_config = if let (Some(cert_path), Some(key_path)) =
@@ -226,12 +227,30 @@ mod tests {
 
     #[test]
     fn test_ssl_mode_parsing() {
-        assert!(matches!("disable".parse::<SslMode>().unwrap(), SslMode::Disable));
-        assert!(matches!("prefer".parse::<SslMode>().unwrap(), SslMode::Prefer));
-        assert!(matches!("require".parse::<SslMode>().unwrap(), SslMode::Require));
-        assert!(matches!("verify-ca".parse::<SslMode>().unwrap(), SslMode::VerifyCa));
-        assert!(matches!("verify-full".parse::<SslMode>().unwrap(), SslMode::VerifyFull));
-        assert!(matches!("REQUIRE".parse::<SslMode>().unwrap(), SslMode::Require));
+        assert!(matches!(
+            "disable".parse::<SslMode>().unwrap(),
+            SslMode::Disable
+        ));
+        assert!(matches!(
+            "prefer".parse::<SslMode>().unwrap(),
+            SslMode::Prefer
+        ));
+        assert!(matches!(
+            "require".parse::<SslMode>().unwrap(),
+            SslMode::Require
+        ));
+        assert!(matches!(
+            "verify-ca".parse::<SslMode>().unwrap(),
+            SslMode::VerifyCa
+        ));
+        assert!(matches!(
+            "verify-full".parse::<SslMode>().unwrap(),
+            SslMode::VerifyFull
+        ));
+        assert!(matches!(
+            "REQUIRE".parse::<SslMode>().unwrap(),
+            SslMode::Require
+        ));
         assert!("invalid".parse::<SslMode>().is_err());
     }
 

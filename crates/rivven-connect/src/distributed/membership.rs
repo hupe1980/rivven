@@ -206,13 +206,19 @@ impl ConnectMembership {
             if old_state != info.state {
                 match info.state {
                     MemberState::Active if old_state == MemberState::Joining => {
-                        let _ = self.event_tx.send(MembershipEvent::MemberActive(info.node_id.clone()));
+                        let _ = self
+                            .event_tx
+                            .send(MembershipEvent::MemberActive(info.node_id.clone()));
                     }
                     MemberState::Suspect => {
-                        let _ = self.event_tx.send(MembershipEvent::MemberSuspect(info.node_id.clone()));
+                        let _ = self
+                            .event_tx
+                            .send(MembershipEvent::MemberSuspect(info.node_id.clone()));
                     }
                     MemberState::Down => {
-                        let _ = self.event_tx.send(MembershipEvent::MemberDown(info.node_id.clone()));
+                        let _ = self
+                            .event_tx
+                            .send(MembershipEvent::MemberDown(info.node_id.clone()));
                     }
                     _ => {}
                 }
@@ -221,7 +227,9 @@ impl ConnectMembership {
         } else {
             // New member
             info.state = MemberState::Joining;
-            let _ = self.event_tx.send(MembershipEvent::MemberJoined(info.node_id.clone()));
+            let _ = self
+                .event_tx
+                .send(MembershipEvent::MemberJoined(info.node_id.clone()));
             members.insert(info.node_id.clone(), info);
         }
     }
@@ -236,7 +244,9 @@ impl ConnectMembership {
             // If suspect, mark as active
             if member.state == MemberState::Suspect {
                 member.state = MemberState::Active;
-                let _ = self.event_tx.send(MembershipEvent::MemberActive(node_id.clone()));
+                let _ = self
+                    .event_tx
+                    .send(MembershipEvent::MemberActive(node_id.clone()));
             }
         }
     }
@@ -247,7 +257,9 @@ impl ConnectMembership {
 
         if let Some(member) = members.get_mut(node_id) {
             member.state = MemberState::Leaving;
-            let _ = self.event_tx.send(MembershipEvent::MemberLeft(node_id.clone()));
+            let _ = self
+                .event_tx
+                .send(MembershipEvent::MemberLeft(node_id.clone()));
         }
     }
 
@@ -379,7 +391,7 @@ pub struct MembershipSnapshot {
 }
 
 /// Simple membership manager for the coordinator
-/// 
+///
 /// This is a lightweight wrapper that tracks node membership without
 /// the full SWIM protocol complexity.
 pub struct MembershipManager {
@@ -394,7 +406,7 @@ impl MembershipManager {
     pub fn new(node_id: NodeId) -> Self {
         let mut members = HashMap::new();
         members.insert(node_id.clone(), Instant::now());
-        
+
         Self { node_id, members }
     }
 

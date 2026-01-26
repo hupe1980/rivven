@@ -12,12 +12,12 @@
 //! - Reference-counted buffers for safe sharing
 //! - Cache-line aligned for optimal CPU performance
 
+use bytes::{Bytes, BytesMut};
+use std::alloc::{alloc, dealloc, Layout};
 use std::ops::Deref;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::ptr::NonNull;
-use std::alloc::{alloc, dealloc, Layout};
-use bytes::{Bytes, BytesMut};
 
 /// Cache line size for alignment (64 bytes on most modern CPUs)
 const CACHE_LINE_SIZE: usize = 64;
@@ -51,14 +51,14 @@ impl ZeroCopyBuffer {
     pub fn new(capacity: usize) -> Self {
         Self::with_id(capacity, 0)
     }
-    
+
     /// Create a new zero-copy buffer with custom ID
     pub fn with_id(capacity: usize, id: u64) -> Self {
         // Align to cache line for optimal performance
         let aligned_capacity = (capacity + CACHE_LINE_SIZE - 1) & !(CACHE_LINE_SIZE - 1);
-        let layout = Layout::from_size_align(aligned_capacity, CACHE_LINE_SIZE)
-            .expect("Invalid layout");
-        
+        let layout =
+            Layout::from_size_align(aligned_capacity, CACHE_LINE_SIZE).expect("Invalid layout");
+
         // Safety: We're allocating with a valid layout
         let data = unsafe {
             let ptr = alloc(layout);
@@ -67,7 +67,7 @@ impl ZeroCopyBuffer {
             }
             NonNull::new_unchecked(ptr)
         };
-        
+
         Self {
             data,
             capacity: aligned_capacity,
@@ -77,26 +77,25 @@ impl ZeroCopyBuffer {
             layout,
         }
     }
-    
+
     /// Get a slice of the buffer for writing
     /// Returns None if there's not enough space
     pub fn reserve(&self, len: usize) -> Option<BufferSlice> {
         loop {
             let current = self.write_pos.load(Ordering::Acquire);
             let new_pos = current + len;
-            
+
             if new_pos > self.capacity {
                 return None;
             }
-            
-            if self.write_pos.compare_exchange_weak(
-                current,
-                new_pos,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ).is_ok() {
+
+            if self
+                .write_pos
+                .compare_exchange_weak(current, new_pos, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
                 self.ref_count.fetch_add(1, Ordering::Relaxed);
-                
+
                 return Some(BufferSlice {
                     buffer: self as *const ZeroCopyBuffer,
                     offset: current,
@@ -107,7 +106,7 @@ impl ZeroCopyBuffer {
             std::hint::spin_loop();
         }
     }
-    
+
     /// Get a mutable slice for the reserved range
     /// # Safety
     /// Caller must ensure exclusive access to this range.
@@ -118,40 +117,38 @@ impl ZeroCopyBuffer {
         debug_assert!(offset + len <= self.capacity);
         std::slice::from_raw_parts_mut(self.data.as_ptr().add(offset), len)
     }
-    
+
     /// Get an immutable slice
     pub fn get_slice(&self, offset: usize, len: usize) -> &[u8] {
         debug_assert!(offset + len <= self.write_pos.load(Ordering::Acquire));
-        unsafe {
-            std::slice::from_raw_parts(self.data.as_ptr().add(offset), len)
-        }
+        unsafe { std::slice::from_raw_parts(self.data.as_ptr().add(offset), len) }
     }
-    
+
     /// Get the current write position
     pub fn len(&self) -> usize {
         self.write_pos.load(Ordering::Acquire)
     }
-    
+
     /// Check if buffer is empty
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    
+
     /// Get remaining capacity
     pub fn remaining(&self) -> usize {
         self.capacity - self.len()
     }
-    
+
     /// Get total capacity
     pub fn capacity(&self) -> usize {
         self.capacity
     }
-    
+
     /// Get buffer ID
     pub fn id(&self) -> u64 {
         self.id
     }
-    
+
     /// Reset buffer for reuse (only when ref_count == 1)
     pub fn reset(&self) -> bool {
         if self.ref_count.load(Ordering::Acquire) == 1 {
@@ -161,22 +158,22 @@ impl ZeroCopyBuffer {
             false
         }
     }
-    
+
     /// Increment reference count
     pub fn add_ref(&self) {
         self.ref_count.fetch_add(1, Ordering::Relaxed);
     }
-    
+
     /// Decrement reference count, returns true if this was the last reference
     pub fn release(&self) -> bool {
         self.ref_count.fetch_sub(1, Ordering::AcqRel) == 1
     }
-    
+
     /// Get current reference count
     pub fn ref_count(&self) -> u32 {
         self.ref_count.load(Ordering::Relaxed)
     }
-    
+
     /// Convert entire written portion to Bytes (zero-copy if possible)
     pub fn freeze(&self) -> Bytes {
         let len = self.len();
@@ -217,14 +214,14 @@ impl BufferSlice {
         // Safety: Buffer is valid while slice exists
         unsafe { &*self.buffer }.get_slice(self.offset, self.len)
     }
-    
+
     /// Get a mutable slice for writing
     /// # Safety
     /// Caller must ensure exclusive access to this range
     pub unsafe fn as_mut_bytes(&mut self) -> &mut [u8] {
         (*self.buffer).get_mut_slice(self.offset, self.len)
     }
-    
+
     /// Write data into this slice
     pub fn write(&mut self, data: &[u8]) -> usize {
         let write_len = data.len().min(self.len);
@@ -234,22 +231,22 @@ impl BufferSlice {
         }
         write_len
     }
-    
+
     /// Get the length of this slice
     pub fn len(&self) -> usize {
         self.len
     }
-    
+
     /// Check if slice is empty
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
-    
+
     /// Get offset within buffer
     pub fn offset(&self) -> usize {
         self.offset
     }
-    
+
     /// Convert to Bytes (copies the data)
     pub fn to_bytes(&self) -> Bytes {
         Bytes::copy_from_slice(self.as_bytes())
@@ -267,7 +264,7 @@ impl Drop for BufferSlice {
 
 impl Deref for BufferSlice {
     type Target = [u8];
-    
+
     fn deref(&self) -> &Self::Target {
         self.as_bytes()
     }
@@ -299,7 +296,7 @@ impl ZeroCopyBufferPool {
     /// Create a new buffer pool
     pub fn new(buffer_size: usize, initial_count: usize) -> Self {
         let (tx, rx) = crossbeam_channel::bounded(initial_count * 2);
-        
+
         let pool = Self {
             free_buffers: tx,
             buffer_receiver: rx,
@@ -308,7 +305,7 @@ impl ZeroCopyBufferPool {
             total_created: AtomicU64::new(0),
             in_use: AtomicU64::new(0),
         };
-        
+
         // Pre-allocate buffers
         for _ in 0..initial_count {
             let id = pool.next_id.fetch_add(1, Ordering::Relaxed);
@@ -316,10 +313,10 @@ impl ZeroCopyBufferPool {
             pool.total_created.fetch_add(1, Ordering::Relaxed);
             let _ = pool.free_buffers.try_send(buffer);
         }
-        
+
         pool
     }
-    
+
     /// Get a buffer from the pool (or create new one)
     pub fn acquire(&self) -> Arc<ZeroCopyBuffer> {
         match self.buffer_receiver.try_recv() {
@@ -341,18 +338,18 @@ impl ZeroCopyBufferPool {
             }
         }
     }
-    
+
     /// Return a buffer to the pool
     pub fn release(&self, buffer: Arc<ZeroCopyBuffer>) {
         self.in_use.fetch_sub(1, Ordering::Relaxed);
-        
+
         // Only return to pool if we're the only holder
         if Arc::strong_count(&buffer) == 1 {
             buffer.reset();
             let _ = self.free_buffers.try_send(buffer);
         }
     }
-    
+
     /// Get pool statistics
     pub fn stats(&self) -> BufferPoolStats {
         BufferPoolStats {
@@ -414,7 +411,7 @@ impl BufferRef {
             BufferRef::External(Bytes::copy_from_slice(data))
         }
     }
-    
+
     /// Create from Bytes (zero-copy)
     pub fn from_external(data: Bytes) -> Self {
         if data.len() <= 64 {
@@ -423,26 +420,34 @@ impl BufferRef {
             BufferRef::External(data)
         }
     }
-    
+
     /// Create from buffer slice
     pub fn from_slice(buffer: Arc<ZeroCopyBuffer>, offset: usize, len: usize) -> Self {
         if len <= 64 {
             let data = buffer.get_slice(offset, len);
             BufferRef::Inline(SmallVec::from_slice(data))
         } else {
-            BufferRef::Slice { buffer, offset, len }
+            BufferRef::Slice {
+                buffer,
+                offset,
+                len,
+            }
         }
     }
-    
+
     /// Get as bytes slice
     pub fn as_bytes(&self) -> &[u8] {
         match self {
             BufferRef::Inline(sv) => sv.as_slice(),
             BufferRef::External(b) => b,
-            BufferRef::Slice { buffer, offset, len } => buffer.get_slice(*offset, *len),
+            BufferRef::Slice {
+                buffer,
+                offset,
+                len,
+            } => buffer.get_slice(*offset, *len),
         }
     }
-    
+
     /// Get length
     pub fn len(&self) -> usize {
         match self {
@@ -451,20 +456,22 @@ impl BufferRef {
             BufferRef::Slice { len, .. } => *len,
         }
     }
-    
+
     /// Check if empty
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    
+
     /// Convert to Bytes
     pub fn to_bytes(&self) -> Bytes {
         match self {
             BufferRef::Inline(sv) => Bytes::copy_from_slice(sv.as_slice()),
             BufferRef::External(b) => b.clone(),
-            BufferRef::Slice { buffer, offset, len } => {
-                Bytes::copy_from_slice(buffer.get_slice(*offset, *len))
-            }
+            BufferRef::Slice {
+                buffer,
+                offset,
+                len,
+            } => Bytes::copy_from_slice(buffer.get_slice(*offset, *len)),
         }
     }
 }
@@ -489,7 +496,7 @@ impl SmallVec {
             len: 0,
         }
     }
-    
+
     pub fn from_slice(slice: &[u8]) -> Self {
         let len = slice.len().min(64);
         let mut sv = Self::new();
@@ -497,15 +504,15 @@ impl SmallVec {
         sv.len = len as u8;
         sv
     }
-    
+
     pub fn as_slice(&self) -> &[u8] {
         &self.data[..self.len as usize]
     }
-    
+
     pub fn len(&self) -> usize {
         self.len as usize
     }
-    
+
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
@@ -539,24 +546,24 @@ impl ZeroCopyProducer {
             stats: ProducerStats::new(),
         }
     }
-    
+
     /// Create a new zero-copy producer with default buffer pool
     pub fn with_defaults() -> Self {
         let pool = Arc::new(ZeroCopyBufferPool::new(DEFAULT_BUFFER_SIZE, 16));
         Self::new(pool)
     }
-    
+
     /// Intern a topic name for efficient storage
     fn intern_topic(&self, topic: &str) -> Arc<str> {
         if let Some(interned) = self.topic_cache.get(topic) {
             return interned.clone();
         }
-        
+
         let interned: Arc<str> = Arc::from(topic);
         self.topic_cache.insert(topic.to_string(), interned.clone());
         interned
     }
-    
+
     /// Create a message with zero-copy value
     pub fn create_message(
         &self,
@@ -566,14 +573,16 @@ impl ZeroCopyProducer {
         value: &[u8],
     ) -> ZeroCopyMessage {
         self.stats.messages_created.fetch_add(1, Ordering::Relaxed);
-        self.stats.bytes_written.fetch_add(value.len() as u64, Ordering::Relaxed);
-        
+        self.stats
+            .bytes_written
+            .fetch_add(value.len() as u64, Ordering::Relaxed);
+
         let topic = self.intern_topic(topic);
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as i64;
-        
+
         ZeroCopyMessage {
             topic,
             partition,
@@ -583,7 +592,7 @@ impl ZeroCopyProducer {
             timestamp,
         }
     }
-    
+
     /// Create a message from existing Bytes (true zero-copy)
     pub fn create_message_from_bytes(
         &self,
@@ -593,14 +602,16 @@ impl ZeroCopyProducer {
         value: Bytes,
     ) -> ZeroCopyMessage {
         self.stats.messages_created.fetch_add(1, Ordering::Relaxed);
-        self.stats.bytes_written.fetch_add(value.len() as u64, Ordering::Relaxed);
-        
+        self.stats
+            .bytes_written
+            .fetch_add(value.len() as u64, Ordering::Relaxed);
+
         let topic = self.intern_topic(topic);
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_millis() as i64;
-        
+
         ZeroCopyMessage {
             topic,
             partition,
@@ -610,11 +621,11 @@ impl ZeroCopyProducer {
             timestamp,
         }
     }
-    
+
     /// Allocate space in current buffer and return slice for direct writing
     pub fn allocate(&self, size: usize) -> Option<(Arc<ZeroCopyBuffer>, usize)> {
         let mut guard = self.current_buffer.lock();
-        
+
         // Try to reserve in current buffer
         if let Some(ref buffer) = *guard {
             if let Some(slice) = buffer.reserve(size) {
@@ -623,7 +634,7 @@ impl ZeroCopyProducer {
                 return Some((buffer.clone(), offset));
             }
         }
-        
+
         // Need a new buffer
         let buffer = self.buffer_pool.acquire();
         if let Some(slice) = buffer.reserve(size) {
@@ -632,10 +643,10 @@ impl ZeroCopyProducer {
             *guard = Some(buffer.clone());
             return Some((buffer, offset));
         }
-        
+
         None
     }
-    
+
     /// Get producer statistics
     pub fn stats(&self) -> ProducerStatsSnapshot {
         ProducerStatsSnapshot {
@@ -683,18 +694,18 @@ impl ZeroCopyConsumer {
             stats: ConsumerStats::new(),
         }
     }
-    
+
     /// Parse messages from a bytes buffer without copying
     pub fn parse_messages(&self, data: Bytes) -> Vec<ConsumedMessage> {
         let mut messages = Vec::new();
         let mut offset = 0;
-        
+
         while offset < data.len() {
             // Minimum message header: 4 (len) + 8 (offset) + 8 (timestamp) = 20 bytes
             if offset + 20 > data.len() {
                 break;
             }
-            
+
             // Read message length
             let msg_len = u32::from_be_bytes([
                 data[offset],
@@ -702,45 +713,45 @@ impl ZeroCopyConsumer {
                 data[offset + 2],
                 data[offset + 3],
             ]) as usize;
-            
+
             if offset + 4 + msg_len > data.len() {
                 break;
             }
-            
+
             // Create a slice of the message data (zero-copy)
             let msg_data = data.slice(offset + 4..offset + 4 + msg_len);
-            
+
             if let Some(msg) = self.parse_single_message(msg_data) {
                 messages.push(msg);
                 self.stats.messages_consumed.fetch_add(1, Ordering::Relaxed);
             }
-            
+
             offset += 4 + msg_len;
         }
-        
-        self.stats.bytes_read.fetch_add(offset as u64, Ordering::Relaxed);
+
+        self.stats
+            .bytes_read
+            .fetch_add(offset as u64, Ordering::Relaxed);
         messages
     }
-    
+
     /// Parse a single message from bytes
     fn parse_single_message(&self, data: Bytes) -> Option<ConsumedMessage> {
         if data.len() < 16 {
             return None;
         }
-        
+
         let msg_offset = u64::from_be_bytes([
-            data[0], data[1], data[2], data[3],
-            data[4], data[5], data[6], data[7],
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
         ]);
-        
+
         let timestamp = i64::from_be_bytes([
-            data[8], data[9], data[10], data[11],
-            data[12], data[13], data[14], data[15],
+            data[8], data[9], data[10], data[11], data[12], data[13], data[14], data[15],
         ]);
-        
+
         // Rest is the value (simplified - real impl would have key + headers)
         let value = data.slice(16..);
-        
+
         Some(ConsumedMessage {
             offset: msg_offset,
             timestamp,
@@ -748,7 +759,7 @@ impl ZeroCopyConsumer {
             value,
         })
     }
-    
+
     /// Get consumer statistics
     pub fn stats(&self) -> ConsumerStatsSnapshot {
         ConsumerStatsSnapshot {
@@ -756,7 +767,7 @@ impl ZeroCopyConsumer {
             bytes_read: self.stats.bytes_read.load(Ordering::Relaxed),
         }
     }
-    
+
     /// Copy data into internal buffer for processing (useful for network reads)
     pub fn buffer_data(&self, data: &[u8]) -> Bytes {
         let mut buffer = self.read_buffer.lock();
@@ -810,7 +821,7 @@ impl ConsumedMessage {
     pub fn value_str(&self) -> Option<&str> {
         std::str::from_utf8(&self.value).ok()
     }
-    
+
     /// Get key as string
     pub fn key_str(&self) -> Option<&str> {
         self.key.as_ref().and_then(|k| std::str::from_utf8(k).ok())
@@ -820,104 +831,99 @@ impl ConsumedMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_zero_copy_buffer_basic() {
         let buffer = ZeroCopyBuffer::new(1024);
         assert_eq!(buffer.len(), 0);
         assert!(buffer.remaining() >= 1024);
-        
+
         // Reserve space
         let slice = buffer.reserve(100).unwrap();
         assert_eq!(slice.len(), 100);
         assert_eq!(buffer.len(), 100);
     }
-    
+
     #[test]
     fn test_zero_copy_buffer_write() {
         let buffer = ZeroCopyBuffer::new(1024);
-        
+
         let mut slice = buffer.reserve(11).unwrap();
         slice.write(b"Hello World");
-        
+
         assert_eq!(slice.as_bytes(), b"Hello World");
     }
-    
+
     #[test]
     fn test_buffer_pool() {
         let pool = ZeroCopyBufferPool::new(1024, 4);
         let stats = pool.stats();
         assert_eq!(stats.total_created, 4);
         assert_eq!(stats.available, 4);
-        
+
         // Acquire buffers
         let b1 = pool.acquire();
         let b2 = pool.acquire();
-        
+
         let stats = pool.stats();
         assert_eq!(stats.in_use, 2);
-        
+
         // Release buffers
         pool.release(b1);
         pool.release(b2);
-        
+
         let stats = pool.stats();
         assert_eq!(stats.in_use, 0);
     }
-    
+
     #[test]
     fn test_buffer_ref_inline() {
         let small_data = b"small";
         let buf_ref = BufferRef::from_bytes(small_data);
-        
+
         match buf_ref {
-            BufferRef::Inline(_) => {},
+            BufferRef::Inline(_) => {}
             _ => panic!("Expected inline storage for small data"),
         }
-        
+
         assert_eq!(buf_ref.as_bytes(), small_data);
     }
-    
+
     #[test]
     fn test_buffer_ref_external() {
         let large_data = vec![0u8; 100];
         let buf_ref = BufferRef::from_bytes(&large_data);
-        
+
         match buf_ref {
-            BufferRef::External(_) => {},
+            BufferRef::External(_) => {}
             _ => panic!("Expected external storage for large data"),
         }
-        
+
         assert_eq!(buf_ref.len(), 100);
     }
-    
+
     #[test]
     fn test_zero_copy_producer() {
         let producer = ZeroCopyProducer::with_defaults();
-        
-        let msg = producer.create_message(
-            "test-topic",
-            0,
-            Some(b"key1"),
-            b"value1",
-        );
-        
+
+        let msg = producer.create_message("test-topic", 0, Some(b"key1"), b"value1");
+
         assert_eq!(&*msg.topic, "test-topic");
         assert_eq!(msg.partition, 0);
         assert_eq!(msg.key.unwrap().as_bytes(), b"key1");
         assert_eq!(msg.value.as_bytes(), b"value1");
-        
+
         let stats = producer.stats();
         assert_eq!(stats.messages_created, 1);
     }
-    
+
     #[test]
     fn test_zero_copy_consumer() {
         let consumer = ZeroCopyConsumer::new();
-        
+
         // Create a simple message format
         let mut data = BytesMut::new();
-        
+
         // Message length (16 + 5 = 21 bytes)
         data.extend_from_slice(&21u32.to_be_bytes());
         // Offset
@@ -926,30 +932,30 @@ mod tests {
         data.extend_from_slice(&1234567890i64.to_be_bytes());
         // Value
         data.extend_from_slice(b"hello");
-        
+
         let messages = consumer.parse_messages(data.freeze());
-        
+
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].offset, 42);
         assert_eq!(messages[0].timestamp, 1234567890);
         assert_eq!(&messages[0].value[..], b"hello");
     }
-    
+
     #[test]
     fn test_small_vec() {
         let sv = SmallVec::from_slice(b"test data");
         assert_eq!(sv.as_slice(), b"test data");
         assert_eq!(sv.len(), 9);
     }
-    
+
     #[test]
     fn test_topic_interning() {
         let producer = ZeroCopyProducer::with_defaults();
-        
+
         let msg1 = producer.create_message("topic-a", 0, None, b"v1");
         let msg2 = producer.create_message("topic-a", 0, None, b"v2");
         let msg3 = producer.create_message("topic-b", 0, None, b"v3");
-        
+
         // Same topic should share the same Arc
         assert!(Arc::ptr_eq(&msg1.topic, &msg2.topic));
         // Different topics should not

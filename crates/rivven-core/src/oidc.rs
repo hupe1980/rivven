@@ -188,7 +188,11 @@ mod oidc_impl {
     }
 
     impl OidcProviderConfig {
-        pub fn new(name: impl Into<String>, issuer: impl Into<String>, audience: impl Into<String>) -> Self {
+        pub fn new(
+            name: impl Into<String>,
+            issuer: impl Into<String>,
+            audience: impl Into<String>,
+        ) -> Self {
             Self {
                 name: name.into(),
                 issuer: issuer.into(),
@@ -221,9 +225,12 @@ mod oidc_impl {
         }
 
         pub fn jwks_url(&self) -> String {
-            self.jwks_uri
-                .clone()
-                .unwrap_or_else(|| format!("{}/.well-known/jwks.json", self.issuer.trim_end_matches('/')))
+            self.jwks_uri.clone().unwrap_or_else(|| {
+                format!(
+                    "{}/.well-known/jwks.json",
+                    self.issuer.trim_end_matches('/')
+                )
+            })
         }
     }
 
@@ -416,7 +423,7 @@ mod oidc_impl {
 
             // Try to find provider by issuer in token (peek at claims)
             let insecure_claims = self.peek_claims(token)?;
-            
+
             // Find matching provider by issuer
             let provider = self
                 .providers
@@ -425,7 +432,8 @@ mod oidc_impl {
                 .ok_or_else(|| OidcError::ProviderNotFound(insecure_claims.iss.clone()))?;
 
             // Validate with the matching provider
-            self.validate_with_provider(token, provider, &header.kid).await
+            self.validate_with_provider(token, provider, &header.kid)
+                .await
         }
 
         /// Validate a JWT token with a specific provider
@@ -442,7 +450,8 @@ mod oidc_impl {
             let header = decode_header(token)
                 .map_err(|e| OidcError::InvalidToken(format!("Invalid header: {}", e)))?;
 
-            self.validate_with_provider(token, provider, &header.kid).await
+            self.validate_with_provider(token, provider, &header.kid)
+                .await
         }
 
         /// Peek at claims without validation (for issuer discovery)
@@ -475,7 +484,8 @@ mod oidc_impl {
                     .ok_or_else(|| OidcError::KeyNotFound(kid.clone()))?
             } else {
                 // Use first key if no kid
-                jwks.keys.first()
+                jwks.keys
+                    .first()
                     .ok_or_else(|| OidcError::KeyNotFound("no keys in JWKS".to_string()))?
             };
 
@@ -523,8 +533,16 @@ mod oidc_impl {
                 .unwrap_or_default();
 
             // Extract common claims
-            let email = claims.extra.get("email").and_then(|v| v.as_str()).map(|s| s.to_string());
-            let name = claims.extra.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let email = claims
+                .extra
+                .get("email")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let name = claims
+                .extra
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
 
             // Validate required claims
             for claim in &provider.required_claims {
@@ -621,9 +639,10 @@ mod oidc_impl {
 
             // Handle nested paths
             let parts: Vec<&str> = path.split('.').collect();
-            let mut current: &serde_json::Value = 
-                claims.extra.get(parts[0])
-                    .ok_or_else(|| OidcError::MissingClaim(path.to_string()))?;
+            let mut current: &serde_json::Value = claims
+                .extra
+                .get(parts[0])
+                .ok_or_else(|| OidcError::MissingClaim(path.to_string()))?;
 
             for part in &parts[1..] {
                 current = current
@@ -693,14 +712,16 @@ mod oidc_impl {
         // Parse GS2 header and extract token
         // Format: n,,<SOH>auth=Bearer <token><SOH><SOH>
         let parts: Vec<&str> = message.split('\x01').collect();
-        
+
         for part in parts {
             if let Some(auth) = part.strip_prefix("auth=Bearer ") {
                 return Ok(auth.trim().to_string());
             }
         }
 
-        Err(OidcError::InvalidToken("No bearer token found in SASL message".to_string()))
+        Err(OidcError::InvalidToken(
+            "No bearer token found in SASL message".to_string(),
+        ))
     }
 
     /// Build OAUTHBEARER SASL response for successful auth
@@ -727,13 +748,9 @@ mod oidc_impl {
 
         #[test]
         fn test_provider_config() {
-            let config = OidcProviderConfig::new(
-                "test",
-                "https://auth.example.com",
-                "test-client",
-            )
-            .with_groups_claim("groups")
-            .with_roles_claim("realm_access.roles");
+            let config = OidcProviderConfig::new("test", "https://auth.example.com", "test-client")
+                .with_groups_claim("groups")
+                .with_roles_claim("realm_access.roles");
 
             assert_eq!(config.name, "test");
             assert_eq!(config.issuer, "https://auth.example.com");
@@ -807,9 +824,9 @@ pub use oidc_impl::*;
 #[cfg(not(feature = "oidc"))]
 mod no_oidc {
     //! Stub module when OIDC feature is disabled
-    
-    use thiserror::Error;
+
     use std::collections::HashMap;
+    use thiserror::Error;
 
     #[derive(Error, Debug)]
     pub enum OidcError {

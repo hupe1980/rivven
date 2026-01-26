@@ -13,9 +13,8 @@ use std::collections::BTreeMap;
 use validator::{Validate, ValidationError};
 
 /// Regex for validating Kubernetes resource quantities (e.g., "10Gi", "100Mi")
-static QUANTITY_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^[0-9]+(\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$").unwrap()
-});
+static QUANTITY_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^[0-9]+(\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$").unwrap());
 
 /// Regex for validating Kubernetes names (RFC 1123 subdomain)
 static NAME_REGEX: Lazy<Regex> =
@@ -54,8 +53,9 @@ fn validate_k8s_name(value: &str) -> Result<(), ValidationError> {
         return Ok(()); // Empty is allowed for optional fields
     }
     if value.len() > 63 {
-        return Err(ValidationError::new("name_too_long")
-            .with_message("name exceeds 63 characters".into()));
+        return Err(
+            ValidationError::new("name_too_long").with_message("name exceeds 63 characters".into())
+        );
     }
     if !NAME_REGEX.is_match(value) {
         return Err(ValidationError::new("invalid_name").with_message(
@@ -70,8 +70,9 @@ fn validate_env_vars(vars: &[k8s_openapi::api::core::v1::EnvVar]) -> Result<(), 
     // Limit number of env vars to prevent resource exhaustion
     const MAX_ENV_VARS: usize = 100;
     if vars.len() > MAX_ENV_VARS {
-        return Err(ValidationError::new("too_many_env_vars")
-            .with_message(format!("maximum {} environment variables allowed", MAX_ENV_VARS).into()));
+        return Err(ValidationError::new("too_many_env_vars").with_message(
+            format!("maximum {} environment variables allowed", MAX_ENV_VARS).into(),
+        ));
     }
     for var in vars {
         // Validate env var name format
@@ -84,8 +85,11 @@ fn validate_env_vars(vars: &[k8s_openapi::api::core::v1::EnvVar]) -> Result<(), 
         for prefix in forbidden_prefixes {
             if var.name.starts_with(prefix) && var.value.is_some() {
                 return Err(ValidationError::new("forbidden_env_var").with_message(
-                    format!("environment variable '{}' is not allowed for security", var.name)
-                        .into(),
+                    format!(
+                        "environment variable '{}' is not allowed for security",
+                        var.name
+                    )
+                    .into(),
                 ));
             }
         }
@@ -329,7 +333,12 @@ pub struct StorageSpec {
 
 /// Validate PVC access modes
 fn validate_access_modes(modes: &[String]) -> Result<(), ValidationError> {
-    let valid_modes = ["ReadWriteOnce", "ReadOnlyMany", "ReadWriteMany", "ReadWriteOncePod"];
+    let valid_modes = [
+        "ReadWriteOnce",
+        "ReadOnlyMany",
+        "ReadWriteMany",
+        "ReadWriteOncePod",
+    ];
     for mode in modes {
         if !valid_modes.contains(&mode.as_str()) {
             return Err(ValidationError::new("invalid_access_mode")
@@ -360,12 +369,20 @@ pub struct BrokerConfig {
 
     /// Default replication factor for new topics (1-10)
     #[serde(default = "default_replication_factor")]
-    #[validate(range(min = 1, max = 10, message = "replication factor must be between 1 and 10"))]
+    #[validate(range(
+        min = 1,
+        max = 10,
+        message = "replication factor must be between 1 and 10"
+    ))]
     pub default_replication_factor: i32,
 
     /// Log retention period in hours (1-8760, i.e., 1 hour to 1 year)
     #[serde(default = "default_log_retention_hours")]
-    #[validate(range(min = 1, max = 8760, message = "retention hours must be between 1 and 8760"))]
+    #[validate(range(
+        min = 1,
+        max = 8760,
+        message = "retention hours must be between 1 and 8760"
+    ))]
     pub log_retention_hours: i32,
 
     /// Log segment size in bytes (1MB to 10GB)
@@ -567,11 +584,11 @@ pub struct ServiceMonitorSpec {
 
 /// Validate Prometheus duration format (e.g., "30s", "1m", "5m30s")
 fn validate_duration(duration: &str) -> Result<(), ValidationError> {
-    static DURATION_REGEX: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"^([0-9]+[smh])+$").unwrap());
+    static DURATION_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"^([0-9]+[smh])+$").unwrap());
     if !DURATION_REGEX.is_match(duration) {
-        return Err(ValidationError::new("invalid_duration")
-            .with_message(format!("'{}' is not a valid duration (e.g., 30s, 1m)", duration).into()));
+        return Err(ValidationError::new("invalid_duration").with_message(
+            format!("'{}' is not a valid duration (e.g., 30s, 1m)", duration).into(),
+        ));
     }
     Ok(())
 }
@@ -618,7 +635,11 @@ fn validate_optional_int_or_percent(value: &str) -> Result<(), ValidationError> 
         Lazy::new(|| Regex::new(r"^([0-9]+|[0-9]+%)$").unwrap());
     if !INT_OR_PERCENT_REGEX.is_match(value) {
         return Err(ValidationError::new("invalid_int_or_percent").with_message(
-            format!("'{}' must be an integer or percentage (e.g., '1' or '25%')", value).into(),
+            format!(
+                "'{}' must be an integer or percentage (e.g., '1' or '25%')",
+                value
+            )
+            .into(),
         ));
     }
     Ok(())
@@ -1161,7 +1182,11 @@ pub struct SourceTopicConfigSpec {
 
     /// Replication factor for auto-created topics
     #[serde(default)]
-    #[validate(range(min = 1, max = 10, message = "replication factor must be between 1 and 10"))]
+    #[validate(range(
+        min = 1,
+        max = 10,
+        message = "replication factor must be between 1 and 10"
+    ))]
     pub replication_factor: Option<i32>,
 
     /// Auto-create topics if they don't exist
@@ -1189,7 +1214,11 @@ pub struct SinkConnectorSpec {
     pub topics: Vec<String>,
 
     /// Consumer group for offset tracking
-    #[validate(length(min = 1, max = 128, message = "consumer group must be 1-128 characters"))]
+    #[validate(length(
+        min = 1,
+        max = 128,
+        message = "consumer group must be 1-128 characters"
+    ))]
     pub consumer_group: String,
 
     /// Whether this sink is enabled
@@ -1226,8 +1255,9 @@ fn validate_start_offset(offset: &str) -> Result<(), ValidationError> {
     match offset {
         "earliest" | "latest" => Ok(()),
         s if s.contains('T') && s.contains(':') => Ok(()), // ISO 8601 timestamp
-        _ => Err(ValidationError::new("invalid_start_offset")
-            .with_message("start offset must be 'earliest', 'latest', or ISO 8601 timestamp".into())),
+        _ => Err(ValidationError::new("invalid_start_offset").with_message(
+            "start offset must be 'earliest', 'latest', or ISO 8601 timestamp".into(),
+        )),
     }
 }
 
@@ -1238,7 +1268,11 @@ fn validate_start_offset(offset: &str) -> Result<(), ValidationError> {
 pub struct RateLimitSpec {
     /// Maximum events per second (0 = unlimited)
     #[serde(default)]
-    #[validate(range(min = 0, max = 1_000_000, message = "events per second must be 0-1000000"))]
+    #[validate(range(
+        min = 0,
+        max = 1_000_000,
+        message = "events per second must be 0-1000000"
+    ))]
     pub events_per_second: u64,
 
     /// Burst capacity (extra events above steady rate)
@@ -1289,7 +1323,11 @@ pub struct TopicSettingsSpec {
 
     /// Default replication factor
     #[serde(default = "default_topic_replication")]
-    #[validate(range(min = 1, max = 10, message = "replication factor must be between 1 and 10"))]
+    #[validate(range(
+        min = 1,
+        max = 10,
+        message = "replication factor must be between 1 and 10"
+    ))]
     pub default_replication_factor: i32,
 
     /// Fail if topic doesn't exist and auto_create is false
@@ -1335,7 +1373,11 @@ pub struct RetryConfigSpec {
 
     /// Maximum backoff in milliseconds
     #[serde(default = "default_max_backoff_ms")]
-    #[validate(range(min = 100, max = 3600000, message = "max backoff must be 100-3600000ms"))]
+    #[validate(range(
+        min = 100,
+        max = 3600000,
+        message = "max backoff must be 100-3600000ms"
+    ))]
     pub max_backoff_ms: i64,
 
     /// Backoff multiplier
@@ -1601,7 +1643,10 @@ impl RivvenConnectSpec {
     /// Get labels for managed resources
     pub fn get_labels(&self, connect_name: &str) -> BTreeMap<String, String> {
         let mut labels = BTreeMap::new();
-        labels.insert("app.kubernetes.io/name".to_string(), "rivven-connect".to_string());
+        labels.insert(
+            "app.kubernetes.io/name".to_string(),
+            "rivven-connect".to_string(),
+        );
         labels.insert(
             "app.kubernetes.io/instance".to_string(),
             connect_name.to_string(),
@@ -1624,7 +1669,10 @@ impl RivvenConnectSpec {
     /// Get selector labels for managed resources
     pub fn get_selector_labels(&self, connect_name: &str) -> BTreeMap<String, String> {
         let mut labels = BTreeMap::new();
-        labels.insert("app.kubernetes.io/name".to_string(), "rivven-connect".to_string());
+        labels.insert(
+            "app.kubernetes.io/name".to_string(),
+            "rivven-connect".to_string(),
+        );
         labels.insert(
             "app.kubernetes.io/instance".to_string(),
             connect_name.to_string(),
@@ -1706,8 +1754,14 @@ mod tests {
         };
 
         let labels = spec.get_labels("my-cluster");
-        assert_eq!(labels.get("app.kubernetes.io/name"), Some(&"rivven".to_string()));
-        assert_eq!(labels.get("app.kubernetes.io/instance"), Some(&"my-cluster".to_string()));
+        assert_eq!(
+            labels.get("app.kubernetes.io/name"),
+            Some(&"rivven".to_string())
+        );
+        assert_eq!(
+            labels.get("app.kubernetes.io/instance"),
+            Some(&"my-cluster".to_string())
+        );
     }
 
     #[test]
@@ -1849,11 +1903,10 @@ mod tests {
     #[test]
     fn test_validate_access_modes() {
         assert!(validate_access_modes(&["ReadWriteOnce".to_string()]).is_ok());
-        assert!(validate_access_modes(&[
-            "ReadWriteOnce".to_string(),
-            "ReadOnlyMany".to_string()
-        ])
-        .is_ok());
+        assert!(
+            validate_access_modes(&["ReadWriteOnce".to_string(), "ReadOnlyMany".to_string()])
+                .is_ok()
+        );
         assert!(validate_access_modes(&["Invalid".to_string()]).is_err());
     }
 

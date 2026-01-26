@@ -227,7 +227,9 @@ impl CdcEventVecExt for [CdcEvent] {
 pub fn assert_json_field(event: &CdcEvent, field: &str, expected: impl Into<Value>) {
     let expected = expected.into();
     let after = event.after.as_ref().expect("Event has no 'after' data");
-    let actual = after.get(field).expect(&format!("Field '{}' not found", field));
+    let actual = after
+        .get(field)
+        .expect(&format!("Field '{}' not found", field));
     assert_eq!(*actual, expected, "Field '{}' mismatch", field);
 }
 
@@ -238,14 +240,16 @@ pub fn get_event_field(event: &CdcEvent, field: &str) -> Option<Value> {
 
 /// Helper to extract string field from event
 pub fn get_string_field(event: &CdcEvent, field: &str) -> Option<String> {
-    get_event_field(event, field)?.as_str().map(|s| s.to_string())
+    get_event_field(event, field)?
+        .as_str()
+        .map(|s| s.to_string())
 }
 
 /// Helper to extract integer field from event
 pub fn get_int_field(event: &CdcEvent, field: &str) -> Option<i64> {
     // Try both string and number representations
     let value = get_event_field(event, field)?;
-    value.as_i64().or_else(|| {
-        value.as_str().and_then(|s| s.parse().ok())
-    })
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
 }

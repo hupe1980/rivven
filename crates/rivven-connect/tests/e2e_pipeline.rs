@@ -193,7 +193,10 @@ impl PostgresTestContainer {
 
         // Grant permissions
         client
-            .execute("GRANT SELECT ON ALL TABLES IN SCHEMA public TO rivven_cdc", &[])
+            .execute(
+                "GRANT SELECT ON ALL TABLES IN SCHEMA public TO rivven_cdc",
+                &[],
+            )
             .await?;
         client
             .execute(
@@ -265,7 +268,9 @@ impl TestBroker {
         Ok(Self { server, addr })
     }
 
-    async fn start_background(self) -> (String, tokio::task::JoinHandle<Result<(), anyhow::Error>>) {
+    async fn start_background(
+        self,
+    ) -> (String, tokio::task::JoinHandle<Result<(), anyhow::Error>>) {
         let addr = self.addr.clone();
         let handle = tokio::spawn(async move { self.server.start().await.map_err(Into::into) });
         // Give server time to bind
@@ -286,9 +291,7 @@ impl TestBroker {
 /// Test: Broker can receive messages and they can be consumed
 #[tokio::test]
 async fn test_broker_roundtrip() -> Result<()> {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .try_init();
+    let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
 
     info!("🧪 Test: Broker roundtrip");
 
@@ -322,9 +325,7 @@ async fn test_broker_roundtrip() -> Result<()> {
 /// Test: GetOffsetBounds API works correctly
 #[tokio::test]
 async fn test_get_offset_bounds() -> Result<()> {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .try_init();
+    let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
 
     info!("🧪 Test: GetOffsetBounds API");
 
@@ -359,9 +360,7 @@ async fn test_get_offset_bounds() -> Result<()> {
 /// Test: Consumer group operations
 #[tokio::test]
 async fn test_consumer_groups() -> Result<()> {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .try_init();
+    let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
 
     info!("🧪 Test: Consumer groups");
 
@@ -398,7 +397,7 @@ async fn test_consumer_groups() -> Result<()> {
 }
 
 /// Integration test: Full E2E pipeline with PostgreSQL CDC
-/// 
+///
 /// This test requires Docker to run PostgreSQL container.
 /// Run with: cargo test -p rivven-connect --test e2e_pipeline test_full_e2e_pipeline -- --nocapture --ignored
 #[tokio::test]
@@ -422,7 +421,9 @@ async fn test_full_e2e_pipeline() -> Result<()> {
 
     // 3. Create CDC topic
     let mut client = Client::connect(&broker_addr).await?;
-    client.create_topic("cdc.testdb.public.users", Some(1)).await?;
+    client
+        .create_topic("cdc.testdb.public.users", Some(1))
+        .await?;
     info!("Created CDC topic");
 
     // 4. Setup test event sink
@@ -476,7 +477,7 @@ async fn test_full_e2e_pipeline() -> Result<()> {
     });
     let event2 = serde_json::json!({
         "op": "c",
-        "table": "users", 
+        "table": "users",
         "after": {"id": 2, "name": "Bob", "email": "bob@example.com"}
     });
     client

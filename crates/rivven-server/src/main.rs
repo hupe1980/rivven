@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
     // Create and start server
     let server = ClusterServer::new(cli).await?;
     let server_shutdown = server.get_shutdown_handle();
-    
+
     // Handle shutdown signals
     let shutdown_tx_signal = shutdown_tx.clone();
     tokio::spawn(async move {
@@ -66,9 +66,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Start server in background
-    let server_handle = tokio::spawn(async move {
-        server.start().await
-    });
+    let server_handle = tokio::spawn(async move { server.start().await });
 
     // Wait for shutdown signal
     let mut shutdown_rx = shutdown_tx.subscribe();
@@ -91,7 +89,10 @@ async fn main() -> anyhow::Result<()> {
             tracing::error!("Server task panicked: {}", e);
         }
         Err(_) => {
-            tracing::warn!("Shutdown timed out after {:?}, forcing exit", shutdown_timeout);
+            tracing::warn!(
+                "Shutdown timed out after {:?}, forcing exit",
+                shutdown_timeout
+            );
         }
     }
 
@@ -129,10 +130,15 @@ async fn wait_for_shutdown_signal() {
 }
 
 fn print_banner(cli: &Cli) {
-    let mode = if cli.is_cluster_mode() { "cluster" } else { "standalone" };
+    let mode = if cli.is_cluster_mode() {
+        "cluster"
+    } else {
+        "standalone"
+    };
     let node_id = cli.node_id.as_deref().unwrap_or("auto");
-    
-    eprintln!(r#"
+
+    eprintln!(
+        r#"
  ____  _                     
 |  _ \(_)_____   _____ _ __  
 | |_) | \ \ / / / / _ \ '_ \ 
@@ -168,11 +174,7 @@ High-Performance Distributed Event Streaming Platform
              Seeds:        {}\n  \
              Replication:  {}\n  \
              Min ISR:      {}\n",
-            cli.cluster_name,
-            rack,
-            seeds,
-            cli.replication_factor,
-            cli.min_isr
+            cli.cluster_name, rack, seeds, cli.replication_factor, cli.min_isr
         );
     }
 }

@@ -148,25 +148,19 @@ pub struct DashboardState {
 
 /// Security headers middleware
 #[cfg(feature = "dashboard")]
-async fn security_headers_middleware(
-    request: Request<Body>,
-    next: Next,
-) -> Response<Body> {
+async fn security_headers_middleware(request: Request<Body>, next: Next) -> Response<Body> {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
-    
+
     // Prevent MIME type sniffing
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     );
-    
+
     // Prevent clickjacking
-    headers.insert(
-        header::X_FRAME_OPTIONS,
-        HeaderValue::from_static("DENY"),
-    );
-    
+    headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+
     // Content Security Policy - allows htmx/alpine from CDN and Google Fonts
     // Note: Alpine.js requires 'unsafe-eval' to evaluate x-text and other expressions
     // Note: connect-src needs ws:/wss: for SSE and localhost for API calls on different ports
@@ -182,19 +176,19 @@ async fn security_headers_middleware(
              frame-ancestors 'none'",
         ),
     );
-    
+
     // Referrer Policy
     headers.insert(
         header::REFERRER_POLICY,
         HeaderValue::from_static("strict-origin-when-cross-origin"),
     );
-    
+
     // Permissions Policy (disable unnecessary browser features)
     headers.insert(
         "Permissions-Policy",
         HeaderValue::from_static("geolocation=(), microphone=(), camera=()"),
     );
-    
+
     response
 }
 
@@ -223,17 +217,17 @@ pub fn create_dashboard_router(state: DashboardState) -> Router {
 #[cfg(feature = "dashboard")]
 async fn static_handler(uri: Uri) -> impl IntoResponse {
     let path = uri.path().trim_start_matches('/');
-    
+
     // Default to index.html for root path
     let path = if path.is_empty() { "index.html" } else { path };
-    
+
     match DashboardAssets::get(path) {
         Some(content) => {
             // Determine content type
             let mime = mime_guess::from_path(path)
                 .first_or_octet_stream()
                 .to_string();
-            
+
             Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, mime)
@@ -261,7 +255,7 @@ async fn static_handler(uri: Uri) -> impl IntoResponse {
                         .unwrap();
                 }
             }
-            
+
             Response::builder()
                 .status(StatusCode::NOT_FOUND)
                 .header(header::CONTENT_TYPE, "text/plain")
@@ -273,28 +267,26 @@ async fn static_handler(uri: Uri) -> impl IntoResponse {
 
 /// Dashboard data endpoint
 #[cfg(feature = "dashboard")]
-async fn dashboard_data_handler(
-    State(state): State<DashboardState>,
-) -> impl IntoResponse {
+async fn dashboard_data_handler(State(state): State<DashboardState>) -> impl IntoResponse {
     use std::time::{SystemTime, UNIX_EPOCH};
-    
+
     // Get topics with detailed metrics
     let topic_list = state.topic_manager.list_topics().await;
     let mut topics: Vec<TopicInfo> = Vec::new();
-    
+
     for name in topic_list {
         // Try to get the actual topic to fetch partition info
         if let Ok(topic) = state.topic_manager.get_topic(&name).await {
             let num_partitions = topic.num_partitions() as u32;
             let mut partition_offsets = Vec::new();
             let mut total_messages: u64 = 0;
-            
+
             for p in topic.all_partitions() {
                 let earliest = p.earliest_offset().await.unwrap_or(0);
                 let latest = p.latest_offset().await;
                 let count = latest.saturating_sub(earliest);
                 total_messages += count;
-                
+
                 partition_offsets.push(PartitionOffset {
                     partition: p.id(),
                     earliest,
@@ -302,7 +294,7 @@ async fn dashboard_data_handler(
                     count,
                 });
             }
-            
+
             topics.push(TopicInfo {
                 name,
                 partitions: num_partitions,
@@ -321,11 +313,11 @@ async fn dashboard_data_handler(
             });
         }
     }
-    
+
     // Get consumer groups with lag calculation
     let groups = state.offset_manager.list_groups().await;
     let mut consumer_groups: Vec<ConsumerGroupInfo> = Vec::new();
-    
+
     for group_id in groups {
         // Get group details from offset manager
         // Returns: topic -> (partition -> offset)
@@ -334,7 +326,7 @@ async fn dashboard_data_handler(
             .as_ref()
             .map(|o| o.keys().cloned().collect())
             .unwrap_or_default();
-        
+
         // Calculate total lag
         let mut total_lag: u64 = 0;
         if let Some(ref group_offsets) = offsets {
@@ -349,7 +341,7 @@ async fn dashboard_data_handler(
                 }
             }
         }
-        
+
         consumer_groups.push(ConsumerGroupInfo {
             group_id,
             state: "Stable".to_string(),
@@ -358,7 +350,7 @@ async fn dashboard_data_handler(
             total_lag,
         });
     }
-    
+
     // Get server stats
     let active_connections = state.stats.get_active_connections();
     let total_requests = state.stats.get_total_requests();
@@ -367,7 +359,7 @@ async fn dashboard_data_handler(
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    
+
     let data = DashboardData {
         topics,
         consumer_groups,
@@ -376,7 +368,7 @@ async fn dashboard_data_handler(
         uptime_secs,
         timestamp,
     };
-    
+
     (StatusCode::OK, Json(data))
 }
 
@@ -438,7 +430,7 @@ mod tests {
             uptime_secs: 3600,
             timestamp: 1706200000000,
         };
-        
+
         let json = serde_json::to_string(&data).unwrap();
         assert!(json.contains("test-topic"));
         assert!(json.contains("test-group"));

@@ -1,17 +1,15 @@
 pub mod log_manager;
-pub mod segment;
-pub mod traits;
 pub mod memory;
+pub mod segment;
 pub mod tiered;
+pub mod traits;
 
 pub use log_manager::LogManager;
-pub use segment::Segment;
-pub use traits::StorageBackend;
 pub use memory::MemoryStorage;
+pub use segment::Segment;
 pub use tiered::{
-    TieredStorage, TieredStorageConfig, StorageTier,
-    ColdStorageConfig, ColdStorageBackend, LocalFsColdStorage,
-    HotTier, WarmTier, SegmentMetadata,
-    TieredStorageStats, TieredStorageStatsSnapshot,
-    HotTierStats, WarmTierStats,
+    ColdStorageBackend, ColdStorageConfig, HotTier, HotTierStats, LocalFsColdStorage,
+    SegmentMetadata, StorageTier, TieredStorage, TieredStorageConfig, TieredStorageStats,
+    TieredStorageStatsSnapshot, WarmTier, WarmTierStats,
 };
+pub use traits::StorageBackend;

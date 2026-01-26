@@ -86,32 +86,89 @@ pub mod plugin;
 
 // Re-export core traits at crate root for ergonomic use
 pub use traits::{
-    // Core connector traits
-    Source, SourceConfig, SourceExt, CheckResult, CheckResultBuilder, CheckDetail,
-    Sink, SinkConfig, BatchSink, BatchConfig, WriteResult,
-    Transform, TransformConfig, TransformOutput,
-    // Event types
-    SourceEvent, SourceEventBuilder, SourceEventType, EventMetadata, LogLevel,
+    chunk_events,
+    metric_names,
+    partition_events,
+    retry,
+    retry_result,
+    AnySink,
     // Registry
-    AnySource, AnySink, AnyTransform,
-    SourceFactory, SinkFactory, TransformFactory,
-    SourceRegistry, SinkRegistry, TransformRegistry,
-    // Catalog
-    Catalog, ConfiguredCatalog, ConfiguredStream, Stream, SyncMode, DestinationSyncMode,
-    // State management
-    State, StateBuilder, StreamState,
-    // Spec
-    ConnectorSpec, ConnectorSpecBuilder, SyncModeSpec,
-    // Retry utilities
-    RetryConfig, RetryGuard, RetryResult, retry, retry_result,
+    AnySource,
+    AnyTransform,
+    AsyncBatcher,
     // Batch processing
-    Batch, Batcher, BatcherConfig, AsyncBatcher, chunk_events, partition_events,
+    Batch,
+    BatchConfig,
+    BatchSink,
+    Batcher,
+    BatcherConfig,
+    // Catalog
+    Catalog,
+    CheckDetail,
+    CheckResult,
+    CheckResultBuilder,
     // Circuit breaker
-    CircuitBreaker, CircuitBreakerConfig, CircuitBreakerError, CircuitState, SharedCircuitBreaker,
+    CircuitBreaker,
+    CircuitBreakerConfig,
+    CircuitBreakerError,
+    CircuitState,
+    ConfiguredCatalog,
+    ConfiguredStream,
+    // Spec
+    ConnectorSpec,
+    ConnectorSpecBuilder,
+    DestinationSyncMode,
+    EventMetadata,
+    HistogramSnapshot,
+    Label,
+    LogLevel,
+    MetricValue,
     // Metrics
-    Metrics, MetricsCollector, MetricsSnapshot, MetricValue, HistogramSnapshot, Label, Timer, NoopMetrics, metric_names,
+    Metrics,
+    MetricsCollector,
+    MetricsSnapshot,
+    MockSink,
+    MockSinkConfig,
     // Testing utilities
-    MockSource, MockSourceConfig, MockSink, MockSinkConfig, MockTransform, TestHarness, TestResult,
+    MockSource,
+    MockSourceConfig,
+    MockTransform,
+    NoopMetrics,
+    // Retry utilities
+    RetryConfig,
+    RetryGuard,
+    RetryResult,
+    SharedCircuitBreaker,
+    Sink,
+    SinkConfig,
+    SinkFactory,
+    SinkRegistry,
+    // Core connector traits
+    Source,
+    SourceConfig,
+    // Event types
+    SourceEvent,
+    SourceEventBuilder,
+    SourceEventType,
+    SourceExt,
+    SourceFactory,
+    SourceRegistry,
+    // State management
+    State,
+    StateBuilder,
+    Stream,
+    StreamState,
+    SyncMode,
+    SyncModeSpec,
+    TestHarness,
+    TestResult,
+    Timer,
+    Transform,
+    TransformConfig,
+    TransformFactory,
+    TransformOutput,
+    TransformRegistry,
+    WriteResult,
 };
 
 // Re-export error types
@@ -135,54 +192,116 @@ pub use serde_json::Value as JsonValue;
 /// Prelude module for convenient imports
 pub mod prelude {
     pub use crate::{
-        // Core traits
-        Source, SourceConfig, SourceExt, CheckResult, CheckResultBuilder, CheckDetail,
-        Sink, SinkConfig, BatchSink, BatchConfig, WriteResult,
-        Transform, TransformConfig, TransformOutput,
-        // Events
-        SourceEvent, SourceEventBuilder, SourceEventType, EventMetadata, LogLevel,
-        // Registry
-        AnySource, AnySink, AnyTransform,
-        SourceFactory, SinkFactory, TransformFactory,
-        SourceRegistry, SinkRegistry, TransformRegistry,
-        // Catalog & State
-        Catalog, ConfiguredCatalog, ConfiguredStream, Stream, State, StateBuilder, StreamState, 
-        SyncMode, DestinationSyncMode,
-        // Spec
-        ConnectorSpec, ConnectorSpecBuilder, SyncModeSpec,
-        // Retry
-        RetryConfig, RetryGuard, retry, retry_result,
-        // Batch processing
-        Batch, Batcher, BatcherConfig, AsyncBatcher, chunk_events, partition_events,
-        // Circuit breaker
-        CircuitBreaker, CircuitBreakerConfig, CircuitBreakerError, CircuitState, SharedCircuitBreaker,
-        // Metrics
-        Metrics, MetricsCollector, MetricsSnapshot, MetricValue, Label, Timer, NoopMetrics, metric_names,
-        // Testing
-        MockSource, MockSourceConfig, MockSink, MockSinkConfig, MockTransform, TestHarness, TestResult,
-        // Errors
-        ConnectorError, ConnectorResult, ConnectError, Result,
         // Re-exports
-        async_trait, BoxStream, Deserialize, Serialize, JsonValue,
+        async_trait,
+        chunk_events,
+        metric_names,
+        partition_events,
+        retry,
+        retry_result,
+        AnySink,
+        // Registry
+        AnySource,
+        AnyTransform,
+        AsyncBatcher,
+        // Batch processing
+        Batch,
+        BatchConfig,
+        BatchSink,
+        Batcher,
+        BatcherConfig,
+        BoxStream,
+        // Catalog & State
+        Catalog,
+        CheckDetail,
+        CheckResult,
+        CheckResultBuilder,
+        // Circuit breaker
+        CircuitBreaker,
+        CircuitBreakerConfig,
+        CircuitBreakerError,
+        CircuitState,
+        ConfiguredCatalog,
+        ConfiguredStream,
+        ConnectError,
+        // Errors
+        ConnectorError,
+        ConnectorResult,
+        // Spec
+        ConnectorSpec,
+        ConnectorSpecBuilder,
+        Deserialize,
+        DestinationSyncMode,
+        EventMetadata,
+        JsonValue,
+        Label,
+        LogLevel,
+        MetricValue,
+        // Metrics
+        Metrics,
+        MetricsCollector,
+        MetricsSnapshot,
+        MockSink,
+        MockSinkConfig,
+        // Testing
+        MockSource,
+        MockSourceConfig,
+        MockTransform,
+        NoopMetrics,
+        Result,
+        // Retry
+        RetryConfig,
+        RetryGuard,
+        Serialize,
+        SharedCircuitBreaker,
+        Sink,
+        SinkConfig,
+        SinkFactory,
+        SinkRegistry,
+        // Core traits
+        Source,
+        SourceConfig,
+        // Events
+        SourceEvent,
+        SourceEventBuilder,
+        SourceEventType,
+        SourceExt,
+        SourceFactory,
+        SourceRegistry,
+        State,
+        StateBuilder,
+        Stream,
+        StreamState,
+        SyncMode,
+        SyncModeSpec,
+        TestHarness,
+        TestResult,
+        Timer,
+        Transform,
+        TransformConfig,
+        TransformFactory,
+        TransformOutput,
+        TransformRegistry,
+        WriteResult,
     };
-    
+
     // Re-export validation and schema traits
-    pub use validator::Validate;
     pub use schemars::JsonSchema;
-    
+    pub use validator::Validate;
+
     // Re-export transform helpers
     pub use crate::traits::transform::transforms;
-    
+
     // Re-export testing helpers
-    pub use crate::traits::testing::{events, assertions};
+    pub use crate::traits::testing::{assertions, events};
 }
 
 /// Convenience macro for creating a record event
-/// 
+///
 /// # Example
 /// ```rust,ignore
 /// use rivven_connect::{record, prelude::*};
-/// 
+///
 /// let event = record!("users", {"id": 1, "name": "Alice"});
 /// ```
 #[macro_export]
@@ -193,11 +312,11 @@ macro_rules! record {
 }
 
 /// Convenience macro for creating a state event
-/// 
+///
 /// # Example
 /// ```rust,ignore
 /// use rivven_connect::{state, prelude::*};
-/// 
+///
 /// let event = state!("users", {"cursor": "abc123"});
 /// ```
 #[macro_export]
@@ -208,11 +327,11 @@ macro_rules! state {
 }
 
 /// Convenience macro for creating a log event
-/// 
+///
 /// # Example
 /// ```rust,ignore
 /// use rivven_connect::{log_event, prelude::*, LogLevel};
-/// 
+///
 /// let event = log_event!(LogLevel::Info, "Starting sync");
 /// ```
 #[macro_export]

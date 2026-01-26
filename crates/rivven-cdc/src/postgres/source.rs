@@ -3,7 +3,9 @@
 //! Implements the CdcSource trait for PostgreSQL logical replication.
 
 use crate::common::{CdcConfig, CdcError, CdcEvent, CdcSource, Result};
-use crate::postgres::protocol::{PgOutputDecoder, RelationBody, ReplicationClient, ReplicationMessage, Tuple, TupleData};
+use crate::postgres::protocol::{
+    PgOutputDecoder, RelationBody, ReplicationClient, ReplicationMessage, Tuple, TupleData,
+};
 use async_trait::async_trait;
 use bytes::Buf;
 use std::collections::HashMap;
@@ -13,9 +15,9 @@ use tracing::{debug, error, info, warn};
 use url::Url;
 
 /// PostgreSQL CDC configuration
-/// 
+///
 /// # Security Note
-/// 
+///
 /// This struct implements a custom Debug that redacts credentials from
 /// the connection string to prevent accidental leakage to logs.
 #[derive(Clone)]
@@ -57,12 +59,12 @@ fn redact_connection_string(conn_str: &str) -> String {
         }
         return conn_str.to_string();
     }
-    
+
     // Handle key=value format: host=localhost password=secret user=postgres
     let mut result = String::new();
     let mut in_password = false;
     let mut skip_until_space = false;
-    
+
     for (i, c) in conn_str.char_indices() {
         if skip_until_space {
             if c.is_whitespace() {
@@ -71,7 +73,7 @@ fn redact_connection_string(conn_str: &str) -> String {
             }
             continue;
         }
-        
+
         // Check for password= pattern
         let remaining = &conn_str[i..];
         if remaining.to_lowercase().starts_with("password=") {
@@ -80,12 +82,12 @@ fn redact_connection_string(conn_str: &str) -> String {
             skip_until_space = true;
             continue;
         }
-        
+
         if !in_password {
             result.push(c);
         }
     }
-    
+
     result
 }
 
@@ -218,10 +220,7 @@ impl PostgresCdc {
 #[async_trait]
 impl CdcSource for PostgresCdc {
     async fn start(&mut self) -> Result<()> {
-        info!(
-            "Starting PostgreSQL CDC on slot {}",
-            self.config.slot_name
-        );
+        info!("Starting PostgreSQL CDC on slot {}", self.config.slot_name);
 
         let config = self.config.clone();
         let event_tx = self
@@ -255,7 +254,10 @@ impl CdcSource for PostgresCdc {
 }
 
 /// Main CDC loop
-async fn run_cdc_loop(config: &PostgresCdcConfig, event_tx: mpsc::Sender<CdcEvent>) -> anyhow::Result<()> {
+async fn run_cdc_loop(
+    config: &PostgresCdcConfig,
+    event_tx: mpsc::Sender<CdcEvent>,
+) -> anyhow::Result<()> {
     // Parse connection string
     let url = Url::parse(&config.connection_string)?;
     let host = url.host_str().unwrap_or("localhost");
@@ -271,7 +273,11 @@ async fn run_cdc_loop(config: &PostgresCdcConfig, event_tx: mpsc::Sender<CdcEven
 
     let client = ReplicationClient::connect(host, port, user, database, password).await?;
     let mut stream = client
-        .start_replication(&config.slot_name, config.start_lsn, &config.publication_name)
+        .start_replication(
+            &config.slot_name,
+            config.start_lsn,
+            &config.publication_name,
+        )
         .await?;
 
     let mut relations: HashMap<u32, RelationBody> = HashMap::new();
@@ -429,7 +435,7 @@ fn current_timestamp() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_config_debug_redacts_url_password() {
         let config = PostgresCdcConfig::builder()
@@ -438,45 +444,62 @@ mod tests {
             .publication_name("test_pub")
             .build()
             .unwrap();
-        
+
         let debug_output = format!("{:?}", config);
-        
+
         // URL encoding may encode brackets, so check for either [REDACTED] or %5BREDACTED%5D
-        let has_redacted = debug_output.contains("[REDACTED]") || debug_output.contains("%5BREDACTED%5D");
-        assert!(has_redacted, 
-            "Debug output should contain REDACTED marker: {}", debug_output);
-        
+        let has_redacted =
+            debug_output.contains("[REDACTED]") || debug_output.contains("%5BREDACTED%5D");
+        assert!(
+            has_redacted,
+            "Debug output should contain REDACTED marker: {}",
+            debug_output
+        );
+
         // Should NOT contain the actual password
-        assert!(!debug_output.contains("secret_password"), 
-            "Debug output should not contain the password");
-        
+        assert!(
+            !debug_output.contains("secret_password"),
+            "Debug output should not contain the password"
+        );
+
         // Should still show non-sensitive parts
-        assert!(debug_output.contains("localhost"), 
-            "Debug output should show host");
-        assert!(debug_output.contains("user"), 
-            "Debug output should show user");
+        assert!(
+            debug_output.contains("localhost"),
+            "Debug output should show host"
+        );
+        assert!(
+            debug_output.contains("user"),
+            "Debug output should show user"
+        );
     }
-    
+
     #[test]
     fn test_config_debug_redacts_keyword_password() {
         let config = PostgresCdcConfig::builder()
-            .connection_string("host=localhost port=5432 user=admin password=super_secret dbname=mydb")
+            .connection_string(
+                "host=localhost port=5432 user=admin password=super_secret dbname=mydb",
+            )
             .slot_name("test_slot")
             .publication_name("test_pub")
             .build()
             .unwrap();
-        
+
         let debug_output = format!("{:?}", config);
-        
+
         // Should contain REDACTED for password in key=value format
-        assert!(debug_output.contains("[REDACTED]"), 
-            "Debug output should contain [REDACTED]: {}", debug_output);
-        
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "Debug output should contain [REDACTED]: {}",
+            debug_output
+        );
+
         // Should NOT contain the actual password
-        assert!(!debug_output.contains("super_secret"), 
-            "Debug output should not contain the password");
+        assert!(
+            !debug_output.contains("super_secret"),
+            "Debug output should not contain the password"
+        );
     }
-    
+
     #[test]
     fn test_config_debug_shows_no_password_connection() {
         let config = PostgresCdcConfig::builder()
@@ -485,15 +508,19 @@ mod tests {
             .publication_name("test_pub")
             .build()
             .unwrap();
-        
+
         let debug_output = format!("{:?}", config);
-        
+
         // Should not show [REDACTED] when there's no password
-        let has_redacted = debug_output.contains("[REDACTED]") || debug_output.contains("%5BREDACTED%5D");
-        assert!(!has_redacted, 
-            "Debug output should not contain REDACTED when no password: {}", debug_output);
+        let has_redacted =
+            debug_output.contains("[REDACTED]") || debug_output.contains("%5BREDACTED%5D");
+        assert!(
+            !has_redacted,
+            "Debug output should not contain REDACTED when no password: {}",
+            debug_output
+        );
     }
-    
+
     #[test]
     fn test_redact_connection_string_url_format() {
         let redacted = redact_connection_string("postgresql://user:password123@localhost:5432/db");
@@ -502,14 +529,14 @@ mod tests {
         assert!(has_redacted);
         assert!(!redacted.contains("password123"));
     }
-    
+
     #[test]
     fn test_redact_connection_string_keyword_format() {
         let redacted = redact_connection_string("host=localhost password=mysecret user=admin");
         assert!(redacted.contains("[REDACTED]"));
         assert!(!redacted.contains("mysecret"));
     }
-    
+
     #[test]
     fn test_redact_connection_string_no_password() {
         let conn = "host=localhost user=admin dbname=mydb";

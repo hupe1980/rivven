@@ -3,11 +3,11 @@
 //! Implements the rivven-connect-sdk Source trait for MySQL/MariaDB
 //! Change Data Capture using binary log replication.
 
+use super::super::prelude::*;
 use crate::connectors::{AnySource, SensitiveString, SourceFactory};
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use futures::StreamExt;
-use super::super::prelude::*;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
@@ -97,19 +97,18 @@ impl MySqlCdcSource {
 
     /// Build a rivven-cdc MySqlCdcConfig from our config
     fn build_cdc_config(config: &MySqlCdcConfig) -> rivven_cdc::mysql::MySqlCdcConfig {
-        let mut cdc_config =
-            rivven_cdc::mysql::MySqlCdcConfig::new(&config.host, &config.user)
-                .with_port(config.port)
-                .with_password(config.password.expose())
-                .with_server_id(config.server_id);
+        let mut cdc_config = rivven_cdc::mysql::MySqlCdcConfig::new(&config.host, &config.user)
+            .with_port(config.port)
+            .with_password(config.password.expose())
+            .with_server_id(config.server_id);
 
         if let Some(ref db) = config.database {
             cdc_config = cdc_config.with_database(db);
         }
 
         if !config.binlog_filename.is_empty() {
-            cdc_config = cdc_config
-                .with_binlog_position(&config.binlog_filename, config.binlog_position);
+            cdc_config =
+                cdc_config.with_binlog_position(&config.binlog_filename, config.binlog_position);
         }
 
         if config.use_gtid && !config.gtid_set.is_empty() {
@@ -152,7 +151,10 @@ impl Source for MySqlCdcSource {
     async fn check(&self, config: &Self::Config) -> Result<CheckResult> {
         // Validate config first
         if let Err(e) = config.validate() {
-            return Ok(CheckResult::failure(format!("Invalid configuration: {}", e)));
+            return Ok(CheckResult::failure(format!(
+                "Invalid configuration: {}",
+                e
+            )));
         }
 
         info!(
@@ -197,18 +199,21 @@ impl Source for MySqlCdcSource {
     }
 
     async fn discover(&self, config: &Self::Config) -> Result<Catalog> {
-        info!("Discovering MySQL streams for {}:{}", config.host, config.port);
+        info!(
+            "Discovering MySQL streams for {}:{}",
+            config.host, config.port
+        );
 
         // Schema discovery for MySQL CDC requires querying INFORMATION_SCHEMA,
         // which would need a general-purpose MySQL query client.
-        // 
+        //
         // For CDC use cases, the catalog can be:
         // 1. Empty - CDC captures all table changes and infers schema from binlog events
         // 2. User-provided - specify tables in include_tables configuration
         //
         // The binlog replication protocol provides TABLE_MAP_EVENT with column types,
         // so the connector can work without upfront schema discovery.
-        
+
         let mut catalog = Catalog::new();
 
         // If include_tables is configured, create streams for those tables
@@ -227,8 +232,7 @@ impl Source for MySqlCdcSource {
                 "additionalProperties": true
             });
 
-            let mut stream = Stream::new(name, json_schema)
-                .sync_modes(vec![SyncMode::Incremental]);
+            let mut stream = Stream::new(name, json_schema).sync_modes(vec![SyncMode::Incremental]);
 
             if let Some(ns) = namespace {
                 stream = stream.namespace(ns);
@@ -283,17 +287,19 @@ impl Source for MySqlCdcSource {
                 }
 
                 let source_event = match cdc_event.op {
-                    CdcOp::Insert | CdcOp::Snapshot => {
-                        SourceEvent::insert(&stream_name, cdc_event.after.clone().unwrap_or_default())
-                    }
+                    CdcOp::Insert | CdcOp::Snapshot => SourceEvent::insert(
+                        &stream_name,
+                        cdc_event.after.clone().unwrap_or_default(),
+                    ),
                     CdcOp::Update => SourceEvent::update(
                         &stream_name,
                         cdc_event.before.clone(),
                         cdc_event.after.clone().unwrap_or_default(),
                     ),
-                    CdcOp::Delete => {
-                        SourceEvent::delete(&stream_name, cdc_event.before.clone().unwrap_or_default())
-                    }
+                    CdcOp::Delete => SourceEvent::delete(
+                        &stream_name,
+                        cdc_event.before.clone().unwrap_or_default(),
+                    ),
                     CdcOp::Truncate => return std::future::ready(None),
                 };
 
@@ -328,7 +334,7 @@ impl SourceFactory for MySqlCdcSourceFactory {
 }
 
 /// Wrapper for type-erased source operations
-#[allow(dead_code)]  // Used by SourceFactory for dynamic dispatch
+#[allow(dead_code)] // Used by SourceFactory for dynamic dispatch
 struct MySqlCdcSourceWrapper(MySqlCdcSource);
 
 #[async_trait]

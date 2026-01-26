@@ -5,11 +5,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Request {
     /// Authenticate with username/password (SASL/PLAIN compatible)
-    Authenticate {
-        username: String,
-        password: String,
-    },
-    
+    Authenticate { username: String, password: String },
+
     /// Authenticate with SASL bytes (for Kafka client compatibility)
     SaslAuthenticate {
         #[serde(with = "rivven_core::serde_utils::bytes_serde")]
@@ -17,21 +14,21 @@ pub enum Request {
         #[serde(with = "rivven_core::serde_utils::bytes_serde")]
         auth_bytes: Bytes,
     },
-    
+
     /// SCRAM-SHA-256: Client-first message
     ScramClientFirst {
         /// Client-first-message bytes (n,,n=<user>,r=<nonce>)
         #[serde(with = "rivven_core::serde_utils::bytes_serde")]
         message: Bytes,
     },
-    
+
     /// SCRAM-SHA-256: Client-final message  
     ScramClientFinal {
         /// Client-final-message bytes (c=<binding>,r=<nonce>,p=<proof>)
         #[serde(with = "rivven_core::serde_utils::bytes_serde")]
         message: Bytes,
     },
-    
+
     /// Publish a message to a topic
     Publish {
         topic: String,
@@ -60,9 +57,7 @@ pub enum Request {
     ListTopics,
 
     /// Delete a topic
-    DeleteTopic {
-        name: String,
-    },
+    DeleteTopic { name: String },
 
     /// Commit consumer offset
     CommitOffset {
@@ -80,10 +75,8 @@ pub enum Request {
     },
 
     /// Get topic metadata
-    GetMetadata {
-        topic: String,
-    },
-    
+    GetMetadata { topic: String },
+
     /// Get cluster metadata (all topics or specific ones)
     GetClusterMetadata {
         /// Topics to get metadata for (empty = all topics)
@@ -94,34 +87,22 @@ pub enum Request {
     Ping,
 
     /// Register a schema
-    RegisterSchema {
-        subject: String,
-        schema: String,
-    },
+    RegisterSchema { subject: String, schema: String },
 
     /// Get a schema
-    GetSchema {
-        id: i32,
-    },
+    GetSchema { id: i32 },
 
     /// Get offset bounds for a partition
-    GetOffsetBounds {
-        topic: String,
-        partition: u32,
-    },
+    GetOffsetBounds { topic: String, partition: u32 },
 
     /// List all consumer groups
     ListGroups,
 
     /// Describe a consumer group (get all offsets)
-    DescribeGroup {
-        consumer_group: String,
-    },
+    DescribeGroup { consumer_group: String },
 
     /// Delete a consumer group
-    DeleteGroup {
-        consumer_group: String,
-    },
+    DeleteGroup { consumer_group: String },
 
     /// Find offset for a timestamp
     GetOffsetForTimestamp {
@@ -142,14 +123,14 @@ pub enum Response {
         /// Session timeout in seconds
         expires_in: u64,
     },
-    
+
     /// SCRAM-SHA-256: Server-first message (challenge)
     ScramServerFirst {
         /// Server-first-message bytes (r=<nonce>,s=<salt>,i=<iterations>)
         #[serde(with = "rivven_core::serde_utils::bytes_serde")]
         message: Bytes,
     },
-    
+
     /// SCRAM-SHA-256: Server-final message (verification or error)
     ScramServerFinal {
         /// Server-final-message bytes (v=<verifier> or e=<error>)
@@ -160,28 +141,18 @@ pub enum Response {
         /// Session timeout in seconds (if authentication succeeded)
         expires_in: Option<u64>,
     },
-    
+
     /// Success response with offset
-    Published {
-        offset: u64,
-        partition: u32,
-    },
+    Published { offset: u64, partition: u32 },
 
     /// Messages response
-    Messages {
-        messages: Vec<MessageData>,
-    },
+    Messages { messages: Vec<MessageData> },
 
     /// Topic created
-    TopicCreated {
-        name: String,
-        partitions: u32,
-    },
+    TopicCreated { name: String, partitions: u32 },
 
     /// List of topics
-    Topics {
-        topics: Vec<String>,
-    },
+    Topics { topics: Vec<String> },
 
     /// Topic deleted
     TopicDeleted,
@@ -190,16 +161,11 @@ pub enum Response {
     OffsetCommitted,
 
     /// Offset response
-    Offset {
-        offset: Option<u64>,
-    },
+    Offset { offset: Option<u64> },
 
     /// Metadata
-    Metadata {
-        name: String,
-        partitions: u32,
-    },
-    
+    Metadata { name: String, partitions: u32 },
+
     /// Full cluster metadata for topic(s)
     ClusterMetadata {
         /// Controller node ID (Raft leader)
@@ -211,29 +177,19 @@ pub enum Response {
     },
 
     /// Schema registration result
-    SchemaRegistered {
-        id: i32,
-    },
+    SchemaRegistered { id: i32 },
 
     /// Schema details
-    Schema {
-        id: i32,
-        schema: String,
-    },
+    Schema { id: i32, schema: String },
 
     /// Pong
     Pong,
 
     /// Offset bounds for a partition
-    OffsetBounds {
-        earliest: u64,
-        latest: u64,
-    },
+    OffsetBounds { earliest: u64, latest: u64 },
 
     /// List of consumer groups
-    Groups {
-        groups: Vec<String>,
-    },
+    Groups { groups: Vec<String> },
 
     /// Consumer group details with all offsets
     GroupDescription {
@@ -253,9 +209,7 @@ pub enum Response {
     },
 
     /// Error response
-    Error {
-        message: String,
-    },
+    Error { message: String },
 
     /// Success
     Ok,
@@ -372,7 +326,7 @@ mod protocol_tests {
         for request in requests {
             let bytes = request.to_bytes().expect("serialize failed");
             let decoded = Request::from_bytes(&bytes).expect("deserialize failed");
-            
+
             // Verify roundtrip by re-serializing
             let bytes2 = decoded.to_bytes().expect("re-serialize failed");
             assert_eq!(bytes, bytes2, "roundtrip failed for {:?}", request);
@@ -383,7 +337,7 @@ mod protocol_tests {
     fn test_response_roundtrip() {
         let responses = vec![
             Response::Pong,
-            Response::Authenticated { 
+            Response::Authenticated {
                 session_id: "abc123".to_string(),
                 expires_in: 3600,
             },
@@ -415,7 +369,7 @@ mod protocol_tests {
         for response in responses {
             let bytes = response.to_bytes().expect("serialize failed");
             let decoded = Response::from_bytes(&bytes).expect("deserialize failed");
-            
+
             let bytes2 = decoded.to_bytes().expect("re-serialize failed");
             assert_eq!(bytes, bytes2, "roundtrip failed for {:?}", response);
         }
@@ -427,11 +381,15 @@ mod protocol_tests {
             mechanism: Bytes::from(b"PLAIN".to_vec()),
             auth_bytes: Bytes::from(b"\x00user\x00pass".to_vec()),
         };
-        
+
         let bytes = request.to_bytes().unwrap();
         let decoded = Request::from_bytes(&bytes).unwrap();
-        
-        if let Request::SaslAuthenticate { mechanism, auth_bytes } = decoded {
+
+        if let Request::SaslAuthenticate {
+            mechanism,
+            auth_bytes,
+        } = decoded
+        {
             assert_eq!(mechanism.as_ref(), b"PLAIN");
             assert_eq!(auth_bytes.as_ref(), b"\x00user\x00pass");
         } else {
@@ -446,10 +404,10 @@ mod protocol_tests {
             name: large_topic.clone(),
             partitions: Some(1),
         };
-        
+
         let bytes = request.to_bytes().unwrap();
         let decoded = Request::from_bytes(&bytes).unwrap();
-        
+
         if let Request::CreateTopic { name, partitions } = decoded {
             assert_eq!(name, large_topic);
             assert_eq!(partitions, Some(1));
@@ -462,10 +420,10 @@ mod protocol_tests {
     fn test_truncated_request() {
         let request = Request::ListTopics;
         let bytes = request.to_bytes().unwrap();
-        
+
         // Truncate the data
         let truncated = &bytes[..bytes.len().saturating_sub(1)];
-        
+
         // Should fail to deserialize
         assert!(Request::from_bytes(truncated).is_err());
     }
@@ -476,10 +434,10 @@ mod protocol_tests {
             name: "test\x00topic".to_string(),
             partitions: None,
         };
-        
+
         let bytes = request.to_bytes().unwrap();
         let decoded = Request::from_bytes(&bytes).unwrap();
-        
+
         if let Request::CreateTopic { name, .. } = decoded {
             // Bincode handles embedded nulls correctly
             assert_eq!(name, "test\x00topic");
@@ -499,7 +457,7 @@ mod protocol_tests {
 
     #[test]
     fn test_response_from_arbitrary_bytes() {
-        // Random garbage should not crash, just return error  
+        // Random garbage should not crash, just return error
         let garbage = vec![0x00, 0x00, 0x00, 0x00, 0xFF];
         let result = Response::from_bytes(&garbage);
         // Either succeeds with some value or errors - neither should panic

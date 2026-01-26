@@ -7,7 +7,9 @@
 //! - Handling failover when singleton leaders fail
 //! - Triggering rebalances when the cluster changes
 
-use crate::distributed::assignment::{AssignmentDecision, AssignmentStrategy, NodeLoad, TaskAssigner};
+use crate::distributed::assignment::{
+    AssignmentDecision, AssignmentStrategy, NodeLoad, TaskAssigner,
+};
 use crate::distributed::membership::MembershipManager;
 use crate::distributed::protocol::*;
 use crate::distributed::task::{ConnectorTask, SingletonState};
@@ -213,9 +215,10 @@ impl ConnectCoordinator {
 
     /// Unregister a connector
     pub fn unregister_connector(&mut self, id: &ConnectorId) -> CoordinatorResult<()> {
-        let _connector = self.connectors.remove(id).ok_or_else(|| {
-            ConnectError::Config(format!("Connector '{}' not found", id.0))
-        })?;
+        let _connector = self
+            .connectors
+            .remove(id)
+            .ok_or_else(|| ConnectError::Config(format!("Connector '{}' not found", id.0)))?;
 
         info!(connector = %id.0, "Unregistering connector");
 
@@ -267,9 +270,10 @@ impl ConnectCoordinator {
         id: &ConnectorId,
         config: serde_json::Value,
     ) -> CoordinatorResult<()> {
-        let connector = self.connectors.get_mut(id).ok_or_else(|| {
-            ConnectError::Config(format!("Connector '{}' not found", id.0))
-        })?;
+        let connector = self
+            .connectors
+            .get_mut(id)
+            .ok_or_else(|| ConnectError::Config(format!("Connector '{}' not found", id.0)))?;
 
         connector.config = config;
         connector.generation.increment();
@@ -611,11 +615,7 @@ impl ConnectCoordinator {
                     if let Some(task) = self.tasks.get_mut(&task_id) {
                         if let Some(state) = self.assigner.singleton_state_mut(&connector_id) {
                             if let Some(new_leader) = state.start_failover() {
-                                task.assign(
-                                    new_leader.clone(),
-                                    Generation::default(),
-                                    self.epoch,
-                                );
+                                task.assign(new_leader.clone(), Generation::default(), self.epoch);
 
                                 let connector = self.connectors.get(&connector_id);
                                 failovers.push(TaskAssignmentMessage {

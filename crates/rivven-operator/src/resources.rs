@@ -7,10 +7,9 @@ use crate::crd::{RivvenCluster, RivvenClusterSpec};
 use crate::error::{OperatorError, Result};
 use k8s_openapi::api::apps::v1::{StatefulSet, StatefulSetSpec};
 use k8s_openapi::api::core::v1::{
-    ConfigMap, Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction,
-    ObjectFieldSelector, PersistentVolumeClaim, PersistentVolumeClaimSpec, PodSpec,
-    PodTemplateSpec, Probe, Service, ServicePort, ServiceSpec,
-    VolumeMount,
+    ConfigMap, Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction, ObjectFieldSelector,
+    PersistentVolumeClaim, PersistentVolumeClaimSpec, PodSpec, PodTemplateSpec, Probe, Service,
+    ServicePort, ServiceSpec, VolumeMount,
 };
 use k8s_openapi::api::policy::v1::{PodDisruptionBudget, PodDisruptionBudgetSpec};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -28,11 +27,10 @@ pub struct ResourceBuilder<'a> {
 impl<'a> ResourceBuilder<'a> {
     /// Create a new resource builder
     pub fn new(cluster: &'a RivvenCluster) -> Result<Self> {
-        let name = cluster
-            .metadata
-            .name
-            .clone()
-            .ok_or_else(|| OperatorError::InvalidConfig("cluster name is required".to_string()))?;
+        let name =
+            cluster.metadata.name.clone().ok_or_else(|| {
+                OperatorError::InvalidConfig("cluster name is required".to_string())
+            })?;
 
         let namespace = cluster
             .metadata
@@ -668,10 +666,7 @@ mod tests {
         let builder = ResourceBuilder::new(&cluster).unwrap();
         let sts = builder.build_statefulset();
 
-        assert_eq!(
-            sts.metadata.name,
-            Some("rivven-my-cluster".to_string())
-        );
+        assert_eq!(sts.metadata.name, Some("rivven-my-cluster".to_string()));
         assert_eq!(sts.spec.as_ref().unwrap().replicas, Some(3));
         assert_eq!(
             sts.spec.as_ref().unwrap().service_name,
@@ -730,10 +725,7 @@ mod tests {
 
         assert!(pdb.is_some());
         let pdb = pdb.unwrap();
-        assert_eq!(
-            pdb.metadata.name,
-            Some("rivven-my-cluster-pdb".to_string())
-        );
+        assert_eq!(pdb.metadata.name, Some("rivven-my-cluster-pdb".to_string()));
     }
 
     #[test]
@@ -751,7 +743,10 @@ mod tests {
     #[test]
     fn test_custom_labels() {
         let mut cluster = create_test_cluster("my-cluster");
-        cluster.spec.pod_labels.insert("custom".to_string(), "label".to_string());
+        cluster
+            .spec
+            .pod_labels
+            .insert("custom".to_string(), "label".to_string());
 
         let builder = ResourceBuilder::new(&cluster).unwrap();
         let sts = builder.build_statefulset();

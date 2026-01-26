@@ -1,7 +1,7 @@
-use std::path::PathBuf;
-use crate::{Result, Message};
 use super::segment::Segment;
+use crate::{Message, Result};
 use std::fs;
+use std::path::PathBuf;
 
 #[derive(Debug)]
 pub struct LogManager {
@@ -12,8 +12,15 @@ pub struct LogManager {
 }
 
 impl LogManager {
-    pub async fn new(base_dir: PathBuf, topic: &str, partition: u32, max_segment_size: u64) -> Result<Self> {
-        let dir = base_dir.join(topic).join(format!("partition-{}", partition));
+    pub async fn new(
+        base_dir: PathBuf,
+        topic: &str,
+        partition: u32,
+        max_segment_size: u64,
+    ) -> Result<Self> {
+        let dir = base_dir
+            .join(topic)
+            .join(format!("partition-{}", partition));
         fs::create_dir_all(&dir)?;
 
         let mut segments = Vec::new();
@@ -24,12 +31,12 @@ impl LogManager {
             .map(|entry| entry.path())
             .filter(|path| path.extension().is_some_and(|ext| ext == "log"))
             .collect();
-        
+
         paths.sort();
 
         if paths.is_empty() {
-             // Create initial segment
-             segments.push(Segment::new(&dir, 0)?);
+            // Create initial segment
+            segments.push(Segment::new(&dir, 0)?);
         } else {
             for path in paths {
                 let filename = path.file_stem().unwrap().to_str().unwrap();
@@ -41,7 +48,7 @@ impl LogManager {
         }
 
         if segments.is_empty() {
-             segments.push(Segment::new(&dir, 0)?);
+            segments.push(Segment::new(&dir, 0)?);
         }
 
         let active_segment_index = segments.len() - 1;
@@ -56,7 +63,7 @@ impl LogManager {
 
     pub async fn append(&mut self, offset: u64, message: Message) -> Result<u64> {
         let segment = &mut self.segments[self.active_segment_index];
-        
+
         // Check if we need to roll
         if segment.size() >= self.max_segment_size {
             let new_segment = Segment::new(&self.dir, offset)?;
@@ -73,32 +80,35 @@ impl LogManager {
         let mut bytes_collected = 0;
 
         // Optimized: Find first segment where base_offset <= offset
-        let start_segment_idx = self.segments.partition_point(|seg| seg.base_offset() <= offset).saturating_sub(1);
+        let start_segment_idx = self
+            .segments
+            .partition_point(|seg| seg.base_offset() <= offset)
+            .saturating_sub(1);
 
         for segment in self.segments.iter().skip(start_segment_idx) {
             // If we have enough data, stop
-             if bytes_collected >= max_bytes {
+            if bytes_collected >= max_bytes {
                 break;
             }
-            
+
             // Read from segment
             let batch = segment.read(offset, max_bytes - bytes_collected).await?;
-            
+
             for msg in batch {
                 if msg.offset < offset {
                     continue;
                 }
-                
-                if messages.len() < 1000 && bytes_collected < max_bytes { 
-                     // Estimate size (header + key + val)
-                     let size = 8 + msg.key.as_ref().map(|k| k.len()).unwrap_or(0) + msg.value.len();  
-                     bytes_collected += size;
-                     
-                     messages.push(msg);
+
+                if messages.len() < 1000 && bytes_collected < max_bytes {
+                    // Estimate size (header + key + val)
+                    let size = 8 + msg.key.as_ref().map(|k| k.len()).unwrap_or(0) + msg.value.len();
+                    bytes_collected += size;
+
+                    messages.push(msg);
                 }
             }
         }
-        
+
         Ok(messages)
     }
 
@@ -111,7 +121,7 @@ impl LogManager {
             if let Some(last_offset) = last_segment.recover_last_offset().await? {
                 return Ok(last_offset + 1);
             }
-            // If last segment is empty, check `base_offset` of it? 
+            // If last segment is empty, check `base_offset` of it?
             // Usually base_offset is the next offset of previous segment.
             // But if it's completely empty (newly created), next offset is `base_offset`.
             return Ok(last_segment.base_offset());

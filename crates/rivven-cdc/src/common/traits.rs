@@ -82,12 +82,12 @@ mod tests {
     #[tokio::test]
     async fn test_mock_source() {
         let mut source = MockCdcSource { active: false };
-        
+
         assert!(!source.is_healthy().await);
-        
+
         source.start().await.unwrap();
         assert!(source.is_healthy().await);
-        
+
         source.stop().await.unwrap();
         assert!(!source.is_healthy().await);
     }

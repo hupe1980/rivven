@@ -63,13 +63,18 @@ impl From<String> for SensitiveString {
 }
 
 impl Serialize for SensitiveString {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         serializer.serialize_str("***REDACTED***")
     }
 }
 
 impl<'de> Deserialize<'de> for SensitiveString {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
         let value = String::deserialize(deserializer)?;
         Ok(Self::new(value))
     }
@@ -302,8 +307,7 @@ impl S3Sink {
             S3Compression::Gzip => {
                 let mut encoder =
                     flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-                encoder.write_all(&json_data)
-                    .map_err(ConnectorError::Io)?;
+                encoder.write_all(&json_data).map_err(ConnectorError::Io)?;
                 encoder.finish().map_err(ConnectorError::Io)
             }
         }
@@ -330,10 +334,7 @@ impl Sink for S3Sink {
             .metadata("partitioning", "none,day,hour")
     }
 
-    async fn check(
-        &self,
-        config: &Self::Config,
-    ) -> rivven_connect::error::Result<CheckResult> {
+    async fn check(&self, config: &Self::Config) -> rivven_connect::error::Result<CheckResult> {
         info!("Checking S3 connectivity for bucket: {}", config.bucket);
 
         let client = Self::create_client(config).await?;

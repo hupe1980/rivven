@@ -35,7 +35,7 @@ impl RequestHeader {
             timeout_ms: 30000,
         }
     }
-    
+
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout_ms = timeout.as_millis() as u32;
         self
@@ -61,7 +61,7 @@ impl ResponseHeader {
             error_message: None,
         }
     }
-    
+
     pub fn error(correlation_id: u64, code: u16, message: impl Into<String>) -> Self {
         Self {
             correlation_id,
@@ -69,7 +69,7 @@ impl ResponseHeader {
             error_message: Some(message.into()),
         }
     }
-    
+
     pub fn is_success(&self) -> bool {
         self.error_code == 0
     }
@@ -84,13 +84,13 @@ pub enum ClusterRequest {
         header: RequestHeader,
         topics: Option<Vec<String>>, // None = all topics
     },
-    
+
     /// Propose a metadata change (forwarded to Raft leader)
     ProposeMetadata {
         header: RequestHeader,
         command: MetadataCommand,
     },
-    
+
     // ==================== Replication Requests ====================
     /// Fetch records from a partition (follower -> leader)
     Fetch {
@@ -99,7 +99,7 @@ pub enum ClusterRequest {
         offset: u64,
         max_bytes: u32,
     },
-    
+
     /// Append records to a partition (client -> leader -> followers)
     Append {
         header: RequestHeader,
@@ -107,7 +107,7 @@ pub enum ClusterRequest {
         records: Vec<u8>, // Serialized records batch
         required_acks: Acks,
     },
-    
+
     /// Report replica state to leader
     ReplicaState {
         header: RequestHeader,
@@ -115,7 +115,7 @@ pub enum ClusterRequest {
         log_end_offset: u64,
         high_watermark: u64,
     },
-    
+
     // ==================== Leader Election ====================
     /// Request leader election for a partition
     ElectLeader {
@@ -123,7 +123,7 @@ pub enum ClusterRequest {
         partition: PartitionId,
         preferred_leader: Option<NodeId>,
     },
-    
+
     // ==================== Heartbeat ====================
     /// Heartbeat from leader to followers
     Heartbeat {
@@ -152,12 +152,10 @@ pub enum ClusterResponse {
         topics: Vec<TopicMetadata>,
         brokers: Vec<BrokerMetadata>,
     },
-    
+
     /// Metadata proposal response
-    MetadataProposal {
-        header: ResponseHeader,
-    },
-    
+    MetadataProposal { header: ResponseHeader },
+
     // ==================== Replication Responses ====================
     /// Fetch response with records
     Fetch {
@@ -167,7 +165,7 @@ pub enum ClusterResponse {
         log_start_offset: u64,
         records: Vec<u8>, // Serialized records
     },
-    
+
     /// Append response
     Append {
         header: ResponseHeader,
@@ -175,14 +173,14 @@ pub enum ClusterResponse {
         base_offset: u64,
         log_append_time: i64,
     },
-    
+
     /// Replica state acknowledgment
     ReplicaStateAck {
         header: ResponseHeader,
         partition: PartitionId,
         in_sync: bool,
     },
-    
+
     // ==================== Leader Election ====================
     /// Leader election response
     ElectLeader {
@@ -191,18 +189,14 @@ pub enum ClusterResponse {
         leader: Option<NodeId>,
         epoch: u64,
     },
-    
+
     // ==================== Heartbeat ====================
     /// Heartbeat response
-    Heartbeat {
-        header: ResponseHeader,
-    },
-    
+    Heartbeat { header: ResponseHeader },
+
     // ==================== Error ====================
     /// Generic error response
-    Error {
-        header: ResponseHeader,
-    },
+    Error { header: ResponseHeader },
 }
 
 /// Topic metadata in response
@@ -254,7 +248,7 @@ impl Acks {
             _ => Acks::Leader,
         }
     }
-    
+
     pub fn to_i8(self) -> i8 {
         match self {
             Acks::None => 0,
@@ -353,7 +347,7 @@ pub fn frame_length(header: &[u8; 4]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_request_roundtrip() {
         let header = RequestHeader::new(42, "node-1".to_string());
@@ -361,10 +355,10 @@ mod tests {
             header,
             topics: Some(vec!["test-topic".to_string()]),
         };
-        
+
         let bytes = encode_request(&request).unwrap();
         let decoded = decode_request(&bytes).unwrap();
-        
+
         match decoded {
             ClusterRequest::FetchMetadata { header, topics } => {
                 assert_eq!(header.correlation_id, 42);
@@ -373,7 +367,7 @@ mod tests {
             _ => panic!("Wrong request type"),
         }
     }
-    
+
     #[test]
     fn test_response_roundtrip() {
         let header = ResponseHeader::success(42);
@@ -384,37 +378,39 @@ mod tests {
             topics: vec![],
             brokers: vec![],
         };
-        
+
         let bytes = encode_response(&response).unwrap();
         let decoded = decode_response(&bytes).unwrap();
-        
+
         match decoded {
-            ClusterResponse::Metadata { header, cluster_id, .. } => {
+            ClusterResponse::Metadata {
+                header, cluster_id, ..
+            } => {
                 assert!(header.is_success());
                 assert_eq!(cluster_id, "test-cluster");
             }
             _ => panic!("Wrong response type"),
         }
     }
-    
+
     #[test]
     fn test_framing() {
         let data = b"hello world";
         let framed = frame_message(data);
-        
+
         assert_eq!(framed.len(), 4 + data.len());
-        
+
         let mut header = [0u8; 4];
         header.copy_from_slice(&framed[..4]);
         assert_eq!(frame_length(&header), data.len());
     }
-    
+
     #[test]
     fn test_acks_conversion() {
         assert_eq!(Acks::from_i8(0), Acks::None);
         assert_eq!(Acks::from_i8(1), Acks::Leader);
         assert_eq!(Acks::from_i8(-1), Acks::All);
-        
+
         assert_eq!(Acks::None.to_i8(), 0);
         assert_eq!(Acks::Leader.to_i8(), 1);
         assert_eq!(Acks::All.to_i8(), -1);

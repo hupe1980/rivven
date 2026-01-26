@@ -346,7 +346,10 @@ macro_rules! impl_any_source {
                 catalog: &$crate::catalog::ConfiguredCatalog,
                 state: Option<$crate::state::State>,
             ) -> $crate::error::Result<
-                futures::stream::BoxStream<'static, $crate::error::Result<$crate::event::SourceEvent>>,
+                futures::stream::BoxStream<
+                    'static,
+                    $crate::error::Result<$crate::event::SourceEvent>,
+                >,
             > {
                 let typed_config: $config_type = serde_yaml::from_value(config.clone())
                     .map_err(|e| $crate::error::ConnectorError::Config(e.to_string()))?;

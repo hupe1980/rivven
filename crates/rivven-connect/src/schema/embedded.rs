@@ -114,7 +114,7 @@ impl EmbeddedRegistry {
         // Check compatibility with existing versions
         let existing_schemas = self.get_all_schemas(subject)?;
         let new_schema = Schema::new(SchemaId::new(0), schema_type, schema.to_string());
-        
+
         let compat_result = self.checker.check(&new_schema, &existing_schemas)?;
         if !compat_result.is_compatible {
             return Err(SchemaRegistryError::IncompatibleSchema(
@@ -141,12 +141,14 @@ impl EmbeddedRegistry {
 
         {
             let mut cache = self.subject_cache.write();
-            let metadata = cache.entry(subject.clone()).or_insert_with(|| SubjectMetadata {
-                subject: subject.clone(),
-                versions: Vec::new(),
-                compatibility: self.default_compatibility,
-                id_map: HashMap::new(),
-            });
+            let metadata = cache
+                .entry(subject.clone())
+                .or_insert_with(|| SubjectMetadata {
+                    subject: subject.clone(),
+                    versions: Vec::new(),
+                    compatibility: self.default_compatibility,
+                    id_map: HashMap::new(),
+                });
             metadata.versions.push(version);
             metadata.id_map.insert(version, id);
         }
@@ -162,7 +164,7 @@ impl EmbeddedRegistry {
                 references: schema.references.clone(),
                 registered_at: chrono::Utc::now().timestamp(),
             };
-            
+
             let _key = format!("{}/{}", subject.0, version);
             let _value = serde_json::to_vec(&entry)
                 .map_err(|e| SchemaRegistryError::SerializationError(e.to_string()))?;
@@ -359,7 +361,10 @@ impl EmbeddedRegistry {
 
     fn schemas_equal(&self, a: &str, b: &str) -> bool {
         // Try to parse as JSON and compare normalized
-        match (serde_json::from_str::<serde_json::Value>(a), serde_json::from_str::<serde_json::Value>(b)) {
+        match (
+            serde_json::from_str::<serde_json::Value>(a),
+            serde_json::from_str::<serde_json::Value>(b),
+        ) {
             (Ok(ja), Ok(jb)) => ja == jb,
             _ => a == b,
         }
@@ -416,14 +421,19 @@ mod tests {
         let subject = Subject::new("test-value");
         let schema = r#"{"type":"object","properties":{"id":{"type":"integer"}}}"#;
 
-        let id = registry.register(&subject, SchemaType::Json, schema).await.unwrap();
+        let id = registry
+            .register(&subject, SchemaType::Json, schema)
+            .await
+            .unwrap();
 
         // Get by ID
         let retrieved = registry.get_by_id(id).unwrap();
         assert_eq!(retrieved.schema_type, SchemaType::Json);
 
         // Get by version
-        let sv = registry.get_by_version(&subject, SchemaVersion::latest()).unwrap();
+        let sv = registry
+            .get_by_version(&subject, SchemaVersion::latest())
+            .unwrap();
         assert_eq!(sv.id, id);
         assert_eq!(sv.version.0, 1);
     }
@@ -436,8 +446,14 @@ mod tests {
         let subject = Subject::new("test-value");
         let schema = r#"{"type":"object","properties":{"id":{"type":"integer"}}}"#;
 
-        let id1 = registry.register(&subject, SchemaType::Json, schema).await.unwrap();
-        let id2 = registry.register(&subject, SchemaType::Json, schema).await.unwrap();
+        let id1 = registry
+            .register(&subject, SchemaType::Json, schema)
+            .await
+            .unwrap();
+        let id2 = registry
+            .register(&subject, SchemaType::Json, schema)
+            .await
+            .unwrap();
 
         // Same schema should return same ID
         assert_eq!(id1, id2);
@@ -449,10 +465,14 @@ mod tests {
         let registry = EmbeddedRegistry::new(&config);
 
         let subject = Subject::new("test-value");
-        
+
         // Register initial schema
-        let schema1 = r#"{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}"#;
-        registry.register(&subject, SchemaType::Json, schema1).await.unwrap();
+        let schema1 =
+            r#"{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}"#;
+        registry
+            .register(&subject, SchemaType::Json, schema1)
+            .await
+            .unwrap();
 
         // Try to add a new required field (should fail backward compatibility)
         let schema2 = r#"{"type":"object","properties":{"id":{"type":"integer"},"name":{"type":"string"}},"required":["id","name"]}"#;
@@ -471,8 +491,14 @@ mod tests {
         let registry = EmbeddedRegistry::new(&config);
 
         let schema = r#"{"type":"object"}"#;
-        registry.register(&Subject::new("a"), SchemaType::Json, schema).await.unwrap();
-        registry.register(&Subject::new("b"), SchemaType::Json, schema).await.unwrap();
+        registry
+            .register(&Subject::new("a"), SchemaType::Json, schema)
+            .await
+            .unwrap();
+        registry
+            .register(&Subject::new("b"), SchemaType::Json, schema)
+            .await
+            .unwrap();
 
         let subjects = registry.list_subjects();
         assert_eq!(subjects.len(), 2);

@@ -191,8 +191,7 @@ pub struct SinkConfig {
 }
 
 /// Rate limiting configuration for sinks
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct SinkRateLimitConfig {
     /// Maximum events per second (0 = unlimited)
     #[serde(default)]
@@ -203,7 +202,6 @@ pub struct SinkRateLimitConfig {
     #[serde(default)]
     pub burst_capacity: Option<u64>,
 }
-
 
 impl SinkRateLimitConfig {
     /// Check if rate limiting is enabled
@@ -361,10 +359,18 @@ impl Default for RetryConfig {
     }
 }
 
-fn default_max_retries() -> u32 { 10 }
-fn default_initial_backoff() -> u64 { 100 }
-fn default_max_backoff() -> u64 { 30_000 }
-fn default_backoff_multiplier() -> f64 { 2.0 }
+fn default_max_retries() -> u32 {
+    10
+}
+fn default_initial_backoff() -> u64 {
+    100
+}
+fn default_max_backoff() -> u64 {
+    30_000
+}
+fn default_backoff_multiplier() -> f64 {
+    2.0
+}
 
 /// Health check endpoint configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -392,8 +398,12 @@ impl Default for HealthConfig {
     }
 }
 
-fn default_health_port() -> u16 { 8080 }
-fn default_health_path() -> String { "/health".to_string() }
+fn default_health_port() -> u16 {
+    8080
+}
+fn default_health_path() -> String {
+    "/health".to_string()
+}
 
 fn default_state_dir() -> PathBuf {
     PathBuf::from("./data/connect-state")
@@ -437,26 +447,27 @@ impl ConnectConfig {
     pub fn from_file(path: &PathBuf) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("Failed to read config file: {}", e))?;
-        
+
         // Expand environment variables
         let expanded = Self::expand_env_vars(&content);
-        
+
         let config: Self = serde_yaml::from_str(&expanded)
             .map_err(|e| anyhow::anyhow!("Failed to parse config: {}", e))?;
-        
+
         config.validate()?;
         Ok(config)
     }
 
     /// Expand environment variables in the format ${VAR} or ${VAR:-default}
     fn expand_env_vars(content: &str) -> String {
-        ENV_VAR_REGEX.replace_all(content, |caps: &regex::Captures| {
-            let var_name = &caps[1];
-            let default = caps.get(2).map(|m| m.as_str());
-            
-            std::env::var(var_name)
-                .unwrap_or_else(|_| default.unwrap_or("").to_string())
-        }).to_string()
+        ENV_VAR_REGEX
+            .replace_all(content, |caps: &regex::Captures| {
+                let var_name = &caps[1];
+                let default = caps.get(2).map(|m| m.as_str());
+
+                std::env::var(var_name).unwrap_or_else(|_| default.unwrap_or("").to_string())
+            })
+            .to_string()
     }
 
     /// Validate configuration
@@ -464,7 +475,10 @@ impl ConnectConfig {
         // Validate sources
         for (name, source) in &self.sources {
             if source.topic.is_empty() && source.topic_routing.is_none() {
-                anyhow::bail!("Source '{}' must have either 'topic' or 'topic_routing'", name);
+                anyhow::bail!(
+                    "Source '{}' must have either 'topic' or 'topic_routing'",
+                    name
+                );
             }
         }
 
@@ -494,21 +508,24 @@ impl ConnectConfig {
         for (name, source) in &self.sources {
             match source.connector.as_str() {
                 "postgres-cdc" => {
-                    let pg_config: PostgresCdcConfig = serde_yaml::from_value(source.config.clone())
-                        .map_err(|e| anyhow::anyhow!(
-                            "Source '{}': invalid postgres-cdc config: {}", name, e
-                        ))?;
-                    pg_config.validate()
-                        .map_err(|e| anyhow::anyhow!(
-                            "Source '{}': config validation failed: {}", name, e
-                        ))?;
+                    let pg_config: PostgresCdcConfig =
+                        serde_yaml::from_value(source.config.clone()).map_err(|e| {
+                            anyhow::anyhow!("Source '{}': invalid postgres-cdc config: {}", name, e)
+                        })?;
+                    pg_config.validate().map_err(|e| {
+                        anyhow::anyhow!("Source '{}': config validation failed: {}", name, e)
+                    })?;
                 }
                 "http" => {
                     // Basic validation - http connector not fully implemented yet
                 }
                 unknown => {
                     // Unknown connectors - warn but don't fail (may be custom)
-                    tracing::warn!("Source '{}': unknown connector type '{}', skipping config validation", name, unknown);
+                    tracing::warn!(
+                        "Source '{}': unknown connector type '{}', skipping config validation",
+                        name,
+                        unknown
+                    );
                 }
             }
         }
@@ -518,14 +535,18 @@ impl ConnectConfig {
             match sink.connector.as_str() {
                 "stdout" => {
                     // StdoutSinkConfig has sensible defaults, parse to validate
-                    let _: StdoutSinkConfig = serde_yaml::from_value(sink.config.clone())
-                        .unwrap_or_default();
+                    let _: StdoutSinkConfig =
+                        serde_yaml::from_value(sink.config.clone()).unwrap_or_default();
                 }
                 "s3" | "http" => {
                     // Not fully implemented yet - basic validation only
                 }
                 unknown => {
-                    tracing::warn!("Sink '{}': unknown connector type '{}', skipping config validation", name, unknown);
+                    tracing::warn!(
+                        "Sink '{}': unknown connector type '{}', skipping config validation",
+                        name,
+                        unknown
+                    );
                 }
             }
         }
@@ -609,7 +630,11 @@ sources:
         let result = config.validate();
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("postgres-cdc"), "Error should mention connector: {}", err);
+        assert!(
+            err.contains("postgres-cdc"),
+            "Error should mention connector: {}",
+            err
+        );
     }
 
     #[test]

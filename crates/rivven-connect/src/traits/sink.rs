@@ -1,9 +1,9 @@
 //! Sink connector trait
 
-use crate::error::Result;
 use super::event::SourceEvent;
-use super::spec::ConnectorSpec;
 use super::source::CheckResult;
+use super::spec::ConnectorSpec;
+use crate::error::Result;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use schemars::JsonSchema;
@@ -130,7 +130,7 @@ impl Default for BatchConfig {
         Self {
             max_records: 10_000,
             max_bytes: 10 * 1024 * 1024, // 10 MB
-            max_wait_ms: 5_000,           // 5 seconds
+            max_wait_ms: 5_000,          // 5 seconds
         }
     }
 }

@@ -198,7 +198,10 @@ impl CdcEvent {
 
     /// Check if this is the last event in a transaction.
     pub fn is_txn_end(&self) -> bool {
-        self.transaction.as_ref().map(|t| t.is_last).unwrap_or(false)
+        self.transaction
+            .as_ref()
+            .map(|t| t.is_last)
+            .unwrap_or(false)
     }
 
     /// Convert to a Rivven Message for topic publishing
@@ -206,11 +209,20 @@ impl CdcEvent {
         let json_bytes = serde_json::to_vec(self)?;
 
         let msg = Message::new(bytes::Bytes::from(json_bytes))
-            .add_header("cdc_source".to_string(), self.source_type.as_bytes().to_vec())
-            .add_header("cdc_database".to_string(), self.database.as_bytes().to_vec())
+            .add_header(
+                "cdc_source".to_string(),
+                self.source_type.as_bytes().to_vec(),
+            )
+            .add_header(
+                "cdc_database".to_string(),
+                self.database.as_bytes().to_vec(),
+            )
             .add_header("cdc_schema".to_string(), self.schema.as_bytes().to_vec())
             .add_header("cdc_table".to_string(), self.table.as_bytes().to_vec())
-            .add_header("cdc_op".to_string(), format!("{:?}", self.op).as_bytes().to_vec());
+            .add_header(
+                "cdc_op".to_string(),
+                format!("{:?}", self.op).as_bytes().to_vec(),
+            );
 
         Ok(msg)
     }
@@ -384,8 +396,8 @@ mod tests {
             .with_total(10)
             .with_commit_ts(1705000000);
 
-        let event = CdcEvent::insert("pg", "db", "s", "t", json!({"id": 1}), 0)
-            .with_transaction(txn);
+        let event =
+            CdcEvent::insert("pg", "db", "s", "t", json!({"id": 1}), 0).with_transaction(txn);
 
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("transaction"));

@@ -7,11 +7,11 @@
 
 use crate::schema::compatibility::CompatibilityResult;
 use crate::schema::types::*;
+use parking_lot::RwLock;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
-use parking_lot::RwLock;
 
 /// Configuration for external schema registry
 pub type ExternalRegistryConfig = ExternalConfig;
@@ -97,13 +97,13 @@ pub struct ExternalRegistry {
 impl ExternalRegistry {
     /// Create a new external registry client
     pub fn new(config: &ExternalRegistryConfig) -> SchemaRegistryResult<Self> {
-        let mut client_builder = Client::builder()
-            .timeout(Duration::from_secs(config.timeout_secs));
+        let mut client_builder =
+            Client::builder().timeout(Duration::from_secs(config.timeout_secs));
 
         // Add basic auth if configured
         if let (Some(username), Some(password)) = (&config.username, &config.password) {
-            use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
             use base64::Engine;
+            use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 
             let credentials = format!("{}:{}", username, password);
             let encoded = base64::engine::general_purpose::STANDARD.encode(credentials);

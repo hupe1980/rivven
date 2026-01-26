@@ -94,12 +94,7 @@ impl StickyPartitioner {
     ///
     /// - If `key` is Some, uses hash-based partitioning (deterministic)
     /// - If `key` is None, uses sticky partitioning (batched rotation)
-    pub fn partition(
-        &self,
-        topic: &str,
-        key: Option<&[u8]>,
-        num_partitions: u32,
-    ) -> u32 {
+    pub fn partition(&self, topic: &str, key: Option<&[u8]>, num_partitions: u32) -> u32 {
         if num_partitions == 0 {
             return 0;
         }
@@ -134,7 +129,7 @@ impl StickyPartitioner {
 
         // Slow path: need to rotate or initialize
         let mut states = self.topic_states.write().unwrap();
-        
+
         let state = states.entry(topic.to_string()).or_insert_with(|| {
             // Initial partition: round-robin across topics for even distribution
             let initial = self.global_counter.fetch_add(1, Ordering::Relaxed) % num_partitions;
@@ -234,12 +229,12 @@ mod tests {
     fn test_keyed_messages_same_partition() {
         let partitioner = StickyPartitioner::new();
         let key = b"user-123";
-        
+
         // Same key should always go to same partition
         let p1 = partitioner.partition("topic", Some(key), 10);
         let p2 = partitioner.partition("topic", Some(key), 10);
         let p3 = partitioner.partition("topic", Some(key), 10);
-        
+
         assert_eq!(p1, p2);
         assert_eq!(p2, p3);
     }
@@ -251,16 +246,19 @@ mod tests {
             linger_duration: Duration::from_secs(60), // Long duration to test batch size
         };
         let partitioner = StickyPartitioner::with_config(config);
-        
+
         // First 100 messages should go to same partition
         let mut partitions = Vec::new();
         for _ in 0..100 {
             partitions.push(partitioner.partition("topic", None, 10));
         }
-        
+
         // All should be the same (batch not exceeded)
         let first = partitions[0];
-        assert!(partitions.iter().all(|&p| p == first), "Messages within batch should go to same partition");
+        assert!(
+            partitions.iter().all(|&p| p == first),
+            "Messages within batch should go to same partition"
+        );
     }
 
     #[test]
@@ -270,13 +268,13 @@ mod tests {
             linger_duration: Duration::from_secs(60),
         };
         let partitioner = StickyPartitioner::with_config(config);
-        
+
         // Send 25 messages - should span 3 batches
         let mut partitions = Vec::new();
         for _ in 0..25 {
             partitions.push(partitioner.partition("topic", None, 10));
         }
-        
+
         // Should have rotated at least twice
         let unique: std::collections::HashSet<_> = partitions.iter().collect();
         assert!(unique.len() >= 2, "Should have rotated partitions");
@@ -285,14 +283,17 @@ mod tests {
     #[test]
     fn test_different_topics_different_partitions() {
         let partitioner = StickyPartitioner::new();
-        
+
         // Different topics should potentially start on different partitions
         let p1 = partitioner.partition("topic-a", None, 100);
         let p2 = partitioner.partition("topic-b", None, 100);
         let p3 = partitioner.partition("topic-c", None, 100);
-        
+
         // At least some should be different (global counter ensures distribution)
-        assert!(p1 != p2 || p2 != p3 || p1 != p3, "Different topics should get different initial partitions");
+        assert!(
+            p1 != p2 || p2 != p3 || p1 != p3,
+            "Different topics should get different initial partitions"
+        );
     }
 
     #[test]
@@ -302,7 +303,7 @@ mod tests {
         let h1 = murmur2_hash(key);
         let h2 = murmur2_hash(key);
         assert_eq!(h1, h2, "Same key should produce same hash");
-        
+
         // Different keys should (likely) produce different hashes
         let h3 = murmur2_hash(b"different-key");
         assert_ne!(h1, h3, "Different keys should produce different hashes");
@@ -314,18 +315,28 @@ mod tests {
         let partitioner = StickyPartitioner::new();
         let num_partitions = 8;
         let mut counts = vec![0u32; num_partitions as usize];
-        
+
         // Generate 1000 different keys
         for i in 0..1000 {
             let key = format!("user-{}", i);
             let partition = partitioner.partition("topic", Some(key.as_bytes()), num_partitions);
             counts[partition as usize] += 1;
         }
-        
+
         // Check that distribution is reasonably even (no partition has < 50 or > 200)
         for (i, &count) in counts.iter().enumerate() {
-            assert!(count >= 50, "Partition {} only got {} keys (expected >= 50)", i, count);
-            assert!(count <= 200, "Partition {} got {} keys (expected <= 200)", i, count);
+            assert!(
+                count >= 50,
+                "Partition {} only got {} keys (expected >= 50)",
+                i,
+                count
+            );
+            assert!(
+                count <= 200,
+                "Partition {} got {} keys (expected <= 200)",
+                i,
+                count
+            );
         }
     }
 }

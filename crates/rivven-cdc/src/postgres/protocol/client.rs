@@ -236,7 +236,7 @@ impl ReplicationStream {
 
         match type_code {
             b'd' => Ok(Some(Bytes::from(body))), // CopyData
-            b'c' => Ok(None),                     // CopyDone
+            b'c' => Ok(None),                    // CopyDone
             b'E' => Err(anyhow!("Replication Error")),
             _ => Err(anyhow!("Unexpected message type: {}", type_code as char)),
         }

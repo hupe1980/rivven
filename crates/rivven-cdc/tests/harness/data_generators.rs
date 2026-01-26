@@ -4,10 +4,10 @@
 
 #![allow(dead_code)] // Some generators are available for future tests
 
-use fake::{Fake, Faker};
-use fake::faker::name::en::*;
 use fake::faker::internet::en::*;
 use fake::faker::lorem::en::*;
+use fake::faker::name::en::*;
+use fake::{Fake, Faker};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -81,7 +81,10 @@ pub fn generate_full_user_insert() -> (String, HashMap<String, Value>) {
 
 /// Generate an update SQL statement
 pub fn generate_user_update(id: i32, new_age: i32) -> String {
-    format!("UPDATE users SET age = {}, updated_at = NOW() WHERE id = {}", new_age, id)
+    format!(
+        "UPDATE users SET age = {}, updated_at = NOW() WHERE id = {}",
+        new_age, id
+    )
 }
 
 /// Generate a delete SQL statement
@@ -113,7 +116,7 @@ pub fn generate_transaction_batch(table: &str, count: usize) -> Vec<String> {
 /// Generate test data for all PostgreSQL types
 pub fn generate_all_types_insert(table: &str) -> String {
     let uuid = uuid::Uuid::new_v4();
-    
+
     format!(
         r#"INSERT INTO {} (
             col_smallint, col_integer, col_bigint,
@@ -132,8 +135,7 @@ pub fn generate_all_types_insert(table: &str) -> String {
             '{{"key": "value"}}', '{{"nested": {{"data": 123}}}}', '{}',
             ARRAY[1, 2, 3], ARRAY['a', 'b', 'c']
         )"#,
-        table,
-        uuid
+        table, uuid
     )
 }
 
@@ -148,7 +150,12 @@ pub fn generate_bulk_inserts(table: &str, count: usize, batch_size: usize) -> Ve
                 let name: String = Name().fake();
                 let email: String = SafeEmail().fake();
                 let age: u8 = (18..80).fake();
-                format!("('{}', '{}', {})", escape_sql(&name), escape_sql(&email), age)
+                format!(
+                    "('{}', '{}', {})",
+                    escape_sql(&name),
+                    escape_sql(&email),
+                    age
+                )
             })
             .collect();
 
@@ -220,20 +227,41 @@ pub mod scenarios {
     pub fn null_handling_inserts(table: &str) -> Vec<String> {
         vec![
             format!("INSERT INTO {} (name) VALUES ('Only Name')", table),
-            format!("INSERT INTO {} (name, email) VALUES ('With Email', NULL)", table),
+            format!(
+                "INSERT INTO {} (name, email) VALUES ('With Email', NULL)",
+                table
+            ),
             format!("INSERT INTO {} (name, age) VALUES ('With Age', 25)", table),
-            format!("INSERT INTO {} (name, email, age) VALUES ('Full Record', 'full@test.com', 30)", table),
+            format!(
+                "INSERT INTO {} (name, email, age) VALUES ('Full Record', 'full@test.com', 30)",
+                table
+            ),
         ]
     }
 
     /// Data for testing special characters
     pub fn special_characters_inserts(table: &str) -> Vec<String> {
         vec![
-            format!("INSERT INTO {} (name, email) VALUES ('O''Brien', 'obrien@test.com')", table),
-            format!("INSERT INTO {} (name, email) VALUES ('José García', 'jose@test.com')", table),
-            format!("INSERT INTO {} (name, email) VALUES ('山田太郎', 'yamada@test.com')", table),
-            format!("INSERT INTO {} (name, email) VALUES ('Test\\nNewline', 'newline@test.com')", table),
-            format!("INSERT INTO {} (name, email) VALUES ('Tab\\tCharacter', 'tab@test.com')", table),
+            format!(
+                "INSERT INTO {} (name, email) VALUES ('O''Brien', 'obrien@test.com')",
+                table
+            ),
+            format!(
+                "INSERT INTO {} (name, email) VALUES ('José García', 'jose@test.com')",
+                table
+            ),
+            format!(
+                "INSERT INTO {} (name, email) VALUES ('山田太郎', 'yamada@test.com')",
+                table
+            ),
+            format!(
+                "INSERT INTO {} (name, email) VALUES ('Test\\nNewline', 'newline@test.com')",
+                table
+            ),
+            format!(
+                "INSERT INTO {} (name, email) VALUES ('Tab\\tCharacter', 'tab@test.com')",
+                table
+            ),
         ]
     }
 
@@ -253,7 +281,9 @@ pub mod scenarios {
             .map(|i| {
                 format!(
                     "UPDATE {} SET age = {}, updated_at = NOW() WHERE id = {}",
-                    table, 20 + i as i32, id
+                    table,
+                    20 + i as i32,
+                    id
                 )
             })
             .collect()

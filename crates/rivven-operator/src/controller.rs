@@ -207,7 +207,9 @@ async fn apply_cluster(cluster: Arc<RivvenCluster>, ctx: Arc<ControllerContext>)
 
     info!(name = %name, "Reconciliation complete");
 
-    Ok(Action::requeue(Duration::from_secs(DEFAULT_REQUEUE_SECONDS)))
+    Ok(Action::requeue(Duration::from_secs(
+        DEFAULT_REQUEUE_SECONDS,
+    )))
 }
 
 /// Validate cluster for security best practices
@@ -389,7 +391,10 @@ fn build_status(
         } else {
             "False".to_string()
         },
-        reason: Some(format!("{}/{} replicas ready", ready_replicas, desired_replicas)),
+        reason: Some(format!(
+            "{}/{} replicas ready",
+            ready_replicas, desired_replicas
+        )),
         message: None,
         last_transition_time: Some(now.clone()),
     });
@@ -415,7 +420,11 @@ fn build_status(
     });
 
     // Build broker endpoints
-    let name = cluster.metadata.name.as_ref().map(|n| format!("rivven-{}", n));
+    let name = cluster
+        .metadata
+        .name
+        .as_ref()
+        .map(|n| format!("rivven-{}", n));
     let namespace = cluster
         .metadata
         .namespace
@@ -473,7 +482,11 @@ async fn update_status(
 }
 
 /// Error policy for the controller
-fn error_policy(_cluster: Arc<RivvenCluster>, error: &OperatorError, _ctx: Arc<ControllerContext>) -> Action {
+fn error_policy(
+    _cluster: Arc<RivvenCluster>,
+    error: &OperatorError,
+    _ctx: Arc<ControllerContext>,
+) -> Action {
     warn!(
         error = %error,
         "Reconciliation error, will retry"
@@ -490,7 +503,9 @@ fn error_policy(_cluster: Arc<RivvenCluster>, error: &OperatorError, _ctx: Arc<C
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crd::{BrokerConfig, MetricsSpec, PdbSpec, ProbeSpec, RivvenClusterSpec, StorageSpec, TlsSpec};
+    use crate::crd::{
+        BrokerConfig, MetricsSpec, PdbSpec, ProbeSpec, RivvenClusterSpec, StorageSpec, TlsSpec,
+    };
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use std::collections::BTreeMap;
 

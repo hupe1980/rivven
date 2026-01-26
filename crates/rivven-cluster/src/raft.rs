@@ -18,13 +18,13 @@
 use crate::config::ClusterConfig;
 use crate::error::{ClusterError, Result};
 use crate::metadata::{ClusterMetadata, MetadataCommand, MetadataResponse};
+use openraft::network::{RPCOption, RaftNetwork, RaftNetworkFactory};
+use openraft::raft::responder::OneshotResponder;
 use openraft::storage::{LogState, RaftLogReader, RaftLogStorage, RaftStateMachine, Snapshot};
 use openraft::{
-    BasicNode, Entry, EntryPayload, LogId, Membership, RaftTypeConfig,
-    SnapshotMeta, StorageError, StorageIOError, StoredMembership, Vote,
+    BasicNode, Entry, EntryPayload, LogId, Membership, RaftTypeConfig, SnapshotMeta, StorageError,
+    StorageIOError, StoredMembership, Vote,
 };
-use openraft::network::{RaftNetwork, RaftNetworkFactory, RPCOption};
-use openraft::raft::responder::OneshotResponder;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -154,12 +154,7 @@ impl LogStore {
         let last_purged = Self::load_state::<RaftLogId>(&db, Self::CF_STATE, Self::KEY_LAST_PURGED);
         let committed = Self::load_state::<RaftLogId>(&db, Self::CF_STATE, Self::KEY_COMMITTED);
 
-        info!(
-            ?vote,
-            ?last_purged,
-            ?committed,
-            "Opened Raft log storage"
-        );
+        info!(?vote, ?last_purged, ?committed, "Opened Raft log storage");
 
         Ok(Self {
             db,
@@ -195,12 +190,19 @@ impl LogStore {
     }
 
     /// Save state to RocksDB
-    fn save_state<T: Serialize>(&self, key: &[u8], value: &T) -> std::result::Result<(), StorageError<NodeId>> {
-        let bytes = bincode::serialize(value)
-            .map_err(|e| StorageError::IO { source: StorageIOError::write_logs(openraft::AnyError::new(&e)) })?;
+    fn save_state<T: Serialize>(
+        &self,
+        key: &[u8],
+        value: &T,
+    ) -> std::result::Result<(), StorageError<NodeId>> {
+        let bytes = bincode::serialize(value).map_err(|e| StorageError::IO {
+            source: StorageIOError::write_logs(openraft::AnyError::new(&e)),
+        })?;
         self.db
             .put_cf(self.cf_state(), key, bytes)
-            .map_err(|e| StorageError::IO { source: StorageIOError::write_logs(openraft::AnyError::new(&e)) })
+            .map_err(|e| StorageError::IO {
+                source: StorageIOError::write_logs(openraft::AnyError::new(&e)),
+            })
     }
 
     /// Encode log index to key (big-endian for proper ordering)
@@ -215,8 +217,10 @@ impl LogStore {
         iter.seek_to_last();
         if iter.valid() {
             if let Some(value) = iter.value() {
-                let entry: RaftEntry = bincode::deserialize(value)
-                    .map_err(|e| StorageError::IO { source: StorageIOError::read_logs(openraft::AnyError::new(&e)) })?;
+                let entry: RaftEntry =
+                    bincode::deserialize(value).map_err(|e| StorageError::IO {
+                        source: StorageIOError::read_logs(openraft::AnyError::new(&e)),
+                    })?;
                 return Ok(Some(entry));
             }
         }
@@ -228,35 +232,46 @@ impl LogStore {
         let key = Self::index_key(index);
         match self.db.get_cf(self.cf_logs(), key) {
             Ok(Some(bytes)) => {
-                let entry: RaftEntry = bincode::deserialize(&bytes)
-                    .map_err(|e| StorageError::IO { source: StorageIOError::read_logs(openraft::AnyError::new(&e)) })?;
+                let entry: RaftEntry =
+                    bincode::deserialize(&bytes).map_err(|e| StorageError::IO {
+                        source: StorageIOError::read_logs(openraft::AnyError::new(&e)),
+                    })?;
                 Ok(Some(entry))
             }
             Ok(None) => Ok(None),
-            Err(e) => Err(StorageError::IO { source: StorageIOError::read_logs(openraft::AnyError::new(&e)) }),
+            Err(e) => Err(StorageError::IO {
+                source: StorageIOError::read_logs(openraft::AnyError::new(&e)),
+            }),
         }
     }
 
     /// Append a log entry
     fn append_log(&self, entry: &RaftEntry) -> std::result::Result<(), StorageError<NodeId>> {
         let key = Self::index_key(entry.log_id.index);
-        let value = bincode::serialize(entry)
-            .map_err(|e| StorageError::IO { source: StorageIOError::write_logs(openraft::AnyError::new(&e)) })?;
+        let value = bincode::serialize(entry).map_err(|e| StorageError::IO {
+            source: StorageIOError::write_logs(openraft::AnyError::new(&e)),
+        })?;
         self.db
             .put_cf(self.cf_logs(), key, value)
-            .map_err(|e| StorageError::IO { source: StorageIOError::write_logs(openraft::AnyError::new(&e)) })
+            .map_err(|e| StorageError::IO {
+                source: StorageIOError::write_logs(openraft::AnyError::new(&e)),
+            })
     }
 
     /// Delete log entries in range [start, end)
-    fn delete_logs_range(&self, start: u64, end: u64) -> std::result::Result<(), StorageError<NodeId>> {
+    fn delete_logs_range(
+        &self,
+        start: u64,
+        end: u64,
+    ) -> std::result::Result<(), StorageError<NodeId>> {
         let cf = self.cf_logs();
         let mut batch = rocksdb::WriteBatch::default();
         for index in start..end {
             batch.delete_cf(cf, Self::index_key(index));
         }
-        self.db
-            .write(batch)
-            .map_err(|e| StorageError::IO { source: StorageIOError::write_logs(openraft::AnyError::new(&e)) })
+        self.db.write(batch).map_err(|e| StorageError::IO {
+            source: StorageIOError::write_logs(openraft::AnyError::new(&e)),
+        })
     }
 }
 
@@ -293,7 +308,9 @@ impl RaftLogReader<TypeConfig> for LogStore {
 impl RaftLogStorage<TypeConfig> for LogStore {
     type LogReader = Self;
 
-    async fn get_log_state(&mut self) -> std::result::Result<LogState<TypeConfig>, StorageError<NodeId>> {
+    async fn get_log_state(
+        &mut self,
+    ) -> std::result::Result<LogState<TypeConfig>, StorageError<NodeId>> {
         let last_purged = *self.last_purged.read().await;
         let last_log = self.last_log()?;
 
@@ -315,7 +332,10 @@ impl RaftLogStorage<TypeConfig> for LogStore {
         }
     }
 
-    async fn save_vote(&mut self, vote: &RaftVote) -> std::result::Result<(), StorageError<NodeId>> {
+    async fn save_vote(
+        &mut self,
+        vote: &RaftVote,
+    ) -> std::result::Result<(), StorageError<NodeId>> {
         self.save_state(Self::KEY_VOTE, vote)?;
         *self.vote.write().await = Some(*vote);
         debug!(?vote, "Saved vote");
@@ -326,7 +346,10 @@ impl RaftLogStorage<TypeConfig> for LogStore {
         Ok(*self.vote.read().await)
     }
 
-    async fn save_committed(&mut self, committed: Option<RaftLogId>) -> std::result::Result<(), StorageError<NodeId>> {
+    async fn save_committed(
+        &mut self,
+        committed: Option<RaftLogId>,
+    ) -> std::result::Result<(), StorageError<NodeId>> {
         if let Some(ref c) = committed {
             self.save_state(Self::KEY_COMMITTED, c)?;
         }
@@ -334,11 +357,17 @@ impl RaftLogStorage<TypeConfig> for LogStore {
         Ok(())
     }
 
-    async fn read_committed(&mut self) -> std::result::Result<Option<RaftLogId>, StorageError<NodeId>> {
+    async fn read_committed(
+        &mut self,
+    ) -> std::result::Result<Option<RaftLogId>, StorageError<NodeId>> {
         Ok(*self.committed.read().await)
     }
 
-    async fn append<I>(&mut self, entries: I, callback: openraft::storage::LogFlushed<TypeConfig>) -> std::result::Result<(), StorageError<NodeId>>
+    async fn append<I>(
+        &mut self,
+        entries: I,
+        callback: openraft::storage::LogFlushed<TypeConfig>,
+    ) -> std::result::Result<(), StorageError<NodeId>>
     where
         I: IntoIterator<Item = RaftEntry> + Send,
         I::IntoIter: Send,
@@ -347,14 +376,17 @@ impl RaftLogStorage<TypeConfig> for LogStore {
             self.append_log(&entry)?;
         }
         // Sync to ensure durability before callback
-        self.db
-            .flush()
-            .map_err(|e| StorageError::IO { source: StorageIOError::write_logs(openraft::AnyError::new(&e)) })?;
+        self.db.flush().map_err(|e| StorageError::IO {
+            source: StorageIOError::write_logs(openraft::AnyError::new(&e)),
+        })?;
         callback.log_io_completed(Ok(()));
         Ok(())
     }
 
-    async fn truncate(&mut self, log_id: RaftLogId) -> std::result::Result<(), StorageError<NodeId>> {
+    async fn truncate(
+        &mut self,
+        log_id: RaftLogId,
+    ) -> std::result::Result<(), StorageError<NodeId>> {
         // Delete all logs after log_id.index
         let start = log_id.index + 1;
         let log_state = RaftLogStorage::get_log_state(self).await?;
@@ -418,7 +450,9 @@ impl StateMachine {
     }
 
     /// Create a snapshot
-    async fn create_snapshot(&self) -> std::result::Result<(RaftSnapshotMeta, Vec<u8>), StorageError<NodeId>> {
+    async fn create_snapshot(
+        &self,
+    ) -> std::result::Result<(RaftSnapshotMeta, Vec<u8>), StorageError<NodeId>> {
         let metadata = self.metadata.read().await.clone();
         let last_applied = *self.last_applied.read().await;
         let membership = self.membership.read().await.clone();
@@ -429,8 +463,9 @@ impl StateMachine {
             membership: membership.clone(),
         };
 
-        let data = bincode::serialize(&snapshot_data)
-            .map_err(|e| StorageError::IO { source: StorageIOError::read_state_machine(openraft::AnyError::new(&e)) })?;
+        let data = bincode::serialize(&snapshot_data).map_err(|e| StorageError::IO {
+            source: StorageIOError::read_state_machine(openraft::AnyError::new(&e)),
+        })?;
 
         let meta = SnapshotMeta {
             last_log_id: snapshot_data.last_applied,
@@ -448,9 +483,14 @@ impl StateMachine {
     }
 
     /// Install a snapshot
-    async fn install_snapshot_data(&self, data: &[u8]) -> std::result::Result<(), StorageError<NodeId>> {
-        let snapshot_data: SnapshotData = bincode::deserialize(data)
-            .map_err(|e| StorageError::IO { source: StorageIOError::read_state_machine(openraft::AnyError::new(&e)) })?;
+    async fn install_snapshot_data(
+        &self,
+        data: &[u8],
+    ) -> std::result::Result<(), StorageError<NodeId>> {
+        let snapshot_data: SnapshotData =
+            bincode::deserialize(data).map_err(|e| StorageError::IO {
+                source: StorageIOError::read_state_machine(openraft::AnyError::new(&e)),
+            })?;
 
         *self.metadata.write().await = snapshot_data.metadata;
         *self.last_applied.write().await = snapshot_data.last_applied;
@@ -487,7 +527,10 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
         Ok((last_applied, membership))
     }
 
-    async fn apply<I>(&mut self, entries: I) -> std::result::Result<Vec<RaftResponse>, StorageError<NodeId>>
+    async fn apply<I>(
+        &mut self,
+        entries: I,
+    ) -> std::result::Result<Vec<RaftResponse>, StorageError<NodeId>>
     where
         I: IntoIterator<Item = RaftEntry> + Send,
         I::IntoIter: Send,
@@ -525,7 +568,9 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
         Ok(responses)
     }
 
-    async fn begin_receiving_snapshot(&mut self) -> std::result::Result<Box<Cursor<Vec<u8>>>, StorageError<NodeId>> {
+    async fn begin_receiving_snapshot(
+        &mut self,
+    ) -> std::result::Result<Box<Cursor<Vec<u8>>>, StorageError<NodeId>> {
         Ok(Box::new(Cursor::new(Vec::new())))
     }
 
@@ -549,7 +594,9 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
         Ok(())
     }
 
-    async fn get_current_snapshot(&mut self) -> std::result::Result<Option<RaftSnapshot>, StorageError<NodeId>> {
+    async fn get_current_snapshot(
+        &mut self,
+    ) -> std::result::Result<Option<RaftSnapshot>, StorageError<NodeId>> {
         let (meta, data) = self.create_snapshot().await?;
         Ok(Some(Snapshot {
             meta,
@@ -584,8 +631,7 @@ impl openraft::storage::RaftSnapshotBuilder<TypeConfig> for StateMachine {
 
 /// Serialization format for Raft RPCs
 /// Binary (bincode) is ~5-10x faster than JSON
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SerializationFormat {
     /// JSON format (for debugging/compatibility)
     Json,
@@ -593,7 +639,6 @@ pub enum SerializationFormat {
     #[default]
     Binary,
 }
-
 
 /// Compression configuration for Raft RPCs
 #[derive(Debug, Clone)]
@@ -653,7 +698,10 @@ impl NetworkFactory {
     }
 
     /// Create network factory with compression config
-    pub fn with_compression(format: SerializationFormat, compression: RaftCompressionConfig) -> Self {
+    pub fn with_compression(
+        format: SerializationFormat,
+        compression: RaftCompressionConfig,
+    ) -> Self {
         Self {
             compression,
             ..Self::with_format(format)
@@ -689,7 +737,13 @@ pub struct Network {
 }
 
 impl Network {
-    pub fn new(target: NodeId, target_addr: String, client: reqwest::Client, format: SerializationFormat, compression: RaftCompressionConfig) -> Self {
+    pub fn new(
+        target: NodeId,
+        target_addr: String,
+        client: reqwest::Client,
+        format: SerializationFormat,
+        compression: RaftCompressionConfig,
+    ) -> Self {
         Self {
             target,
             target_addr,
@@ -708,7 +762,10 @@ impl Network {
     }
 
     /// Deserialize response based on format
-    fn deserialize<T: serde::de::DeserializeOwned>(&self, data: &[u8]) -> std::result::Result<T, String> {
+    fn deserialize<T: serde::de::DeserializeOwned>(
+        &self,
+        data: &[u8],
+    ) -> std::result::Result<T, String> {
         match self.format {
             SerializationFormat::Json => serde_json::from_slice(data).map_err(|e| e.to_string()),
             SerializationFormat::Binary => bincode::deserialize(data).map_err(|e| e.to_string()),
@@ -726,8 +783,8 @@ impl Network {
     /// Compress data if enabled and beneficial
     #[cfg(feature = "compression")]
     fn maybe_compress(&self, data: Vec<u8>) -> (Vec<u8>, bool) {
-        use rivven_core::compression::{Compressor, CompressionConfig};
-        
+        use rivven_core::compression::{CompressionConfig, Compressor};
+
         if !self.compression.enabled || data.len() < self.compression.min_size {
             return (data, false);
         }
@@ -738,7 +795,7 @@ impl Network {
             ..Default::default()
         };
         let compressor = Compressor::with_config(config);
-        
+
         match compressor.compress(&data) {
             Ok(compressed) => {
                 // Only use compression if it actually helps
@@ -759,21 +816,30 @@ impl Network {
 
     /// Decompress data if it was compressed
     #[cfg(feature = "compression")]
-    fn maybe_decompress(&self, data: &[u8], was_compressed: bool) -> std::result::Result<Vec<u8>, String> {
+    fn maybe_decompress(
+        &self,
+        data: &[u8],
+        was_compressed: bool,
+    ) -> std::result::Result<Vec<u8>, String> {
         use rivven_core::compression::Compressor;
-        
+
         if !was_compressed {
             return Ok(data.to_vec());
         }
 
         let compressor = Compressor::new();
-        compressor.decompress(data)
+        compressor
+            .decompress(data)
             .map(|b| b.to_vec())
             .map_err(|e| e.to_string())
     }
 
     #[cfg(not(feature = "compression"))]
-    fn maybe_decompress(&self, data: &[u8], _was_compressed: bool) -> std::result::Result<Vec<u8>, String> {
+    fn maybe_decompress(
+        &self,
+        data: &[u8],
+        _was_compressed: bool,
+    ) -> std::result::Result<Vec<u8>, String> {
         Ok(data.to_vec())
     }
 }
@@ -783,7 +849,13 @@ impl RaftNetworkFactory<TypeConfig> for NetworkFactory {
     type Network = Network;
 
     async fn new_client(&mut self, target: NodeId, node: &BasicNode) -> Self::Network {
-        Network::new(target, node.addr.clone(), self.client.clone(), self.format, self.compression.clone())
+        Network::new(
+            target,
+            node.addr.clone(),
+            self.client.clone(),
+            self.format,
+            self.compression.clone(),
+        )
     }
 }
 
@@ -793,13 +865,19 @@ impl RaftNetwork<TypeConfig> for Network {
         &mut self,
         rpc: openraft::raft::AppendEntriesRequest<TypeConfig>,
         _option: RPCOption,
-    ) -> std::result::Result<openraft::raft::AppendEntriesResponse<NodeId>, openraft::error::RPCError<NodeId, BasicNode, openraft::error::RaftError<NodeId>>> {
-        use crate::observability::{RaftMetrics, NetworkMetrics};
+    ) -> std::result::Result<
+        openraft::raft::AppendEntriesResponse<NodeId>,
+        openraft::error::RPCError<NodeId, BasicNode, openraft::error::RaftError<NodeId>>,
+    > {
+        use crate::observability::{NetworkMetrics, RaftMetrics};
         let start = std::time::Instant::now();
-        
+
         let url = format!("{}/raft/append", self.target_addr);
-        let serialized = self.serialize(&rpc)
-            .map_err(|e| openraft::error::RPCError::Network(openraft::error::NetworkError::new(&NetworkErrorWrapper(e))))?;
+        let serialized = self.serialize(&rpc).map_err(|e| {
+            openraft::error::RPCError::Network(openraft::error::NetworkError::new(
+                &NetworkErrorWrapper(e),
+            ))
+        })?;
 
         // Apply compression if beneficial
         let (body, compressed) = self.maybe_compress(serialized);
@@ -816,41 +894,50 @@ impl RaftNetwork<TypeConfig> for Network {
             request = request.header("X-Rivven-Original-Size", uncompressed_size.to_string());
         }
 
-        let resp = request
-            .send()
-            .await
-            .map_err(|e| {
-                NetworkMetrics::increment_rpc_errors("append_entries");
-                openraft::error::RPCError::Network(openraft::error::NetworkError::new(&e))
-            })?;
+        let resp = request.send().await.map_err(|e| {
+            NetworkMetrics::increment_rpc_errors("append_entries");
+            openraft::error::RPCError::Network(openraft::error::NetworkError::new(&e))
+        })?;
 
         if !resp.status().is_success() {
             NetworkMetrics::increment_rpc_errors("append_entries");
             return Err(openraft::error::RPCError::Network(
-                openraft::error::NetworkError::new(&NetworkErrorWrapper(format!("HTTP error: {}", resp.status()))),
+                openraft::error::NetworkError::new(&NetworkErrorWrapper(format!(
+                    "HTTP error: {}",
+                    resp.status()
+                ))),
             ));
         }
 
         // Check if response is compressed
-        let resp_compressed = resp.headers()
+        let resp_compressed = resp
+            .headers()
             .get("X-Rivven-Compressed")
             .map(|v| v == "1")
             .unwrap_or(false);
 
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| openraft::error::RPCError::Network(openraft::error::NetworkError::new(&e)))?;
+        let bytes = resp.bytes().await.map_err(|e| {
+            openraft::error::RPCError::Network(openraft::error::NetworkError::new(&e))
+        })?;
 
         NetworkMetrics::add_bytes_received(bytes.len() as u64);
         RaftMetrics::record_append_entries_latency(start.elapsed());
 
         // Decompress if needed
-        let response_data = self.maybe_decompress(&bytes, resp_compressed)
-            .map_err(|e| openraft::error::RPCError::Network(openraft::error::NetworkError::new(&NetworkErrorWrapper(e))))?;
+        let response_data = self
+            .maybe_decompress(&bytes, resp_compressed)
+            .map_err(|e| {
+                openraft::error::RPCError::Network(openraft::error::NetworkError::new(
+                    &NetworkErrorWrapper(e),
+                ))
+            })?;
 
-        let response: openraft::raft::AppendEntriesResponse<NodeId> = self.deserialize(&response_data)
-            .map_err(|e| openraft::error::RPCError::Network(openraft::error::NetworkError::new(&NetworkErrorWrapper(e))))?;
+        let response: openraft::raft::AppendEntriesResponse<NodeId> =
+            self.deserialize(&response_data).map_err(|e| {
+                openraft::error::RPCError::Network(openraft::error::NetworkError::new(
+                    &NetworkErrorWrapper(e),
+                ))
+            })?;
 
         Ok(response)
     }
@@ -859,13 +946,23 @@ impl RaftNetwork<TypeConfig> for Network {
         &mut self,
         rpc: openraft::raft::InstallSnapshotRequest<TypeConfig>,
         _option: RPCOption,
-    ) -> std::result::Result<openraft::raft::InstallSnapshotResponse<NodeId>, openraft::error::RPCError<NodeId, BasicNode, openraft::error::RaftError<NodeId, openraft::error::InstallSnapshotError>>> {
-        use crate::observability::{RaftMetrics, NetworkMetrics};
+    ) -> std::result::Result<
+        openraft::raft::InstallSnapshotResponse<NodeId>,
+        openraft::error::RPCError<
+            NodeId,
+            BasicNode,
+            openraft::error::RaftError<NodeId, openraft::error::InstallSnapshotError>,
+        >,
+    > {
+        use crate::observability::{NetworkMetrics, RaftMetrics};
         let start = std::time::Instant::now();
-        
+
         let url = format!("{}/raft/snapshot", self.target_addr);
-        let serialized = self.serialize(&rpc)
-            .map_err(|e| openraft::error::RPCError::Network(openraft::error::NetworkError::new(&NetworkErrorWrapper(e))))?;
+        let serialized = self.serialize(&rpc).map_err(|e| {
+            openraft::error::RPCError::Network(openraft::error::NetworkError::new(
+                &NetworkErrorWrapper(e),
+            ))
+        })?;
 
         // Snapshots benefit significantly from compression
         let (body, compressed) = self.maybe_compress(serialized);
@@ -881,31 +978,34 @@ impl RaftNetwork<TypeConfig> for Network {
             request = request.header("X-Rivven-Original-Size", uncompressed_size.to_string());
         }
 
-        let resp = request
-            .send()
-            .await
-            .map_err(|e| {
-                NetworkMetrics::increment_rpc_errors("install_snapshot");
-                openraft::error::RPCError::Network(openraft::error::NetworkError::new(&e))
-            })?;
+        let resp = request.send().await.map_err(|e| {
+            NetworkMetrics::increment_rpc_errors("install_snapshot");
+            openraft::error::RPCError::Network(openraft::error::NetworkError::new(&e))
+        })?;
 
         if !resp.status().is_success() {
             NetworkMetrics::increment_rpc_errors("install_snapshot");
             return Err(openraft::error::RPCError::Network(
-                openraft::error::NetworkError::new(&NetworkErrorWrapper(format!("HTTP error: {}", resp.status()))),
+                openraft::error::NetworkError::new(&NetworkErrorWrapper(format!(
+                    "HTTP error: {}",
+                    resp.status()
+                ))),
             ));
         }
 
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| openraft::error::RPCError::Network(openraft::error::NetworkError::new(&e)))?;
+        let bytes = resp.bytes().await.map_err(|e| {
+            openraft::error::RPCError::Network(openraft::error::NetworkError::new(&e))
+        })?;
 
         NetworkMetrics::add_bytes_received(bytes.len() as u64);
         RaftMetrics::record_snapshot_duration(start.elapsed());
 
-        let response: openraft::raft::InstallSnapshotResponse<NodeId> = self.deserialize(&bytes)
-            .map_err(|e| openraft::error::RPCError::Network(openraft::error::NetworkError::new(&NetworkErrorWrapper(e))))?;
+        let response: openraft::raft::InstallSnapshotResponse<NodeId> =
+            self.deserialize(&bytes).map_err(|e| {
+                openraft::error::RPCError::Network(openraft::error::NetworkError::new(
+                    &NetworkErrorWrapper(e),
+                ))
+            })?;
 
         Ok(response)
     }
@@ -914,13 +1014,19 @@ impl RaftNetwork<TypeConfig> for Network {
         &mut self,
         rpc: openraft::raft::VoteRequest<NodeId>,
         _option: RPCOption,
-    ) -> std::result::Result<openraft::raft::VoteResponse<NodeId>, openraft::error::RPCError<NodeId, BasicNode, openraft::error::RaftError<NodeId>>> {
-        use crate::observability::{RaftMetrics, NetworkMetrics};
+    ) -> std::result::Result<
+        openraft::raft::VoteResponse<NodeId>,
+        openraft::error::RPCError<NodeId, BasicNode, openraft::error::RaftError<NodeId>>,
+    > {
+        use crate::observability::{NetworkMetrics, RaftMetrics};
         let start = std::time::Instant::now();
-        
+
         let url = format!("{}/raft/vote", self.target_addr);
-        let body = self.serialize(&rpc)
-            .map_err(|e| openraft::error::RPCError::Network(openraft::error::NetworkError::new(&NetworkErrorWrapper(e))))?;
+        let body = self.serialize(&rpc).map_err(|e| {
+            openraft::error::RPCError::Network(openraft::error::NetworkError::new(
+                &NetworkErrorWrapper(e),
+            ))
+        })?;
 
         NetworkMetrics::add_bytes_sent(body.len() as u64);
 
@@ -939,21 +1045,27 @@ impl RaftNetwork<TypeConfig> for Network {
         if !resp.status().is_success() {
             NetworkMetrics::increment_rpc_errors("vote");
             return Err(openraft::error::RPCError::Network(
-                openraft::error::NetworkError::new(&NetworkErrorWrapper(format!("HTTP error: {}", resp.status()))),
+                openraft::error::NetworkError::new(&NetworkErrorWrapper(format!(
+                    "HTTP error: {}",
+                    resp.status()
+                ))),
             ));
         }
 
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| openraft::error::RPCError::Network(openraft::error::NetworkError::new(&e)))?;
+        let bytes = resp.bytes().await.map_err(|e| {
+            openraft::error::RPCError::Network(openraft::error::NetworkError::new(&e))
+        })?;
 
         NetworkMetrics::add_bytes_received(bytes.len() as u64);
         RaftMetrics::record_vote_latency(start.elapsed());
         RaftMetrics::increment_elections();
 
-        let response: openraft::raft::VoteResponse<NodeId> = self.deserialize(&bytes)
-            .map_err(|e| openraft::error::RPCError::Network(openraft::error::NetworkError::new(&NetworkErrorWrapper(e))))?;
+        let response: openraft::raft::VoteResponse<NodeId> =
+            self.deserialize(&bytes).map_err(|e| {
+                openraft::error::RPCError::Network(openraft::error::NetworkError::new(
+                    &NetworkErrorWrapper(e),
+                ))
+            })?;
 
         Ok(response)
     }
@@ -1046,12 +1158,15 @@ impl BatchAccumulator {
     }
 
     /// Add a command to the current batch, returning a channel for the response
-    pub async fn add(&self, command: MetadataCommand) -> tokio::sync::oneshot::Receiver<Result<MetadataResponse>> {
+    pub async fn add(
+        &self,
+        command: MetadataCommand,
+    ) -> tokio::sync::oneshot::Receiver<Result<MetadataResponse>> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        
+
         let should_flush = {
             let mut pending = self.pending.write().await;
-            
+
             if pending.is_none() {
                 *pending = Some(PendingBatch {
                     commands: vec![command],
@@ -1066,14 +1181,14 @@ impl BatchAccumulator {
                 batch.commands.len() >= self.config.max_batch_size
             }
         };
-        
+
         self.notify.notify_one();
-        
+
         if should_flush {
             // Force flush if batch is full
             self.notify.notify_one();
         }
-        
+
         rx
     }
 
@@ -1081,13 +1196,13 @@ impl BatchAccumulator {
     #[allow(dead_code)]
     pub(crate) async fn take_if_ready(&self) -> Option<PendingBatch> {
         let mut pending = self.pending.write().await;
-        
+
         if let Some(ref batch) = *pending {
             let elapsed = batch.started.elapsed();
             let size = batch.commands.len();
-            
-            if size >= self.config.max_batch_size 
-                || elapsed.as_micros() as u64 >= self.config.max_wait_us 
+
+            if size >= self.config.max_batch_size
+                || elapsed.as_micros() as u64 >= self.config.max_wait_us
             {
                 return pending.take();
             }
@@ -1199,25 +1314,29 @@ impl RaftNode {
         // Initialize log storage
         let log_store = LogStore::new(&self.data_dir)
             .map_err(|e| ClusterError::RaftStorage(format!("Failed to create log store: {}", e)))?;
-        
+
         // Build openraft config
         let raft_config = openraft::Config {
             cluster_name: "rivven-cluster".to_string(),
             heartbeat_interval: self.raft_config.heartbeat_interval_ms,
             election_timeout_min: self.raft_config.election_timeout_min_ms,
             election_timeout_max: self.raft_config.election_timeout_max_ms,
-            snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(self.raft_config.snapshot_threshold),
+            snapshot_policy: openraft::SnapshotPolicy::LogsSinceLast(
+                self.raft_config.snapshot_threshold,
+            ),
             max_in_snapshot_log_to_keep: 1000,
             ..Default::default()
         };
 
-        let raft_config = Arc::new(raft_config.validate().map_err(|e| {
-            ClusterError::RaftStorage(format!("Invalid Raft config: {}", e))
-        })?);
+        let raft_config = Arc::new(
+            raft_config
+                .validate()
+                .map_err(|e| ClusterError::RaftStorage(format!("Invalid Raft config: {}", e)))?,
+        );
 
         // Create a new state machine for openraft (it takes ownership)
         let state_machine = StateMachine::new();
-        
+
         // Create a new network factory for openraft (it takes ownership)
         let network = NetworkFactory::new();
         // Copy node addresses to the new network
@@ -1226,15 +1345,10 @@ impl RaftNode {
         }
 
         // Create the Raft instance
-        let raft = openraft::Raft::new(
-            self.node_id,
-            raft_config,
-            network,
-            log_store,
-            state_machine,
-        )
-        .await
-        .map_err(|e| ClusterError::RaftStorage(format!("Failed to create Raft: {}", e)))?;
+        let raft =
+            openraft::Raft::new(self.node_id, raft_config, network, log_store, state_machine)
+                .await
+                .map_err(|e| ClusterError::RaftStorage(format!("Failed to create Raft: {}", e)))?;
 
         self.raft = Some(raft);
 
@@ -1266,7 +1380,7 @@ impl RaftNode {
     pub async fn propose(&self, command: MetadataCommand) -> Result<MetadataResponse> {
         use crate::observability::RaftMetrics;
         let start = std::time::Instant::now();
-        
+
         if self.standalone {
             // In standalone mode, apply directly to state machine
             let index = {
@@ -1277,29 +1391,32 @@ impl RaftNode {
             };
             let log_id = LogId::new(openraft::CommittedLeaderId::new(0, self.node_id), index);
             let response = self.state_machine.apply_command(&log_id, command).await;
-            
+
             RaftMetrics::increment_proposals();
             RaftMetrics::increment_commits();
             RaftMetrics::record_proposal_latency(start.elapsed());
-            
+
             return Ok(response.response);
         }
 
         // Cluster mode - use Raft client_write
         if let Some(ref raft) = self.raft {
             let request = RaftRequest { command };
-            let result = raft.client_write(request)
+            let result = raft
+                .client_write(request)
                 .await
                 .map_err(|e| ClusterError::RaftStorage(format!("Client write failed: {}", e)))?;
-            
+
             RaftMetrics::increment_proposals();
             RaftMetrics::increment_commits();
             RaftMetrics::record_proposal_latency(start.elapsed());
-            
+
             return Ok(result.data.response);
         }
 
-        Err(ClusterError::RaftStorage("Raft not initialized".to_string()))
+        Err(ClusterError::RaftStorage(
+            "Raft not initialized".to_string(),
+        ))
     }
 
     /// Propose multiple commands in a single batch for higher throughput
@@ -1310,13 +1427,16 @@ impl RaftNode {
     /// 3. Amortized network overhead
     ///
     /// Returns responses in the same order as commands.
-    pub async fn propose_batch(&self, commands: Vec<MetadataCommand>) -> Result<Vec<MetadataResponse>> {
+    pub async fn propose_batch(
+        &self,
+        commands: Vec<MetadataCommand>,
+    ) -> Result<Vec<MetadataResponse>> {
         use crate::observability::RaftMetrics;
-        
+
         if commands.is_empty() {
             return Ok(vec![]);
         }
-        
+
         let batch_size = commands.len();
         RaftMetrics::record_batch_size(batch_size);
 
@@ -1341,7 +1461,7 @@ impl RaftNode {
         // openraft will batch these in a single AppendEntries RPC
         if let Some(ref raft) = self.raft {
             let mut responses = Vec::with_capacity(commands.len());
-            
+
             // Submit all commands concurrently
             let futures: Vec<_> = commands
                 .into_iter()
@@ -1353,21 +1473,28 @@ impl RaftNode {
                     }
                 })
                 .collect();
-            
+
             // Wait for all to complete
             let results = futures::future::join_all(futures).await;
-            
+
             for result in results {
                 match result {
                     Ok(r) => responses.push(r.data.response),
-                    Err(e) => return Err(ClusterError::RaftStorage(format!("Batch write failed: {}", e))),
+                    Err(e) => {
+                        return Err(ClusterError::RaftStorage(format!(
+                            "Batch write failed: {}",
+                            e
+                        )))
+                    }
                 }
             }
-            
+
             return Ok(responses);
         }
 
-        Err(ClusterError::RaftStorage("Raft not initialized".to_string()))
+        Err(ClusterError::RaftStorage(
+            "Raft not initialized".to_string(),
+        ))
     }
 
     /// Ensure linearizable read by confirming leadership with cluster
@@ -1389,10 +1516,10 @@ impl RaftNode {
         if let Some(ref raft) = self.raft {
             // Use openraft's built-in linearizable read mechanism
             // This waits for the state machine to catch up to the commit index
-            let applied = raft.ensure_linearizable()
-                .await
-                .map_err(|e| ClusterError::RaftStorage(format!("Linearizable read failed: {}", e)))?;
-            
+            let applied = raft.ensure_linearizable().await.map_err(|e| {
+                ClusterError::RaftStorage(format!("Linearizable read failed: {}", e))
+            })?;
+
             debug!(
                 applied_log = %applied.map(|l| l.index.to_string()).unwrap_or_else(|| "none".to_string()),
                 "Linearizable read confirmed"
@@ -1400,14 +1527,18 @@ impl RaftNode {
             return Ok(());
         }
 
-        Err(ClusterError::RaftStorage("Raft not initialized".to_string()))
+        Err(ClusterError::RaftStorage(
+            "Raft not initialized".to_string(),
+        ))
     }
 
     /// Read metadata with linearizable consistency
     ///
     /// This ensures the read reflects all committed writes up to this point.
     /// Slightly slower than eventual reads but guarantees consistency.
-    pub async fn linearizable_metadata(&self) -> Result<tokio::sync::RwLockReadGuard<'_, ClusterMetadata>> {
+    pub async fn linearizable_metadata(
+        &self,
+    ) -> Result<tokio::sync::RwLockReadGuard<'_, ClusterMetadata>> {
         // First ensure we're up to date
         self.ensure_linearizable_read().await?;
         // Then return the metadata
@@ -1437,7 +1568,7 @@ impl RaftNode {
         if self.standalone {
             return Some(self.node_id);
         }
-        
+
         if let Some(ref raft) = self.raft {
             let metrics = raft.metrics().borrow().clone();
             return metrics.current_leader;
@@ -1475,17 +1606,21 @@ impl RaftNode {
         // In cluster mode, snapshots are managed by openraft
         if !self.standalone {
             if let Some(ref raft) = self.raft {
-                raft.trigger().snapshot().await
-                    .map_err(|e| ClusterError::RaftStorage(format!("Snapshot trigger failed: {}", e)))?;
+                raft.trigger().snapshot().await.map_err(|e| {
+                    ClusterError::RaftStorage(format!("Snapshot trigger failed: {}", e))
+                })?;
                 info!(node_id = self.node_id, "Triggered Raft snapshot");
                 return Ok(());
             }
         }
-        
+
         // In standalone mode, create snapshot directly
-        let (_meta, data) = self.state_machine.create_snapshot().await
+        let (_meta, data) = self
+            .state_machine
+            .create_snapshot()
+            .await
             .map_err(|e| ClusterError::RaftStorage(format!("{}", e)))?;
-        
+
         info!(size = data.len(), "Created standalone snapshot");
         Ok(())
     }
@@ -1509,7 +1644,9 @@ impl RaftNode {
                 .await
                 .map_err(|e| ClusterError::RaftStorage(format!("{}", e)))
         } else {
-            Err(ClusterError::RaftStorage("Raft not initialized".to_string()))
+            Err(ClusterError::RaftStorage(
+                "Raft not initialized".to_string(),
+            ))
         }
     }
 
@@ -1523,7 +1660,9 @@ impl RaftNode {
                 .await
                 .map_err(|e| ClusterError::RaftStorage(format!("{}", e)))
         } else {
-            Err(ClusterError::RaftStorage("Raft not initialized".to_string()))
+            Err(ClusterError::RaftStorage(
+                "Raft not initialized".to_string(),
+            ))
         }
     }
 
@@ -1537,7 +1676,9 @@ impl RaftNode {
                 .await
                 .map_err(|e| ClusterError::RaftStorage(format!("{}", e)))
         } else {
-            Err(ClusterError::RaftStorage("Raft not initialized".to_string()))
+            Err(ClusterError::RaftStorage(
+                "Raft not initialized".to_string(),
+            ))
         }
     }
 }
@@ -1583,7 +1724,7 @@ mod tests {
     async fn test_state_machine_apply() {
         let sm = StateMachine::new();
         let log_id = LogId::new(openraft::CommittedLeaderId::new(1, 1), 1);
-        
+
         let cmd = MetadataCommand::CreateTopic {
             config: crate::partition::TopicConfig::new("test-topic", 3, 1),
             partition_assignments: vec![
@@ -1594,7 +1735,10 @@ mod tests {
         };
 
         let response = sm.apply_command(&log_id, cmd).await;
-        assert!(matches!(response.response, MetadataResponse::TopicCreated { .. }));
+        assert!(matches!(
+            response.response,
+            MetadataResponse::TopicCreated { .. }
+        ));
 
         // Verify topic exists
         let metadata = sm.metadata().await;

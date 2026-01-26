@@ -323,11 +323,8 @@ impl SignalResult {
 /// Signal handler trait.
 pub trait SignalHandler: Send + Sync {
     /// Handle a signal.
-    fn handle(
-        &self,
-        signal: &Signal,
-    ) -> impl std::future::Future<Output = SignalResult> + Send;
-    
+    fn handle(&self, signal: &Signal) -> impl std::future::Future<Output = SignalResult> + Send;
+
     /// Get supported action types.
     fn supported_actions(&self) -> Vec<SignalAction>;
 }
@@ -461,7 +458,10 @@ impl SignalProcessor {
         Fut: std::future::Future<Output = SignalResult> + Send + 'static,
     {
         let boxed: BoxedHandler = Box::new(move |signal| Box::pin(handler(signal)));
-        self.handlers.write().await.insert(action.to_string(), boxed);
+        self.handlers
+            .write()
+            .await
+            .insert(action.to_string(), boxed);
         debug!("Registered handler for action: {}", action);
     }
 
@@ -532,10 +532,7 @@ impl SignalProcessor {
                         ))
                     } else {
                         warn!("No handler for action: {:?}", signal.action);
-                        SignalResult::Ignored(format!(
-                            "No handler for action: {:?}",
-                            signal.action
-                        ))
+                        SignalResult::Ignored(format!("No handler for action: {:?}", signal.action))
                     }
                 }
             }
@@ -564,7 +561,7 @@ impl SignalProcessor {
         data: Option<&str>,
     ) -> Result<Signal, String> {
         let action = SignalAction::parse(signal_type);
-        
+
         let signal_data = if let Some(data_str) = data {
             serde_json::from_str(data_str)
                 .map_err(|e| format!("Failed to parse signal data: {}", e))?
@@ -572,8 +569,7 @@ impl SignalProcessor {
             SignalData::empty()
         };
 
-        Ok(Signal::new(id, action, signal_data)
-            .with_source(SignalSource::Source))
+        Ok(Signal::new(id, action, signal_data).with_source(SignalSource::Source))
     }
 }
 
@@ -617,7 +613,10 @@ mod tests {
         assert_eq!(SignalAction::PauseSnapshot.as_str(), "pause-snapshot");
         assert_eq!(SignalAction::ResumeSnapshot.as_str(), "resume-snapshot");
         assert_eq!(SignalAction::Log.as_str(), "log");
-        assert_eq!(SignalAction::Custom("my-action".to_string()).as_str(), "my-action");
+        assert_eq!(
+            SignalAction::Custom("my-action".to_string()).as_str(),
+            "my-action"
+        );
     }
 
     #[test]
@@ -677,7 +676,7 @@ mod tests {
     #[test]
     fn test_signal_execute_snapshot() {
         let signal = Signal::execute_snapshot(vec!["public.users".to_string()]);
-        
+
         assert_eq!(signal.action, SignalAction::ExecuteSnapshot);
         assert_eq!(signal.data.data_collections, vec!["public.users"]);
         assert_eq!(signal.data.snapshot_type, Some("incremental".to_string()));
@@ -688,14 +687,14 @@ mod tests {
     #[test]
     fn test_signal_blocking_snapshot() {
         let signal = Signal::blocking_snapshot(vec!["public.orders".to_string()]);
-        
+
         assert_eq!(signal.data.snapshot_type, Some("blocking".to_string()));
     }
 
     #[test]
     fn test_signal_stop_snapshot() {
         let signal = Signal::stop_snapshot();
-        
+
         assert_eq!(signal.action, SignalAction::StopSnapshot);
         assert!(signal.is_snapshot_action());
     }
@@ -703,7 +702,7 @@ mod tests {
     #[test]
     fn test_signal_pause() {
         let signal = Signal::pause();
-        
+
         assert_eq!(signal.action, SignalAction::PauseSnapshot);
         assert!(signal.is_control_action());
         assert!(!signal.is_snapshot_action());
@@ -712,7 +711,7 @@ mod tests {
     #[test]
     fn test_signal_resume() {
         let signal = Signal::resume();
-        
+
         assert_eq!(signal.action, SignalAction::ResumeSnapshot);
         assert!(signal.is_control_action());
     }
@@ -720,15 +719,15 @@ mod tests {
     #[test]
     fn test_signal_log() {
         let signal = Signal::log("Hello, CDC!");
-        
+
         assert_eq!(signal.action, SignalAction::Log);
         assert_eq!(signal.data.log_message(), Some("Hello, CDC!"));
     }
 
     #[test]
     fn test_signal_custom() {
-        let data = SignalData::empty()
-            .with_property("custom_field", serde_json::json!("custom_value"));
+        let data =
+            SignalData::empty().with_property("custom_field", serde_json::json!("custom_value"));
         let signal = Signal::custom("my-custom-action", data);
 
         assert_eq!(
@@ -760,7 +759,7 @@ mod tests {
     #[test]
     fn test_signal_stats() {
         let stats = SignalStats::default();
-        
+
         stats.record_received();
         stats.record_received();
         assert_eq!(stats.received(), 2);
@@ -778,7 +777,7 @@ mod tests {
     #[tokio::test]
     async fn test_signal_processor_new() {
         let processor = SignalProcessor::new();
-        
+
         assert!(!processor.is_paused());
         assert_eq!(processor.stats().received(), 0);
     }
@@ -786,12 +785,12 @@ mod tests {
     #[tokio::test]
     async fn test_signal_processor_pause_resume() {
         let processor = SignalProcessor::new();
-        
+
         assert!(!processor.is_paused());
-        
+
         processor.pause();
         assert!(processor.is_paused());
-        
+
         processor.resume();
         assert!(!processor.is_paused());
     }
@@ -799,9 +798,9 @@ mod tests {
     #[tokio::test]
     async fn test_signal_processor_process_pause() {
         let processor = SignalProcessor::new();
-        
+
         let result = processor.process(Signal::pause()).await;
-        
+
         assert!(result.is_success());
         assert!(processor.is_paused());
     }
@@ -810,9 +809,9 @@ mod tests {
     async fn test_signal_processor_process_resume() {
         let processor = SignalProcessor::new();
         processor.pause();
-        
+
         let result = processor.process(Signal::resume()).await;
-        
+
         assert!(result.is_success());
         assert!(!processor.is_paused());
     }
@@ -820,25 +819,23 @@ mod tests {
     #[tokio::test]
     async fn test_signal_processor_process_log() {
         let processor = SignalProcessor::new();
-        
+
         let result = processor.process(Signal::log("Test log")).await;
-        
+
         assert!(result.is_success());
     }
 
     #[tokio::test]
     async fn test_signal_processor_custom_handler() {
         let processor = SignalProcessor::new();
-        
+
         processor
-            .register_handler("custom-action", |_signal| async {
-                SignalResult::Success
-            })
+            .register_handler("custom-action", |_signal| async { SignalResult::Success })
             .await;
 
         let signal = Signal::custom("custom-action", SignalData::empty());
         let result = processor.process(signal).await;
-        
+
         assert!(result.is_success());
     }
 
@@ -861,10 +858,10 @@ mod tests {
     #[tokio::test]
     async fn test_signal_processor_snapshot_pending() {
         let processor = SignalProcessor::new();
-        
+
         let signal = Signal::execute_snapshot(vec!["public.users".to_string()]);
         let result = processor.process(signal).await;
-        
+
         // Without handler, snapshot signals should be pending
         assert!(matches!(result, SignalResult::Pending(_)));
     }
@@ -872,11 +869,11 @@ mod tests {
     #[tokio::test]
     async fn test_signal_processor_stats() {
         let processor = SignalProcessor::new();
-        
+
         processor.process(Signal::log("msg1")).await;
         processor.process(Signal::pause()).await;
         processor.process(Signal::resume()).await;
-        
+
         assert_eq!(processor.stats().received(), 3);
         assert_eq!(processor.stats().processed(), 3);
     }
@@ -897,8 +894,7 @@ mod tests {
 
     #[test]
     fn test_parse_from_row_no_data() {
-        let signal =
-            SignalProcessor::parse_from_row("sig-2", "pause-snapshot", None).unwrap();
+        let signal = SignalProcessor::parse_from_row("sig-2", "pause-snapshot", None).unwrap();
 
         assert_eq!(signal.id, "sig-2");
         assert_eq!(signal.action, SignalAction::PauseSnapshot);
@@ -906,8 +902,7 @@ mod tests {
 
     #[test]
     fn test_parse_from_row_invalid_json() {
-        let result =
-            SignalProcessor::parse_from_row("sig-3", "log", Some("not valid json"));
+        let result = SignalProcessor::parse_from_row("sig-3", "log", Some("not valid json"));
 
         assert!(result.is_err());
     }
@@ -915,13 +910,13 @@ mod tests {
     #[tokio::test]
     async fn test_signal_channel() {
         let (channel, mut receiver) = SignalChannel::new(16);
-        
+
         channel.send(Signal::pause()).await.unwrap();
         channel.send(Signal::resume()).await.unwrap();
-        
+
         let sig1 = receiver.recv().await.unwrap();
         let sig2 = receiver.recv().await.unwrap();
-        
+
         assert_eq!(sig1.action, SignalAction::PauseSnapshot);
         assert_eq!(sig2.action, SignalAction::ResumeSnapshot);
     }
@@ -929,7 +924,7 @@ mod tests {
     #[tokio::test]
     async fn test_signal_channel_try_send() {
         let (channel, _receiver) = SignalChannel::new(2);
-        
+
         assert!(channel.try_send(Signal::pause()).is_ok());
         assert!(channel.try_send(Signal::resume()).is_ok());
         // Buffer full
@@ -940,7 +935,7 @@ mod tests {
     fn test_signal_serialization() {
         let signal = Signal::execute_snapshot(vec!["public.users".to_string()]);
         let json = serde_json::to_string(&signal).unwrap();
-        
+
         assert!(json.contains("execute-snapshot"));
         assert!(json.contains("public.users"));
 

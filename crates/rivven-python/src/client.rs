@@ -19,7 +19,7 @@ use tokio::sync::Mutex;
 ///
 /// Example:
 ///     >>> import rivven
-///     >>> 
+///     >>>
 ///     >>> async def main():
 ///     ...     client = await rivven.connect("localhost:9092")
 ///     ...     
@@ -78,10 +78,7 @@ impl RivvenClient {
         let client = Arc::clone(&self.client);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut guard = client.lock().await;
-            let result = guard
-                .create_topic(&name, partitions)
-                .await
-                .into_py_err()?;
+            let result = guard.create_topic(&name, partitions).await.into_py_err()?;
             Ok(result)
         })
     }
@@ -192,7 +189,7 @@ impl RivvenClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = Arc::clone(&self.client);
         let group_clone = group.clone();
-        
+
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             // Determine starting offset
             let offset = match (start_offset, &group_clone) {
@@ -208,7 +205,7 @@ impl RivvenClient {
                 }
                 (None, None) => 0,
             };
-            
+
             Ok(Consumer::new(
                 client,
                 topic,
@@ -377,7 +374,11 @@ impl RivvenClient {
             let offset = match key {
                 Some(k) => {
                     guard
-                        .publish_with_key(&topic, Some(bytes::Bytes::from(k)), bytes::Bytes::from(value))
+                        .publish_with_key(
+                            &topic,
+                            Some(bytes::Bytes::from(k)),
+                            bytes::Bytes::from(value),
+                        )
                         .await
                 }
                 None => guard.publish(&topic, bytes::Bytes::from(value)).await,
@@ -412,14 +413,14 @@ impl RivvenClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = Arc::clone(&self.client);
         let topic_clone = topic.clone();
-        
+
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut guard = client.lock().await;
             let messages = guard
                 .consume(&topic, partition, offset, max_messages)
                 .await
                 .into_py_err()?;
-            
+
             let result: Vec<crate::Message> = messages
                 .into_iter()
                 .map(|m| crate::Message::from_client_data(m, partition, topic_clone.clone()))
@@ -477,10 +478,7 @@ impl RivvenClient {
         let client = Arc::clone(&self.client);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut guard = client.lock().await;
-            let schema = guard
-                .get_schema(schema_id)
-                .await
-                .into_py_err()?;
+            let schema = guard.get_schema(schema_id).await.into_py_err()?;
             Ok(schema)
         })
     }

@@ -22,10 +22,10 @@
 //! sinks.register("http-webhook", Arc::new(HttpWebhookSinkFactory));
 //! ```
 
-use async_trait::async_trait;
-use futures::StreamExt;
 use super::super::prelude::*;
 use super::super::traits::registry::{AnySink, SinkFactory};
+use async_trait::async_trait;
+use futures::StreamExt;
 use schemars::JsonSchema;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -59,13 +59,18 @@ impl From<String> for SensitiveString {
 }
 
 impl Serialize for SensitiveString {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         serializer.serialize_str("***REDACTED***")
     }
 }
 
 impl<'de> Deserialize<'de> for SensitiveString {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
         let value = String::deserialize(deserializer)?;
         Ok(Self::new(value))
     }
@@ -336,7 +341,10 @@ impl Sink for HttpWebhookSink {
     async fn check(&self, config: &Self::Config) -> Result<CheckResult> {
         // Validate config first
         if let Err(e) = config.validate() {
-            return Ok(CheckResult::failure(format!("Invalid configuration: {}", e)));
+            return Ok(CheckResult::failure(format!(
+                "Invalid configuration: {}",
+                e
+            )));
         }
 
         info!("Checking HTTP webhook connectivity to {}", config.url);

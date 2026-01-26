@@ -52,13 +52,18 @@ impl From<String> for SensitiveString {
 }
 
 impl Serialize for SensitiveString {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         serializer.serialize_str("***REDACTED***")
     }
 }
 
 impl<'de> Deserialize<'de> for SensitiveString {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
         let value = String::deserialize(deserializer)?;
         Ok(Self::new(value))
     }
@@ -173,11 +178,11 @@ impl Sink for SnowflakeSink {
             .metadata("auth", "jwt-keypair")
     }
 
-    async fn check(
-        &self,
-        config: &Self::Config,
-    ) -> rivven_connect::error::Result<CheckResult> {
-        info!("Checking Snowflake connectivity for account: {}", config.account);
+    async fn check(&self, config: &Self::Config) -> rivven_connect::error::Result<CheckResult> {
+        info!(
+            "Checking Snowflake connectivity for account: {}",
+            config.account
+        );
 
         // Verify private key file exists
         let key_path = std::path::Path::new(&config.private_key_path);
@@ -193,7 +198,7 @@ impl Sink for SnowflakeSink {
             Ok(contents) => {
                 if !contents.contains("-----BEGIN") || !contents.contains("PRIVATE KEY-----") {
                     return Ok(CheckResult::failure(
-                        "Private key file does not appear to be in PEM format"
+                        "Private key file does not appear to be in PEM format",
                     ));
                 }
             }
@@ -210,10 +215,12 @@ impl Sink for SnowflakeSink {
         // 2. Exchange for scoped token
         // 3. Test API connectivity
         // For now, we just validate configuration
-        
-        info!("Snowflake configuration validated for {}.{}.{}", 
-              config.database, config.schema, config.table);
-        
+
+        info!(
+            "Snowflake configuration validated for {}.{}.{}",
+            config.database, config.schema, config.table
+        );
+
         Ok(CheckResult::builder()
             .check_passed("private_key")
             .check_passed("configuration")
@@ -226,7 +233,7 @@ impl Sink for SnowflakeSink {
         mut events: futures::stream::BoxStream<'static, SourceEvent>,
     ) -> rivven_connect::error::Result<WriteResult> {
         use futures::StreamExt;
-        
+
         let mut batch: Vec<serde_json::Value> = Vec::with_capacity(config.batch_size);
         let mut total_written = 0u64;
         let mut last_flush = std::time::Instant::now();
@@ -247,7 +254,7 @@ impl Sink for SnowflakeSink {
 
             if should_flush && !batch.is_empty() {
                 debug!("Flushing {} rows to Snowflake", batch.len());
-                
+
                 // In real implementation: call Snowpipe Streaming API
                 // For now, we simulate success
                 total_written += batch.len() as u64;
@@ -262,7 +269,10 @@ impl Sink for SnowflakeSink {
             total_written += batch.len() as u64;
         }
 
-        info!("Snowflake sink completed: {} total rows written", total_written);
+        info!(
+            "Snowflake sink completed: {} total rows written",
+            total_written
+        );
 
         Ok(WriteResult {
             records_written: total_written,

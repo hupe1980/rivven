@@ -27,7 +27,7 @@
 //!   bits 5-7: Reserved
 //! ```
 
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use std::io::{Read, Write};
 use thiserror::Error;
 
@@ -39,19 +39,19 @@ use thiserror::Error;
 pub enum CompressionError {
     #[error("LZ4 compression failed: {0}")]
     Lz4Error(String),
-    
+
     #[error("Zstd compression failed: {0}")]
     ZstdError(String),
-    
+
     #[error("Invalid compression header")]
     InvalidHeader,
-    
+
     #[error("Decompression buffer too small: need {needed}, have {available}")]
     BufferTooSmall { needed: usize, available: usize },
-    
+
     #[error("Unknown compression algorithm: {0}")]
     UnknownAlgorithm(u8),
-    
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -96,7 +96,7 @@ impl CompressionAlgorithm {
         }
         flags
     }
-    
+
     /// Get human-readable name
     pub fn name(&self) -> &'static str {
         match self {
@@ -112,8 +112,7 @@ impl CompressionAlgorithm {
 // ============================================================================
 
 /// Compression level presets
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CompressionLevel {
     /// Fastest compression, lowest ratio
     Fast,
@@ -130,9 +129,9 @@ impl CompressionLevel {
     /// Get LZ4 acceleration parameter (higher = faster, lower ratio)
     fn lz4_acceleration(&self) -> i32 {
         match self {
-            Self::Fast => 65537,      // Max acceleration
-            Self::Default => 1,       // Default
-            Self::Best => 1,          // LZ4 doesn't have "best", use default
+            Self::Fast => 65537, // Max acceleration
+            Self::Default => 1,  // Default
+            Self::Best => 1,     // LZ4 doesn't have "best", use default
             Self::Custom(n) => *n,
         }
     }
@@ -141,13 +140,12 @@ impl CompressionLevel {
     fn zstd_level(&self) -> i32 {
         match self {
             Self::Fast => 1,
-            Self::Default => 3,       // Zstd default
-            Self::Best => 19,         // High compression
+            Self::Default => 3, // Zstd default
+            Self::Best => 19,   // High compression
             Self::Custom(n) => *n,
         }
     }
 }
-
 
 // ============================================================================
 // Compressor Configuration
@@ -175,8 +173,8 @@ impl Default for CompressionConfig {
         Self {
             algorithm: CompressionAlgorithm::Lz4,
             level: CompressionLevel::Default,
-            min_size: 64,           // Don't compress < 64 bytes
-            ratio_threshold: 0.95,  // Must achieve at least 5% reduction
+            min_size: 64,          // Don't compress < 64 bytes
+            ratio_threshold: 0.95, // Must achieve at least 5% reduction
             adaptive: true,
         }
     }
@@ -232,7 +230,7 @@ fn compress_lz4(data: &[u8], level: CompressionLevel) -> Result<Vec<u8>> {
         CompressionLevel::Custom(n) if n > 0 => lz4::block::CompressionMode::FAST(n),
         CompressionLevel::Custom(n) => lz4::block::CompressionMode::HIGHCOMPRESSION(-n),
     };
-    
+
     lz4::block::compress(data, Some(mode), false)
         .map_err(|e| CompressionError::Lz4Error(e.to_string()))
 }
@@ -240,7 +238,7 @@ fn compress_lz4(data: &[u8], level: CompressionLevel) -> Result<Vec<u8>> {
 /// Decompress LZ4 data
 fn decompress_lz4(data: &[u8], original_size: Option<usize>) -> Result<Vec<u8>> {
     let uncompressed_size = original_size.unwrap_or(data.len() * 4); // Estimate 4x expansion
-    
+
     lz4::block::decompress(data, Some(uncompressed_size as i32))
         .map_err(|e| CompressionError::Lz4Error(e.to_string()))
 }
@@ -248,9 +246,8 @@ fn decompress_lz4(data: &[u8], original_size: Option<usize>) -> Result<Vec<u8>> 
 /// Compress data using Zstd
 fn compress_zstd(data: &[u8], level: CompressionLevel) -> Result<Vec<u8>> {
     let level = level.zstd_level();
-    
-    zstd::bulk::compress(data, level)
-        .map_err(|e| CompressionError::ZstdError(e.to_string()))
+
+    zstd::bulk::compress(data, level).map_err(|e| CompressionError::ZstdError(e.to_string()))
 }
 
 /// Decompress Zstd data
@@ -382,14 +379,14 @@ impl Compressor {
         // 2. Detect high entropy (random/encrypted): No compression
         // 3. Text-like data: Zstd (better ratio)
         // 4. Binary data: LZ4 (faster)
-        
+
         if data.len() < self.config.min_size {
             return CompressionAlgorithm::None;
         }
 
         // Quick entropy estimation using byte frequency
         let entropy = estimate_entropy(data);
-        
+
         if entropy > 7.5 {
             // High entropy - likely already compressed or encrypted
             return CompressionAlgorithm::None;
@@ -471,7 +468,7 @@ fn estimate_entropy(data: &[u8]) -> f32 {
     // Calculate entropy
     let len = sample.len() as f32;
     let mut entropy = 0.0f32;
-    
+
     for count in freq.iter() {
         if *count > 0 {
             let p = *count as f32 / len;
@@ -499,7 +496,11 @@ enum StreamingEncoder<W: Write> {
 
 impl<W: Write> StreamingCompressor<W> {
     /// Create streaming compressor
-    pub fn new(writer: W, algorithm: CompressionAlgorithm, level: CompressionLevel) -> Result<Self> {
+    pub fn new(
+        writer: W,
+        algorithm: CompressionAlgorithm,
+        level: CompressionLevel,
+    ) -> Result<Self> {
         let encoder = match algorithm {
             CompressionAlgorithm::None => StreamingEncoder::None(writer),
             CompressionAlgorithm::Lz4 => {
@@ -537,9 +538,9 @@ impl<W: Write> StreamingCompressor<W> {
                 result.map_err(|e| CompressionError::Lz4Error(e.to_string()))?;
                 Ok(w)
             }
-            StreamingEncoder::Zstd(e) => {
-                e.finish().map_err(|e| CompressionError::ZstdError(e.to_string()))
-            }
+            StreamingEncoder::Zstd(e) => e
+                .finish()
+                .map_err(|e| CompressionError::ZstdError(e.to_string())),
         }
     }
 }
@@ -618,10 +619,10 @@ impl BatchCompressor {
     pub fn finish(self) -> Result<CompressedBatch> {
         let message_count = self.message_offsets.len();
         let uncompressed_size = self.buffer.len();
-        
+
         // Compress the batch
         let compressed = self.compressor.compress(&self.buffer)?;
-        
+
         Ok(CompressedBatch {
             data: compressed,
             message_count,
@@ -649,7 +650,7 @@ impl CompressedBatch {
     pub fn decompress(&self) -> Result<BatchIterator> {
         let compressor = Compressor::new();
         let decompressed = compressor.decompress(&self.data)?;
-        
+
         Ok(BatchIterator {
             data: decompressed,
             position: 0,
@@ -741,7 +742,7 @@ mod tests {
         let compressed = compressor.compress(data).unwrap();
         // Should be flags (1) + data (4) = 5 bytes
         assert_eq!(compressed.len(), 5);
-        
+
         let decompressed = compressor.decompress(&compressed).unwrap();
         assert_eq!(&decompressed[..], &data[..]);
     }

@@ -37,8 +37,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 /// Snapshot state for a table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SnapshotState {
     /// Not started
     #[default]
@@ -52,7 +51,6 @@ pub enum SnapshotState {
     /// Paused (can resume)
     Paused,
 }
-
 
 /// Progress information for a table snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -321,13 +319,13 @@ impl SnapshotBatch {
 pub trait ProgressStore: Send + Sync {
     /// Save progress for a table.
     async fn save(&self, progress: &SnapshotProgress) -> Result<()>;
-    
+
     /// Load progress for a table.
     async fn load(&self, schema: &str, table: &str) -> Result<Option<SnapshotProgress>>;
-    
+
     /// Delete progress for a table.
     async fn delete(&self, schema: &str, table: &str) -> Result<()>;
-    
+
     /// List all progress entries.
     async fn list(&self) -> Result<Vec<SnapshotProgress>>;
 }
@@ -377,10 +375,10 @@ impl ProgressStore for MemoryProgressStore {
 pub trait SnapshotSource: Send + Sync {
     /// Get current position/watermark.
     async fn get_watermark(&self) -> Result<String>;
-    
+
     /// Estimate row count for a table.
     async fn estimate_row_count(&self, schema: &str, table: &str) -> Result<Option<u64>>;
-    
+
     /// Fetch a batch of rows.
     async fn fetch_batch(
         &self,
@@ -520,21 +518,23 @@ impl<S: SnapshotSource, P: ProgressStore> SnapshotCoordinator<S, P> {
     /// Snapshot a single table.
     pub async fn snapshot_table(&self, spec: &TableSpec) -> Result<Vec<SnapshotBatch>> {
         let mut batches = Vec::new();
-        let mut progress = self.progress_store
+        let mut progress = self
+            .progress_store
             .load(&spec.schema, &spec.table)
             .await?
             .unwrap_or_else(|| SnapshotProgress::new(&spec.schema, &spec.table));
 
         // Get watermark
         let watermark = self.source.get_watermark().await?;
-        
+
         // Start or resume
         if progress.state == SnapshotState::Pending {
             progress.start(Some(watermark));
-            
+
             // Estimate rows if configured
             if self.config.estimate_rows {
-                progress.total_rows = self.source
+                progress.total_rows = self
+                    .source
                     .estimate_row_count(&spec.schema, &spec.table)
                     .await?;
             }
@@ -552,10 +552,7 @@ impl<S: SnapshotSource, P: ProgressStore> SnapshotCoordinator<S, P> {
             }
 
             // Fetch batch with retry
-            let batch = self.fetch_with_retry(
-                spec,
-                last_key.as_deref(),
-            ).await?;
+            let batch = self.fetch_with_retry(spec, last_key.as_deref()).await?;
 
             let batch_len = batch.len() as u64;
             let is_last = batch.is_last || batch.is_empty();
@@ -607,13 +604,17 @@ impl<S: SnapshotSource, P: ProgressStore> SnapshotCoordinator<S, P> {
     ) -> Result<SnapshotBatch> {
         let mut attempts = 0;
         loop {
-            match self.source.fetch_batch(
-                &spec.schema,
-                &spec.table,
-                &spec.key_column,
-                last_key,
-                self.config.batch_size,
-            ).await {
+            match self
+                .source
+                .fetch_batch(
+                    &spec.schema,
+                    &spec.table,
+                    &spec.key_column,
+                    last_key,
+                    self.config.batch_size,
+                )
+                .await
+            {
                 Ok(batch) => return Ok(batch),
                 Err(e) => {
                     attempts += 1;
@@ -628,9 +629,12 @@ impl<S: SnapshotSource, P: ProgressStore> SnapshotCoordinator<S, P> {
     }
 
     /// Snapshot multiple tables.
-    pub async fn snapshot_tables(&self, specs: Vec<TableSpec>) -> Result<HashMap<String, Vec<SnapshotBatch>>> {
+    pub async fn snapshot_tables(
+        &self,
+        specs: Vec<TableSpec>,
+    ) -> Result<HashMap<String, Vec<SnapshotBatch>>> {
         let mut results = HashMap::new();
-        
+
         // Process tables (could be parallelized with semaphore)
         for spec in specs {
             let key = format!("{}.{}", spec.schema, spec.table);
@@ -707,13 +711,14 @@ impl SnapshotSource for MockSnapshotSource {
     ) -> Result<SnapshotBatch> {
         let key = format!("{}.{}", schema, table);
         let rows = self.rows.read().await;
-        
+
         let table_rows = rows.get(&key).cloned().unwrap_or_default();
-        
+
         // Find start position
         let start_idx = if let Some(last) = last_key {
             let last_val: i64 = last.parse().unwrap_or(0);
-            table_rows.iter()
+            table_rows
+                .iter()
                 .position(|r| {
                     r.get(key_column)
                         .and_then(|v| v.as_i64())
@@ -729,21 +734,25 @@ impl SnapshotSource for MockSnapshotSource {
         let batch_rows: Vec<_> = table_rows[start_idx..end_idx].to_vec();
         let is_last = end_idx >= table_rows.len();
 
-        let events: Vec<CdcEvent> = batch_rows.iter().map(|row| {
-            CdcEvent {
-                source_type: "snapshot".to_string(),
-                database: "test".to_string(),
-                schema: schema.to_string(),
-                table: table.to_string(),
-                op: CdcOp::Snapshot, // Snapshot events use Snapshot op
-                before: None,
-                after: Some(row.clone()),
-                timestamp: chrono::Utc::now().timestamp(),
-                transaction: None,
-            }
-        }).collect();
+        let events: Vec<CdcEvent> = batch_rows
+            .iter()
+            .map(|row| {
+                CdcEvent {
+                    source_type: "snapshot".to_string(),
+                    database: "test".to_string(),
+                    schema: schema.to_string(),
+                    table: table.to_string(),
+                    op: CdcOp::Snapshot, // Snapshot events use Snapshot op
+                    before: None,
+                    after: Some(row.clone()),
+                    timestamp: chrono::Utc::now().timestamp(),
+                    transaction: None,
+                }
+            })
+            .collect();
 
-        let last_key = batch_rows.last()
+        let last_key = batch_rows
+            .last()
             .and_then(|r| r.get(key_column))
             .and_then(|v| v.as_i64())
             .map(|v| v.to_string());
@@ -773,7 +782,7 @@ mod tests {
     #[test]
     fn test_snapshot_progress_lifecycle() {
         let mut progress = SnapshotProgress::new("public", "users");
-        
+
         // Start
         progress.start(Some("0/1234".to_string()));
         assert_eq!(progress.state, SnapshotState::InProgress);
@@ -796,7 +805,7 @@ mod tests {
         let mut progress = SnapshotProgress::new("public", "users");
         progress.start(None);
         progress.fail("Connection lost");
-        
+
         assert_eq!(progress.state, SnapshotState::Failed);
         assert_eq!(progress.error, Some("Connection lost".to_string()));
     }
@@ -806,7 +815,7 @@ mod tests {
         let mut progress = SnapshotProgress::new("public", "users");
         progress.total_rows = Some(1000);
         progress.rows_processed = 500;
-        
+
         assert_eq!(progress.percentage(), Some(50.0));
     }
 
@@ -816,7 +825,7 @@ mod tests {
         progress.start(None);
         progress.update(100, Some("100".to_string()));
         progress.pause();
-        
+
         assert!(progress.can_resume());
     }
 
@@ -856,23 +865,19 @@ mod tests {
 
     #[test]
     fn test_snapshot_batch() {
-        let events = vec![
-            CdcEvent {
-                source_type: "snapshot".to_string(),
-                database: "test".to_string(),
-                schema: "public".to_string(),
-                table: "users".to_string(),
-                op: CdcOp::Snapshot,
-                before: None,
-                after: Some(serde_json::json!({"id": 1})),
-                timestamp: 0,
-                transaction: None,
-            }
-        ];
+        let events = vec![CdcEvent {
+            source_type: "snapshot".to_string(),
+            database: "test".to_string(),
+            schema: "public".to_string(),
+            table: "users".to_string(),
+            op: CdcOp::Snapshot,
+            before: None,
+            after: Some(serde_json::json!({"id": 1})),
+            timestamp: 0,
+            transaction: None,
+        }];
 
-        let batch = SnapshotBatch::new(events, 0)
-            .with_last_key("1")
-            .mark_last();
+        let batch = SnapshotBatch::new(events, 0).with_last_key("1").mark_last();
 
         assert_eq!(batch.len(), 1);
         assert!(batch.is_last);
@@ -881,8 +886,7 @@ mod tests {
 
     #[test]
     fn test_table_spec() {
-        let spec = TableSpec::new("public", "users", "id")
-            .with_filter("active = true");
+        let spec = TableSpec::new("public", "users", "id").with_filter("active = true");
 
         assert_eq!(spec.schema, "public");
         assert_eq!(spec.table, "users");
@@ -893,7 +897,7 @@ mod tests {
     #[tokio::test]
     async fn test_memory_progress_store() {
         let store = MemoryProgressStore::new();
-        
+
         let mut progress = SnapshotProgress::new("public", "users");
         progress.start(None);
         progress.update(100, Some("100".to_string()));
@@ -916,7 +920,7 @@ mod tests {
     #[tokio::test]
     async fn test_mock_snapshot_source() {
         let source = MockSnapshotSource::new();
-        
+
         let rows = vec![
             serde_json::json!({"id": 1, "name": "Alice"}),
             serde_json::json!({"id": 2, "name": "Bob"}),
@@ -925,13 +929,19 @@ mod tests {
         source.add_rows("public", "users", rows).await;
 
         // First batch
-        let batch = source.fetch_batch("public", "users", "id", None, 2).await.unwrap();
+        let batch = source
+            .fetch_batch("public", "users", "id", None, 2)
+            .await
+            .unwrap();
         assert_eq!(batch.events.len(), 2);
         assert!(!batch.is_last);
         assert_eq!(batch.last_key, Some("2".to_string()));
 
         // Second batch (from last key)
-        let batch = source.fetch_batch("public", "users", "id", Some("2"), 2).await.unwrap();
+        let batch = source
+            .fetch_batch("public", "users", "id", Some("2"), 2)
+            .await
+            .unwrap();
         assert_eq!(batch.events.len(), 1);
         assert!(batch.is_last);
     }
@@ -939,11 +949,8 @@ mod tests {
     #[tokio::test]
     async fn test_mock_snapshot_source_estimate() {
         let source = MockSnapshotSource::new();
-        
-        let rows = vec![
-            serde_json::json!({"id": 1}),
-            serde_json::json!({"id": 2}),
-        ];
+
+        let rows = vec![serde_json::json!({"id": 1}), serde_json::json!({"id": 2})];
         source.add_rows("public", "users", rows).await;
 
         let count = source.estimate_row_count("public", "users").await.unwrap();
@@ -960,15 +967,13 @@ mod tests {
         source.add_rows("public", "users", rows).await;
 
         let progress_store = MemoryProgressStore::new();
-        let config = SnapshotConfig::builder()
-            .batch_size(10)
-            .build();
+        let config = SnapshotConfig::builder().batch_size(10).build();
 
         let coordinator = SnapshotCoordinator::new(config, source, progress_store);
         let spec = TableSpec::new("public", "users", "id");
 
         let batches = coordinator.snapshot_table(&spec).await.unwrap();
-        
+
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].events.len(), 2);
         assert!(batches[0].is_last);
@@ -977,10 +982,7 @@ mod tests {
     #[tokio::test]
     async fn test_snapshot_coordinator_stats() {
         let source = MockSnapshotSource::new();
-        let rows = vec![
-            serde_json::json!({"id": 1}),
-            serde_json::json!({"id": 2}),
-        ];
+        let rows = vec![serde_json::json!({"id": 1}), serde_json::json!({"id": 2})];
         source.add_rows("public", "users", rows).await;
 
         let progress_store = MemoryProgressStore::new();
@@ -1004,26 +1006,21 @@ mod tests {
         source.add_rows("public", "users", rows).await;
 
         let progress_store = MemoryProgressStore::new();
-        let config = SnapshotConfig::builder()
-            .batch_size(10)
-            .build();
+        let config = SnapshotConfig::builder().batch_size(10).build();
 
         let coordinator = SnapshotCoordinator::new(config, source, progress_store);
         coordinator.cancel();
 
         let spec = TableSpec::new("public", "users", "id");
         let result = coordinator.snapshot_table(&spec).await;
-        
+
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_snapshot_coordinator_progress_persistence() {
         let source = MockSnapshotSource::new();
-        let rows = vec![
-            serde_json::json!({"id": 1}),
-            serde_json::json!({"id": 2}),
-        ];
+        let rows = vec![serde_json::json!({"id": 1}), serde_json::json!({"id": 2})];
         source.add_rows("public", "users", rows).await;
 
         let progress_store = MemoryProgressStore::new();
@@ -1043,7 +1040,7 @@ mod tests {
     #[test]
     fn test_snapshot_stats() {
         let stats = SnapshotStats::new();
-        
+
         stats.record_rows(100);
         stats.record_batch();
         stats.record_bytes(1024);
@@ -1059,12 +1056,12 @@ mod tests {
     #[tokio::test]
     async fn test_snapshot_multiple_tables() {
         let source = MockSnapshotSource::new();
-        source.add_rows("public", "users", vec![
-            serde_json::json!({"id": 1}),
-        ]).await;
-        source.add_rows("public", "orders", vec![
-            serde_json::json!({"id": 1}),
-        ]).await;
+        source
+            .add_rows("public", "users", vec![serde_json::json!({"id": 1})])
+            .await;
+        source
+            .add_rows("public", "orders", vec![serde_json::json!({"id": 1})])
+            .await;
 
         let progress_store = MemoryProgressStore::new();
         let config = SnapshotConfig::default();
@@ -1077,7 +1074,7 @@ mod tests {
         ];
 
         let results = coordinator.snapshot_tables(specs).await.unwrap();
-        
+
         assert_eq!(results.len(), 2);
         assert!(results.contains_key("public.users"));
         assert!(results.contains_key("public.orders"));

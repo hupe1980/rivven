@@ -5,22 +5,22 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     /// Server bind address
     pub bind_address: String,
-    
+
     /// Server port
     pub port: u16,
-    
+
     /// Default number of partitions for new topics
     pub default_partitions: u32,
-    
+
     /// Enable disk persistence
     pub enable_persistence: bool,
-    
+
     /// Data directory for persistence
     pub data_dir: String,
 
     /// Maximum segment size in bytes
     pub max_segment_size: u64,
-    
+
     /// Log level
     pub log_level: String,
 }
@@ -105,7 +105,7 @@ mod tests {
             .with_default_partitions(6)
             .with_persistence(true)
             .with_data_dir("/var/lib/rivven".to_string());
-        
+
         assert_eq!(config.bind_address, "0.0.0.0");
         assert_eq!(config.port, 9093);
         assert_eq!(config.default_partitions, 6);
@@ -117,7 +117,7 @@ mod tests {
     fn test_server_address() {
         let config = Config::default();
         assert_eq!(config.server_address(), "127.0.0.1:9092");
-        
+
         let custom = Config::new()
             .with_bind_address("10.0.0.1".to_string())
             .with_port(9999);
@@ -129,7 +129,7 @@ mod tests {
         let config = Config::default();
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: Config = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(config.bind_address, deserialized.bind_address);
         assert_eq!(config.port, deserialized.port);
         assert_eq!(config.default_partitions, deserialized.default_partitions);

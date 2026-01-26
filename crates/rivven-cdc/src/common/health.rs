@@ -67,9 +67,8 @@ impl HealthCheckResult {
 }
 
 /// Type alias for async health check functions.
-pub type HealthCheckFn = Box<
-    dyn Fn() -> Pin<Box<dyn Future<Output = HealthCheckResult> + Send>> + Send + Sync,
->;
+pub type HealthCheckFn =
+    Box<dyn Fn() -> Pin<Box<dyn Future<Output = HealthCheckResult> + Send>> + Send + Sync>;
 
 /// Configuration for health monitoring.
 #[derive(Debug, Clone)]
@@ -206,10 +205,7 @@ impl HealthMonitor {
         Fut: Future<Output = HealthCheckResult> + Send + 'static,
     {
         let mut checks = self.checks.write().await;
-        checks.insert(
-            name.to_string(),
-            Box::new(move || Box::pin(check())),
-        );
+        checks.insert(name.to_string(), Box::new(move || Box::pin(check())));
         debug!("Registered health check: {}", name);
     }
 

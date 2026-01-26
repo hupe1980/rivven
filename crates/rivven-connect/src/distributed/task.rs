@@ -30,7 +30,10 @@ impl TaskState {
     }
 
     pub fn can_start(&self) -> bool {
-        matches!(self, TaskState::Pending | TaskState::Assigned | TaskState::Paused | TaskState::Failed)
+        matches!(
+            self,
+            TaskState::Pending | TaskState::Assigned | TaskState::Paused | TaskState::Failed
+        )
     }
 }
 
@@ -215,7 +218,7 @@ impl SingletonState {
         self.generation.increment();
         self.last_heartbeat = chrono::Utc::now().timestamp();
         self.failover_in_progress = false;
-        
+
         // Remove from standbys if present
         self.standbys.retain(|n| n != &node);
     }
@@ -245,10 +248,10 @@ impl SingletonState {
         if self.failover_in_progress {
             return None;
         }
-        
+
         self.failover_in_progress = true;
         self.leader = None;
-        
+
         // Promote first standby
         if let Some(new_leader) = self.standbys.first().cloned() {
             self.set_leader(new_leader.clone());

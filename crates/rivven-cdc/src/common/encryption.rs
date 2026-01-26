@@ -37,8 +37,7 @@ use tokio::sync::RwLock;
 use tracing::warn;
 
 /// Encryption algorithm.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum EncryptionAlgorithm {
     /// AES-256-GCM (authenticated encryption)
     #[default]
@@ -46,7 +45,6 @@ pub enum EncryptionAlgorithm {
     /// Deterministic encryption for searchable fields
     Deterministic,
 }
-
 
 /// Field encryption rule.
 #[derive(Debug, Clone)]
@@ -177,9 +175,9 @@ impl EncryptionConfigBuilder {
         field: impl Into<String>,
         algorithm: EncryptionAlgorithm,
     ) -> Self {
-        self.config.rules.push(
-            FieldRule::new(table, field).with_algorithm(algorithm),
-        );
+        self.config
+            .rules
+            .push(FieldRule::new(table, field).with_algorithm(algorithm));
         self
     }
 
@@ -336,25 +334,25 @@ impl KeyProvider for MemoryKeyProvider {
 
     async fn rotate_key(&self, key_id: &str) -> Result<EncryptionKey> {
         let new_key = EncryptionKey::generate(key_id)?;
-        
+
         // Deactivate old key
         let mut keys = self.keys.write().await;
         if let Some(old) = keys.get_mut(key_id) {
             old.active = false;
         }
-        
+
         // Store new key with incremented version
         let mut versioned_key = new_key;
         if let Some(old) = keys.get(key_id) {
             versioned_key.version = old.version + 1;
         }
-        
+
         let key_clone = versioned_key.clone();
         keys.insert(key_id.to_string(), versioned_key);
-        
+
         // Update active key ID
         *self.active_key_id.write().await = key_id.to_string();
-        
+
         Ok(key_clone)
     }
 }
@@ -460,12 +458,15 @@ impl<P: KeyProvider> FieldEncryptor<P> {
                         let plaintext = value.to_string();
                         match self.encrypt_value(&aead_key, &plaintext, &key.id) {
                             Ok(ciphertext) => {
-                                obj.insert(field.clone(), serde_json::json!({
-                                    "__encrypted": true,
-                                    "__key_id": key.id,
-                                    "__key_version": key.version,
-                                    "__value": ciphertext,
-                                }));
+                                obj.insert(
+                                    field.clone(),
+                                    serde_json::json!({
+                                        "__encrypted": true,
+                                        "__key_id": key.id,
+                                        "__key_version": key.version,
+                                        "__value": ciphertext,
+                                    }),
+                                );
                                 encrypted_count += 1;
                             }
                             Err(e) => {
@@ -488,12 +489,15 @@ impl<P: KeyProvider> FieldEncryptor<P> {
                         let plaintext = value.to_string();
                         match self.encrypt_value(&aead_key, &plaintext, &key.id) {
                             Ok(ciphertext) => {
-                                obj.insert(field.clone(), serde_json::json!({
-                                    "__encrypted": true,
-                                    "__key_id": key.id,
-                                    "__key_version": key.version,
-                                    "__value": ciphertext,
-                                }));
+                                obj.insert(
+                                    field.clone(),
+                                    serde_json::json!({
+                                        "__encrypted": true,
+                                        "__key_id": key.id,
+                                        "__key_version": key.version,
+                                        "__value": ciphertext,
+                                    }),
+                                );
                                 encrypted_count += 1;
                             }
                             Err(e) => {
@@ -524,7 +528,7 @@ impl<P: KeyProvider> FieldEncryptor<P> {
             if let Some(obj) = after.as_object_mut() {
                 let mut decrypted_count = 0u64;
                 let keys: Vec<_> = obj.keys().cloned().collect();
-                
+
                 for field in keys {
                     if let Some(value) = obj.get(&field) {
                         if let Some(encrypted) = value.as_object() {
@@ -536,9 +540,10 @@ impl<P: KeyProvider> FieldEncryptor<P> {
                                     match self.decrypt_value(key_id, ciphertext).await {
                                         Ok(plaintext) => {
                                             // Parse back to original JSON type
-                                            let parsed: serde_json::Value = 
-                                                serde_json::from_str(&plaintext)
-                                                    .unwrap_or_else(|_| serde_json::json!(plaintext));
+                                            let parsed: serde_json::Value = serde_json::from_str(
+                                                &plaintext,
+                                            )
+                                            .unwrap_or_else(|_| serde_json::json!(plaintext));
                                             obj.insert(field, parsed);
                                             decrypted_count += 1;
                                         }
@@ -561,7 +566,7 @@ impl<P: KeyProvider> FieldEncryptor<P> {
             if let Some(obj) = before.as_object_mut() {
                 let mut decrypted_count = 0u64;
                 let keys: Vec<_> = obj.keys().cloned().collect();
-                
+
                 for field in keys {
                     if let Some(value) = obj.get(&field) {
                         if let Some(encrypted) = value.as_object() {
@@ -572,9 +577,10 @@ impl<P: KeyProvider> FieldEncryptor<P> {
                                 ) {
                                     match self.decrypt_value(key_id, ciphertext).await {
                                         Ok(plaintext) => {
-                                            let parsed: serde_json::Value = 
-                                                serde_json::from_str(&plaintext)
-                                                    .unwrap_or_else(|_| serde_json::json!(plaintext));
+                                            let parsed: serde_json::Value = serde_json::from_str(
+                                                &plaintext,
+                                            )
+                                            .unwrap_or_else(|_| serde_json::json!(plaintext));
                                             obj.insert(field, parsed);
                                             decrypted_count += 1;
                                         }
@@ -599,7 +605,8 @@ impl<P: KeyProvider> FieldEncryptor<P> {
     fn encrypt_value(&self, key: &LessSafeKey, plaintext: &str, key_id: &str) -> Result<String> {
         // Generate random nonce
         let mut nonce_bytes = [0u8; 12];
-        self.rng.fill(&mut nonce_bytes)
+        self.rng
+            .fill(&mut nonce_bytes)
             .map_err(|_| CdcError::replication("Failed to generate nonce"))?;
         let nonce = Nonce::assume_unique_for_key(nonce_bytes);
 
@@ -622,19 +629,23 @@ impl<P: KeyProvider> FieldEncryptor<P> {
 
     /// Decrypt a single value.
     async fn decrypt_value(&self, key_id: &str, ciphertext: &str) -> Result<String> {
-        let key = self.key_provider.get_key(key_id).await?
+        let key = self
+            .key_provider
+            .get_key(key_id)
+            .await?
             .ok_or_else(|| CdcError::replication(format!("Key not found: {}", key_id)))?;
         let aead_key = key.to_aead_key()?;
 
         // Base64 decode
         let data = base64_decode(ciphertext)?;
-        
+
         if data.len() < 12 {
             return Err(CdcError::replication("Invalid ciphertext"));
         }
 
         // Extract nonce and ciphertext
-        let nonce_bytes: [u8; 12] = data[..12].try_into()
+        let nonce_bytes: [u8; 12] = data[..12]
+            .try_into()
             .map_err(|_| CdcError::replication("Invalid nonce"))?;
         let nonce = Nonce::assume_unique_for_key(nonce_bytes);
         let mut ciphertext_data = data[12..].to_vec();
@@ -644,11 +655,11 @@ impl<P: KeyProvider> FieldEncryptor<P> {
         let aad = Aad::from(aad.as_bytes());
 
         // Decrypt
-        let plaintext = aead_key.open_in_place(nonce, aad, &mut ciphertext_data)
+        let plaintext = aead_key
+            .open_in_place(nonce, aad, &mut ciphertext_data)
             .map_err(|_| CdcError::replication("Decryption failed"))?;
 
-        String::from_utf8(plaintext.to_vec())
-            .map_err(|_| CdcError::replication("Invalid UTF-8"))
+        String::from_utf8(plaintext.to_vec()).map_err(|_| CdcError::replication("Invalid UTF-8"))
     }
 
     /// Get statistics.
@@ -658,7 +669,8 @@ impl<P: KeyProvider> FieldEncryptor<P> {
 
     /// Check if a field is encrypted.
     pub fn is_field_encrypted(value: &serde_json::Value) -> bool {
-        value.as_object()
+        value
+            .as_object()
             .map(|obj| obj.get("__encrypted") == Some(&serde_json::json!(true)))
             .unwrap_or(false)
     }
@@ -668,48 +680,46 @@ impl<P: KeyProvider> FieldEncryptor<P> {
 fn base64_encode(data: &[u8]) -> String {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut result = String::new();
-    
+
     for chunk in data.chunks(3) {
         let n = chunk.len();
         let mut buf = [0u8; 3];
         buf[..n].copy_from_slice(chunk);
-        
+
         let b = ((buf[0] as u32) << 16) | ((buf[1] as u32) << 8) | (buf[2] as u32);
-        
+
         result.push(ALPHABET[(b >> 18) as usize & 0x3F] as char);
         result.push(ALPHABET[(b >> 12) as usize & 0x3F] as char);
-        
+
         if n > 1 {
             result.push(ALPHABET[(b >> 6) as usize & 0x3F] as char);
         } else {
             result.push('=');
         }
-        
+
         if n > 2 {
             result.push(ALPHABET[b as usize & 0x3F] as char);
         } else {
             result.push('=');
         }
     }
-    
+
     result
 }
 
 fn base64_decode(s: &str) -> Result<Vec<u8>> {
     const DECODE: [i8; 128] = [
-        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 62, -1, -1, -1, 63,
-        52, 53, 54, 55, 56, 57, 58, 59, 60, 61, -1, -1, -1, -1, -1, -1,
-        -1,  0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14,
-        15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, -1, -1, -1, -1, -1,
-        -1, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
-        41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 62, -1, -1,
+        -1, 63, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, -1, -1, -1, -1, -1, -1, -1, 0, 1, 2, 3, 4,
+        5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, -1, -1, -1,
+        -1, -1, -1, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45,
+        46, 47, 48, 49, 50, 51, -1, -1, -1, -1, -1,
     ];
-    
+
     let s = s.trim_end_matches('=');
     let mut result = Vec::with_capacity(s.len() * 3 / 4);
-    
+
     let bytes: Vec<u8> = s.bytes().collect();
     for chunk in bytes.chunks(4) {
         let mut buf = [0u8; 4];
@@ -723,11 +733,13 @@ fn base64_decode(s: &str) -> Result<Vec<u8>> {
             }
             buf[i] = val as u8;
         }
-        
+
         let n = chunk.len();
-        let b = ((buf[0] as u32) << 18) | ((buf[1] as u32) << 12) 
-              | ((buf[2] as u32) << 6) | (buf[3] as u32);
-        
+        let b = ((buf[0] as u32) << 18)
+            | ((buf[1] as u32) << 12)
+            | ((buf[2] as u32) << 6)
+            | (buf[3] as u32);
+
         result.push((b >> 16) as u8);
         if n > 2 {
             result.push((b >> 8) as u8);
@@ -736,7 +748,7 @@ fn base64_decode(s: &str) -> Result<Vec<u8>> {
             result.push(b as u8);
         }
     }
-    
+
     Ok(result)
 }
 
@@ -845,7 +857,7 @@ mod tests {
     #[tokio::test]
     async fn test_memory_key_provider() {
         let provider = MemoryKeyProvider::new().unwrap();
-        
+
         let key = provider.get_active_key().await.unwrap();
         assert_eq!(key.id, "default");
         assert!(key.active);
@@ -854,10 +866,10 @@ mod tests {
     #[tokio::test]
     async fn test_memory_key_provider_rotation() {
         let provider = MemoryKeyProvider::new().unwrap();
-        
+
         let old_key = provider.get_active_key().await.unwrap();
         let new_key = provider.rotate_key("default").await.unwrap();
-        
+
         assert_eq!(new_key.id, "default");
         assert_eq!(new_key.version, old_key.version + 1);
     }
@@ -868,7 +880,7 @@ mod tests {
             .encrypt_field("users", "email")
             .encrypt_field("users", "ssn")
             .build();
-        
+
         let provider = MemoryKeyProvider::new().unwrap();
         let encryptor = FieldEncryptor::new(config, provider);
 
@@ -891,9 +903,12 @@ mod tests {
         // Decrypt
         let decrypted = encryptor.decrypt(&encrypted).await.unwrap();
         let after = decrypted.after.as_ref().unwrap();
-        
+
         // Values should be restored (compare as JSON strings)
-        assert_eq!(after.get("email").unwrap().as_str().unwrap(), "test@example.com");
+        assert_eq!(
+            after.get("email").unwrap().as_str().unwrap(),
+            "test@example.com"
+        );
         assert_eq!(after.get("ssn").unwrap().as_str().unwrap(), "123-45-6789");
         assert_eq!(after.get("name").unwrap().as_str().unwrap(), "John Doe");
     }

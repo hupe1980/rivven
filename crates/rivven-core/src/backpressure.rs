@@ -13,11 +13,11 @@
 //! - Reactive Streams backpressure
 //! - Netflix Hystrix circuit breaker patterns
 
+use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex, Notify, Semaphore};
-use parking_lot::RwLock;
 
 /// Token bucket rate limiter
 /// Allows bursts up to bucket capacity, then limits to refill rate
@@ -50,30 +50,34 @@ impl TokenBucket {
             stats: TokenBucketStats::new(),
         }
     }
-    
+
     /// Try to acquire tokens without blocking
     pub fn try_acquire(&self, count: u64) -> bool {
         self.refill();
-        
+
         loop {
             let current = self.tokens.load(Ordering::Acquire);
             if current < count {
                 self.stats.rejected.fetch_add(1, Ordering::Relaxed);
                 return false;
             }
-            
-            if self.tokens.compare_exchange_weak(
-                current,
-                current - count,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ).is_ok() {
+
+            if self
+                .tokens
+                .compare_exchange_weak(
+                    current,
+                    current - count,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
                 self.stats.acquired.fetch_add(count, Ordering::Relaxed);
                 return true;
             }
         }
     }
-    
+
     /// Acquire tokens, blocking if necessary
     pub async fn acquire(&self, count: u64) {
         while !self.try_acquire(count) {
@@ -81,55 +85,53 @@ impl TokenBucket {
             let tokens_needed = count.saturating_sub(self.tokens.load(Ordering::Relaxed));
             let wait_secs = tokens_needed as f64 / self.refill_rate;
             let wait_duration = Duration::from_secs_f64(wait_secs.max(0.001));
-            
+
             tokio::time::sleep(wait_duration).await;
         }
     }
-    
+
     /// Refill tokens based on elapsed time
     fn refill(&self) {
         let now = self.created.elapsed().as_nanos() as u64;
         let last = self.last_refill.load(Ordering::Acquire);
-        
+
         if now <= last {
             return;
         }
-        
+
         let elapsed_secs = (now - last) as f64 / 1_000_000_000.0;
         let new_tokens = (elapsed_secs * self.refill_rate) as u64;
-        
+
         if new_tokens == 0 {
             return;
         }
-        
-        if self.last_refill.compare_exchange(
-            last,
-            now,
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        ).is_ok() {
+
+        if self
+            .last_refill
+            .compare_exchange(last, now, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
             loop {
                 let current = self.tokens.load(Ordering::Acquire);
                 let new_total = (current + new_tokens).min(self.capacity);
-                
-                if self.tokens.compare_exchange_weak(
-                    current,
-                    new_total,
-                    Ordering::AcqRel,
-                    Ordering::Relaxed,
-                ).is_ok() {
+
+                if self
+                    .tokens
+                    .compare_exchange_weak(current, new_total, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+                {
                     break;
                 }
             }
         }
     }
-    
+
     /// Get current token count
     pub fn available(&self) -> u64 {
         self.refill();
         self.tokens.load(Ordering::Relaxed)
     }
-    
+
     /// Get statistics
     pub fn stats(&self) -> TokenBucketStatsSnapshot {
         TokenBucketStatsSnapshot {
@@ -188,7 +190,7 @@ impl CreditFlowControl {
             stats: CreditStats::new(),
         }
     }
-    
+
     /// Try to consume credits without blocking
     pub fn try_consume(&self, count: u64) -> bool {
         loop {
@@ -197,50 +199,53 @@ impl CreditFlowControl {
                 self.stats.blocked.fetch_add(1, Ordering::Relaxed);
                 return false;
             }
-            
-            if self.credits.compare_exchange_weak(
-                current,
-                current - count,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ).is_ok() {
+
+            if self
+                .credits
+                .compare_exchange_weak(
+                    current,
+                    current - count,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
                 self.stats.consumed.fetch_add(count, Ordering::Relaxed);
                 return true;
             }
         }
     }
-    
+
     /// Consume credits, blocking if necessary
     pub async fn consume(&self, count: u64) {
         while !self.try_consume(count) {
             self.credit_notify.notified().await;
         }
     }
-    
+
     /// Grant credits (called by receiver)
     pub fn grant(&self, count: u64) {
         loop {
             let current = self.credits.load(Ordering::Acquire);
             let new_total = (current + count).min(self.max_credits);
-            
-            if self.credits.compare_exchange_weak(
-                current,
-                new_total,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            ).is_ok() {
+
+            if self
+                .credits
+                .compare_exchange_weak(current, new_total, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
                 self.stats.granted.fetch_add(count, Ordering::Relaxed);
                 self.credit_notify.notify_waiters();
                 break;
             }
         }
     }
-    
+
     /// Get available credits
     pub fn available(&self) -> u64 {
         self.credits.load(Ordering::Relaxed)
     }
-    
+
     /// Get statistics
     pub fn stats(&self) -> CreditStatsSnapshot {
         CreditStatsSnapshot {
@@ -316,7 +321,7 @@ impl LatencySamples {
             filled: false,
         }
     }
-    
+
     fn add(&mut self, latency_us: u64) {
         self.samples[self.index] = latency_us;
         self.index = (self.index + 1) % self.samples.len();
@@ -324,16 +329,20 @@ impl LatencySamples {
             self.filled = true;
         }
     }
-    
+
     fn percentile(&self, p: f64) -> u64 {
-        let count = if self.filled { self.samples.len() } else { self.index };
+        let count = if self.filled {
+            self.samples.len()
+        } else {
+            self.index
+        };
         if count == 0 {
             return 0;
         }
-        
+
         let mut sorted: Vec<u64> = self.samples[..count].to_vec();
         sorted.sort_unstable();
-        
+
         let idx = ((count as f64 * p) as usize).min(count - 1);
         sorted[idx]
     }
@@ -343,7 +352,7 @@ impl AdaptiveRateLimiter {
     /// Create new adaptive rate limiter
     pub fn new(config: AdaptiveRateLimiterConfig) -> Self {
         let bucket = TokenBucket::new(config.initial_rate, config.initial_rate as f64);
-        
+
         Self {
             rate: AtomicU64::new(config.initial_rate),
             min_rate: config.min_rate,
@@ -356,38 +365,38 @@ impl AdaptiveRateLimiter {
             stats: AdaptiveStats::new(),
         }
     }
-    
+
     /// Try to acquire permission
     pub fn try_acquire(&self) -> bool {
         self.bucket.try_acquire(1)
     }
-    
+
     /// Acquire permission, blocking if necessary
     pub async fn acquire(&self) {
         self.bucket.acquire(1).await
     }
-    
+
     /// Record latency feedback for adaptation
     pub fn record_latency(&self, latency: Duration) {
         let latency_us = latency.as_micros() as u64;
-        
+
         {
             let mut samples = self.latency_samples.write();
             samples.add(latency_us);
         }
-        
+
         // Adapt rate based on p99 latency
         let p99 = {
             let samples = self.latency_samples.read();
             samples.percentile(0.99)
         };
-        
+
         let current_rate = self.rate.load(Ordering::Relaxed);
-        
+
         if p99 > self.target_latency_us {
             // Decrease rate (multiplicative)
-            let new_rate = ((current_rate as f64 * self.multiplicative_decrease) as u64)
-                .max(self.min_rate);
+            let new_rate =
+                ((current_rate as f64 * self.multiplicative_decrease) as u64).max(self.min_rate);
             self.rate.store(new_rate, Ordering::Relaxed);
             self.stats.decreases.fetch_add(1, Ordering::Relaxed);
         } else if p99 < self.target_latency_us / 2 {
@@ -397,12 +406,12 @@ impl AdaptiveRateLimiter {
             self.stats.increases.fetch_add(1, Ordering::Relaxed);
         }
     }
-    
+
     /// Get current rate limit
     pub fn current_rate(&self) -> u64 {
         self.rate.load(Ordering::Relaxed)
     }
-    
+
     /// Get statistics
     pub fn stats(&self) -> AdaptiveStatsSnapshot {
         let samples = self.latency_samples.read();
@@ -518,11 +527,11 @@ impl CircuitBreaker {
             stats: CircuitBreakerStats::new(),
         }
     }
-    
+
     /// Check if request is allowed
     pub fn allow(&self) -> bool {
         let state = *self.state.read();
-        
+
         match state {
             CircuitState::Closed => {
                 self.stats.allowed.fetch_add(1, Ordering::Relaxed);
@@ -546,15 +555,19 @@ impl CircuitBreaker {
             }
         }
     }
-    
+
     /// Record a successful operation
     pub fn record_success(&self) {
         let mut state = self.state.write();
         self.stats.successes.fetch_add(1, Ordering::Relaxed);
-        
+
         match *state {
             CircuitState::HalfOpen => {
-                let successes = self.stats.half_open_successes.fetch_add(1, Ordering::Relaxed) + 1;
+                let successes = self
+                    .stats
+                    .half_open_successes
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1;
                 if successes >= self.config.success_threshold as u64 {
                     *state = CircuitState::Closed;
                     self.stats.half_open_successes.store(0, Ordering::Relaxed);
@@ -568,35 +581,43 @@ impl CircuitBreaker {
             _ => {}
         }
     }
-    
+
     /// Record a failed operation
     pub fn record_failure(&self) {
         let mut state = self.state.write();
         self.stats.failures.fetch_add(1, Ordering::Relaxed);
-        
+
         match *state {
             CircuitState::Closed => {
-                let failures = self.stats.failures_in_window.fetch_add(1, Ordering::Relaxed) + 1;
+                let failures = self
+                    .stats
+                    .failures_in_window
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1;
                 if failures >= self.config.failure_threshold as u64 {
-                    *state = CircuitState::Open { opened_at: Instant::now() };
+                    *state = CircuitState::Open {
+                        opened_at: Instant::now(),
+                    };
                     self.stats.opens.fetch_add(1, Ordering::Relaxed);
                 }
             }
             CircuitState::HalfOpen => {
                 // Any failure in half-open reopens circuit
-                *state = CircuitState::Open { opened_at: Instant::now() };
+                *state = CircuitState::Open {
+                    opened_at: Instant::now(),
+                };
                 self.stats.half_open_successes.store(0, Ordering::Relaxed);
                 self.stats.opens.fetch_add(1, Ordering::Relaxed);
             }
             _ => {}
         }
     }
-    
+
     /// Get current state
     pub fn state(&self) -> CircuitState {
         *self.state.read()
     }
-    
+
     /// Get statistics
     pub fn stats(&self) -> CircuitBreakerStatsSnapshot {
         CircuitBreakerStatsSnapshot {
@@ -665,7 +686,7 @@ impl<T> BackpressureChannel<T> {
     pub fn new(capacity: usize) -> Self {
         // Use semaphore to track capacity, but start at 0 (no items in channel)
         let (tx, rx) = mpsc::channel(capacity);
-        
+
         Self {
             tx,
             rx: Mutex::new(rx),
@@ -674,7 +695,7 @@ impl<T> BackpressureChannel<T> {
             stats: ChannelStats::new(),
         }
     }
-    
+
     /// Send a value, blocking if buffer is full
     pub async fn send(&self, value: T) -> Result<(), mpsc::error::SendError<T>> {
         self.stats.sent.fetch_add(1, Ordering::Relaxed);
@@ -685,7 +706,7 @@ impl<T> BackpressureChannel<T> {
         }
         result
     }
-    
+
     /// Try to send without blocking
     pub fn try_send(&self, value: T) -> Result<(), mpsc::error::TrySendError<T>> {
         let result = self.tx.try_send(value);
@@ -701,33 +722,33 @@ impl<T> BackpressureChannel<T> {
         }
         result
     }
-    
+
     /// Receive a value
     pub async fn recv(&self) -> Option<T> {
         // Acquire permit (blocks until item available)
         let permit = self.permits.acquire().await.ok()?;
         permit.forget(); // Don't release, we're consuming the item
-        
+
         let mut rx = self.rx.lock().await;
         let result = rx.recv().await;
-        
+
         if result.is_some() {
             self.stats.received.fetch_add(1, Ordering::Relaxed);
         }
-        
+
         result
     }
-    
+
     /// Get current queue length
     pub fn len(&self) -> usize {
         self.permits.available_permits()
     }
-    
+
     /// Check if channel is empty
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    
+
     /// Get statistics
     pub fn stats(&self) -> ChannelStatsSnapshot {
         ChannelStatsSnapshot {
@@ -782,10 +803,8 @@ pub struct WindowedRateTracker {
 impl WindowedRateTracker {
     /// Create a new windowed rate tracker
     pub fn new(window_duration: Duration, num_buckets: usize) -> Self {
-        let buckets: Vec<AtomicU64> = (0..num_buckets)
-            .map(|_| AtomicU64::new(0))
-            .collect();
-        
+        let buckets: Vec<AtomicU64> = (0..num_buckets).map(|_| AtomicU64::new(0)).collect();
+
         Self {
             buckets: RwLock::new(buckets),
             bucket_duration: window_duration / num_buckets as u32,
@@ -794,39 +813,35 @@ impl WindowedRateTracker {
             last_rotation: RwLock::new(Instant::now()),
         }
     }
-    
+
     /// Record a request
     pub fn record(&self, count: u64) {
         self.maybe_rotate();
-        
+
         let buckets = self.buckets.read();
         let idx = self.current_bucket.load(Ordering::Relaxed);
         buckets[idx].fetch_add(count, Ordering::Relaxed);
     }
-    
+
     /// Get rate over the window
     pub fn rate(&self) -> f64 {
         self.maybe_rotate();
-        
+
         let buckets = self.buckets.read();
-        let total: u64 = buckets.iter()
-            .map(|b| b.load(Ordering::Relaxed))
-            .sum();
-        
+        let total: u64 = buckets.iter().map(|b| b.load(Ordering::Relaxed)).sum();
+
         let window_secs = self.bucket_duration.as_secs_f64() * self.num_buckets as f64;
         total as f64 / window_secs
     }
-    
+
     /// Get total count in window
     pub fn total(&self) -> u64 {
         self.maybe_rotate();
-        
+
         let buckets = self.buckets.read();
-        buckets.iter()
-            .map(|b| b.load(Ordering::Relaxed))
-            .sum()
+        buckets.iter().map(|b| b.load(Ordering::Relaxed)).sum()
     }
-    
+
     /// Maybe rotate to next bucket
     fn maybe_rotate(&self) {
         let now = Instant::now();
@@ -834,24 +849,25 @@ impl WindowedRateTracker {
             let last = self.last_rotation.read();
             now.duration_since(*last)
         };
-        
+
         if elapsed < self.bucket_duration {
             return;
         }
-        
-        let buckets_to_rotate = (elapsed.as_secs_f64() / self.bucket_duration.as_secs_f64()) as usize;
+
+        let buckets_to_rotate =
+            (elapsed.as_secs_f64() / self.bucket_duration.as_secs_f64()) as usize;
         if buckets_to_rotate == 0 {
             return;
         }
-        
+
         // Update last rotation
         {
             let mut last = self.last_rotation.write();
             *last = now;
         }
-        
+
         let buckets = self.buckets.read();
-        
+
         // Rotate buckets
         for _ in 0..buckets_to_rotate.min(self.num_buckets) {
             let next = (self.current_bucket.load(Ordering::Relaxed) + 1) % self.num_buckets;
@@ -864,57 +880,61 @@ impl WindowedRateTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_token_bucket_basic() {
         let bucket = TokenBucket::new(10, 10.0);
-        
+
         // Should be able to acquire up to capacity
         assert!(bucket.try_acquire(5));
         assert!(bucket.try_acquire(5));
-        
+
         // Should fail when empty
         assert!(!bucket.try_acquire(1));
-        
+
         let stats = bucket.stats();
         assert_eq!(stats.acquired, 10);
         assert_eq!(stats.rejected, 1);
     }
-    
+
     #[tokio::test]
     async fn test_token_bucket_refill() {
         // Use larger capacity so refill doesn't cap out
         let bucket = TokenBucket::new(1000, 100.0); // 1000 capacity, 100 tokens/sec
-        
+
         // Drain bucket
         bucket.try_acquire(1000);
         assert!(!bucket.try_acquire(1));
-        
+
         // Wait for refill (50ms should give us ~5 tokens)
         tokio::time::sleep(Duration::from_millis(50)).await;
-        
+
         // Should have some tokens now (at least 4 with 100/sec rate over 50ms)
         let available = bucket.available();
-        assert!(available >= 4, "Expected at least 4 tokens, got {}", available);
+        assert!(
+            available >= 4,
+            "Expected at least 4 tokens, got {}",
+            available
+        );
     }
-    
+
     #[test]
     fn test_credit_flow_control() {
         let flow = CreditFlowControl::new(10, 100);
-        
+
         // Consume credits
         assert!(flow.try_consume(5));
         assert!(flow.try_consume(5));
         assert!(!flow.try_consume(1));
-        
+
         assert_eq!(flow.available(), 0);
-        
+
         // Grant credits
         flow.grant(5);
         assert_eq!(flow.available(), 5);
         assert!(flow.try_consume(5));
     }
-    
+
     #[test]
     fn test_adaptive_rate_limiter() {
         let config = AdaptiveRateLimiterConfig {
@@ -925,86 +945,86 @@ mod tests {
             additive_increase: 100,
             multiplicative_decrease: 0.5,
         };
-        
+
         let limiter = AdaptiveRateLimiter::new(config);
-        
+
         // Initial rate
         assert_eq!(limiter.current_rate(), 1000);
-        
+
         // Record high latency -> rate should decrease
         for _ in 0..100 {
             limiter.record_latency(Duration::from_millis(20));
         }
         assert!(limiter.current_rate() < 1000);
     }
-    
+
     #[test]
     fn test_circuit_breaker_closed() {
         let breaker = CircuitBreaker::new(CircuitBreakerConfig {
             failure_threshold: 3,
             ..Default::default()
         });
-        
+
         // Normal operation
         assert!(breaker.allow());
         breaker.record_success();
-        
+
         assert_eq!(breaker.state(), CircuitState::Closed);
     }
-    
+
     #[test]
     fn test_circuit_breaker_opens() {
         let breaker = CircuitBreaker::new(CircuitBreakerConfig {
             failure_threshold: 3,
             ..Default::default()
         });
-        
+
         // Trigger failures
         for _ in 0..3 {
             assert!(breaker.allow());
             breaker.record_failure();
         }
-        
+
         // Circuit should be open
         match breaker.state() {
             CircuitState::Open { .. } => {}
             _ => panic!("Expected open state"),
         }
-        
+
         // New requests should be rejected
         assert!(!breaker.allow());
     }
-    
+
     #[tokio::test]
     async fn test_backpressure_channel() {
         let channel = BackpressureChannel::new(3);
-        
+
         // Fill channel
         channel.send(1).await.unwrap();
         channel.send(2).await.unwrap();
         channel.send(3).await.unwrap();
-        
+
         assert_eq!(channel.len(), 3);
-        
+
         // Try send should fail
         assert!(channel.try_send(4).is_err());
-        
+
         // Receive should work
         assert_eq!(channel.recv().await, Some(1));
         assert_eq!(channel.len(), 2);
-        
+
         // Now we can send again
         channel.send(4).await.unwrap();
     }
-    
+
     #[test]
     fn test_windowed_rate_tracker() {
         let tracker = WindowedRateTracker::new(Duration::from_secs(1), 10);
-        
+
         // Record some requests
         tracker.record(100);
         tracker.record(100);
-        
+
         assert_eq!(tracker.total(), 200);
         assert!(tracker.rate() > 0.0);
     }

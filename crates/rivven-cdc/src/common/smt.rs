@@ -53,11 +53,11 @@ use tracing::warn;
 /// Convert CdcOp to Debezium-style operation code.
 fn op_to_code(op: &CdcOp) -> &'static str {
     match op {
-        CdcOp::Insert => "c",    // create
-        CdcOp::Update => "u",    // update
-        CdcOp::Delete => "d",    // delete
-        CdcOp::Truncate => "t",  // truncate
-        CdcOp::Snapshot => "r",  // read (snapshot)
+        CdcOp::Insert => "c",   // create
+        CdcOp::Update => "u",   // update
+        CdcOp::Delete => "d",   // delete
+        CdcOp::Truncate => "t", // truncate
+        CdcOp::Snapshot => "r", // read (snapshot)
     }
 }
 
@@ -417,12 +417,8 @@ impl TimestampConverter {
             TimestampFormat::EpochSeconds => Value::Number(timestamp.timestamp().into()),
             TimestampFormat::EpochMillis => Value::Number(timestamp.timestamp_millis().into()),
             TimestampFormat::EpochMicros => Value::Number(timestamp.timestamp_micros().into()),
-            TimestampFormat::DateOnly => {
-                Value::String(timestamp.format("%Y-%m-%d").to_string())
-            }
-            TimestampFormat::TimeOnly => {
-                Value::String(timestamp.format("%H:%M:%S").to_string())
-            }
+            TimestampFormat::DateOnly => Value::String(timestamp.format("%Y-%m-%d").to_string()),
+            TimestampFormat::TimeOnly => Value::String(timestamp.format("%H:%M:%S").to_string()),
         })
     }
 
@@ -500,8 +496,7 @@ impl Smt for TimestampConverter {
 // ============================================================================
 
 /// Masking strategy for sensitive fields.
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub enum MaskStrategy {
     /// Replace with fixed string
     Fixed(String),
@@ -517,7 +512,6 @@ pub enum MaskStrategy {
     /// Redact completely (remove field)
     Redact,
 }
-
 
 /// Mask sensitive fields in CDC events.
 #[derive(Debug, Clone)]
@@ -845,23 +839,37 @@ pub enum FilterCondition {
 impl std::fmt::Debug for FilterCondition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Equals { field, value } => {
-                f.debug_struct("Equals").field("field", field).field("value", value).finish()
-            }
-            Self::NotEquals { field, value } => {
-                f.debug_struct("NotEquals").field("field", field).field("value", value).finish()
-            }
+            Self::Equals { field, value } => f
+                .debug_struct("Equals")
+                .field("field", field)
+                .field("value", value)
+                .finish(),
+            Self::NotEquals { field, value } => f
+                .debug_struct("NotEquals")
+                .field("field", field)
+                .field("value", value)
+                .finish(),
             Self::IsNull { field } => f.debug_struct("IsNull").field("field", field).finish(),
             Self::IsNotNull { field } => f.debug_struct("IsNotNull").field("field", field).finish(),
-            Self::Matches { field, pattern } => {
-                f.debug_struct("Matches").field("field", field).field("pattern", pattern).finish()
-            }
-            Self::In { field, values } => {
-                f.debug_struct("In").field("field", field).field("values", values).finish()
-            }
+            Self::Matches { field, pattern } => f
+                .debug_struct("Matches")
+                .field("field", field)
+                .field("pattern", pattern)
+                .finish(),
+            Self::In { field, values } => f
+                .debug_struct("In")
+                .field("field", field)
+                .field("values", values)
+                .finish(),
             Self::Custom(_) => f.debug_struct("Custom").field("fn", &"<closure>").finish(),
-            Self::And(conditions) => f.debug_struct("And").field("conditions", conditions).finish(),
-            Self::Or(conditions) => f.debug_struct("Or").field("conditions", conditions).finish(),
+            Self::And(conditions) => f
+                .debug_struct("And")
+                .field("conditions", conditions)
+                .finish(),
+            Self::Or(conditions) => f
+                .debug_struct("Or")
+                .field("conditions", conditions)
+                .finish(),
             Self::Not(condition) => f.debug_struct("Not").field("condition", condition).finish(),
         }
     }
@@ -1257,7 +1265,7 @@ impl Smt for RegexRouter {
 // ============================================================================
 
 /// Predicate for conditionally applying transforms.
-/// 
+///
 /// Debezium-style predicates allow transforms to be applied only when
 /// certain conditions are met.
 pub enum Predicate {
@@ -1284,12 +1292,16 @@ pub enum Predicate {
 impl Predicate {
     /// Create a table pattern predicate.
     pub fn table(pattern: &str) -> Option<Self> {
-        Regex::new(pattern).ok().map(|re| Predicate::Table { pattern: re })
+        Regex::new(pattern)
+            .ok()
+            .map(|re| Predicate::Table { pattern: re })
     }
 
     /// Create a schema pattern predicate.
     pub fn schema(pattern: &str) -> Option<Self> {
-        Regex::new(pattern).ok().map(|re| Predicate::Schema { pattern: re })
+        Regex::new(pattern)
+            .ok()
+            .map(|re| Predicate::Schema { pattern: re })
     }
 
     /// Create an operation predicate.
@@ -1318,25 +1330,21 @@ impl Predicate {
             Predicate::Table { pattern } => pattern.is_match(&event.table),
             Predicate::Schema { pattern } => pattern.is_match(&event.schema),
             Predicate::Operation { ops } => ops.contains(&event.op),
-            Predicate::FieldValue { field, value } => {
-                event
-                    .after
-                    .as_ref()
-                    .or(event.before.as_ref())
-                    .and_then(|v| v.as_object())
-                    .and_then(|obj| obj.get(field))
-                    .map(|v| v == value)
-                    .unwrap_or(false)
-            }
-            Predicate::FieldExists { field } => {
-                event
-                    .after
-                    .as_ref()
-                    .or(event.before.as_ref())
-                    .and_then(|v| v.as_object())
-                    .map(|obj| obj.contains_key(field))
-                    .unwrap_or(false)
-            }
+            Predicate::FieldValue { field, value } => event
+                .after
+                .as_ref()
+                .or(event.before.as_ref())
+                .and_then(|v| v.as_object())
+                .and_then(|obj| obj.get(field))
+                .map(|v| v == value)
+                .unwrap_or(false),
+            Predicate::FieldExists { field } => event
+                .after
+                .as_ref()
+                .or(event.before.as_ref())
+                .and_then(|v| v.as_object())
+                .map(|obj| obj.contains_key(field))
+                .unwrap_or(false),
             Predicate::Custom(f) => f(event),
             Predicate::And(predicates) => predicates.iter().all(|p| p.matches(event)),
             Predicate::Or(predicates) => predicates.iter().any(|p| p.matches(event)),
@@ -1348,22 +1356,32 @@ impl Predicate {
 impl std::fmt::Debug for Predicate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Table { pattern } => {
-                f.debug_struct("Table").field("pattern", &pattern.as_str()).finish()
-            }
-            Self::Schema { pattern } => {
-                f.debug_struct("Schema").field("pattern", &pattern.as_str()).finish()
-            }
+            Self::Table { pattern } => f
+                .debug_struct("Table")
+                .field("pattern", &pattern.as_str())
+                .finish(),
+            Self::Schema { pattern } => f
+                .debug_struct("Schema")
+                .field("pattern", &pattern.as_str())
+                .finish(),
             Self::Operation { ops } => f.debug_struct("Operation").field("ops", ops).finish(),
-            Self::FieldValue { field, value } => {
-                f.debug_struct("FieldValue").field("field", field).field("value", value).finish()
-            }
+            Self::FieldValue { field, value } => f
+                .debug_struct("FieldValue")
+                .field("field", field)
+                .field("value", value)
+                .finish(),
             Self::FieldExists { field } => {
                 f.debug_struct("FieldExists").field("field", field).finish()
             }
             Self::Custom(_) => f.debug_struct("Custom").field("fn", &"<closure>").finish(),
-            Self::And(predicates) => f.debug_struct("And").field("predicates", predicates).finish(),
-            Self::Or(predicates) => f.debug_struct("Or").field("predicates", predicates).finish(),
+            Self::And(predicates) => f
+                .debug_struct("And")
+                .field("predicates", predicates)
+                .finish(),
+            Self::Or(predicates) => f
+                .debug_struct("Or")
+                .field("predicates", predicates)
+                .finish(),
             Self::Not(predicate) => f.debug_struct("Not").field("predicate", predicate).finish(),
         }
     }
@@ -1508,11 +1526,11 @@ impl Smt for HeaderToValue {
                         HeaderSource::Table => Value::String(event.table.clone()),
                         HeaderSource::Operation => Value::String(op_to_code(&event.op).to_string()),
                         HeaderSource::Timestamp => Value::Number(event.timestamp.into()),
-                        HeaderSource::TransactionId => {
-                            event.transaction.as_ref()
-                                .map(|t| Value::String(t.id.clone()))
-                                .unwrap_or(Value::Null)
-                        }
+                        HeaderSource::TransactionId => event
+                            .transaction
+                            .as_ref()
+                            .map(|t| Value::String(t.id.clone()))
+                            .unwrap_or(Value::Null),
                     };
                     obj.insert(target.clone(), value);
                 }
@@ -1640,9 +1658,7 @@ impl SetNull {
     fn should_nullify(&self, value: &Value) -> bool {
         match &self.condition {
             NullCondition::Always => true,
-            NullCondition::IfEmpty => {
-                value.as_str().map(|s| s.is_empty()).unwrap_or(false)
-            }
+            NullCondition::IfEmpty => value.as_str().map(|s| s.is_empty()).unwrap_or(false),
             NullCondition::IfEquals(target) => value == target,
             NullCondition::IfMatches(pattern) => {
                 if let (Ok(re), Some(s)) = (Regex::new(pattern), value.as_str()) {
@@ -2356,7 +2372,9 @@ impl ComputeField {
                 let mut data = Vec::new();
                 for field in fields {
                     if let Some(v) = obj.get(field) {
-                        data.extend_from_slice(serde_json::to_string(v).unwrap_or_default().as_bytes());
+                        data.extend_from_slice(
+                            serde_json::to_string(v).unwrap_or_default().as_bytes(),
+                        );
                     }
                 }
                 let hash = digest(&SHA256, &data);
@@ -2383,30 +2401,27 @@ impl ComputeField {
                 }
                 Some(Value::from(sum))
             }
-            ComputeOp::Length(field) => {
-                obj.get(field)
-                    .and_then(|v| v.as_str())
-                    .map(|s| Value::from(s.len() as i64))
-            }
-            ComputeOp::Upper(field) => {
-                obj.get(field)
-                    .and_then(|v| v.as_str())
-                    .map(|s| Value::String(s.to_uppercase()))
-            }
-            ComputeOp::Lower(field) => {
-                obj.get(field)
-                    .and_then(|v| v.as_str())
-                    .map(|s| Value::String(s.to_lowercase()))
-            }
+            ComputeOp::Length(field) => obj
+                .get(field)
+                .and_then(|v| v.as_str())
+                .map(|s| Value::from(s.len() as i64)),
+            ComputeOp::Upper(field) => obj
+                .get(field)
+                .and_then(|v| v.as_str())
+                .map(|s| Value::String(s.to_uppercase())),
+            ComputeOp::Lower(field) => obj
+                .get(field)
+                .and_then(|v| v.as_str())
+                .map(|s| Value::String(s.to_lowercase())),
             ComputeOp::Substring(field, start, len) => {
-                obj.get(field)
-                    .and_then(|v| v.as_str())
-                    .map(|s| {
-                        let chars: Vec<char> = s.chars().collect();
-                        let end = len.map(|l| (*start + l).min(chars.len())).unwrap_or(chars.len());
-                        let substr: String = chars[*start.min(&chars.len())..end].iter().collect();
-                        Value::String(substr)
-                    })
+                obj.get(field).and_then(|v| v.as_str()).map(|s| {
+                    let chars: Vec<char> = s.chars().collect();
+                    let end = len
+                        .map(|l| (*start + l).min(chars.len()))
+                        .unwrap_or(chars.len());
+                    let substr: String = chars[*start.min(&chars.len())..end].iter().collect();
+                    Value::String(substr)
+                })
             }
             ComputeOp::Replace(field, pattern, replacement) => {
                 if let Ok(re) = Regex::new(pattern) {
@@ -2417,9 +2432,7 @@ impl ComputeField {
                     None
                 }
             }
-            ComputeOp::CurrentTimestamp => {
-                Some(Value::String(Utc::now().to_rfc3339()))
-            }
+            ComputeOp::CurrentTimestamp => Some(Value::String(Utc::now().to_rfc3339())),
             ComputeOp::Uuid => {
                 // Generate a simple UUID v4
                 use ring::rand::{SecureRandom, SystemRandom};
@@ -2468,7 +2481,11 @@ impl ComputeField {
                         }
                     }
                 };
-                Some(if matches { then_val.clone() } else { else_val.clone() })
+                Some(if matches {
+                    then_val.clone()
+                } else {
+                    else_val.clone()
+                })
             }
         }
     }
@@ -2604,11 +2621,7 @@ mod tests {
 
     #[test]
     fn test_extract_custom_prefix() {
-        let event = make_event(
-            CdcOp::Insert,
-            None,
-            Some(json!({"id": 1})),
-        );
+        let event = make_event(CdcOp::Insert, None, Some(json!({"id": 1})));
 
         let smt = ExtractNewRecordState::new()
             .header_prefix("_cdc_")
@@ -2778,7 +2791,8 @@ mod tests {
             Some(json!({"email": "alice@test.com"})),
         );
 
-        let smt = MaskField::new(["email"]).with_strategy(MaskStrategy::Fixed("[REDACTED]".to_string()));
+        let smt =
+            MaskField::new(["email"]).with_strategy(MaskStrategy::Fixed("[REDACTED]".to_string()));
         let result = smt.apply(event).unwrap();
         let after = result.after.unwrap();
 
@@ -2976,11 +2990,7 @@ mod tests {
 
     #[test]
     fn test_filter_not() {
-        let event = make_event(
-            CdcOp::Insert,
-            None,
-            Some(json!({"status": "active"})),
-        );
+        let event = make_event(CdcOp::Insert, None, Some(json!({"status": "active"})));
 
         let smt = Filter::keep(FilterCondition::Not(Box::new(FilterCondition::Equals {
             field: "status".to_string(),
@@ -3007,11 +3017,7 @@ mod tests {
 
     #[test]
     fn test_filter_in() {
-        let event = make_event(
-            CdcOp::Insert,
-            None,
-            Some(json!({"status": "pending"})),
-        );
+        let event = make_event(CdcOp::Insert, None, Some(json!({"status": "pending"})));
 
         let smt = Filter::keep(FilterCondition::In {
             field: "status".to_string(),
@@ -3024,11 +3030,7 @@ mod tests {
     // Cast tests
     #[test]
     fn test_cast_to_string() {
-        let event = make_event(
-            CdcOp::Insert,
-            None,
-            Some(json!({"id": 42, "active": true})),
-        );
+        let event = make_event(CdcOp::Insert, None, Some(json!({"id": 42, "active": true})));
 
         let smt = Cast::new()
             .field("id", CastType::String)
@@ -3186,11 +3188,17 @@ mod tests {
         let event = make_event(
             CdcOp::Update,
             Some(json!({"id": 1, "ssn": "123-45-6789", "name": "Old"})),
-            Some(json!({"id": 1, "ssn": "123-45-6789", "name": "New", "created_at": 1705320000000i64})),
+            Some(
+                json!({"id": 1, "ssn": "123-45-6789", "name": "New", "created_at": 1705320000000i64}),
+            ),
         );
 
         let chain = SmtChain::new()
-            .add(ExtractNewRecordState::new().add_op_field().add_table_field())
+            .add(
+                ExtractNewRecordState::new()
+                    .add_op_field()
+                    .add_table_field(),
+            )
             .add(MaskField::new(["ssn"]))
             .add(TimestampConverter::new(
                 ["created_at"],
@@ -3210,11 +3218,7 @@ mod tests {
 
     #[test]
     fn test_filter_drops_chain() {
-        let event = make_event(
-            CdcOp::Insert,
-            None,
-            Some(json!({"status": "deleted"})),
-        );
+        let event = make_event(CdcOp::Insert, None, Some(json!({"status": "deleted"})));
 
         let chain = SmtChain::new()
             .add(Filter::drop(FilterCondition::Equals {
@@ -3267,11 +3271,7 @@ mod tests {
 
     #[test]
     fn test_predicate_and() {
-        let event = make_event(
-            CdcOp::Insert,
-            None,
-            Some(json!({"status": "active"})),
-        );
+        let event = make_event(CdcOp::Insert, None, Some(json!({"status": "active"})));
 
         let predicate = Predicate::And(vec![
             Predicate::operation(vec![CdcOp::Insert]),
@@ -3505,9 +3505,11 @@ mod tests {
                 MaskField::new(["ssn"]),
             ))
             // Add metadata
-            .add(HeaderToValue::new()
-                .field("_table", HeaderSource::Table)
-                .field("_op", HeaderSource::Operation))
+            .add(
+                HeaderToValue::new()
+                    .field("_table", HeaderSource::Table)
+                    .field("_op", HeaderSource::Operation),
+            )
             // Add version
             .add(InsertField::new().static_field("_version", json!(1)));
 
@@ -3699,8 +3701,16 @@ mod tests {
         );
 
         let smt = ContentRouter::new()
-            .route_if("amount", |v| v.as_i64().map(|n| n > 1000).unwrap_or(false), "high-value")
-            .route_if("amount", |v| v.as_i64().map(|n| n <= 1000).unwrap_or(false), "normal-value");
+            .route_if(
+                "amount",
+                |v| v.as_i64().map(|n| n > 1000).unwrap_or(false),
+                "high-value",
+            )
+            .route_if(
+                "amount",
+                |v| v.as_i64().map(|n| n <= 1000).unwrap_or(false),
+                "normal-value",
+            );
 
         let result = smt.apply(event).unwrap();
         let after = result.after.unwrap();
@@ -3758,8 +3768,7 @@ mod tests {
             Some(json!({"first_name": "Alice", "last_name": "Smith"})),
         );
 
-        let smt = ComputeField::new()
-            .concat("full_name", ["$first_name", " ", "$last_name"]);
+        let smt = ComputeField::new().concat("full_name", ["$first_name", " ", "$last_name"]);
 
         let result = smt.apply(event).unwrap();
         let after = result.after.unwrap();
@@ -3794,8 +3803,7 @@ mod tests {
             Some(json!({"nickname": null, "username": "alice123", "email": "alice@test.com"})),
         );
 
-        let smt = ComputeField::new()
-            .coalesce("display_name", ["nickname", "username", "email"]);
+        let smt = ComputeField::new().coalesce("display_name", ["nickname", "username", "email"]);
 
         let result = smt.apply(event).unwrap();
         let after = result.after.unwrap();
@@ -3821,11 +3829,7 @@ mod tests {
 
     #[test]
     fn test_compute_field_length() {
-        let event = make_event(
-            CdcOp::Insert,
-            None,
-            Some(json!({"name": "Alice"})),
-        );
+        let event = make_event(CdcOp::Insert, None, Some(json!({"name": "Alice"})));
 
         let smt = ComputeField::new().length("name_length", "name");
 
@@ -3837,11 +3841,7 @@ mod tests {
 
     #[test]
     fn test_compute_field_upper_lower() {
-        let event = make_event(
-            CdcOp::Insert,
-            None,
-            Some(json!({"name": "Alice Smith"})),
-        );
+        let event = make_event(CdcOp::Insert, None, Some(json!({"name": "Alice Smith"})));
 
         let smt = ComputeField::new()
             .upper("name_upper", "name")
@@ -3862,8 +3862,7 @@ mod tests {
             Some(json!({"phone": "+1-555-123-4567"})),
         );
 
-        let smt = ComputeField::new()
-            .substring("area_code", "phone", 3, Some(3));
+        let smt = ComputeField::new().substring("area_code", "phone", 3, Some(3));
 
         let result = smt.apply(event).unwrap();
         let after = result.after.unwrap();
@@ -3873,14 +3872,9 @@ mod tests {
 
     #[test]
     fn test_compute_field_replace() {
-        let event = make_event(
-            CdcOp::Insert,
-            None,
-            Some(json!({"phone": "555-123-4567"})),
-        );
+        let event = make_event(CdcOp::Insert, None, Some(json!({"phone": "555-123-4567"})));
 
-        let smt = ComputeField::new()
-            .replace("phone_clean", "phone", r"-", "");
+        let smt = ComputeField::new().replace("phone_clean", "phone", r"-", "");
 
         let result = smt.apply(event).unwrap();
         let after = result.after.unwrap();
@@ -3890,11 +3884,7 @@ mod tests {
 
     #[test]
     fn test_compute_field_current_timestamp() {
-        let event = make_event(
-            CdcOp::Insert,
-            None,
-            Some(json!({"name": "Alice"})),
-        );
+        let event = make_event(CdcOp::Insert, None, Some(json!({"name": "Alice"})));
 
         let smt = ComputeField::new().current_timestamp("processed_at");
 
@@ -3907,11 +3897,7 @@ mod tests {
 
     #[test]
     fn test_compute_field_uuid() {
-        let event = make_event(
-            CdcOp::Insert,
-            None,
-            Some(json!({"name": "Alice"})),
-        );
+        let event = make_event(CdcOp::Insert, None, Some(json!({"name": "Alice"})));
 
         let smt = ComputeField::new().uuid("request_id");
 
@@ -3943,8 +3929,7 @@ mod tests {
             })),
         );
 
-        let smt = ComputeField::new()
-            .json_path("user_name", "metadata", "user.name");
+        let smt = ComputeField::new().json_path("user_name", "metadata", "user.name");
 
         let result = smt.apply(event).unwrap();
         let after = result.after.unwrap();
@@ -3960,13 +3945,12 @@ mod tests {
             Some(json!({"status": "active", "name": "Alice"})),
         );
 
-        let smt = ComputeField::new()
-            .conditional(
-                "is_active",
-                ComputeCondition::FieldEquals("status".to_string(), json!("active")),
-                json!(true),
-                json!(false),
-            );
+        let smt = ComputeField::new().conditional(
+            "is_active",
+            ComputeCondition::FieldEquals("status".to_string(), json!("active")),
+            json!(true),
+            json!(false),
+        );
 
         let result = smt.apply(event).unwrap();
         let after = result.after.unwrap();
@@ -3982,13 +3966,12 @@ mod tests {
             Some(json!({"name": "Alice", "deleted_at": null})),
         );
 
-        let smt = ComputeField::new()
-            .conditional(
-                "status",
-                ComputeCondition::FieldIsNull("deleted_at".to_string()),
-                json!("active"),
-                json!("deleted"),
-            );
+        let smt = ComputeField::new().conditional(
+            "status",
+            ComputeCondition::FieldIsNull("deleted_at".to_string()),
+            json!("active"),
+            json!("deleted"),
+        );
 
         let result = smt.apply(event).unwrap();
         let after = result.after.unwrap();
@@ -4004,13 +3987,12 @@ mod tests {
             Some(json!({"email": "admin@company.com", "name": "Admin"})),
         );
 
-        let smt = ComputeField::new()
-            .conditional(
-                "is_admin",
-                ComputeCondition::FieldMatches("email".to_string(), r"^admin@".to_string()),
-                json!(true),
-                json!(false),
-            );
+        let smt = ComputeField::new().conditional(
+            "is_admin",
+            ComputeCondition::FieldMatches("email".to_string(), r"^admin@".to_string()),
+            json!(true),
+            json!(false),
+        );
 
         let result = smt.apply(event).unwrap();
         let after = result.after.unwrap();
@@ -4065,20 +4047,26 @@ mod tests {
 
         let chain = SmtChain::new()
             // Compute full name
-            .add(ComputeField::new()
-                .concat("full_name", ["$first_name", " ", "$last_name"])
-                .hash("email_hash", ["email"])
-                .uuid("event_id"))
+            .add(
+                ComputeField::new()
+                    .concat("full_name", ["$first_name", " ", "$last_name"])
+                    .hash("email_hash", ["email"])
+                    .uuid("event_id"),
+            )
             // Mask email
             .add(MaskField::new(["email"]))
             // Route based on priority
-            .add(ContentRouter::new()
-                .route("priority", "high", "priority-events")
-                .default_topic("normal-events"))
+            .add(
+                ContentRouter::new()
+                    .route("priority", "high", "priority-events")
+                    .default_topic("normal-events"),
+            )
             // Convert timezone
-            .add(TimezoneConverter::new(["created_at"])
-                .from("UTC")
-                .to("America/New_York"));
+            .add(
+                TimezoneConverter::new(["created_at"])
+                    .from("UTC")
+                    .to("America/New_York"),
+            );
 
         let result = chain.apply(event).unwrap();
         let after = result.after.unwrap();

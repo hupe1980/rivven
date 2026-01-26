@@ -3,9 +3,9 @@
 //! Implements the rivven-connect-sdk Source trait for PostgreSQL
 //! Change Data Capture using logical replication.
 
+use super::super::prelude::*;
 use crate::connectors::{AnySource, SourceFactory};
 use async_trait::async_trait;
-use super::super::prelude::*;
 use schemars::JsonSchema;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
@@ -21,11 +21,16 @@ mod secrecy_string_serde {
     use secrecy::{ExposeSecret, SecretString};
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S: Serializer>(secret: &SecretString, serializer: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(
+        secret: &SecretString,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(secret.expose_secret())
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<SecretString, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<SecretString, D::Error> {
         let s = String::deserialize(deserializer)?;
         Ok(SecretString::new(s.into_boxed_str()))
     }
@@ -371,10 +376,7 @@ impl PostgresCdcSource {
                             // Check if error is because slot already exists (race condition)
                             let err_str = e.to_string();
                             if err_str.contains("already exists") {
-                                warn!(
-                                    "Slot '{}' was created by another process",
-                                    config.slot_name
-                                );
+                                warn!("Slot '{}' was created by another process", config.slot_name);
                                 result.slot_existed = true;
                             } else {
                                 return Err(format!("Failed to create replication slot: {}", e));
@@ -445,19 +447,23 @@ impl Source for PostgresCdcSource {
 
     async fn check(&self, config: &Self::Config) -> Result<CheckResult> {
         use tracing::info;
-        
+
         // Validate config first
         if let Err(e) = config.validate() {
-            return Ok(CheckResult::failure(format!("Invalid configuration: {}", e)));
+            return Ok(CheckResult::failure(format!(
+                "Invalid configuration: {}",
+                e
+            )));
         }
 
         let conn_str = Self::connection_string(config);
 
         // Connect to PostgreSQL
-        let (client, connection) = match tokio_postgres::connect(&conn_str, tokio_postgres::NoTls).await {
-            Ok(c) => c,
-            Err(e) => return Ok(CheckResult::failure(format!("Connection failed: {}", e))),
-        };
+        let (client, connection) =
+            match tokio_postgres::connect(&conn_str, tokio_postgres::NoTls).await {
+                Ok(c) => c,
+                Err(e) => return Ok(CheckResult::failure(format!("Connection failed: {}", e))),
+            };
 
         // Spawn connection handler
         tokio::spawn(async move {
@@ -475,7 +481,12 @@ impl Source for PostgresCdcSource {
                     )));
                 }
             }
-            Err(e) => return Ok(CheckResult::failure(format!("Failed to check wal_level: {}", e))),
+            Err(e) => {
+                return Ok(CheckResult::failure(format!(
+                    "Failed to check wal_level: {}",
+                    e
+                )))
+            }
         }
 
         // Check max_replication_slots
@@ -525,7 +536,10 @@ impl Source for PostgresCdcSource {
                     }
                 }
                 Err(e) => {
-                    return Ok(CheckResult::failure(format!("Auto-provisioning failed: {}", e)));
+                    return Ok(CheckResult::failure(format!(
+                        "Auto-provisioning failed: {}",
+                        e
+                    )));
                 }
             }
         } else {
@@ -534,7 +548,13 @@ impl Source for PostgresCdcSource {
                 "SELECT 1 FROM pg_publication WHERE pubname = '{}'",
                 config.publication_name.replace('\'', "''")
             );
-            if client.query_opt(&pub_check, &[]).await.ok().flatten().is_none() {
+            if client
+                .query_opt(&pub_check, &[])
+                .await
+                .ok()
+                .flatten()
+                .is_none()
+            {
                 return Ok(CheckResult::failure(format!(
                     "Publication '{}' does not exist. Create it manually or set auto_create_publication=true",
                     config.publication_name
@@ -545,7 +565,13 @@ impl Source for PostgresCdcSource {
                 "SELECT 1 FROM pg_replication_slots WHERE slot_name = '{}'",
                 config.slot_name.replace('\'', "''")
             );
-            if client.query_opt(&slot_check, &[]).await.ok().flatten().is_none() {
+            if client
+                .query_opt(&slot_check, &[])
+                .await
+                .ok()
+                .flatten()
+                .is_none()
+            {
                 return Ok(CheckResult::failure(format!(
                     "Replication slot '{}' does not exist. Create it manually or set auto_create_slot=true",
                     config.slot_name
@@ -656,9 +682,7 @@ impl Source for PostgresCdcSource {
 
             // Set primary key
             if !primary_keys.is_empty() {
-                stream = stream.primary_key(
-                    primary_keys.iter().map(|k| vec![k.clone()]).collect()
-                );
+                stream = stream.primary_key(primary_keys.iter().map(|k| vec![k.clone()]).collect());
             }
 
             // CDC supports incremental with cursor
@@ -687,7 +711,7 @@ impl Source for PostgresCdcSource {
             let (client, connection) = tokio_postgres::connect(&conn_str, tokio_postgres::NoTls)
                 .await
                 .map_err(|e| ConnectorError::Connection(format!("Connection failed: {}", e)))?;
-            
+
             tokio::spawn(async move {
                 let _ = connection.await;
             });
@@ -734,7 +758,9 @@ impl Source for PostgresCdcSource {
         // Resume from state if available
         let _resume_lsn = state.as_ref().and_then(|s| {
             s.streams.get("_global").and_then(|gs| {
-                gs.cursor_value.as_ref().and_then(|c| c.as_str().map(String::from))
+                gs.cursor_value
+                    .as_ref()
+                    .and_then(|c| c.as_str().map(String::from))
             })
         });
 
@@ -742,7 +768,7 @@ impl Source for PostgresCdcSource {
         let stream = tokio_stream::wrappers::ReceiverStream::new(event_rx)
             .filter_map(move |cdc_event| {
                 use rivven_cdc::common::CdcOp;
-                
+
                 let stream_name = format!("{}.{}", cdc_event.schema, cdc_event.table);
 
                 // Filter to configured streams
@@ -751,17 +777,19 @@ impl Source for PostgresCdcSource {
                 }
 
                 let source_event = match cdc_event.op {
-                    CdcOp::Insert | CdcOp::Snapshot => {
-                        SourceEvent::insert(&stream_name, cdc_event.after.clone().unwrap_or_default())
-                    }
+                    CdcOp::Insert | CdcOp::Snapshot => SourceEvent::insert(
+                        &stream_name,
+                        cdc_event.after.clone().unwrap_or_default(),
+                    ),
                     CdcOp::Update => SourceEvent::update(
                         &stream_name,
                         cdc_event.before.clone(),
                         cdc_event.after.clone().unwrap_or_default(),
                     ),
-                    CdcOp::Delete => {
-                        SourceEvent::delete(&stream_name, cdc_event.before.clone().unwrap_or_default())
-                    }
+                    CdcOp::Delete => SourceEvent::delete(
+                        &stream_name,
+                        cdc_event.before.clone().unwrap_or_default(),
+                    ),
                     CdcOp::Truncate => return std::future::ready(None),
                 };
 
@@ -781,14 +809,20 @@ impl Source for PostgresCdcSource {
 /// Convert PostgreSQL type to JSON Schema type
 fn postgres_type_to_json(pg_type: &str) -> serde_json::Value {
     let pg_type_lower = pg_type.to_lowercase();
-    
+
     // Check for arrays first (before other type patterns)
     let json_type = if pg_type_lower.contains("[]") || pg_type_lower.starts_with("array") {
         "array"
-    } else if pg_type_lower.contains("int") || pg_type_lower == "serial" || pg_type_lower == "bigserial" {
+    } else if pg_type_lower.contains("int")
+        || pg_type_lower == "serial"
+        || pg_type_lower == "bigserial"
+    {
         "integer"
-    } else if pg_type_lower.contains("numeric") || pg_type_lower.contains("decimal") 
-        || pg_type_lower.contains("real") || pg_type_lower.contains("double") {
+    } else if pg_type_lower.contains("numeric")
+        || pg_type_lower.contains("decimal")
+        || pg_type_lower.contains("real")
+        || pg_type_lower.contains("double")
+    {
         "number"
     } else if pg_type_lower == "boolean" || pg_type_lower == "bool" {
         "boolean"
@@ -818,7 +852,7 @@ impl SourceFactory for PostgresCdcSourceFactory {
 }
 
 /// Wrapper for type-erased source operations
-#[allow(dead_code)]  // Used by SourceFactory for dynamic dispatch
+#[allow(dead_code)] // Used by SourceFactory for dynamic dispatch
 struct PostgresCdcSourceWrapper(PostgresCdcSource);
 
 #[async_trait]
@@ -879,7 +913,7 @@ mod tests {
             drop_slot_on_stop: false,
             tls: PostgresTlsConfig::default(),
         };
-        
+
         assert!(config.validate().is_ok());
     }
 
@@ -903,7 +937,7 @@ mod tests {
             drop_slot_on_stop: false,
             tls: PostgresTlsConfig::default(),
         };
-        
+
         assert!(config.validate().is_err());
     }
 
@@ -929,10 +963,7 @@ mod tests {
             postgres_type_to_json("jsonb").get("type").unwrap(),
             "object"
         );
-        assert_eq!(
-            postgres_type_to_json("text").get("type").unwrap(),
-            "string"
-        );
+        assert_eq!(postgres_type_to_json("text").get("type").unwrap(), "string");
         assert_eq!(
             postgres_type_to_json("integer[]").get("type").unwrap(),
             "array"
@@ -942,12 +973,12 @@ mod tests {
     #[test]
     fn test_password_redacted_in_debug() {
         let password = SensitiveString::new("super-secret-password");
-        
+
         // Debug output should show [REDACTED], not the actual password
         let debug_output = format!("{:?}", password);
         assert_eq!(debug_output, "[REDACTED]");
         assert!(!debug_output.contains("super-secret"));
-        
+
         // Config debug should also be redacted
         let config = PostgresCdcConfig {
             host: "localhost".to_string(),
@@ -967,7 +998,7 @@ mod tests {
             drop_slot_on_stop: false,
             tls: PostgresTlsConfig::default(),
         };
-        
+
         let config_debug = format!("{:?}", config);
         assert!(config_debug.contains("[REDACTED]"));
         assert!(!config_debug.contains("my-secret-password"));
@@ -998,7 +1029,7 @@ mod tests {
             client_key_path: Some("/path/to/client-key.pem".to_string()),
             accept_invalid_certs: false,
         };
-        
+
         assert_eq!(tls.mode, "verify-full");
         assert!(tls.ca_cert_path.is_some());
     }
@@ -1018,7 +1049,7 @@ tls:
   ca_cert_path: /etc/ssl/ca.pem
   accept_invalid_certs: false
 "#;
-        
+
         let config: PostgresCdcConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.host, "db.example.com");
         assert_eq!(config.tls.mode, "verify-full");

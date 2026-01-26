@@ -14,12 +14,12 @@
 
 use crate::handler::RequestHandler;
 use crate::protocol::{Request, Response};
+use bytes::Bytes;
 use rivven_core::{
     AuthManager, AuthSession, Permission, ResourceType, SaslPlainAuth, SaslScramAuth, ScramState,
 };
-use bytes::Bytes;
 use std::sync::Arc;
-use tracing::{debug, warn, info};
+use tracing::{debug, info, warn};
 
 /// Connection authentication state
 #[derive(Debug, Clone)]
@@ -50,7 +50,11 @@ pub struct AuthenticatedHandler {
 
 impl AuthenticatedHandler {
     /// Create a new authenticated handler
-    pub fn new(handler: RequestHandler, auth_manager: Arc<AuthManager>, require_auth: bool) -> Self {
+    pub fn new(
+        handler: RequestHandler,
+        auth_manager: Arc<AuthManager>,
+        require_auth: bool,
+    ) -> Self {
         let sasl_plain = SaslPlainAuth::new(auth_manager.clone());
         let sasl_scram = SaslScramAuth::new(auth_manager.clone());
         Self {
@@ -61,7 +65,7 @@ impl AuthenticatedHandler {
             require_auth,
         }
     }
-    
+
     /// Handle a request with authentication and authorization
     pub async fn handle(
         &self,
@@ -72,16 +76,27 @@ impl AuthenticatedHandler {
         // Handle authentication requests first (don't require existing auth)
         match &request {
             Request::Authenticate { username, password } => {
-                return self.handle_authenticate(username, password, client_ip, connection_auth).await;
+                return self
+                    .handle_authenticate(username, password, client_ip, connection_auth)
+                    .await;
             }
-            Request::SaslAuthenticate { mechanism, auth_bytes } => {
-                return self.handle_sasl_authenticate(mechanism, auth_bytes, client_ip, connection_auth).await;
+            Request::SaslAuthenticate {
+                mechanism,
+                auth_bytes,
+            } => {
+                return self
+                    .handle_sasl_authenticate(mechanism, auth_bytes, client_ip, connection_auth)
+                    .await;
             }
             Request::ScramClientFirst { message } => {
-                return self.handle_scram_client_first(message, client_ip, connection_auth).await;
+                return self
+                    .handle_scram_client_first(message, client_ip, connection_auth)
+                    .await;
             }
             Request::ScramClientFinal { message } => {
-                return self.handle_scram_client_final(message, client_ip, connection_auth).await;
+                return self
+                    .handle_scram_client_final(message, client_ip, connection_auth)
+                    .await;
             }
             Request::Ping => {
                 // Ping is always allowed (for health checks)
@@ -89,7 +104,7 @@ impl AuthenticatedHandler {
             }
             _ => {}
         }
-        
+
         // Check authentication requirement
         if self.require_auth {
             match connection_auth {
@@ -103,19 +118,23 @@ impl AuthenticatedHandler {
                     // SCRAM handshake incomplete - only ScramClientFinal allowed
                     warn!("Non-auth request during SCRAM handshake from {}", client_ip);
                     return Response::Error {
-                        message: "AUTHENTICATION_REQUIRED: Complete SCRAM handshake first".to_string(),
+                        message: "AUTHENTICATION_REQUIRED: Complete SCRAM handshake first"
+                            .to_string(),
                     };
                 }
                 ConnectionAuth::Authenticated(session) => {
                     // Check session expiration
                     if session.is_expired() {
-                        warn!("Expired session for {} from {}", session.principal_name, client_ip);
+                        warn!(
+                            "Expired session for {} from {}",
+                            session.principal_name, client_ip
+                        );
                         *connection_auth = ConnectionAuth::Unauthenticated;
                         return Response::Error {
                             message: "SESSION_EXPIRED: Please re-authenticate".to_string(),
                         };
                     }
-                    
+
                     // Validate session still exists (principal not deleted)
                     if self.auth_manager.get_session(&session.id).is_none() {
                         warn!("Invalid session {} from {}", session.id, client_ip);
@@ -127,24 +146,29 @@ impl AuthenticatedHandler {
                 }
                 ConnectionAuth::Anonymous => {
                     // This shouldn't happen if require_auth is true
-                    warn!("Anonymous access attempted when auth required from {}", client_ip);
+                    warn!(
+                        "Anonymous access attempted when auth required from {}",
+                        client_ip
+                    );
                     return Response::Error {
-                        message: "AUTHENTICATION_REQUIRED: Anonymous access not allowed".to_string(),
+                        message: "AUTHENTICATION_REQUIRED: Anonymous access not allowed"
+                            .to_string(),
                     };
                 }
             }
         }
-        
+
         // Get session for authorization (if authenticated)
         let session = match connection_auth {
             ConnectionAuth::Authenticated(s) => Some(s.clone()),
             _ => None,
         };
-        
+
         // Authorize and handle the request
-        self.authorize_and_handle(request, session.as_ref(), client_ip).await
+        self.authorize_and_handle(request, session.as_ref(), client_ip)
+            .await
     }
-    
+
     /// Handle username/password authentication
     async fn handle_authenticate(
         &self,
@@ -153,10 +177,14 @@ impl AuthenticatedHandler {
         client_ip: &str,
         connection_auth: &mut ConnectionAuth,
     ) -> Response {
-        match self.auth_manager.authenticate(username, password, client_ip) {
+        match self
+            .auth_manager
+            .authenticate(username, password, client_ip)
+        {
             Ok(session) => {
                 info!("User '{}' authenticated from {}", username, client_ip);
-                let expires_in = session.expires_at
+                let expires_in = session
+                    .expires_at
                     .duration_since(session.created_at)
                     .as_secs();
                 let session_id = session.id.clone();
@@ -167,14 +195,17 @@ impl AuthenticatedHandler {
                 }
             }
             Err(e) => {
-                warn!("Authentication failed for '{}' from {}: {}", username, client_ip, e);
+                warn!(
+                    "Authentication failed for '{}' from {}: {}",
+                    username, client_ip, e
+                );
                 Response::Error {
                     message: format!("AUTHENTICATION_FAILED: {}", e),
                 }
             }
         }
     }
-    
+
     /// Handle SASL/PLAIN authentication (Kafka client compatible)
     async fn handle_sasl_authenticate(
         &self,
@@ -187,15 +218,21 @@ impl AuthenticatedHandler {
         let mechanism_str = String::from_utf8_lossy(mechanism);
         if mechanism_str != "PLAIN" {
             return Response::Error {
-                message: format!("UNSUPPORTED_MECHANISM: Only PLAIN is supported, got {}", mechanism_str),
+                message: format!(
+                    "UNSUPPORTED_MECHANISM: Only PLAIN is supported, got {}",
+                    mechanism_str
+                ),
             };
         }
-        
+
         match self.sasl_plain.authenticate(auth_bytes, client_ip) {
             Ok(session) => {
-                info!("SASL authentication successful for '{}' from {}", 
-                      session.principal_name, client_ip);
-                let expires_in = session.expires_at
+                info!(
+                    "SASL authentication successful for '{}' from {}",
+                    session.principal_name, client_ip
+                );
+                let expires_in = session
+                    .expires_at
                     .duration_since(session.created_at)
                     .as_secs();
                 let session_id = session.id.clone();
@@ -213,7 +250,7 @@ impl AuthenticatedHandler {
             }
         }
     }
-    
+
     /// Handle SCRAM-SHA-256 client-first message
     async fn handle_scram_client_first(
         &self,
@@ -237,7 +274,7 @@ impl AuthenticatedHandler {
             }
         }
     }
-    
+
     /// Handle SCRAM-SHA-256 client-final message
     async fn handle_scram_client_final(
         &self,
@@ -255,12 +292,18 @@ impl AuthenticatedHandler {
                 };
             }
         };
-        
-        match self.sasl_scram.process_client_final(&state, message, client_ip) {
+
+        match self
+            .sasl_scram
+            .process_client_final(&state, message, client_ip)
+        {
             Ok((session, server_final)) => {
-                info!("SCRAM authentication successful for '{}' from {}", 
-                      session.principal_name, client_ip);
-                let expires_in = session.expires_at
+                info!(
+                    "SCRAM authentication successful for '{}' from {}",
+                    session.principal_name, client_ip
+                );
+                let expires_in = session
+                    .expires_at
                     .duration_since(session.created_at)
                     .as_secs();
                 let session_id = session.id.clone();
@@ -285,7 +328,7 @@ impl AuthenticatedHandler {
             }
         }
     }
-    
+
     /// Authorize and handle a request
     async fn authorize_and_handle(
         &self,
@@ -307,9 +350,7 @@ impl AuthenticatedHandler {
             Request::DeleteTopic { name } => {
                 (ResourceType::Topic(name.clone()), Permission::Delete)
             }
-            Request::ListTopics => {
-                (ResourceType::Cluster, Permission::Describe)
-            }
+            Request::ListTopics => (ResourceType::Cluster, Permission::Describe),
             Request::GetMetadata { topic } => {
                 (ResourceType::Topic(topic.clone()), Permission::Describe)
             }
@@ -319,10 +360,12 @@ impl AuthenticatedHandler {
             Request::GetOffsetForTimestamp { topic, .. } => {
                 (ResourceType::Topic(topic.clone()), Permission::Describe)
             }
-            Request::GetClusterMetadata { .. } => {
-                (ResourceType::Cluster, Permission::Describe)
-            }
-            Request::CommitOffset { consumer_group, topic, .. } => {
+            Request::GetClusterMetadata { .. } => (ResourceType::Cluster, Permission::Describe),
+            Request::CommitOffset {
+                consumer_group,
+                topic,
+                ..
+            } => {
                 // Commit offset requires both consumer group Write and topic Read permissions
                 // We check consumer group here, topic is checked below for dual-resource ops
                 if let Some(session) = session {
@@ -338,14 +381,21 @@ impl AuthenticatedHandler {
                             session.principal_name, consumer_group, e
                         );
                         return Response::Error {
-                            message: format!("AUTHORIZATION_FAILED: Consumer group access denied: {}", e),
+                            message: format!(
+                                "AUTHORIZATION_FAILED: Consumer group access denied: {}",
+                                e
+                            ),
                         };
                     }
                 }
                 // Then check topic Read permission
                 (ResourceType::Topic(topic.clone()), Permission::Read)
             }
-            Request::GetOffset { consumer_group, topic, .. } => {
+            Request::GetOffset {
+                consumer_group,
+                topic,
+                ..
+            } => {
                 // Get offset requires consumer group Read and topic Read
                 if let Some(session) = session {
                     if let Err(e) = self.auth_manager.authorize(
@@ -359,7 +409,10 @@ impl AuthenticatedHandler {
                             session.principal_name, consumer_group, e
                         );
                         return Response::Error {
-                            message: format!("AUTHORIZATION_FAILED: Consumer group access denied: {}", e),
+                            message: format!(
+                                "AUTHORIZATION_FAILED: Consumer group access denied: {}",
+                                e
+                            ),
                         };
                     }
                 }
@@ -368,21 +421,19 @@ impl AuthenticatedHandler {
             Request::RegisterSchema { subject, .. } => {
                 (ResourceType::Schema(subject.clone()), Permission::Write)
             }
-            Request::GetSchema { .. } => {
-                (ResourceType::Cluster, Permission::Describe)
-            }
-            Request::ListGroups => {
-                (ResourceType::Cluster, Permission::Describe)
-            }
-            Request::DescribeGroup { consumer_group, .. } => {
-                (ResourceType::ConsumerGroup(consumer_group.clone()), Permission::Describe)
-            }
-            Request::DeleteGroup { consumer_group, .. } => {
-                (ResourceType::ConsumerGroup(consumer_group.clone()), Permission::Delete)
-            }
+            Request::GetSchema { .. } => (ResourceType::Cluster, Permission::Describe),
+            Request::ListGroups => (ResourceType::Cluster, Permission::Describe),
+            Request::DescribeGroup { consumer_group, .. } => (
+                ResourceType::ConsumerGroup(consumer_group.clone()),
+                Permission::Describe,
+            ),
+            Request::DeleteGroup { consumer_group, .. } => (
+                ResourceType::ConsumerGroup(consumer_group.clone()),
+                Permission::Delete,
+            ),
             // Auth requests handled earlier
-            Request::Authenticate { .. } 
-            | Request::SaslAuthenticate { .. } 
+            Request::Authenticate { .. }
+            | Request::SaslAuthenticate { .. }
             | Request::ScramClientFirst { .. }
             | Request::ScramClientFinal { .. }
             | Request::Ping => {
@@ -392,10 +443,13 @@ impl AuthenticatedHandler {
                 };
             }
         };
-        
+
         // Authorize if we have a session
         if let Some(session) = session {
-            if let Err(e) = self.auth_manager.authorize(session, &resource, permission, client_ip) {
+            if let Err(e) = self
+                .auth_manager
+                .authorize(session, &resource, permission, client_ip)
+            {
                 warn!(
                     "Authorization denied for '{}' on {:?}: {}",
                     session.principal_name, resource, e
@@ -414,7 +468,7 @@ impl AuthenticatedHandler {
                 message: "AUTHENTICATION_REQUIRED".to_string(),
             };
         }
-        
+
         // Delegate to base handler
         self.handler.handle(request).await
     }
@@ -424,22 +478,22 @@ impl AuthenticatedHandler {
 mod tests {
     use super::*;
     use rivven_core::{
-        AuthConfig, AuthManager, Config, OffsetManager, PrincipalType, TopicManager,
-        schema_registry::EmbeddedSchemaRegistry,
+        schema_registry::EmbeddedSchemaRegistry, AuthConfig, AuthManager, Config, OffsetManager,
+        PrincipalType, TopicManager,
     };
     use std::collections::HashSet;
     use std::time::Duration;
     use tempfile::tempdir;
-    
+
     async fn setup_test_handler(require_auth: bool) -> (AuthenticatedHandler, Arc<AuthManager>) {
         let temp_dir = tempdir().unwrap();
         let config = Config::new().with_data_dir(temp_dir.path().to_string_lossy().to_string());
         let topic_manager = TopicManager::new(config.clone());
         let offset_manager = OffsetManager::new();
         let schema_registry = Arc::new(EmbeddedSchemaRegistry::new(&config).await.unwrap());
-        
+
         let base_handler = RequestHandler::new(topic_manager, offset_manager, schema_registry);
-        
+
         let auth_config = AuthConfig {
             require_authentication: require_auth,
             enable_acls: require_auth,
@@ -447,31 +501,38 @@ mod tests {
             ..Default::default()
         };
         let auth_manager = Arc::new(AuthManager::new(auth_config));
-        
+
         // Create test users
         let mut producer_roles = HashSet::new();
         producer_roles.insert("producer".to_string());
-        auth_manager.create_principal("producer", "producer_pass", PrincipalType::User, producer_roles).unwrap();
-        
+        auth_manager
+            .create_principal(
+                "producer",
+                "producer_pass",
+                PrincipalType::User,
+                producer_roles,
+            )
+            .unwrap();
+
         let mut admin_roles = HashSet::new();
         admin_roles.insert("admin".to_string());
-        auth_manager.create_principal("admin", "admin_pass", PrincipalType::User, admin_roles).unwrap();
-        
+        auth_manager
+            .create_principal("admin", "admin_pass", PrincipalType::User, admin_roles)
+            .unwrap();
+
         let handler = AuthenticatedHandler::new(base_handler, auth_manager.clone(), require_auth);
         (handler, auth_manager)
     }
-    
+
     #[tokio::test]
     async fn test_unauthenticated_request_denied() {
         let (handler, _) = setup_test_handler(true).await;
         let mut conn_auth = ConnectionAuth::Unauthenticated;
-        
-        let response = handler.handle(
-            Request::ListTopics,
-            &mut conn_auth,
-            "127.0.0.1",
-        ).await;
-        
+
+        let response = handler
+            .handle(Request::ListTopics, &mut conn_auth, "127.0.0.1")
+            .await;
+
         match response {
             Response::Error { message } => {
                 assert!(message.contains("AUTHENTICATION_REQUIRED"));
@@ -479,21 +540,23 @@ mod tests {
             _ => panic!("Expected error response"),
         }
     }
-    
+
     #[tokio::test]
     async fn test_authentication_success() {
         let (handler, _) = setup_test_handler(true).await;
         let mut conn_auth = ConnectionAuth::Unauthenticated;
-        
-        let response = handler.handle(
-            Request::Authenticate {
-                username: "producer".to_string(),
-                password: "producer_pass".to_string(),
-            },
-            &mut conn_auth,
-            "127.0.0.1",
-        ).await;
-        
+
+        let response = handler
+            .handle(
+                Request::Authenticate {
+                    username: "producer".to_string(),
+                    password: "producer_pass".to_string(),
+                },
+                &mut conn_auth,
+                "127.0.0.1",
+            )
+            .await;
+
         match response {
             Response::Authenticated { session_id, .. } => {
                 assert!(!session_id.is_empty());
@@ -502,21 +565,23 @@ mod tests {
             _ => panic!("Expected authenticated response"),
         }
     }
-    
+
     #[tokio::test]
     async fn test_authentication_failure() {
         let (handler, _) = setup_test_handler(true).await;
         let mut conn_auth = ConnectionAuth::Unauthenticated;
-        
-        let response = handler.handle(
-            Request::Authenticate {
-                username: "producer".to_string(),
-                password: "wrong_password".to_string(),
-            },
-            &mut conn_auth,
-            "127.0.0.1",
-        ).await;
-        
+
+        let response = handler
+            .handle(
+                Request::Authenticate {
+                    username: "producer".to_string(),
+                    password: "wrong_password".to_string(),
+                },
+                &mut conn_auth,
+                "127.0.0.1",
+            )
+            .await;
+
         match response {
             Response::Error { message } => {
                 assert!(message.contains("AUTHENTICATION_FAILED"));
@@ -524,61 +589,69 @@ mod tests {
             _ => panic!("Expected error response"),
         }
     }
-    
+
     #[tokio::test]
     async fn test_authorized_request() {
         let (handler, _) = setup_test_handler(true).await;
         let mut conn_auth = ConnectionAuth::Unauthenticated;
-        
+
         // First authenticate
-        handler.handle(
-            Request::Authenticate {
-                username: "producer".to_string(),
-                password: "producer_pass".to_string(),
-            },
-            &mut conn_auth,
-            "127.0.0.1",
-        ).await;
-        
+        handler
+            .handle(
+                Request::Authenticate {
+                    username: "producer".to_string(),
+                    password: "producer_pass".to_string(),
+                },
+                &mut conn_auth,
+                "127.0.0.1",
+            )
+            .await;
+
         // Now try to publish (producer role should allow this)
-        let response = handler.handle(
-            Request::CreateTopic {
-                name: "test-topic".to_string(),
-                partitions: Some(1),
-            },
-            &mut conn_auth,
-            "127.0.0.1",
-        ).await;
-        
+        let response = handler
+            .handle(
+                Request::CreateTopic {
+                    name: "test-topic".to_string(),
+                    partitions: Some(1),
+                },
+                &mut conn_auth,
+                "127.0.0.1",
+            )
+            .await;
+
         // Producer role has Write on topics, but not Create - should fail
         // Let's test with admin instead
     }
-    
+
     #[tokio::test]
     async fn test_admin_can_create_topic() {
         let (handler, _) = setup_test_handler(true).await;
         let mut conn_auth = ConnectionAuth::Unauthenticated;
-        
+
         // Authenticate as admin
-        handler.handle(
-            Request::Authenticate {
-                username: "admin".to_string(),
-                password: "admin_pass".to_string(),
-            },
-            &mut conn_auth,
-            "127.0.0.1",
-        ).await;
-        
+        handler
+            .handle(
+                Request::Authenticate {
+                    username: "admin".to_string(),
+                    password: "admin_pass".to_string(),
+                },
+                &mut conn_auth,
+                "127.0.0.1",
+            )
+            .await;
+
         // Admin should be able to create topics
-        let response = handler.handle(
-            Request::CreateTopic {
-                name: "admin-topic".to_string(),
-                partitions: Some(1),
-            },
-            &mut conn_auth,
-            "127.0.0.1",
-        ).await;
-        
+        let response = handler
+            .handle(
+                Request::CreateTopic {
+                    name: "admin-topic".to_string(),
+                    partitions: Some(1),
+                },
+                &mut conn_auth,
+                "127.0.0.1",
+            )
+            .await;
+
         match response {
             Response::TopicCreated { name, .. } => {
                 assert_eq!(name, "admin-topic");
@@ -589,34 +662,30 @@ mod tests {
             _ => panic!("Expected topic created response"),
         }
     }
-    
+
     #[tokio::test]
     async fn test_ping_without_auth() {
         let (handler, _) = setup_test_handler(true).await;
         let mut conn_auth = ConnectionAuth::Unauthenticated;
-        
+
         // Ping should always work
-        let response = handler.handle(
-            Request::Ping,
-            &mut conn_auth,
-            "127.0.0.1",
-        ).await;
-        
+        let response = handler
+            .handle(Request::Ping, &mut conn_auth, "127.0.0.1")
+            .await;
+
         assert!(matches!(response, Response::Pong));
     }
-    
+
     #[tokio::test]
     async fn test_no_auth_required() {
         let (handler, _) = setup_test_handler(false).await;
         let mut conn_auth = ConnectionAuth::Unauthenticated;
-        
+
         // Should be able to list topics without auth when not required
-        let response = handler.handle(
-            Request::ListTopics,
-            &mut conn_auth,
-            "127.0.0.1",
-        ).await;
-        
+        let response = handler
+            .handle(Request::ListTopics, &mut conn_auth, "127.0.0.1")
+            .await;
+
         assert!(matches!(response, Response::Topics { .. }));
     }
 }

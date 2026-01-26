@@ -1,10 +1,10 @@
-use std::path::{Path, PathBuf};
+use crate::{Error, Message, Result};
+use bytes::{BufMut, BytesMut};
+use crc32fast::Hasher;
+use memmap2::Mmap;
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
-use memmap2::Mmap;
-use crate::{Error, Result, Message};
-use bytes::{BytesMut, BufMut};
-use crc32fast::Hasher;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -32,7 +32,6 @@ impl Segment {
         // Open or create log file
         let mut log_file = OpenOptions::new()
             .read(true)
-            
             .create(true)
             .append(true)
             .open(&log_path)?;
@@ -44,9 +43,9 @@ impl Segment {
             .read(true)
             .write(true)
             .create(true)
-            .truncate(false)  // Preserve existing data
+            .truncate(false) // Preserve existing data
             .open(&index_path)?;
-        
+
         let mut segment = Self {
             base_offset,
             log_path,
@@ -55,12 +54,12 @@ impl Segment {
             current_size,
             index_buffer: Vec::new(),
         };
-        
+
         // Load index if exists
         if index_file.metadata()?.len() > 0 {
             segment.load_index(&index_file)?;
         }
-        
+
         Ok(segment)
     }
 
@@ -70,24 +69,24 @@ impl Segment {
         // SAFETY: The file is opened for reading and remains valid for the mmap lifetime.
         // The mmap is read-only and we only access within its bounds.
         let mmap = unsafe { Mmap::map(file)? };
-        
+
         let mut cursor = 0;
         for _ in 0..count {
             if cursor + INDEX_ENTRY_SIZE > mmap.len() {
                 break;
             }
-            
-            let rel_offset_bytes: [u8; 4] = mmap[cursor..cursor+4].try_into().unwrap();
-            let pos_bytes: [u8; 8] = mmap[cursor+4..cursor+12].try_into().unwrap();
-            
+
+            let rel_offset_bytes: [u8; 4] = mmap[cursor..cursor + 4].try_into().unwrap();
+            let pos_bytes: [u8; 8] = mmap[cursor + 4..cursor + 12].try_into().unwrap();
+
             self.index_buffer.push((
                 u32::from_be_bytes(rel_offset_bytes),
-                u64::from_be_bytes(pos_bytes)
+                u64::from_be_bytes(pos_bytes),
             ));
-            
+
             cursor += INDEX_ENTRY_SIZE;
         }
-        
+
         Ok(())
     }
 
@@ -123,7 +122,7 @@ impl Segment {
         }
         let position = self.current_size;
         // file.sync_data()?; // Optional: Call sync for durability (slow) or rely on OS cache
-        
+
         self.current_size += frame.len() as u64;
 
         // 5. Update Index (every 4KB or so)
@@ -141,12 +140,12 @@ impl Segment {
             .append(true)
             .create(true)
             .open(&self.index_path)?;
-            
+
         let mut buf = BytesMut::with_capacity(12);
         buf.put_u32(relative_offset);
         buf.put_u64(position);
         file.write_all(&buf)?;
-        
+
         self.index_buffer.push((relative_offset, position));
         Ok(())
     }
@@ -167,10 +166,14 @@ impl Segment {
         // 1. Find position from index
         let relative_offset = (offset - self.base_offset).try_into().unwrap_or(u32::MAX);
         let mut start_pos = 0;
-        
+
         // Binary search for the closest index entry <= relative_offset
-        if let Some(idx) = self.index_buffer.partition_point(|&(off, _)| off <= relative_offset).checked_sub(1) {
-             start_pos = self.index_buffer[idx].1;
+        if let Some(idx) = self
+            .index_buffer
+            .partition_point(|&(off, _)| off <= relative_offset)
+            .checked_sub(1)
+        {
+            start_pos = self.index_buffer[idx].1;
         }
 
         // 2. Mmap the file for reading (Zero clone from kernel cache context)
@@ -179,7 +182,7 @@ impl Segment {
         if file_len == 0 {
             return Ok(Vec::new());
         }
-        
+
         // SAFETY: File is opened read-only and remains valid for mmap lifetime.
         // We check bounds before all slice accesses below.
         let mmap = unsafe { Mmap::map(&file)? };
@@ -192,7 +195,6 @@ impl Segment {
         let mut messages = Vec::new();
         let mut bytes_read = 0;
 
-
         while current_pos < mmap.len() && bytes_read < max_bytes {
             // Check headers
             if current_pos + 8 > mmap.len() {
@@ -201,7 +203,7 @@ impl Segment {
 
             let slice = &mmap[current_pos..];
             let _cursor = std::io::Cursor::new(slice);
-            
+
             // Read CRC and Len
             // Using converting methods
             let crc_bytes: [u8; 4] = slice[0..4].try_into().unwrap();
@@ -214,13 +216,16 @@ impl Segment {
             }
 
             // Verify CRC
-            let payload = &slice[8..8+msg_len];
+            let payload = &slice[8..8 + msg_len];
             let mut hasher = Hasher::new();
             hasher.update(payload);
             let computed_crc = hasher.finalize();
 
             if computed_crc != stored_crc {
-                return Err(Error::Other(format!("CRC mismatch at position {}", current_pos)));
+                return Err(Error::Other(format!(
+                    "CRC mismatch at position {}",
+                    current_pos
+                )));
             }
 
             // Deserialize
@@ -255,13 +260,13 @@ impl Segment {
         if len == 0 {
             return Ok(None);
         }
-        
+
         // SAFETY: File is opened read-only, checked non-empty, and remains valid.
         // We check bounds before all slice accesses.
         let mmap = unsafe { Mmap::map(&file)? };
-        
+
         if start_pos >= mmap.len() as u64 {
-             return Ok(None);
+            return Ok(None);
         }
 
         let mut current_pos = start_pos as usize;
@@ -279,15 +284,15 @@ impl Segment {
             if current_pos + 8 + msg_len > mmap.len() {
                 break;
             }
-            
-            let payload = &slice[8..8+msg_len];
+
+            let payload = &slice[8..8 + msg_len];
             if let Ok(msg) = Message::from_bytes(payload) {
                 last_offset = Some(msg.offset);
             }
 
             current_pos += 8 + msg_len;
         }
-        
+
         Ok(last_offset)
     }
 

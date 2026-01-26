@@ -1,7 +1,10 @@
 use crate::partitioner::{StickyPartitioner, StickyPartitionerConfig};
 use crate::protocol::{MessageData, Request, Response};
-use rivven_core::{Message, OffsetManager, TopicManager, Validator, schema_registry::{EmbeddedSchemaRegistry, SchemaRegistry}};
 use bytes::Bytes;
+use rivven_core::{
+    schema_registry::{EmbeddedSchemaRegistry, SchemaRegistry},
+    Message, OffsetManager, TopicManager, Validator,
+};
 use std::sync::Arc;
 use tracing::{debug, error, warn};
 
@@ -47,15 +50,13 @@ impl RequestHandler {
     pub async fn handle(&self, request: Request) -> Response {
         match request {
             // Authentication is handled by AuthenticatedHandler, not here
-            Request::Authenticate { .. } 
+            Request::Authenticate { .. }
             | Request::SaslAuthenticate { .. }
             | Request::ScramClientFirst { .. }
-            | Request::ScramClientFinal { .. } => {
-                Response::Error {
-                    message: "UNSUPPORTED: Use authenticated endpoint for authentication".to_string(),
-                }
-            }
-            
+            | Request::ScramClientFinal { .. } => Response::Error {
+                message: "UNSUPPORTED: Use authenticated endpoint for authentication".to_string(),
+            },
+
             Request::Publish {
                 topic,
                 partition,
@@ -68,7 +69,10 @@ impl RequestHandler {
                 partition,
                 offset,
                 max_messages,
-            } => self.handle_consume(topic, partition, offset, max_messages).await,
+            } => {
+                self.handle_consume(topic, partition, offset, max_messages)
+                    .await
+            }
 
             Request::CreateTopic { name, partitions } => {
                 self.handle_create_topic(name, partitions).await
@@ -92,14 +96,17 @@ impl RequestHandler {
                 consumer_group,
                 topic,
                 partition,
-            } => self.handle_get_offset(consumer_group, topic, partition).await,
+            } => {
+                self.handle_get_offset(consumer_group, topic, partition)
+                    .await
+            }
 
             Request::GetOffsetBounds { topic, partition } => {
                 self.handle_get_offset_bounds(topic, partition).await
             }
 
             Request::GetMetadata { topic } => self.handle_get_metadata(topic).await,
-            
+
             Request::GetClusterMetadata { .. } => {
                 // Cluster metadata is handled by the router, not here
                 // If it gets here, we're in standalone mode without full cluster support
@@ -146,7 +153,11 @@ impl RequestHandler {
     ) -> Response {
         // Validate topic name
         if let Err(e) = Validator::validate_topic_name(&topic_name) {
-            warn!("Invalid topic name '{}': {}", Validator::sanitize_for_log(&topic_name, 50), e);
+            warn!(
+                "Invalid topic name '{}': {}",
+                Validator::sanitize_for_log(&topic_name, 50),
+                e
+            );
             return Response::Error {
                 message: format!("INVALID_TOPIC_NAME: {}", e),
             };
@@ -185,7 +196,10 @@ impl RequestHandler {
         // Append to partition
         match topic.append(partition_id, message).await {
             Ok(offset) => {
-                debug!("Published to partition {} at offset {}", partition_id, offset);
+                debug!(
+                    "Published to partition {} at offset {}",
+                    partition_id, offset
+                );
                 Response::Published {
                     offset,
                     partition: partition_id,
@@ -209,7 +223,11 @@ impl RequestHandler {
     ) -> Response {
         // Validate topic name
         if let Err(e) = Validator::validate_topic_name(&topic_name) {
-            warn!("Invalid topic name '{}': {}", Validator::sanitize_for_log(&topic_name, 50), e);
+            warn!(
+                "Invalid topic name '{}': {}",
+                Validator::sanitize_for_log(&topic_name, 50),
+                e
+            );
             return Response::Error {
                 message: format!("INVALID_TOPIC_NAME: {}", e),
             };
@@ -259,7 +277,11 @@ impl RequestHandler {
     async fn handle_create_topic(&self, name: String, partitions: Option<u32>) -> Response {
         // Validate topic name
         if let Err(e) = Validator::validate_topic_name(&name) {
-            warn!("Invalid topic name '{}': {}", Validator::sanitize_for_log(&name, 50), e);
+            warn!(
+                "Invalid topic name '{}': {}",
+                Validator::sanitize_for_log(&name, 50),
+                e
+            );
             return Response::Error {
                 message: format!("INVALID_TOPIC_NAME: {}", e),
             };
@@ -269,12 +291,19 @@ impl RequestHandler {
         if let Some(p) = partitions {
             if p == 0 || p > 1000 {
                 return Response::Error {
-                    message: format!("INVALID_PARTITION_COUNT: must be between 1 and 1000, got {}", p),
+                    message: format!(
+                        "INVALID_PARTITION_COUNT: must be between 1 and 1000, got {}",
+                        p
+                    ),
                 };
             }
         }
 
-        match self.topic_manager.create_topic(name.clone(), partitions).await {
+        match self
+            .topic_manager
+            .create_topic(name.clone(), partitions)
+            .await
+        {
             Ok(topic) => Response::TopicCreated {
                 name,
                 partitions: topic.num_partitions() as u32,
@@ -293,7 +322,11 @@ impl RequestHandler {
     async fn handle_delete_topic(&self, name: String) -> Response {
         // Validate topic name
         if let Err(e) = Validator::validate_topic_name(&name) {
-            warn!("Invalid topic name '{}': {}", Validator::sanitize_for_log(&name, 50), e);
+            warn!(
+                "Invalid topic name '{}': {}",
+                Validator::sanitize_for_log(&name, 50),
+                e
+            );
             return Response::Error {
                 message: format!("INVALID_TOPIC_NAME: {}", e),
             };
@@ -316,7 +349,11 @@ impl RequestHandler {
     ) -> Response {
         // Validate consumer group
         if let Err(e) = Validator::validate_consumer_group_id(&consumer_group) {
-            warn!("Invalid consumer group '{}': {}", Validator::sanitize_for_log(&consumer_group, 50), e);
+            warn!(
+                "Invalid consumer group '{}': {}",
+                Validator::sanitize_for_log(&consumer_group, 50),
+                e
+            );
             return Response::Error {
                 message: format!("INVALID_CONSUMER_GROUP: {}", e),
             };
@@ -371,18 +408,19 @@ impl RequestHandler {
         }
 
         match self.topic_manager.get_topic(&topic_name).await {
-            Ok(topic) => {
-                match topic.partition(partition) {
-                    Ok(p) => {
-                        let earliest = p.earliest_offset().await.unwrap_or(0);
-                        let latest = p.latest_offset().await;
-                        Response::OffsetBounds { earliest, latest }
-                    }
-                    Err(_) => Response::Error {
-                        message: format!("Partition {} not found for topic '{}'", partition, topic_name),
-                    },
+            Ok(topic) => match topic.partition(partition) {
+                Ok(p) => {
+                    let earliest = p.earliest_offset().await.unwrap_or(0);
+                    let latest = p.latest_offset().await;
+                    Response::OffsetBounds { earliest, latest }
                 }
-            }
+                Err(_) => Response::Error {
+                    message: format!(
+                        "Partition {} not found for topic '{}'",
+                        partition, topic_name
+                    ),
+                },
+            },
             Err(e) => Response::Error {
                 message: e.to_string(),
             },
@@ -429,7 +467,7 @@ impl RequestHandler {
                     id,
                     schema: schema.canonical_form(),
                 }
-            },
+            }
             Err(e) => Response::Error {
                 message: format!("Failed to get schema: {}", e),
             },
@@ -506,7 +544,10 @@ impl RequestHandler {
             };
         }
 
-        match topic.find_offset_for_timestamp(partition, timestamp_ms).await {
+        match topic
+            .find_offset_for_timestamp(partition, timestamp_ms)
+            .await
+        {
             Ok(offset) => Response::OffsetForTimestamp { offset },
             Err(e) => Response::Error {
                 message: format!("Failed to find offset for timestamp: {}", e),

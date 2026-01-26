@@ -34,17 +34,17 @@
 #![allow(clippy::useless_conversion)]
 
 mod client;
+mod consumer;
 mod error;
 mod message;
-mod consumer;
 mod producer;
 
 use pyo3::prelude::*;
 
 pub use client::RivvenClient;
+pub use consumer::Consumer;
 pub use error::RivvenError;
 pub use message::Message;
-pub use consumer::Consumer;
 pub use producer::Producer;
 
 use error::IntoPyErr;
@@ -112,7 +112,9 @@ fn connect_tls<'py>(
             (Some(cert), Some(key)) => TlsConfig::mtls_from_pem_files(cert, key, &ca_cert_path),
             _ => TlsConfig {
                 enabled: true,
-                root_ca: Some(CertificateSource::File { path: ca_cert_path.into() }),
+                root_ca: Some(CertificateSource::File {
+                    path: ca_cert_path.into(),
+                }),
                 ..Default::default()
             },
         };
@@ -135,7 +137,10 @@ fn version() -> &'static str {
 fn rivven(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Module metadata
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
-    m.add("__doc__", "Python bindings for Rivven event streaming platform")?;
+    m.add(
+        "__doc__",
+        "Python bindings for Rivven event streaming platform",
+    )?;
 
     // Top-level functions
     m.add_function(wrap_pyfunction!(connect, m)?)?;

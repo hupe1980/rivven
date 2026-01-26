@@ -63,7 +63,10 @@ impl RivvenTestContext {
             .await;
         self.partitions.insert(topic_name, partition.clone());
 
-        info!("📌 Registered CDC topic for {}.{}.{}", database, schema, table);
+        info!(
+            "📌 Registered CDC topic for {}.{}.{}",
+            database, schema, table
+        );
         Ok(partition)
     }
 
@@ -82,7 +85,8 @@ impl RivvenTestContext {
 
         let mut cdc = PostgresCdc::new(config);
 
-        let event_rx = cdc.take_event_receiver()
+        let event_rx = cdc
+            .take_event_receiver()
             .ok_or_else(|| anyhow::anyhow!("Failed to get event receiver"))?;
         let connector_clone = self.connector.clone();
         let event_routing_task = tokio::spawn(async move {
@@ -100,7 +104,10 @@ impl RivvenTestContext {
 
         sleep(Duration::from_millis(super::CDC_STARTUP_DELAY_MS)).await;
 
-        info!("🚀 CDC started with slot {} and publication {}", slot_name, publication_name);
+        info!(
+            "🚀 CDC started with slot {} and publication {}",
+            slot_name, publication_name
+        );
         Ok(())
     }
 
@@ -127,8 +134,11 @@ impl RivvenTestContext {
             .context(format!("Topic not found: {}", topic))?;
 
         loop {
-            let messages = partition.read(0, expected_count + 10).await.map_err(|e| anyhow::anyhow!("{}", e))?;
-            
+            let messages = partition
+                .read(0, expected_count + 10)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
             if messages.len() >= expected_count {
                 return Ok(messages);
             }
@@ -150,8 +160,7 @@ impl RivvenTestContext {
         messages
             .iter()
             .map(|msg| {
-                serde_json::from_slice::<CdcEvent>(&msg.value)
-                    .context("Failed to parse CDC event")
+                serde_json::from_slice::<CdcEvent>(&msg.value).context("Failed to parse CDC event")
             })
             .collect()
     }
@@ -172,7 +181,7 @@ impl RivvenTestContext {
             .read(start_offset, limit)
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
-        
+
         Ok(messages)
     }
 }

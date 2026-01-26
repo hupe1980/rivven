@@ -161,18 +161,14 @@ impl HeartbeatStats {
     /// Record a heartbeat.
     pub fn record_heartbeat(&self) {
         self.heartbeats_sent.fetch_add(1, Ordering::Relaxed);
-        self.last_heartbeat_ts.store(
-            chrono::Utc::now().timestamp_millis(),
-            Ordering::Relaxed,
-        );
+        self.last_heartbeat_ts
+            .store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
     }
 
     /// Record position update.
     pub fn record_position_update(&self, lag_ms: i64) {
-        self.last_position_ts.store(
-            chrono::Utc::now().timestamp_millis(),
-            Ordering::Relaxed,
-        );
+        self.last_position_ts
+            .store(chrono::Utc::now().timestamp_millis(), Ordering::Relaxed);
         self.current_lag_ms.store(lag_ms, Ordering::Relaxed);
     }
 
@@ -272,7 +268,7 @@ impl Heartbeat {
     pub async fn update_position(&self, position: &str, server_id: &str) {
         let now = chrono::Utc::now().timestamp_millis();
         let mut pos = self.position.write().await;
-        
+
         // Calculate lag from previous position update
         let lag_ms = if pos.timestamp > 0 {
             now - pos.timestamp
@@ -286,7 +282,7 @@ impl Heartbeat {
         drop(pos);
 
         self.stats.record_position_update(lag_ms);
-        
+
         // Check health based on lag
         let healthy = lag_ms < self.config.max_lag.as_millis() as i64;
         self.stats.set_healthy(healthy);
@@ -306,16 +302,11 @@ impl Heartbeat {
     pub async fn beat(&self) -> HeartbeatEvent {
         let pos = self.position.read().await;
         let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
-        
+
         self.stats.record_heartbeat();
         self.stats.set_healthy(true);
 
-        let event = HeartbeatEvent::new(
-            &pos.server_id,
-            &pos.position,
-            &self.connector_name,
-            seq,
-        );
+        let event = HeartbeatEvent::new(&pos.server_id, &pos.position, &self.connector_name, seq);
 
         info!(
             "Heartbeat #{}: position={}, connector={}",
@@ -329,7 +320,7 @@ impl Heartbeat {
     /// Returns a channel receiver for heartbeat events.
     pub async fn start(&self) -> tokio::sync::mpsc::Receiver<HeartbeatEvent> {
         let (tx, rx) = tokio::sync::mpsc::channel(16);
-        
+
         self.running.store(true, Ordering::Relaxed);
         *self.started_at.write().await = Some(Instant::now());
         self.stats.set_healthy(true);
@@ -346,40 +337,35 @@ impl Heartbeat {
         // Spawn background heartbeat task
         let stats_clone = stats.clone();
         let position_clone = position_arc.clone();
-        
+
         // Use a shared atomic for running state
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
-        
+
         tokio::spawn(async move {
             let mut interval_timer = tokio::time::interval(interval);
             let sequence = AtomicU64::new(0);
-            
+
             loop {
                 interval_timer.tick().await;
-                
+
                 if !running_clone.load(Ordering::Relaxed) {
                     break;
                 }
 
                 let pos = position_clone.read().await;
                 let seq = sequence.fetch_add(1, Ordering::Relaxed);
-                
+
                 stats_clone.record_heartbeat();
 
-                let event = HeartbeatEvent::new(
-                    &pos.server_id,
-                    &pos.position,
-                    &connector_name,
-                    seq,
-                );
+                let event =
+                    HeartbeatEvent::new(&pos.server_id, &pos.position, &connector_name, seq);
                 drop(pos);
 
-                if emit_events
-                    && tx.send(event).await.is_err() {
-                        // Receiver dropped
-                        break;
-                    }
+                if emit_events && tx.send(event).await.is_err() {
+                    // Receiver dropped
+                    break;
+                }
             }
         });
 
@@ -433,7 +419,7 @@ impl Heartbeat {
 pub trait HeartbeatCallback: Send + Sync {
     /// Called to send a heartbeat request to the database.
     fn send_heartbeat(&self) -> impl std::future::Future<Output = Result<(), String>> + Send;
-    
+
     /// Get current position for heartbeat event.
     fn get_position(&self) -> impl std::future::Future<Output = String> + Send;
 }
@@ -471,7 +457,7 @@ mod tests {
     #[test]
     fn test_heartbeat_event() {
         let event = HeartbeatEvent::new("pg-server", "0/16B3748", "my-connector", 1);
-        
+
         assert_eq!(event.source, "pg-server");
         assert_eq!(event.position, "0/16B3748");
         assert_eq!(event.connector, "my-connector");
@@ -482,13 +468,13 @@ mod tests {
     #[test]
     fn test_heartbeat_stats() {
         let stats = HeartbeatStats::default();
-        
+
         assert_eq!(stats.heartbeats_sent(), 0);
         assert!(!stats.is_healthy());
-        
+
         stats.set_healthy(true);
         assert!(stats.is_healthy());
-        
+
         stats.record_heartbeat();
         assert_eq!(stats.heartbeats_sent(), 1);
         assert!(stats.last_heartbeat_ts() > 0);
@@ -518,9 +504,9 @@ mod tests {
         let heartbeat = Heartbeat::new(config, "test-connector");
 
         heartbeat.update_position("0/16B3748", "pg-server-1").await;
-        
+
         assert!(heartbeat.is_healthy());
-        
+
         let pos = heartbeat.position.read().await;
         assert_eq!(pos.position, "0/16B3748");
         assert_eq!(pos.server_id, "pg-server-1");
@@ -532,9 +518,9 @@ mod tests {
         let heartbeat = Heartbeat::new(config, "test-connector");
 
         heartbeat.update_position("0/1234", "server-1").await;
-        
+
         let event = heartbeat.beat().await;
-        
+
         assert_eq!(event.connector, "test-connector");
         assert_eq!(event.position, "0/1234");
         assert_eq!(event.source, "server-1");
@@ -567,13 +553,13 @@ mod tests {
 
         // First update
         heartbeat.update_position("0/1000", "server").await;
-        
+
         // Simulate lag by waiting
         tokio::time::sleep(Duration::from_millis(10)).await;
-        
+
         // Second update - should calculate lag
         heartbeat.update_position("0/2000", "server").await;
-        
+
         // Lag should be small (around 10ms)
         let lag = heartbeat.stats().current_lag_ms();
         assert!(lag > 0);
@@ -609,7 +595,7 @@ mod tests {
     #[tokio::test]
     async fn test_heartbeat_event_serialization() {
         let event = HeartbeatEvent::new("pg", "0/ABCD", "conn", 42);
-        
+
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"source\":\"pg\""));
         assert!(json.contains("\"position\":\"0/ABCD\""));
@@ -627,7 +613,9 @@ mod tests {
         let heartbeat = Heartbeat::new(config, "test");
 
         for i in 0..5 {
-            heartbeat.update_position(&format!("0/{}", i * 1000), "server").await;
+            heartbeat
+                .update_position(&format!("0/{}", i * 1000), "server")
+                .await;
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
 

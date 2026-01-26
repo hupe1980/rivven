@@ -267,13 +267,22 @@ pub trait OutboxStore: Send + Sync {
     async fn get_pending(&self, limit: usize) -> Result<Vec<OutboxEvent>>;
 
     /// Update event status.
-    async fn update_status(&self, event_id: &str, status: OutboxStatus, error: Option<String>) -> Result<()>;
+    async fn update_status(
+        &self,
+        event_id: &str,
+        status: OutboxStatus,
+        error: Option<String>,
+    ) -> Result<()>;
 
     /// Delete old delivered events.
     async fn cleanup(&self, older_than: Duration) -> Result<u64>;
 
     /// Get events for an aggregate (ordered by sequence).
-    async fn get_by_aggregate(&self, aggregate_type: &str, aggregate_id: &str) -> Result<Vec<OutboxEvent>>;
+    async fn get_by_aggregate(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+    ) -> Result<Vec<OutboxEvent>>;
 
     /// Get DLQ events (failed after max retries).
     async fn get_dlq(&self, limit: usize) -> Result<Vec<OutboxEvent>>;
@@ -342,7 +351,12 @@ impl OutboxStore for MemoryOutboxStore {
         Ok(pending)
     }
 
-    async fn update_status(&self, event_id: &str, status: OutboxStatus, error: Option<String>) -> Result<()> {
+    async fn update_status(
+        &self,
+        event_id: &str,
+        status: OutboxStatus,
+        error: Option<String>,
+    ) -> Result<()> {
         let mut events = self.events.write().await;
         if let Some(event) = events.get_mut(event_id) {
             event.status = status;
@@ -357,13 +371,15 @@ impl OutboxStore for MemoryOutboxStore {
         let mut events = self.events.write().await;
         let cutoff = unix_timestamp_millis() - older_than.as_millis() as u64;
         let before = events.len();
-        events.retain(|_, e| {
-            e.status != OutboxStatus::Delivered || e.created_at > cutoff
-        });
+        events.retain(|_, e| e.status != OutboxStatus::Delivered || e.created_at > cutoff);
         Ok((before - events.len()) as u64)
     }
 
-    async fn get_by_aggregate(&self, aggregate_type: &str, aggregate_id: &str) -> Result<Vec<OutboxEvent>> {
+    async fn get_by_aggregate(
+        &self,
+        aggregate_type: &str,
+        aggregate_id: &str,
+    ) -> Result<Vec<OutboxEvent>> {
         let events = self.events.read().await;
         let mut agg_events: Vec<_> = events
             .values()
@@ -430,7 +446,8 @@ impl OutboxStats {
     }
 
     pub fn record_latency(&self, latency: Duration) {
-        self.total_latency_ms.fetch_add(latency.as_millis() as u64, Ordering::Relaxed);
+        self.total_latency_ms
+            .fetch_add(latency.as_millis() as u64, Ordering::Relaxed);
     }
 
     pub fn record_error(&self) {
@@ -441,7 +458,7 @@ impl OutboxStats {
         let processed = self.events_processed.load(Ordering::Relaxed);
         let delivered = self.events_delivered.load(Ordering::Relaxed);
         let total_latency = self.total_latency_ms.load(Ordering::Relaxed);
-        
+
         OutboxStatsSnapshot {
             events_processed: processed,
             events_delivered: delivered,
@@ -450,7 +467,11 @@ impl OutboxStats {
             batches_processed: self.batches_processed.load(Ordering::Relaxed),
             delivery_errors: self.delivery_errors.load(Ordering::Relaxed),
             avg_batch_size: self.avg_batch_size.load(Ordering::Relaxed),
-            avg_latency_ms: if delivered > 0 { total_latency / delivered } else { 0 },
+            avg_latency_ms: if delivered > 0 {
+                total_latency / delivered
+            } else {
+                0
+            },
             delivery_rate: if processed > 0 {
                 delivered as f64 / processed as f64
             } else {
@@ -564,20 +585,34 @@ where
                 let event_id = event.id.clone();
                 stats.record_processed(1);
 
-                match tokio::time::timeout(
-                    config.delivery_timeout,
-                    publisher.publish(&event),
-                ).await {
+                match tokio::time::timeout(config.delivery_timeout, publisher.publish(&event)).await
+                {
                     Ok(Ok(())) => {
-                        store.update_status(&event_id, OutboxStatus::Delivered, None).await?;
+                        store
+                            .update_status(&event_id, OutboxStatus::Delivered, None)
+                            .await?;
                         stats.record_delivered(1);
                     }
                     Ok(Err(e)) => {
-                        Self::handle_failure(config, store, &event_id, event.attempts, &e.to_string()).await?;
+                        Self::handle_failure(
+                            config,
+                            store,
+                            &event_id,
+                            event.attempts,
+                            &e.to_string(),
+                        )
+                        .await?;
                         stats.record_error();
                     }
                     Err(_) => {
-                        Self::handle_failure(config, store, &event_id, event.attempts, "Delivery timeout").await?;
+                        Self::handle_failure(
+                            config,
+                            store,
+                            &event_id,
+                            event.attempts,
+                            "Delivery timeout",
+                        )
+                        .await?;
                         stats.record_error();
                     }
                 }
@@ -585,16 +620,25 @@ where
         } else {
             // Parallel delivery for throughput
             let results = publisher.publish_batch(&pending).await?;
-            
+
             for (event, result) in pending.iter().zip(results.iter()) {
                 stats.record_processed(1);
                 match result {
                     Ok(()) => {
-                        store.update_status(&event.id, OutboxStatus::Delivered, None).await?;
+                        store
+                            .update_status(&event.id, OutboxStatus::Delivered, None)
+                            .await?;
                         stats.record_delivered(1);
                     }
                     Err(e) => {
-                        Self::handle_failure(config, store, &event.id, event.attempts, &e.to_string()).await?;
+                        Self::handle_failure(
+                            config,
+                            store,
+                            &event.id,
+                            event.attempts,
+                            &e.to_string(),
+                        )
+                        .await?;
                         stats.record_error();
                     }
                 }
@@ -614,11 +658,21 @@ where
         error: &str,
     ) -> Result<()> {
         if attempts >= config.max_retries {
-            warn!("Event {} failed after {} attempts, moving to DLQ", event_id, attempts);
-            store.update_status(event_id, OutboxStatus::Failed, Some(error.to_string())).await?;
+            warn!(
+                "Event {} failed after {} attempts, moving to DLQ",
+                event_id, attempts
+            );
+            store
+                .update_status(event_id, OutboxStatus::Failed, Some(error.to_string()))
+                .await?;
         } else {
-            debug!("Event {} delivery failed, will retry (attempt {})", event_id, attempts);
-            store.update_status(event_id, OutboxStatus::Pending, Some(error.to_string())).await?;
+            debug!(
+                "Event {} delivery failed, will retry (attempt {})",
+                event_id, attempts
+            );
+            store
+                .update_status(event_id, OutboxStatus::Pending, Some(error.to_string()))
+                .await?;
         }
         Ok(())
     }
@@ -656,7 +710,9 @@ where
 
     /// Retry a failed event from DLQ.
     pub async fn retry_dlq_event(&self, event_id: &str) -> Result<()> {
-        self.store.update_status(event_id, OutboxStatus::Pending, None).await
+        self.store
+            .update_status(event_id, OutboxStatus::Pending, None)
+            .await
     }
 }
 
@@ -673,8 +729,8 @@ fn uuid_v4() -> String {
 }
 
 fn rand_u64() -> u64 {
-    use std::hash::{Hash, Hasher};
     use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
     std::time::Instant::now().hash(&mut hasher);
     std::thread::current().id().hash(&mut hasher);
@@ -760,8 +816,14 @@ mod tests {
             .with_metadata("correlation_id", "corr-123")
             .with_metadata("trace_id", "trace-456");
 
-        assert_eq!(event.metadata.get("correlation_id"), Some(&"corr-123".to_string()));
-        assert_eq!(event.metadata.get("trace_id"), Some(&"trace-456".to_string()));
+        assert_eq!(
+            event.metadata.get("correlation_id"),
+            Some(&"corr-123".to_string())
+        );
+        assert_eq!(
+            event.metadata.get("trace_id"),
+            Some(&"trace-456".to_string())
+        );
     }
 
     #[test]
@@ -783,16 +845,16 @@ mod tests {
     #[test]
     fn test_outbox_event_status_transitions() {
         let mut event = OutboxEvent::new("Test", "1", "TestEvent", serde_json::json!({}));
-        
+
         assert_eq!(event.status, OutboxStatus::Pending);
-        
+
         event.mark_processing();
         assert_eq!(event.status, OutboxStatus::Processing);
         assert_eq!(event.attempts, 1);
-        
+
         event.mark_delivered();
         assert_eq!(event.status, OutboxStatus::Delivered);
-        
+
         let mut event2 = OutboxEvent::new("Test", "2", "TestEvent", serde_json::json!({}));
         event2.mark_processing();
         event2.mark_failed("Connection refused");
@@ -837,7 +899,7 @@ mod tests {
     #[tokio::test]
     async fn test_memory_store_basic() {
         let store = MemoryOutboxStore::new();
-        
+
         let event = OutboxEvent::new("Order", "1", "OrderCreated", serde_json::json!({}));
         store.store(event.clone()).await.unwrap();
 
@@ -849,15 +911,20 @@ mod tests {
     #[tokio::test]
     async fn test_memory_store_sequence_numbers() {
         let store = MemoryOutboxStore::new();
-        
+
         for i in 0..5 {
-            let event = OutboxEvent::new("Order", "order-1", &format!("Event{}", i), serde_json::json!({}));
+            let event = OutboxEvent::new(
+                "Order",
+                "order-1",
+                &format!("Event{}", i),
+                serde_json::json!({}),
+            );
             store.store(event).await.unwrap();
         }
 
         let events = store.get_by_aggregate("Order", "order-1").await.unwrap();
         assert_eq!(events.len(), 5);
-        
+
         // Verify sequence ordering
         for (i, event) in events.iter().enumerate() {
             assert_eq!(event.sequence, (i + 1) as u64);
@@ -867,12 +934,15 @@ mod tests {
     #[tokio::test]
     async fn test_memory_store_status_update() {
         let store = MemoryOutboxStore::new();
-        
+
         let event = OutboxEvent::new("Test", "1", "TestEvent", serde_json::json!({}));
         let event_id = event.id.clone();
         store.store(event).await.unwrap();
 
-        store.update_status(&event_id, OutboxStatus::Delivered, None).await.unwrap();
+        store
+            .update_status(&event_id, OutboxStatus::Delivered, None)
+            .await
+            .unwrap();
 
         let pending = store.get_pending(10).await.unwrap();
         assert!(pending.is_empty()); // No longer pending
@@ -881,12 +951,15 @@ mod tests {
     #[tokio::test]
     async fn test_memory_store_dlq() {
         let store = MemoryOutboxStore::new();
-        
+
         let event = OutboxEvent::new("Test", "1", "TestEvent", serde_json::json!({}));
         let event_id = event.id.clone();
         store.store(event).await.unwrap();
 
-        store.update_status(&event_id, OutboxStatus::Failed, Some("Error".to_string())).await.unwrap();
+        store
+            .update_status(&event_id, OutboxStatus::Failed, Some("Error".to_string()))
+            .await
+            .unwrap();
 
         let dlq = store.get_dlq(10).await.unwrap();
         assert_eq!(dlq.len(), 1);
@@ -896,12 +969,15 @@ mod tests {
     #[tokio::test]
     async fn test_memory_store_cleanup() {
         let store = MemoryOutboxStore::new();
-        
+
         // Store and mark as delivered
         let event = OutboxEvent::new("Test", "1", "TestEvent", serde_json::json!({}));
         let event_id = event.id.clone();
         store.store(event).await.unwrap();
-        store.update_status(&event_id, OutboxStatus::Delivered, None).await.unwrap();
+        store
+            .update_status(&event_id, OutboxStatus::Delivered, None)
+            .await
+            .unwrap();
 
         // Cleanup with zero retention (should remove all delivered)
         let cleaned = store.cleanup(Duration::ZERO).await.unwrap();
@@ -912,9 +988,14 @@ mod tests {
     async fn test_processor_basic_delivery() {
         let store = MemoryOutboxStore::new();
         let publisher = MockPublisher::new();
-        
+
         // Store an event
-        let event = OutboxEvent::new("Order", "1", "OrderCreated", serde_json::json!({"total": 100}));
+        let event = OutboxEvent::new(
+            "Order",
+            "1",
+            "OrderCreated",
+            serde_json::json!({"total": 100}),
+        );
         store.store(event).await.unwrap();
 
         // Process
@@ -925,7 +1006,9 @@ mod tests {
             &Arc::new(store),
             &Arc::new(publisher),
             &stats,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
         let snapshot = stats.snapshot();
         assert_eq!(snapshot.events_processed, 1);
@@ -936,7 +1019,7 @@ mod tests {
     async fn test_processor_retry_on_failure() {
         let store = Arc::new(MemoryOutboxStore::new());
         let publisher = Arc::new(MockPublisher::new());
-        
+
         // Store an event
         let event = OutboxEvent::new("Order", "1", "OrderCreated", serde_json::json!({}));
         let _event_id = event.id.clone();
@@ -946,22 +1029,19 @@ mod tests {
         publisher.set_fail(true);
 
         // Process (should fail and be reset to pending)
-        let config = OutboxConfig::builder()
-            .max_retries(3)
-            .build();
+        let config = OutboxConfig::builder().max_retries(3).build();
         let stats = Arc::new(OutboxStats::new());
-        
+
         OutboxProcessor::<MemoryOutboxStore, MockPublisher>::process_batch(
-            &config,
-            &store,
-            &publisher,
-            &stats,
-        ).await.unwrap();
+            &config, &store, &publisher, &stats,
+        )
+        .await
+        .unwrap();
 
         // Event should still be pending for retry
         let pending = store.get_pending(10).await.unwrap();
         assert_eq!(pending.len(), 1);
-        
+
         let snapshot = stats.snapshot();
         assert_eq!(snapshot.events_processed, 1);
         assert_eq!(snapshot.events_delivered, 0);
@@ -972,7 +1052,7 @@ mod tests {
     async fn test_processor_dlq_after_max_retries() {
         let store = Arc::new(MemoryOutboxStore::new());
         let publisher = Arc::new(MockPublisher::new());
-        
+
         // Store an event with max attempts already reached
         let mut event = OutboxEvent::new("Order", "1", "OrderCreated", serde_json::json!({}));
         event.attempts = 3; // Already at max
@@ -982,22 +1062,19 @@ mod tests {
         // Set publisher to fail
         publisher.set_fail(true);
 
-        let config = OutboxConfig::builder()
-            .max_retries(3)
-            .build();
+        let config = OutboxConfig::builder().max_retries(3).build();
         let stats = Arc::new(OutboxStats::new());
-        
+
         OutboxProcessor::<MemoryOutboxStore, MockPublisher>::process_batch(
-            &config,
-            &store,
-            &publisher,
-            &stats,
-        ).await.unwrap();
+            &config, &store, &publisher, &stats,
+        )
+        .await
+        .unwrap();
 
         // Event should be in DLQ now
         let dlq = store.get_dlq(10).await.unwrap();
         assert_eq!(dlq.len(), 1);
-        
+
         let pending = store.get_pending(10).await.unwrap();
         assert!(pending.is_empty());
     }

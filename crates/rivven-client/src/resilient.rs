@@ -403,8 +403,11 @@ impl ResilientClient {
 
         // Start health check background task
         if config.health_check_enabled {
-            let pools_clone: HashMap<String, Arc<ConnectionPool>> =
-                client.pools.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            let pools_clone: HashMap<String, Arc<ConnectionPool>> = client
+                .pools
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
             let interval = config.health_check_interval;
 
             let handle = tokio::spawn(async move {
@@ -446,7 +449,8 @@ impl ResilientClient {
 
         for attempt in 0..self.config.retry_max_attempts {
             // Round-robin server selection with failover
-            let server_idx = (self.current_server.fetch_add(1, Ordering::Relaxed) as usize) % num_servers;
+            let server_idx =
+                (self.current_server.fetch_add(1, Ordering::Relaxed) as usize) % num_servers;
             let server = &servers[server_idx];
 
             let pool = match self.pools.get(server) {
@@ -580,7 +584,10 @@ impl ResilientClient {
         self.execute_with_retry(move |mut conn| {
             let topic = topic.clone();
             async move {
-                let result = conn.client.consume(&topic, partition, offset, max_messages).await;
+                let result = conn
+                    .client
+                    .consume(&topic, partition, offset, max_messages)
+                    .await;
                 (conn, result)
             }
         })
@@ -833,7 +840,9 @@ mod tests {
     #[test]
     fn test_is_retryable_error() {
         assert!(is_retryable_error(&Error::ConnectionError("test".into())));
-        assert!(is_retryable_error(&Error::CircuitBreakerOpen("test".into())));
+        assert!(is_retryable_error(&Error::CircuitBreakerOpen(
+            "test".into()
+        )));
         assert!(!is_retryable_error(&Error::InvalidResponse));
         assert!(!is_retryable_error(&Error::ServerError("test".into())));
     }

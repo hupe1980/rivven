@@ -116,25 +116,25 @@ impl Consumer {
         let partition = self.partition;
         let offset = Arc::clone(&self.offset);
         let batch_size = max_messages.unwrap_or(self.batch_size);
-        
+
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let current_offset = {
                 let guard = offset.lock().await;
                 *guard
             };
-            
+
             let mut guard = client.lock().await;
             let messages = guard
                 .consume(&topic, partition, current_offset, batch_size)
                 .await
                 .into_py_err()?;
-            
+
             // Update offset if we got messages
             if let Some(last) = messages.last() {
                 let mut offset_guard = offset.lock().await;
                 *offset_guard = last.offset + 1;
             }
-            
+
             // Convert to Python messages
             let result: Vec<Message> = messages
                 .into_iter()
@@ -163,23 +163,23 @@ impl Consumer {
         let partition = self.partition;
         let group = self.group.clone();
         let offset = Arc::clone(&self.offset);
-        
+
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let group = group.ok_or_else(|| {
                 RivvenError::invalid_config("Cannot commit without a consumer group")
             })?;
-            
+
             let current_offset = {
                 let guard = offset.lock().await;
                 *guard
             };
-            
+
             let mut guard = client.lock().await;
             guard
                 .commit_offset(&group, &topic, partition, current_offset)
                 .await
                 .into_py_err()?;
-            
+
             Ok(())
         })
     }
@@ -210,14 +210,14 @@ impl Consumer {
         let topic = self.topic.clone();
         let partition = self.partition;
         let offset = Arc::clone(&self.offset);
-        
+
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut guard = client.lock().await;
             let (earliest, _) = guard
                 .get_offset_bounds(&topic, partition)
                 .await
                 .into_py_err()?;
-            
+
             let mut offset_guard = offset.lock().await;
             *offset_guard = earliest;
             Ok(())
@@ -233,14 +233,14 @@ impl Consumer {
         let topic = self.topic.clone();
         let partition = self.partition;
         let offset = Arc::clone(&self.offset);
-        
+
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut guard = client.lock().await;
             let (_, latest) = guard
                 .get_offset_bounds(&topic, partition)
                 .await
                 .into_py_err()?;
-            
+
             let mut offset_guard = offset.lock().await;
             *offset_guard = latest;
             Ok(())
@@ -259,7 +259,7 @@ impl Consumer {
         let client = Arc::clone(&self.client);
         let topic = self.topic.clone();
         let partition = self.partition;
-        
+
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut guard = client.lock().await;
             let bounds = guard
@@ -283,28 +283,28 @@ impl Consumer {
         let offset = Arc::clone(&self.offset);
         let group = self.group.clone();
         let auto_commit = self.auto_commit;
-        
+
         let fut = pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let current_offset = {
                 let guard = offset.lock().await;
                 *guard
             };
-            
+
             let mut guard = client.lock().await;
             let messages = guard
                 .consume(&topic, partition, current_offset, 1)
                 .await
                 .into_py_err()?;
-            
+
             if let Some(msg_data) = messages.into_iter().next() {
                 let new_offset = msg_data.offset + 1;
-                
+
                 // Update offset
                 {
                     let mut offset_guard = offset.lock().await;
                     *offset_guard = new_offset;
                 }
-                
+
                 // Auto-commit if enabled
                 if auto_commit {
                     if let Some(ref group) = group {
@@ -314,7 +314,7 @@ impl Consumer {
                             .into_py_err()?;
                     }
                 }
-                
+
                 let msg = Message::from_client_data(msg_data, partition, topic);
                 Ok(Some(msg))
             } else {
@@ -322,7 +322,7 @@ impl Consumer {
                 Ok(None)
             }
         })?;
-        
+
         Ok(Some(fut))
     }
 

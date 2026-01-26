@@ -279,29 +279,29 @@ mod cedar_impl {
         }
 
         fn to_cedar_context(&self) -> CedarResult<Context> {
-            // Cedar does not allow null values, so we must create a JSON object 
+            // Cedar does not allow null values, so we must create a JSON object
             // with only the non-null values
             let mut context_map = serde_json::Map::new();
-            
+
             // Add timestamp (always present)
             context_map.insert("timestamp".to_string(), serde_json::json!(self.timestamp));
-            
+
             // Add optional fields only if they have values
             if let Some(ip) = &self.ip_address {
                 context_map.insert("ip_address".to_string(), serde_json::json!(ip));
             }
-            
+
             if let Some(tls) = &self.tls_subject {
                 context_map.insert("tls_subject".to_string(), serde_json::json!(tls));
             }
-            
+
             // Add extra context, filtering out null values
             for (key, value) in &self.extra {
                 if !value.is_null() {
                     context_map.insert(key.clone(), value.clone());
                 }
             }
-            
+
             let json = serde_json::Value::Object(context_map);
 
             Context::from_json_value(json, None)
@@ -614,12 +614,12 @@ mod cedar_impl {
                 .filter(|p| p.id() != &policy_id)
                 .cloned()
                 .collect::<Vec<_>>();
-            
+
             let mut new_set = PolicySet::new();
             for policy in new_policies {
                 new_set.add(policy).ok();
             }
-            
+
             *policies = new_set;
             info!("Removed Cedar policy: {}", id);
             Ok(())
@@ -997,11 +997,19 @@ permit(
             // Add group and user
             authz.add_group("admins", &[]).unwrap();
             authz
-                .add_user("alice", Some("alice@example.com"), &["admin"], &["admins"], false)
+                .add_user(
+                    "alice",
+                    Some("alice@example.com"),
+                    &["admin"],
+                    &["admins"],
+                    false,
+                )
                 .unwrap();
 
             // Add topic
-            authz.add_topic("orders", Some("alice"), 3, 2, 604800000).unwrap();
+            authz
+                .add_topic("orders", Some("alice"), 3, 2, 604800000)
+                .unwrap();
 
             // Check authorization
             let ctx = AuthzContext::new().with_ip("127.0.0.1");
@@ -1077,7 +1085,7 @@ pub use cedar_impl::*;
 #[cfg(not(feature = "cedar"))]
 mod no_cedar {
     //! Stub module when Cedar feature is disabled
-    
+
     use std::collections::HashMap;
     use thiserror::Error;
 

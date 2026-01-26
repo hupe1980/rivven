@@ -107,7 +107,11 @@ impl ConnectorSpec {
     /// Enable incremental sync support
     pub fn incremental(mut self, supported: bool) -> Self {
         self.supports_incremental = supported;
-        if supported && !self.supported_sync_modes.contains(&SyncModeSpec::Incremental) {
+        if supported
+            && !self
+                .supported_sync_modes
+                .contains(&SyncModeSpec::Incremental)
+        {
             self.supported_sync_modes.push(SyncModeSpec::Incremental);
         }
         self
@@ -179,8 +183,15 @@ impl ConnectorSpecBuilder {
     /// Enable incremental sync support
     pub fn incremental(mut self, supported: bool) -> Self {
         self.spec.supports_incremental = supported;
-        if supported && !self.spec.supported_sync_modes.contains(&SyncModeSpec::Incremental) {
-            self.spec.supported_sync_modes.push(SyncModeSpec::Incremental);
+        if supported
+            && !self
+                .spec
+                .supported_sync_modes
+                .contains(&SyncModeSpec::Incremental)
+        {
+            self.spec
+                .supported_sync_modes
+                .push(SyncModeSpec::Incremental);
         }
         self
     }

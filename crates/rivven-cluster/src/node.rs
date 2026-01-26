@@ -25,13 +25,12 @@ pub enum NodeState {
     Unknown,
 }
 
-
 impl NodeState {
     /// Check if node is considered healthy for routing
     pub fn is_healthy(&self) -> bool {
         matches!(self, NodeState::Alive)
     }
-    
+
     /// Check if node might be reachable
     pub fn is_reachable(&self) -> bool {
         matches!(self, NodeState::Alive | NodeState::Suspect)
@@ -58,7 +57,7 @@ impl NodeCapabilities {
             replica_eligible: true,
         }
     }
-    
+
     /// Observer capabilities (replica only, no voting/leading)
     pub fn observer() -> Self {
         Self {
@@ -74,25 +73,25 @@ impl NodeCapabilities {
 pub struct NodeInfo {
     /// Unique node identifier
     pub id: NodeId,
-    
+
     /// Human-readable name
     pub name: Option<String>,
-    
+
     /// Rack identifier for rack-aware placement
     pub rack: Option<String>,
-    
+
     /// Client-facing address
     pub client_addr: SocketAddr,
-    
+
     /// Cluster communication address
     pub cluster_addr: SocketAddr,
-    
+
     /// Node capabilities
     pub capabilities: NodeCapabilities,
-    
+
     /// Node version (for compatibility checking)
     pub version: String,
-    
+
     /// Custom metadata/tags
     pub tags: std::collections::HashMap<String, String>,
 }
@@ -111,25 +110,25 @@ impl NodeInfo {
             tags: std::collections::HashMap::new(),
         }
     }
-    
+
     /// Set human-readable name
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into());
         self
     }
-    
+
     /// Set rack identifier
     pub fn with_rack(mut self, rack: impl Into<String>) -> Self {
         self.rack = Some(rack.into());
         self
     }
-    
+
     /// Set capabilities
     pub fn with_capabilities(mut self, capabilities: NodeCapabilities) -> Self {
         self.capabilities = capabilities;
         self
     }
-    
+
     /// Add a tag
     pub fn with_tag(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.tags.insert(key.into(), value.into());
@@ -142,22 +141,22 @@ impl NodeInfo {
 pub struct Node {
     /// Static node information
     pub info: NodeInfo,
-    
+
     /// Current node state
     pub state: NodeState,
-    
+
     /// Incarnation number (for SWIM protocol)
     pub incarnation: u64,
-    
+
     /// Last time we heard from this node
     pub last_seen: Instant,
-    
+
     /// Number of partitions led by this node
     pub partition_leader_count: u32,
-    
+
     /// Number of partition replicas on this node
     pub partition_replica_count: u32,
-    
+
     /// Whether this node is the Raft leader
     pub is_raft_leader: bool,
 }
@@ -175,56 +174,56 @@ impl Node {
             is_raft_leader: false,
         }
     }
-    
+
     /// Update last seen time
     pub fn touch(&mut self) {
         self.last_seen = Instant::now();
     }
-    
+
     /// Mark as alive
     pub fn mark_alive(&mut self, incarnation: u64) {
         self.state = NodeState::Alive;
         self.incarnation = incarnation;
         self.touch();
     }
-    
+
     /// Mark as suspect
     pub fn mark_suspect(&mut self) {
         if self.state == NodeState::Alive {
             self.state = NodeState::Suspect;
         }
     }
-    
+
     /// Mark as dead
     pub fn mark_dead(&mut self) {
         self.state = NodeState::Dead;
     }
-    
+
     /// Mark as leaving
     pub fn mark_leaving(&mut self) {
         self.state = NodeState::Leaving;
     }
-    
+
     /// Check if node is healthy
     pub fn is_healthy(&self) -> bool {
         self.state.is_healthy()
     }
-    
+
     /// Get node ID
     pub fn id(&self) -> &str {
         &self.info.id
     }
-    
+
     /// Get cluster address
     pub fn cluster_addr(&self) -> SocketAddr {
         self.info.cluster_addr
     }
-    
+
     /// Get client address  
     pub fn client_addr(&self) -> SocketAddr {
         self.info.client_addr
     }
-    
+
     /// Calculate load score (lower is better for placement)
     pub fn load_score(&self) -> u32 {
         // Weight leaders more than replicas
@@ -261,46 +260,54 @@ impl From<&Node> for NodeGossipState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_node_state_transitions() {
-        let info = NodeInfo::new("node-1", "127.0.0.1:9092".parse().unwrap(), "127.0.0.1:9093".parse().unwrap());
+        let info = NodeInfo::new(
+            "node-1",
+            "127.0.0.1:9092".parse().unwrap(),
+            "127.0.0.1:9093".parse().unwrap(),
+        );
         let mut node = Node::new(info);
-        
+
         assert_eq!(node.state, NodeState::Unknown);
         assert!(!node.is_healthy());
-        
+
         node.mark_alive(1);
         assert_eq!(node.state, NodeState::Alive);
         assert!(node.is_healthy());
-        
+
         node.mark_suspect();
         assert_eq!(node.state, NodeState::Suspect);
         assert!(!node.is_healthy());
         assert!(node.state.is_reachable());
-        
+
         node.mark_dead();
         assert_eq!(node.state, NodeState::Dead);
         assert!(!node.state.is_reachable());
     }
-    
+
     #[test]
     fn test_load_score() {
-        let info = NodeInfo::new("node-1", "127.0.0.1:9092".parse().unwrap(), "127.0.0.1:9093".parse().unwrap());
+        let info = NodeInfo::new(
+            "node-1",
+            "127.0.0.1:9092".parse().unwrap(),
+            "127.0.0.1:9093".parse().unwrap(),
+        );
         let mut node = Node::new(info);
-        
+
         node.partition_leader_count = 2;
         node.partition_replica_count = 4;
-        
+
         // Leaders weighted 3x
         assert_eq!(node.load_score(), 2 * 3 + 4);
     }
-    
+
     #[test]
     fn test_node_capabilities() {
         let full = NodeCapabilities::full();
         assert!(full.voter && full.leader_eligible && full.replica_eligible);
-        
+
         let observer = NodeCapabilities::observer();
         assert!(!observer.voter && !observer.leader_eligible && observer.replica_eligible);
     }

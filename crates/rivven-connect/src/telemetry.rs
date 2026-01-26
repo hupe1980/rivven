@@ -293,9 +293,11 @@ pub fn init_tracing(config: &TelemetryConfig) -> Result<(), TelemetryError> {
     // Note: Full OpenTelemetry integration requires the opentelemetry crate
     // which would be added as an optional dependency behind a feature flag.
     // This is a placeholder implementation showing the API.
-    
+
     match &config.exporter {
-        ExporterConfig::Otlp { endpoint, use_http, .. } => {
+        ExporterConfig::Otlp {
+            endpoint, use_http, ..
+        } => {
             info!(
                 endpoint = %endpoint,
                 use_http = %use_http,
@@ -343,7 +345,7 @@ pub enum TelemetryError {
 pub trait TracingExt {
     /// Attach trace context to this item
     fn with_trace_context(self, ctx: TraceContext) -> Self;
-    
+
     /// Extract trace context from this item
     fn trace_context(&self) -> Option<&TraceContext>;
 }
@@ -392,7 +394,7 @@ pub fn broker_publish_span(topic: &str) -> Span {
 pub fn broker_consume_span(topic: &str) -> Span {
     tracing::info_span!(
         "broker.consume",
-        otel.kind = "consumer", 
+        otel.kind = "consumer",
         messaging.system = "rivven",
         messaging.source = topic,
     )
@@ -424,7 +426,8 @@ mod tests {
     #[test]
     fn test_trace_context_headers() {
         let mut ctx = TraceContext::new();
-        ctx.traceparent = Some("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01".to_string());
+        ctx.traceparent =
+            Some("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01".to_string());
         ctx.set_baggage("key", "value");
 
         let headers = ctx.to_headers();
@@ -436,7 +439,7 @@ mod tests {
     fn test_parse_baggage() {
         let baggage = "key1=value1,key2=value2, key3=value3";
         let parsed = parse_baggage(baggage);
-        
+
         assert_eq!(parsed.get("key1"), Some(&"value1".to_string()));
         assert_eq!(parsed.get("key2"), Some(&"value2".to_string()));
         assert_eq!(parsed.get("key3"), Some(&"value3".to_string()));
@@ -447,7 +450,7 @@ mod tests {
         let mut baggage = HashMap::new();
         baggage.insert("a".to_string(), "1".to_string());
         baggage.insert("b".to_string(), "2".to_string());
-        
+
         let formatted = format_baggage(&baggage);
         assert!(formatted.contains("a=1"));
         assert!(formatted.contains("b=2"));
@@ -462,7 +465,9 @@ use_http: false
 "#;
         let config: ExporterConfig = serde_yaml::from_str(yaml).unwrap();
         match config {
-            ExporterConfig::Otlp { endpoint, use_http, .. } => {
+            ExporterConfig::Otlp {
+                endpoint, use_http, ..
+            } => {
                 assert_eq!(endpoint, "http://localhost:4317");
                 assert!(!use_http);
             }

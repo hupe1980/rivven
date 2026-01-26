@@ -15,9 +15,9 @@ use super::decoder::{BinlogDecoder, BinlogEvent, ColumnValue, RowsEvent, TableMa
 use super::protocol::MySqlBinlogClient;
 
 /// MySQL CDC configuration
-/// 
+///
 /// # Security Note
-/// 
+///
 /// This struct implements a custom Debug that redacts the password field
 /// to prevent accidental leakage to logs.
 #[derive(Clone)]
@@ -94,44 +94,44 @@ impl MySqlCdcConfig {
             ..Default::default()
         }
     }
-    
+
     pub fn with_password(mut self, password: impl Into<String>) -> Self {
         self.password = Some(password.into());
         self
     }
-    
+
     pub fn with_port(mut self, port: u16) -> Self {
         self.port = port;
         self
     }
-    
+
     pub fn with_database(mut self, database: impl Into<String>) -> Self {
         self.database = Some(database.into());
         self
     }
-    
+
     pub fn with_server_id(mut self, server_id: u32) -> Self {
         self.server_id = server_id;
         self
     }
-    
+
     pub fn with_binlog_position(mut self, filename: impl Into<String>, position: u32) -> Self {
         self.binlog_filename = filename.into();
         self.binlog_position = position;
         self
     }
-    
+
     pub fn with_gtid(mut self, gtid_set: impl Into<String>) -> Self {
         self.use_gtid = true;
         self.gtid_set = gtid_set.into();
         self
     }
-    
+
     pub fn include_table(mut self, pattern: impl Into<String>) -> Self {
         self.include_tables.push(pattern.into());
         self
     }
-    
+
     pub fn exclude_table(mut self, pattern: impl Into<String>) -> Self {
         self.exclude_tables.push(pattern.into());
         self
@@ -153,42 +153,42 @@ impl MySqlCdc {
             event_sender: None,
         }
     }
-    
+
     /// Set an event channel for receiving CDC events
     pub fn with_event_channel(mut self, sender: mpsc::Sender<CdcEvent>) -> Self {
         self.event_sender = Some(sender);
         self
     }
-    
+
     /// Get the configuration
     pub fn config(&self) -> &MySqlCdcConfig {
         &self.config
     }
-    
+
     /// Check if a table should be captured based on include/exclude filters
     #[allow(dead_code)]
     fn should_capture_table(&self, schema: &str, table: &str) -> bool {
         let full_name = format!("{}.{}", schema, table);
-        
+
         // If exclude list is not empty, check for exclusion first
         for pattern in &self.config.exclude_tables {
             if pattern_matches(pattern, &full_name) {
                 return false;
             }
         }
-        
+
         // If include list is empty, include all non-excluded tables
         if self.config.include_tables.is_empty() {
             return true;
         }
-        
+
         // Check if table matches any include pattern
         for pattern in &self.config.include_tables {
             if pattern_matches(pattern, &full_name) {
                 return true;
             }
         }
-        
+
         false
     }
 }
@@ -199,34 +199,34 @@ impl CdcSource for MySqlCdc {
         if self.running.load(Ordering::SeqCst) {
             return Ok(());
         }
-        
+
         info!(
             "Starting MySQL CDC from {}:{} (server_id={})",
             self.config.host, self.config.port, self.config.server_id
         );
-        
+
         self.running.store(true, Ordering::SeqCst);
-        
+
         let config = self.config.clone();
         let running = self.running.clone();
         let event_sender = self.event_sender.clone();
-        
+
         tokio::spawn(async move {
             if let Err(e) = run_mysql_cdc_loop(config, running.clone(), event_sender).await {
                 error!("MySQL CDC loop failed: {:?}", e);
                 running.store(false, Ordering::SeqCst);
             }
         });
-        
+
         Ok(())
     }
-    
+
     async fn stop(&mut self) -> Result<()> {
         info!("Stopping MySQL CDC");
         self.running.store(false, Ordering::SeqCst);
         Ok(())
     }
-    
+
     async fn is_healthy(&self) -> bool {
         self.running.load(Ordering::SeqCst)
     }
@@ -248,35 +248,45 @@ async fn run_mysql_cdc_loop(
     )
     .await
     .context("Failed to connect to MySQL")?;
-    
-    info!("Connected to MySQL {} (connection_id={})", 
-          client.server_version(), client.connection_id());
-    
+
+    info!(
+        "Connected to MySQL {} (connection_id={})",
+        client.server_version(),
+        client.connection_id()
+    );
+
     // Get binlog position if not specified
     let (binlog_file, binlog_pos) = if config.binlog_filename.is_empty() {
         get_current_binlog_position(&mut client).await?
     } else {
         (config.binlog_filename.clone(), config.binlog_position)
     };
-    
-    info!("Starting binlog replication from {}:{}", binlog_file, binlog_pos);
-    
+
+    info!(
+        "Starting binlog replication from {}:{}",
+        binlog_file, binlog_pos
+    );
+
     // Register as replica
     client.register_slave(config.server_id).await?;
-    
+
     // Start binlog dump
     let mut stream = if config.use_gtid && !config.gtid_set.is_empty() {
-        client.binlog_dump_gtid(config.server_id, &config.gtid_set).await?
+        client
+            .binlog_dump_gtid(config.server_id, &config.gtid_set)
+            .await?
     } else {
-        client.binlog_dump(config.server_id, &binlog_file, binlog_pos).await?
+        client
+            .binlog_dump(config.server_id, &binlog_file, binlog_pos)
+            .await?
     };
-    
+
     let mut decoder = BinlogDecoder::new();
     let mut event_buffer: Vec<CdcEvent> = Vec::new();
     let mut current_gtid: Option<String> = None;
     let mut current_binlog_file = binlog_file;
     let mut current_binlog_pos = binlog_pos;
-    
+
     while running.load(Ordering::SeqCst) {
         let event_data = match stream.next_event().await {
             Ok(Some(data)) => data,
@@ -292,7 +302,7 @@ async fn run_mysql_cdc_loop(
                 continue;
             }
         };
-        
+
         let event = match decoder.decode(&event_data) {
             Ok(ev) => ev,
             Err(e) => {
@@ -300,30 +310,36 @@ async fn run_mysql_cdc_loop(
                 continue;
             }
         };
-        
+
         match event {
             BinlogEvent::FormatDescription(fde) => {
-                info!("Binlog format: version={}, server={}", 
-                      fde.binlog_version, fde.server_version);
+                info!(
+                    "Binlog format: version={}, server={}",
+                    fde.binlog_version, fde.server_version
+                );
             }
-            
+
             BinlogEvent::Rotate(rotate) => {
-                info!("Rotating to binlog file: {} at position {}", 
-                      rotate.next_binlog, rotate.position);
+                info!(
+                    "Rotating to binlog file: {} at position {}",
+                    rotate.next_binlog, rotate.position
+                );
                 current_binlog_file = rotate.next_binlog;
                 current_binlog_pos = rotate.position as u32;
             }
-            
+
             BinlogEvent::Gtid(gtid) => {
                 current_gtid = Some(gtid.gtid_string());
                 debug!("GTID: {}", current_gtid.as_ref().unwrap());
             }
-            
+
             BinlogEvent::TableMap(table_map) => {
-                debug!("Table map: {}.{} (table_id={})", 
-                       table_map.schema_name, table_map.table_name, table_map.table_id);
+                debug!(
+                    "Table map: {}.{} (table_id={})",
+                    table_map.schema_name, table_map.table_name, table_map.table_id
+                );
             }
-            
+
             BinlogEvent::WriteRows(rows) => {
                 if let Some(table_map) = decoder.get_table(rows.table_id) {
                     process_row_event(
@@ -338,7 +354,7 @@ async fn run_mysql_cdc_loop(
                     );
                 }
             }
-            
+
             BinlogEvent::UpdateRows(rows) => {
                 if let Some(table_map) = decoder.get_table(rows.table_id) {
                     process_row_event(
@@ -353,7 +369,7 @@ async fn run_mysql_cdc_loop(
                     );
                 }
             }
-            
+
             BinlogEvent::DeleteRows(rows) => {
                 if let Some(table_map) = decoder.get_table(rows.table_id) {
                     process_row_event(
@@ -368,10 +384,10 @@ async fn run_mysql_cdc_loop(
                     );
                 }
             }
-            
+
             BinlogEvent::Xid(xid) => {
                 debug!("Transaction commit: XID={}", xid.xid);
-                
+
                 // Flush event buffer
                 if !event_buffer.is_empty() {
                     // Send to event channel
@@ -386,43 +402,45 @@ async fn run_mysql_cdc_loop(
                         event_buffer.clear();
                     }
                 }
-                
+
                 current_gtid = None;
             }
-            
+
             BinlogEvent::Query(query) => {
                 // Handle DDL statements
                 let sql_upper = query.query.to_uppercase();
-                if sql_upper.contains("CREATE TABLE") 
+                if sql_upper.contains("CREATE TABLE")
                     || sql_upper.contains("ALTER TABLE")
                     || sql_upper.contains("DROP TABLE")
                     || sql_upper.contains("TRUNCATE")
                 {
                     debug!("DDL: {}", query.query);
-                    
+
                     if sql_upper.contains("TRUNCATE") {
                         // Generate truncate event
                         // Would need to parse table name from query
                     }
                 }
             }
-            
+
             BinlogEvent::Heartbeat => {
                 debug!("Heartbeat received");
             }
-            
+
             BinlogEvent::Unknown(event_type) => {
                 trace!("Unknown event type: {:?}", event_type);
             }
         }
     }
-    
+
     info!("MySQL CDC loop stopped");
     Ok(())
 }
 
 /// Get current binlog position from MySQL
-async fn get_current_binlog_position(_client: &mut MySqlBinlogClient) -> anyhow::Result<(String, u32)> {
+async fn get_current_binlog_position(
+    _client: &mut MySqlBinlogClient,
+) -> anyhow::Result<(String, u32)> {
     // Execute SHOW MASTER STATUS
     // For now, use a default
     // A real implementation would parse the result
@@ -444,14 +462,14 @@ fn process_row_event(
     // Filter check
     // Note: MySqlCdc methods aren't available here, so we inline the check
     let full_name = format!("{}.{}", table_map.schema_name, table_map.table_name);
-    
+
     // Check exclude patterns
     for pattern in &config.exclude_tables {
         if pattern_matches(pattern, &full_name) {
             return;
         }
     }
-    
+
     // Check include patterns
     if !config.include_tables.is_empty() {
         let mut matched = false;
@@ -465,34 +483,36 @@ fn process_row_event(
             return;
         }
     }
-    
+
     // Filter by database if configured
     if let Some(db) = &config.database {
         if !db.is_empty() && table_map.schema_name != *db {
             return;
         }
     }
-    
+
     let timestamp = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    
+
     for row in &rows.rows {
         let before = match op {
-            CdcOp::Update | CdcOp::Delete => {
-                row.before.as_ref().map(|cols| columns_to_json(cols, table_map))
-            }
+            CdcOp::Update | CdcOp::Delete => row
+                .before
+                .as_ref()
+                .map(|cols| columns_to_json(cols, table_map)),
             _ => None,
         };
-        
+
         let after = match op {
-            CdcOp::Insert | CdcOp::Update => {
-                row.after.as_ref().map(|cols| columns_to_json(cols, table_map))
-            }
+            CdcOp::Insert | CdcOp::Update => row
+                .after
+                .as_ref()
+                .map(|cols| columns_to_json(cols, table_map)),
             _ => None,
         };
-        
+
         let event = CdcEvent {
             source_type: "mysql".into(),
             database: table_map.schema_name.clone(),
@@ -504,7 +524,7 @@ fn process_row_event(
             timestamp,
             transaction: None,
         };
-        
+
         buffer.push(event);
     }
 }
@@ -512,16 +532,16 @@ fn process_row_event(
 /// Convert column values to JSON
 fn columns_to_json(columns: &[ColumnValue], _table_map: &TableMapEvent) -> serde_json::Value {
     let mut map = serde_json::Map::new();
-    
+
     for (i, value) in columns.iter().enumerate() {
         // Use column index as name since MySQL binlog doesn't include column names
         // A full implementation would query INFORMATION_SCHEMA for column names
         let col_name = format!("col{}", i);
-        
+
         let json_value = column_value_to_json(value);
         map.insert(col_name, json_value);
     }
-    
+
     serde_json::Value::Object(map)
 }
 
@@ -544,23 +564,45 @@ fn column_value_to_json(value: &ColumnValue) -> serde_json::Value {
         ColumnValue::Date { year, month, day } => {
             serde_json::json!(format!("{:04}-{:02}-{:02}", year, month, day))
         }
-        ColumnValue::Time { hours, minutes, seconds, microseconds, negative } => {
+        ColumnValue::Time {
+            hours,
+            minutes,
+            seconds,
+            microseconds,
+            negative,
+        } => {
             let sign = if *negative { "-" } else { "" };
             if *microseconds > 0 {
-                serde_json::json!(format!("{}{:02}:{:02}:{:02}.{:06}", 
-                    sign, hours, minutes, seconds, microseconds))
+                serde_json::json!(format!(
+                    "{}{:02}:{:02}:{:02}.{:06}",
+                    sign, hours, minutes, seconds, microseconds
+                ))
             } else {
-                serde_json::json!(format!("{}{:02}:{:02}:{:02}", 
-                    sign, hours, minutes, seconds))
+                serde_json::json!(format!(
+                    "{}{:02}:{:02}:{:02}",
+                    sign, hours, minutes, seconds
+                ))
             }
         }
-        ColumnValue::DateTime { year, month, day, hour, minute, second, microsecond } => {
+        ColumnValue::DateTime {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            microsecond,
+        } => {
             if *microsecond > 0 {
-                serde_json::json!(format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}",
-                    year, month, day, hour, minute, second, microsecond))
+                serde_json::json!(format!(
+                    "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}",
+                    year, month, day, hour, minute, second, microsecond
+                ))
             } else {
-                serde_json::json!(format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
-                    year, month, day, hour, minute, second))
+                serde_json::json!(format!(
+                    "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+                    year, month, day, hour, minute, second
+                ))
             }
         }
         ColumnValue::Timestamp(v) => serde_json::json!(*v),
@@ -582,20 +624,20 @@ fn pattern_matches(pattern: &str, value: &str) -> bool {
     if pattern == "*" || pattern == "*.*" {
         return true;
     }
-    
+
     if !pattern.contains('*') {
         return pattern == value;
     }
-    
+
     // Convert glob pattern to simple matching
     let parts: Vec<&str> = pattern.split('*').collect();
-    
+
     if parts.len() == 2 {
         // Pattern like "schema.*" or "*.table"
         let (prefix, suffix) = (parts[0], parts[1]);
         return value.starts_with(prefix) && value.ends_with(suffix);
     }
-    
+
     // More complex patterns - use simple contains for now
     parts.iter().all(|part| value.contains(part))
 }
@@ -603,7 +645,7 @@ fn pattern_matches(pattern: &str, value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_pattern_matches() {
         assert!(pattern_matches("*", "test.users"));
@@ -617,7 +659,7 @@ mod tests {
         assert!(pattern_matches("test.users", "test.users"));
         assert!(!pattern_matches("test.users", "test.orders"));
     }
-    
+
     #[test]
     fn test_config_builder() {
         let config = MySqlCdcConfig::new("localhost", "admin")
@@ -627,7 +669,7 @@ mod tests {
             .with_server_id(12345)
             .include_table("mydb.*")
             .exclude_table("mydb.temp_*");
-        
+
         assert_eq!(config.host, "localhost");
         assert_eq!(config.user, "admin");
         assert_eq!(config.password, Some("secret".to_string()));
@@ -637,48 +679,71 @@ mod tests {
         assert_eq!(config.include_tables, vec!["mydb.*"]);
         assert_eq!(config.exclude_tables, vec!["mydb.temp_*"]);
     }
-    
+
     #[test]
     fn test_column_value_to_json() {
-        assert_eq!(column_value_to_json(&ColumnValue::Null), serde_json::Value::Null);
-        assert_eq!(column_value_to_json(&ColumnValue::SignedInt(42)), serde_json::json!(42));
-        assert_eq!(column_value_to_json(&ColumnValue::String("hello".to_string())), serde_json::json!("hello"));
         assert_eq!(
-            column_value_to_json(&ColumnValue::Date { year: 2024, month: 1, day: 15 }),
+            column_value_to_json(&ColumnValue::Null),
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            column_value_to_json(&ColumnValue::SignedInt(42)),
+            serde_json::json!(42)
+        );
+        assert_eq!(
+            column_value_to_json(&ColumnValue::String("hello".to_string())),
+            serde_json::json!("hello")
+        );
+        assert_eq!(
+            column_value_to_json(&ColumnValue::Date {
+                year: 2024,
+                month: 1,
+                day: 15
+            }),
             serde_json::json!("2024-01-15")
         );
     }
-    
+
     #[test]
     fn test_config_debug_redacts_password() {
-        let config = MySqlCdcConfig::new("localhost", "admin")
-            .with_password("super_secret_password");
-        
+        let config =
+            MySqlCdcConfig::new("localhost", "admin").with_password("super_secret_password");
+
         let debug_output = format!("{:?}", config);
-        
+
         // Should contain REDACTED for password
-        assert!(debug_output.contains("[REDACTED]"), 
-            "Debug output should contain [REDACTED]");
-        
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "Debug output should contain [REDACTED]"
+        );
+
         // Should NOT contain the actual password
-        assert!(!debug_output.contains("super_secret_password"), 
-            "Debug output should not contain the password");
-        
+        assert!(
+            !debug_output.contains("super_secret_password"),
+            "Debug output should not contain the password"
+        );
+
         // Should still show non-sensitive fields
-        assert!(debug_output.contains("localhost"), 
-            "Debug output should show host");
-        assert!(debug_output.contains("admin"), 
-            "Debug output should show user");
+        assert!(
+            debug_output.contains("localhost"),
+            "Debug output should show host"
+        );
+        assert!(
+            debug_output.contains("admin"),
+            "Debug output should show user"
+        );
     }
-    
+
     #[test]
     fn test_config_debug_shows_none_for_missing_password() {
         let config = MySqlCdcConfig::new("localhost", "admin");
-        
+
         let debug_output = format!("{:?}", config);
-        
+
         // When password is None, should show None (not REDACTED)
-        assert!(debug_output.contains("None"), 
-            "Debug output should show None for missing password");
+        assert!(
+            debug_output.contains("None"),
+            "Debug output should show None for missing password"
+        );
     }
 }

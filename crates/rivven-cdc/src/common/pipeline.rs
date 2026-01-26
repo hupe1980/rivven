@@ -41,9 +41,8 @@ use tracing::debug;
 pub type TransformFn = Box<dyn Fn(CdcEvent) -> Option<CdcEvent> + Send + Sync>;
 
 /// An async transform function.
-pub type AsyncTransformFn = Box<
-    dyn Fn(CdcEvent) -> Pin<Box<dyn Future<Output = Option<CdcEvent>> + Send>> + Send + Sync,
->;
+pub type AsyncTransformFn =
+    Box<dyn Fn(CdcEvent) -> Pin<Box<dyn Future<Output = Option<CdcEvent>> + Send>> + Send + Sync>;
 
 /// A filter predicate for CDC events.
 pub type FilterFn = Box<dyn Fn(&CdcEvent) -> bool + Send + Sync>;
@@ -147,7 +146,10 @@ impl PipelineStatsSnapshot {
 #[derive(Debug, Clone)]
 pub enum ProcessResult {
     /// Event passed through, with optional routing destination
-    Output { event: CdcEvent, destination: Option<String> },
+    Output {
+        event: CdcEvent,
+        destination: Option<String>,
+    },
     /// Event was filtered out
     Filtered,
     /// Event was sent to dead letter queue
@@ -175,7 +177,8 @@ impl PipelineBuilder {
     where
         F: Fn(CdcEvent) -> Option<CdcEvent> + Send + Sync + 'static,
     {
-        self.stages.push(PipelineStage::Transform(Arc::new(Box::new(f))));
+        self.stages
+            .push(PipelineStage::Transform(Arc::new(Box::new(f))));
         self
     }
 
@@ -185,9 +188,10 @@ impl PipelineBuilder {
         F: Fn(CdcEvent) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Option<CdcEvent>> + Send + 'static,
     {
-        self.stages.push(PipelineStage::AsyncTransform(Arc::new(Box::new(
-            move |e| Box::pin(f(e)),
-        ))));
+        self.stages
+            .push(PipelineStage::AsyncTransform(Arc::new(Box::new(
+                move |e| Box::pin(f(e)),
+            ))));
         self
     }
 
@@ -196,7 +200,8 @@ impl PipelineBuilder {
     where
         F: Fn(&CdcEvent) -> bool + Send + Sync + 'static,
     {
-        self.stages.push(PipelineStage::Filter(Arc::new(Box::new(predicate))));
+        self.stages
+            .push(PipelineStage::Filter(Arc::new(Box::new(predicate))));
         self
     }
 
@@ -205,7 +210,8 @@ impl PipelineBuilder {
     where
         F: Fn(&CdcEvent) -> String + Send + Sync + 'static,
     {
-        self.stages.push(PipelineStage::Route(Arc::new(Box::new(router))));
+        self.stages
+            .push(PipelineStage::Route(Arc::new(Box::new(router))));
         self
     }
 
@@ -249,7 +255,9 @@ impl Pipeline {
         for stage in &self.stages {
             match stage {
                 PipelineStage::Transform(f) => {
-                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(current.clone()))) {
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        f(current.clone())
+                    })) {
                         Ok(Some(e)) => current = e,
                         Ok(None) => {
                             self.stats.record_filtered();
@@ -265,15 +273,13 @@ impl Pipeline {
                         }
                     }
                 }
-                PipelineStage::AsyncTransform(f) => {
-                    match f(current.clone()).await {
-                        Some(e) => current = e,
-                        None => {
-                            self.stats.record_filtered();
-                            return ProcessResult::Filtered;
-                        }
+                PipelineStage::AsyncTransform(f) => match f(current.clone()).await {
+                    Some(e) => current = e,
+                    None => {
+                        self.stats.record_filtered();
+                        return ProcessResult::Filtered;
                     }
-                }
+                },
                 PipelineStage::Filter(predicate) => {
                     if !predicate(&current) {
                         self.stats.record_filtered();
@@ -338,12 +344,10 @@ pub mod transforms {
     use super::*;
 
     /// Mask sensitive fields in the event.
-    pub fn mask_fields(
-        fields: Vec<String>,
-    ) -> impl Fn(CdcEvent) -> Option<CdcEvent> + Send + Sync {
+    pub fn mask_fields(fields: Vec<String>) -> impl Fn(CdcEvent) -> Option<CdcEvent> + Send + Sync {
         move |mut event| {
             let mask = serde_json::json!("***MASKED***");
-            
+
             if let Some(ref mut after) = event.after {
                 if let Some(obj) = after.as_object_mut() {
                     for field in &fields {
@@ -353,7 +357,7 @@ pub mod transforms {
                     }
                 }
             }
-            
+
             if let Some(ref mut before) = event.before {
                 if let Some(obj) = before.as_object_mut() {
                     for field in &fields {
@@ -363,7 +367,7 @@ pub mod transforms {
                     }
                 }
             }
-            
+
             Some(event)
         }
     }
@@ -381,7 +385,7 @@ pub mod transforms {
                     }
                 }
             }
-            
+
             if let Some(ref mut before) = event.before {
                 if let Some(obj) = before.as_object_mut() {
                     if let Some(value) = obj.remove(&from) {
@@ -389,7 +393,7 @@ pub mod transforms {
                     }
                 }
             }
-            
+
             Some(event)
         }
     }
@@ -498,9 +502,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pipeline_basic() {
-        let pipeline = Pipeline::builder("test")
-            .transform(|e| Some(e))
-            .build();
+        let pipeline = Pipeline::builder("test").transform(|e| Some(e)).build();
 
         let event = make_event("users", CdcOp::Insert);
         let result = pipeline.process_one(event.clone()).await;
@@ -537,7 +539,10 @@ mod tests {
     #[tokio::test]
     async fn test_pipeline_transform() {
         let pipeline = Pipeline::builder("test")
-            .transform(transforms::rename_field("email".to_string(), "user_email".to_string()))
+            .transform(transforms::rename_field(
+                "email".to_string(),
+                "user_email".to_string(),
+            ))
             .build();
 
         let event = make_event("users", CdcOp::Insert);
@@ -594,7 +599,10 @@ mod tests {
         let pipeline = Pipeline::builder("test")
             .filter(|e| e.op != CdcOp::Delete)
             .transform(transforms::normalize_op())
-            .transform(transforms::rename_field("email".to_string(), "user_email".to_string()))
+            .transform(transforms::rename_field(
+                "email".to_string(),
+                "user_email".to_string(),
+            ))
             .route(transforms::route_by_table("events".to_string()))
             .build();
 
@@ -642,9 +650,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pipeline_parallel() {
-        let pipeline = Pipeline::builder("test")
-            .transform(|e| Some(e))
-            .build();
+        let pipeline = Pipeline::builder("test").transform(|e| Some(e)).build();
 
         let events: Vec<_> = (0..100)
             .map(|i| make_event(&format!("table_{}", i), CdcOp::Insert))
@@ -719,10 +725,10 @@ mod tests {
     #[test]
     fn test_only_ops_filter() {
         let filter = transforms::only_ops(vec![CdcOp::Insert, CdcOp::Update]);
-        
+
         let insert = make_event("users", CdcOp::Insert);
         let delete = make_event("users", CdcOp::Delete);
-        
+
         assert!(filter(&insert));
         assert!(!filter(&delete));
     }

@@ -10,7 +10,7 @@
 use crate::broker_client::SharedBrokerClient;
 use crate::config::{ConnectConfig, SinkConfig, StartOffset};
 use crate::error::{ConnectError, ConnectorStatus, Result};
-use crate::rate_limiter::{TokenBucketRateLimiter, RateLimiterStats};
+use crate::rate_limiter::{RateLimiterStats, TokenBucketRateLimiter};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -143,7 +143,12 @@ impl SinkRunner {
             let key = (topic.clone(), partition);
 
             // First try to get committed offset
-            let committed = self.broker.get_offset(consumer_group, topic, partition).await.ok().flatten();
+            let committed = self
+                .broker
+                .get_offset(consumer_group, topic, partition)
+                .await
+                .ok()
+                .flatten();
 
             let start_offset = match committed {
                 Some(offset) => {
@@ -207,7 +212,11 @@ impl SinkRunner {
                 };
 
                 // Query the broker for the offset at or after the given timestamp
-                match self.broker.get_offset_for_timestamp(topic, 0, timestamp_ms).await {
+                match self
+                    .broker
+                    .get_offset_for_timestamp(topic, 0, timestamp_ms)
+                    .await
+                {
                     Ok(Some(offset)) => {
                         info!(
                             "Sink '{}': Starting from offset {} (timestamp >= {}) for topic '{}'",
@@ -246,12 +255,16 @@ impl SinkRunner {
         offset: u64,
         max_messages: usize,
     ) -> Result<Vec<rivven_client::MessageData>> {
-        self.broker.consume_batch(topic, partition, offset, max_messages).await
+        self.broker
+            .consume_batch(topic, partition, offset, max_messages)
+            .await
     }
 
     /// Commit offset for a topic/partition
     async fn commit_offset(&self, topic: &str, partition: u32, offset: u64) -> Result<()> {
-        self.broker.commit_offset(&self.config.consumer_group, topic, partition, offset).await
+        self.broker
+            .commit_offset(&self.config.consumer_group, topic, partition, offset)
+            .await
     }
 
     /// Commit all current offsets
@@ -265,8 +278,8 @@ impl SinkRunner {
 
     /// Stdout sink - prints events to console (useful for debugging)
     async fn run_stdout_sink(&self, shutdown_rx: &mut broadcast::Receiver<()>) -> Result<()> {
-        use crate::connectors::stdout::{StdoutSinkConfig, OutputFormat, format_event};
         use super::prelude::*;
+        use crate::connectors::stdout::{format_event, OutputFormat, StdoutSinkConfig};
         use serde::Deserialize;
 
         #[derive(Deserialize, Default)]
@@ -332,13 +345,16 @@ impl SinkRunner {
             for topic in &self.config.topics {
                 let partition = 0u32;
                 let key = (topic.clone(), partition);
-                
+
                 let current_offset = {
                     let offsets = self.offsets.read().await;
                     *offsets.get(&key).unwrap_or(&0)
                 };
 
-                match self.consume(topic, partition, current_offset, legacy_config.batch_size).await {
+                match self
+                    .consume(topic, partition, current_offset, legacy_config.batch_size)
+                    .await
+                {
                     Ok(messages) if !messages.is_empty() => {
                         received_any = true;
                         let mut max_offset = current_offset;
@@ -398,7 +414,8 @@ impl SinkRunner {
 
                         // Commit offset periodically (every 100 messages)
                         if self.events_consumed().is_multiple_of(100) {
-                            if let Err(e) = self.commit_offset(topic, partition, next_offset).await {
+                            if let Err(e) = self.commit_offset(topic, partition, next_offset).await
+                            {
                                 warn!("Sink '{}' failed to commit offset: {}", self.name, e);
                             }
                         }
@@ -422,7 +439,10 @@ impl SinkRunner {
 
     /// S3 sink - writes events to S3 in batches
     async fn run_s3_sink(&self, _shutdown_rx: &mut broadcast::Receiver<()>) -> Result<()> {
-        Err(ConnectError::sink(&self.name, "S3 sink not yet implemented"))
+        Err(ConnectError::sink(
+            &self.name,
+            "S3 sink not yet implemented",
+        ))
     }
 
     /// HTTP sink - posts events to HTTP endpoint

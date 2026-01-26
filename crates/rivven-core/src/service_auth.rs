@@ -47,7 +47,7 @@
 //!
 //! ```text
 //! rvn.<version>.<key_id>.<secret>
-//! 
+//!
 //! Example: rvn.v1.a1b2c3d4e5f6.MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI
 //!          ^^^ ^^ ^^^^^^^^^^^^ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 //!           │   │       │            │
@@ -113,9 +113,9 @@ pub type ServiceAuthResult<T> = Result<T, ServiceAuthError>;
 // ============================================================================
 
 /// API Key for service authentication
-/// 
+///
 /// # Security Note
-/// 
+///
 /// This struct implements a custom Debug that redacts the secret_hash field
 /// to prevent accidental leakage to logs.
 #[derive(Clone, Serialize, Deserialize)]
@@ -246,9 +246,13 @@ impl ApiKey {
         if provided_hash.len() != self.secret_hash.len() {
             return false;
         }
-        
+
         let mut result = 0u8;
-        for (a, b) in provided_hash.as_bytes().iter().zip(self.secret_hash.as_bytes()) {
+        for (a, b) in provided_hash
+            .as_bytes()
+            .iter()
+            .zip(self.secret_hash.as_bytes())
+        {
             result |= a ^ b;
         }
         result == 0
@@ -296,14 +300,8 @@ impl ApiKey {
         let prefix_len: u32 = parts[1].parse().unwrap_or(32);
 
         // Parse IPs
-        let ip_parts: Vec<u8> = ip
-            .split('.')
-            .filter_map(|p| p.parse().ok())
-            .collect();
-        let net_parts: Vec<u8> = network
-            .split('.')
-            .filter_map(|p| p.parse().ok())
-            .collect();
+        let ip_parts: Vec<u8> = ip.split('.').filter_map(|p| p.parse().ok()).collect();
+        let net_parts: Vec<u8> = network.split('.').filter_map(|p| p.parse().ok()).collect();
 
         if ip_parts.len() != 4 || net_parts.len() != 4 {
             return false;
@@ -679,10 +677,7 @@ impl ServiceAuthManager {
 
         // Check IP allowlist
         if !api_key.is_ip_allowed(client_ip) {
-            warn!(
-                "API key {} used from non-allowed IP {}",
-                key_id, client_ip
-            );
+            warn!("API key {} used from non-allowed IP {}", key_id, client_ip);
             return Err(ServiceAuthError::PermissionDenied(
                 "IP not in allowlist".to_string(),
             ));
@@ -691,11 +686,9 @@ impl ServiceAuthManager {
         // Check service account is enabled
         {
             let accounts = self.service_accounts.read();
-            let account = accounts
-                .get(&api_key.service_account)
-                .ok_or_else(|| {
-                    ServiceAuthError::ServiceAccountNotFound(api_key.service_account.clone())
-                })?;
+            let account = accounts.get(&api_key.service_account).ok_or_else(|| {
+                ServiceAuthError::ServiceAccountNotFound(api_key.service_account.clone())
+            })?;
 
             if !account.enabled {
                 return Err(ServiceAuthError::ServiceAccountDisabled(
@@ -746,7 +739,9 @@ impl ServiceAuthManager {
             })?;
 
         if !account.enabled {
-            return Err(ServiceAuthError::ServiceAccountDisabled(account.name.clone()));
+            return Err(ServiceAuthError::ServiceAccountDisabled(
+                account.name.clone(),
+            ));
         }
 
         // Create session with roles from account
@@ -983,10 +978,9 @@ mod tests {
 
     #[test]
     fn test_ip_allowlist() {
-        let mut api_key =
-            ApiKey::generate("test-service", None, None, vec![])
-                .unwrap()
-                .0;
+        let mut api_key = ApiKey::generate("test-service", None, None, vec![])
+            .unwrap()
+            .0;
 
         // Empty allowlist = all allowed
         assert!(api_key.is_ip_allowed("192.168.1.1"));
@@ -1042,7 +1036,10 @@ mod tests {
             .unwrap();
 
         // Try to authenticate with invalid key (correctly formatted but non-existent)
-        let result = manager.authenticate_api_key("rvn.v1.invalid1.secretsecretsecretsecretsecretsecr", "127.0.0.1");
+        let result = manager.authenticate_api_key(
+            "rvn.v1.invalid1.secretsecretsecretsecretsecretsecr",
+            "127.0.0.1",
+        );
         assert!(matches!(result, Err(ServiceAuthError::KeyNotFound(_))));
     }
 
@@ -1052,11 +1049,17 @@ mod tests {
 
         // Try many invalid auth attempts
         for _ in 0..15 {
-            let _ = manager.authenticate_api_key("rvn.v1.invalid1.secretsecretsecretsecretsecretsecr", "1.2.3.4");
+            let _ = manager.authenticate_api_key(
+                "rvn.v1.invalid1.secretsecretsecretsecretsecretsecr",
+                "1.2.3.4",
+            );
         }
 
         // Should be rate limited
-        let result = manager.authenticate_api_key("rvn.v1.invalid1.secretsecretsecretsecretsecretsecr", "1.2.3.4");
+        let result = manager.authenticate_api_key(
+            "rvn.v1.invalid1.secretsecretsecretsecretsecretsecr",
+            "1.2.3.4",
+        );
         assert!(matches!(result, Err(ServiceAuthError::RateLimited)));
     }
 
@@ -1083,7 +1086,10 @@ mod tests {
 
         // New auth should fail
         let result = manager.authenticate_api_key(&key, "127.0.0.1");
-        assert!(matches!(result, Err(ServiceAuthError::ServiceAccountDisabled(_))));
+        assert!(matches!(
+            result,
+            Err(ServiceAuthError::ServiceAccountDisabled(_))
+        ));
     }
 
     #[test]
@@ -1105,7 +1111,7 @@ mod tests {
         assert_eq!(session.service_account, "connector-orders");
         assert_eq!(session.auth_method, AuthMethod::MutualTls);
     }
-    
+
     #[test]
     fn test_api_key_debug_redacts_secret_hash() {
         let (api_key, _) = ApiKey::generate(
@@ -1113,22 +1119,32 @@ mod tests {
             Some("Test key"),
             None,
             vec!["read".to_string()],
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         let debug_output = format!("{:?}", api_key);
-        
+
         // Should contain REDACTED for secret_hash
-        assert!(debug_output.contains("[REDACTED]"), 
-            "Debug output should contain [REDACTED]: {}", debug_output);
-        
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "Debug output should contain [REDACTED]: {}",
+            debug_output
+        );
+
         // Should NOT contain the actual hash (which is a base64-like string)
-        assert!(!debug_output.contains(&api_key.secret_hash),
-            "Debug output should not contain the secret hash");
-        
+        assert!(
+            !debug_output.contains(&api_key.secret_hash),
+            "Debug output should not contain the secret hash"
+        );
+
         // Should still show non-sensitive fields
-        assert!(debug_output.contains("key_id"),
-            "Debug output should show key_id field");
-        assert!(debug_output.contains("test-service"),
-            "Debug output should show service_account");
+        assert!(
+            debug_output.contains("key_id"),
+            "Debug output should show key_id field"
+        );
+        assert!(
+            debug_output.contains("test-service"),
+            "Debug output should show service_account"
+        );
     }
 }

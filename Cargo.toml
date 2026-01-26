@@ -20,6 +20,7 @@ exclude = [
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
+rust-version = "1.80"
 authors = ["hupe1980"]
 license = "Apache-2.0"
 repository = "https://github.com/hupe1980/rivven"

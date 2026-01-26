@@ -196,7 +196,9 @@ impl SchemaRegistry {
         schema: &str,
     ) -> SchemaRegistryResult<SchemaId> {
         let subject = Subject::value(topic);
-        self.client.register(&subject, SchemaType::Json, schema).await
+        self.client
+            .register(&subject, SchemaType::Json, schema)
+            .await
     }
 
     /// Register a JSON schema for a topic's key
@@ -206,19 +208,25 @@ impl SchemaRegistry {
         schema: &str,
     ) -> SchemaRegistryResult<SchemaId> {
         let subject = Subject::key(topic);
-        self.client.register(&subject, SchemaType::Json, schema).await
+        self.client
+            .register(&subject, SchemaType::Json, schema)
+            .await
     }
 
     /// Get the latest value schema for a topic
     pub async fn get_value_schema(&self, topic: &str) -> SchemaRegistryResult<SubjectVersion> {
         let subject = Subject::value(topic);
-        self.client.get_by_version(&subject, SchemaVersion::latest()).await
+        self.client
+            .get_by_version(&subject, SchemaVersion::latest())
+            .await
     }
 
     /// Get the latest key schema for a topic
     pub async fn get_key_schema(&self, topic: &str) -> SchemaRegistryResult<SubjectVersion> {
         let subject = Subject::key(topic);
-        self.client.get_by_version(&subject, SchemaVersion::latest()).await
+        self.client
+            .get_by_version(&subject, SchemaVersion::latest())
+            .await
     }
 
     /// Register a schema with auto-detected type
@@ -228,7 +236,9 @@ impl SchemaRegistry {
         schema_type: SchemaType,
         schema: &str,
     ) -> SchemaRegistryResult<SchemaId> {
-        self.client.register(&subject.into(), schema_type, schema).await
+        self.client
+            .register(&subject.into(), schema_type, schema)
+            .await
     }
 
     /// Get schema by ID

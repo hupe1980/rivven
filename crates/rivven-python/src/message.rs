@@ -25,22 +25,22 @@ use pyo3::types::PyBytes;
 pub struct Message {
     /// Message value (payload) as raw bytes
     value_bytes: Vec<u8>,
-    
+
     /// Optional message key as raw bytes
     key_bytes: Option<Vec<u8>>,
-    
+
     /// Message offset in partition
     #[pyo3(get)]
     pub offset: u64,
-    
+
     /// Timestamp in milliseconds since epoch
     #[pyo3(get)]
     pub timestamp: i64,
-    
+
     /// Partition ID
     #[pyo3(get)]
     pub partition: u32,
-    
+
     /// Topic name
     #[pyo3(get)]
     pub topic: String,
@@ -102,11 +102,9 @@ impl Message {
     ///     UnicodeDecodeError: If key is not valid UTF-8
     pub fn key_str(&self) -> PyResult<Option<String>> {
         match &self.key_bytes {
-            Some(key) => {
-                String::from_utf8(key.clone())
-                    .map(Some)
-                    .map_err(|e| PyErr::new::<pyo3::exceptions::PyUnicodeDecodeError, _>(e.to_string()))
-            }
+            Some(key) => String::from_utf8(key.clone()).map(Some).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyUnicodeDecodeError, _>(e.to_string())
+            }),
             None => Ok(None),
         }
     }

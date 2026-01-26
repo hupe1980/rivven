@@ -116,7 +116,11 @@ impl PgOutputDecoder {
         let id = buf.get_u32();
         let namespace = read_string(buf)?;
         let name = read_string(buf)?;
-        Ok(TypeBody { id, namespace, name })
+        Ok(TypeBody {
+            id,
+            namespace,
+            name,
+        })
     }
 
     fn decode_insert(buf: &mut Bytes) -> Result<InsertBody, DecodeError> {

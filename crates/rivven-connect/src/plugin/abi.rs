@@ -43,7 +43,7 @@ impl std::fmt::Display for AbiVersion {
 }
 
 /// Plugin ABI function signatures
-/// 
+///
 /// These are the functions that plugins must export and the host functions
 /// they can import.
 pub struct PluginAbi;

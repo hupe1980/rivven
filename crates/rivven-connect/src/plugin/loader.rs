@@ -120,7 +120,7 @@ impl PluginLoader {
     /// Load a plugin from URL
     pub async fn load_url(&self, url: &str) -> PluginResult<WasmModule> {
         let client = reqwest::Client::new();
-        
+
         let response = client
             .get(url)
             .send()
@@ -338,11 +338,11 @@ mod tests {
     #[test]
     fn test_invalid_wasm() {
         let loader = PluginLoader::new();
-        
+
         // Not WASM
         let result = loader.load_bytes("test", b"not wasm");
         assert!(result.is_err());
-        
+
         // Too short
         let result = loader.load_bytes("test", &[0, 0x61, 0x73, 0x6D]);
         assert!(result.is_err());
@@ -351,16 +351,16 @@ mod tests {
     #[test]
     fn test_minimal_wasm() {
         let loader = PluginLoader::new();
-        
+
         // Minimal valid WASM (magic + version only)
         let minimal_wasm = [
             0x00, 0x61, 0x73, 0x6D, // magic
             0x01, 0x00, 0x00, 0x00, // version 1
         ];
-        
+
         let result = loader.load_bytes("test", &minimal_wasm);
         assert!(result.is_ok());
-        
+
         let module = result.unwrap();
         assert_eq!(module.name, "test");
     }
@@ -368,11 +368,11 @@ mod tests {
     #[test]
     fn test_leb128_decode() {
         let loader = PluginLoader::new();
-        
+
         // Single byte values
         assert_eq!(loader.read_leb128(&[0x00]), Some((0, 1)));
         assert_eq!(loader.read_leb128(&[0x7F]), Some((127, 1)));
-        
+
         // Multi-byte value
         assert_eq!(loader.read_leb128(&[0x80, 0x01]), Some((128, 2)));
         assert_eq!(loader.read_leb128(&[0xE5, 0x8E, 0x26]), Some((624485, 3)));

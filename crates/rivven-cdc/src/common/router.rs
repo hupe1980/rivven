@@ -144,19 +144,19 @@ impl RouteCondition {
             Self::All(conditions) => conditions.iter().all(|c| c.matches(event)),
             Self::Any(conditions) => conditions.iter().any(|c| c.matches(event)),
             Self::Not(condition) => !condition.matches(event),
-            Self::FieldEquals(field, value) => {
-                event.after.as_ref()
-                    .or(event.before.as_ref())
-                    .and_then(|obj| obj.get(field))
-                    .map(|v| v == value)
-                    .unwrap_or(false)
-            }
-            Self::FieldExists(field) => {
-                event.after.as_ref()
-                    .or(event.before.as_ref())
-                    .and_then(|obj| obj.get(field))
-                    .is_some()
-            }
+            Self::FieldEquals(field, value) => event
+                .after
+                .as_ref()
+                .or(event.before.as_ref())
+                .and_then(|obj| obj.get(field))
+                .map(|v| v == value)
+                .unwrap_or(false),
+            Self::FieldExists(field) => event
+                .after
+                .as_ref()
+                .or(event.before.as_ref())
+                .and_then(|obj| obj.get(field))
+                .is_some(),
         }
     }
 
@@ -351,7 +351,7 @@ impl EventRouter {
     /// Route an event.
     pub fn route(&self, event: &CdcEvent) -> RouteDecision {
         self.stats.record_event();
-        
+
         let mut destinations = Vec::new();
         let mut matched = false;
 
@@ -360,7 +360,7 @@ impl EventRouter {
                 matched = true;
                 self.stats.record_rule_match(&rule.name);
                 destinations.extend(rule.destinations.clone());
-                
+
                 if !rule.continue_matching {
                     break;
                 }
@@ -404,7 +404,10 @@ impl EventRouter {
     }
 
     /// Route and group by destination.
-    pub fn route_and_group<'a>(&self, events: &'a [CdcEvent]) -> HashMap<String, Vec<&'a CdcEvent>> {
+    pub fn route_and_group<'a>(
+        &self,
+        events: &'a [CdcEvent],
+    ) -> HashMap<String, Vec<&'a CdcEvent>> {
         let mut groups: HashMap<String, Vec<&'a CdcEvent>> = HashMap::new();
 
         for event in events {
@@ -508,7 +511,8 @@ impl RouterStats {
 
     pub fn record_routed(&self, destinations: u64) {
         self.events_routed.fetch_add(1, Ordering::Relaxed);
-        self.destinations_total.fetch_add(destinations, Ordering::Relaxed);
+        self.destinations_total
+            .fetch_add(destinations, Ordering::Relaxed);
     }
 
     pub fn record_dropped(&self) {
@@ -537,7 +541,9 @@ impl RouterStats {
             events_dead_letter: self.events_dead_letter.load(Ordering::Relaxed),
             events_default: self.events_default.load(Ordering::Relaxed),
             destinations_total: self.destinations_total.load(Ordering::Relaxed),
-            rule_matches: self.rule_matches.read()
+            rule_matches: self
+                .rule_matches
+                .read()
                 .map(|m| m.clone())
                 .unwrap_or_default(),
         }
@@ -631,7 +637,7 @@ mod tests {
         let cond = RouteCondition::table("users");
         let event1 = make_event("users", CdcOp::Insert);
         let event2 = make_event("orders", CdcOp::Insert);
-        
+
         assert!(cond.matches(&event1));
         assert!(!cond.matches(&event2));
     }
@@ -642,7 +648,7 @@ mod tests {
         let event1 = make_event("users", CdcOp::Insert);
         let event2 = make_event("user_profiles", CdcOp::Insert);
         let event3 = make_event("orders", CdcOp::Insert);
-        
+
         assert!(cond.matches(&event1));
         assert!(cond.matches(&event2));
         assert!(!cond.matches(&event3));
@@ -660,7 +666,7 @@ mod tests {
         let cond = RouteCondition::operation(CdcOp::Insert);
         let event1 = make_event("users", CdcOp::Insert);
         let event2 = make_event("users", CdcOp::Update);
-        
+
         assert!(cond.matches(&event1));
         assert!(!cond.matches(&event2));
     }
@@ -671,7 +677,7 @@ mod tests {
         let event1 = make_event("users", CdcOp::Insert);
         let event2 = make_event("users", CdcOp::Update);
         let event3 = make_event("users", CdcOp::Delete);
-        
+
         assert!(cond.matches(&event1));
         assert!(cond.matches(&event2));
         assert!(!cond.matches(&event3));
@@ -681,7 +687,7 @@ mod tests {
     fn test_condition_field_equals() {
         let cond = RouteCondition::field_equals("status", serde_json::json!("active"));
         let event = make_event("users", CdcOp::Insert);
-        
+
         assert!(cond.matches(&event));
     }
 
@@ -689,19 +695,18 @@ mod tests {
     fn test_condition_field_exists() {
         let cond = RouteCondition::field_exists("id");
         let event = make_event("users", CdcOp::Insert);
-        
+
         assert!(cond.matches(&event));
     }
 
     #[test]
     fn test_condition_and() {
-        let cond = RouteCondition::table("users")
-            .and(RouteCondition::operation(CdcOp::Insert));
-        
+        let cond = RouteCondition::table("users").and(RouteCondition::operation(CdcOp::Insert));
+
         let event1 = make_event("users", CdcOp::Insert);
         let event2 = make_event("users", CdcOp::Update);
         let event3 = make_event("orders", CdcOp::Insert);
-        
+
         assert!(cond.matches(&event1));
         assert!(!cond.matches(&event2));
         assert!(!cond.matches(&event3));
@@ -709,13 +714,12 @@ mod tests {
 
     #[test]
     fn test_condition_or() {
-        let cond = RouteCondition::table("users")
-            .or(RouteCondition::table("orders"));
-        
+        let cond = RouteCondition::table("users").or(RouteCondition::table("orders"));
+
         let event1 = make_event("users", CdcOp::Insert);
         let event2 = make_event("orders", CdcOp::Insert);
         let event3 = make_event("products", CdcOp::Insert);
-        
+
         assert!(cond.matches(&event1));
         assert!(cond.matches(&event2));
         assert!(!cond.matches(&event3));
@@ -724,10 +728,10 @@ mod tests {
     #[test]
     fn test_condition_not() {
         let cond = RouteCondition::table("users").negate();
-        
+
         let event1 = make_event("users", CdcOp::Insert);
         let event2 = make_event("orders", CdcOp::Insert);
-        
+
         assert!(!cond.matches(&event1));
         assert!(cond.matches(&event2));
     }
@@ -736,7 +740,7 @@ mod tests {
     fn test_route_rule_table_match() {
         let rule = RouteRule::table_match("users", "user-topic");
         let event = make_event("users", CdcOp::Insert);
-        
+
         assert!(rule.matches(&event));
         assert_eq!(rule.destinations, vec!["user-topic"]);
     }
@@ -744,19 +748,18 @@ mod tests {
     #[test]
     fn test_route_rule_operation_match() {
         let rule = RouteRule::operation_match(CdcOp::Delete, "delete-topic");
-        
+
         let event1 = make_event("users", CdcOp::Delete);
         let event2 = make_event("users", CdcOp::Insert);
-        
+
         assert!(rule.matches(&event1));
         assert!(!rule.matches(&event2));
     }
 
     #[test]
     fn test_route_rule_priority() {
-        let rule = RouteRule::table_match("users", "topic")
-            .with_priority(10);
-        
+        let rule = RouteRule::table_match("users", "topic").with_priority(10);
+
         assert_eq!(rule.priority, 10);
     }
 
@@ -764,7 +767,7 @@ mod tests {
     fn test_route_rule_multiple_destinations() {
         let rule = RouteRule::table_match("users", "topic1")
             .with_destinations(vec!["topic1".to_string(), "topic2".to_string()]);
-        
+
         assert_eq!(rule.destinations.len(), 2);
     }
 
@@ -853,7 +856,11 @@ mod tests {
     #[test]
     fn test_router_continue_matching() {
         let router = EventRouter::builder()
-            .route(RouteRule::table_match("users", "audit").with_priority(10).and_continue())
+            .route(
+                RouteRule::table_match("users", "audit")
+                    .with_priority(10)
+                    .and_continue(),
+            )
             .route(RouteRule::table_match("users", "main").with_priority(5))
             .build();
 
@@ -899,7 +906,7 @@ mod tests {
         ];
 
         let groups = router.route_and_group(&events);
-        
+
         assert_eq!(groups.get("user-events").map(|v| v.len()), Some(2));
         assert_eq!(groups.get("order-events").map(|v| v.len()), Some(1));
     }
@@ -940,8 +947,10 @@ mod tests {
     #[test]
     fn test_router_stats_avg_destinations() {
         let router = EventRouter::builder()
-            .route(RouteRule::table_match("users", "t1")
-                .with_destinations(vec!["t1".to_string(), "t2".to_string()]))
+            .route(
+                RouteRule::table_match("users", "t1")
+                    .with_destinations(vec!["t1".to_string(), "t2".to_string()]),
+            )
             .build();
 
         let event = make_event("users", CdcOp::Insert);
@@ -964,10 +973,10 @@ mod tests {
     #[test]
     fn test_condition_predicate() {
         let cond = RouteCondition::Predicate(Arc::new(|e: &CdcEvent| e.table.starts_with("user")));
-        
+
         let event1 = make_event("users", CdcOp::Insert);
         let event2 = make_event("orders", CdcOp::Insert);
-        
+
         assert!(cond.matches(&event1));
         assert!(!cond.matches(&event2));
     }

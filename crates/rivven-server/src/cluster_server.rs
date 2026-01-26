@@ -24,26 +24,25 @@
 use crate::cli::Cli;
 use crate::handler::RequestHandler;
 use crate::partitioner::StickyPartitionerConfig;
-use crate::protocol::{Request, Response, BrokerInfo, TopicMetadata, PartitionMetadata};
+use crate::protocol::{BrokerInfo, PartitionMetadata, Request, Response, TopicMetadata};
 use crate::raft_api::RaftApiState;
-use rivven_cluster::{
-    ClusterCoordinator, ClusterHealth, CoordinatorState,
-    Transport, TransportConfig, TopicState, RaftNode,
-    hash_node_id,
-};
-use rivven_core::{OffsetManager, TopicManager, schema_registry::EmbeddedSchemaRegistry};
 use bytes::{Bytes, BytesMut};
+use rivven_cluster::{
+    hash_node_id, ClusterCoordinator, ClusterHealth, CoordinatorState, RaftNode, TopicState,
+    Transport, TransportConfig,
+};
+use rivven_core::{schema_registry::EmbeddedSchemaRegistry, OffsetManager, TopicManager};
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, RwLock, Mutex};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
 #[cfg(feature = "tls")]
-use rivven_core::tls::{TlsAcceptor, TlsConfig, TlsIdentity, MtlsMode};
+use rivven_core::tls::{MtlsMode, TlsAcceptor, TlsConfig, TlsIdentity};
 
 /// Shared statistics for tracking server metrics
 #[derive(Debug)]
@@ -168,9 +167,12 @@ impl ClusterServer {
         let (shutdown_tx, _) = broadcast::channel(1);
 
         // Initialize Raft node (works in both standalone and cluster modes)
-        let mut raft_node = RaftNode::new(&cluster_config).await
+        let mut raft_node = RaftNode::new(&cluster_config)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to create Raft node: {}", e))?;
-        raft_node.start().await
+        raft_node
+            .start()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to start Raft node: {}", e))?;
         let raft_node = Arc::new(RwLock::new(raft_node));
 
@@ -217,7 +219,7 @@ impl ClusterServer {
             idle_timeout: Duration::from_secs(cli.idle_timeout_secs),
         };
         let rate_limiter = Arc::new(crate::rate_limiter::RateLimiter::new(rate_limit_config));
-        
+
         info!(
             max_connections_per_ip = cli.max_connections_per_ip,
             max_total_connections = cli.max_total_connections,
@@ -229,11 +231,15 @@ impl ClusterServer {
         // Initialize TLS acceptor if enabled
         #[cfg(feature = "tls")]
         let tls_acceptor = if cli.tls_enabled {
-            let cert_path = cli.tls_cert.as_ref()
+            let cert_path = cli
+                .tls_cert
+                .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("TLS enabled but --tls-cert not specified"))?;
-            let key_path = cli.tls_key.as_ref()
+            let key_path = cli
+                .tls_key
+                .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("TLS enabled but --tls-key not specified"))?;
-            
+
             // Build TLS configuration
             let mut tls_config = if let Some(ref ca_path) = cli.tls_ca {
                 // mTLS with CA for client verification
@@ -242,7 +248,7 @@ impl ClusterServer {
                 // TLS without client verification
                 TlsConfig::from_pem_files(cert_path, key_path)
             };
-            
+
             // Set mTLS mode based on CLI flag
             tls_config.mtls_mode = if cli.tls_verify_client {
                 MtlsMode::Required
@@ -251,16 +257,16 @@ impl ClusterServer {
             } else {
                 MtlsMode::Disabled
             };
-            
+
             let acceptor = TlsAcceptor::new(&tls_config)
                 .map_err(|e| anyhow::anyhow!("Failed to initialize TLS: {}", e))?;
-            
+
             info!(
                 tls_mode = ?tls_config.mtls_mode,
                 cert = %cert_path.display(),
                 "TLS enabled for client connections"
             );
-            
+
             Some(Arc::new(acceptor))
         } else {
             None
@@ -305,7 +311,7 @@ impl ClusterServer {
         );
         let tls_config_clone = tls_config.clone();
         let mut shutdown_rx_api = self.shutdown_tx.subscribe();
-        
+
         // Start the API server (with or without dashboard based on feature)
         #[cfg(feature = "dashboard")]
         {
@@ -313,7 +319,7 @@ impl ClusterServer {
             let stats_clone = self.stats.clone();
             let topic_manager_clone = self.topic_manager.clone();
             let offset_manager_clone = self.offset_manager.clone();
-            
+
             tokio::spawn(async move {
                 let dashboard_config = crate::raft_api::DashboardConfig {
                     enabled: dashboard_enabled,
@@ -323,8 +329,8 @@ impl ClusterServer {
                 };
                 tokio::select! {
                     result = crate::raft_api::start_raft_api_server_with_dashboard(
-                        api_bind_addr, 
-                        raft_api_state, 
+                        api_bind_addr,
+                        raft_api_state,
                         &tls_config_clone,
                         dashboard_config,
                     ) => {
@@ -338,7 +344,7 @@ impl ClusterServer {
                 }
             });
         }
-        
+
         #[cfg(not(feature = "dashboard"))]
         tokio::spawn(async move {
             tokio::select! {
@@ -405,7 +411,7 @@ impl ClusterServer {
 
         // Start client listener
         let listener = TcpListener::bind(bind_addr).await?;
-        
+
         #[cfg(feature = "tls")]
         let tls_mode = if self.tls_acceptor.is_some() {
             if self.cli.tls_verify_client {
@@ -418,10 +424,10 @@ impl ClusterServer {
         } else {
             "plaintext"
         };
-        
+
         #[cfg(not(feature = "tls"))]
         let tls_mode = "plaintext";
-        
+
         info!("Server listening on {} (mode: {})", bind_addr, tls_mode);
 
         // Configure partitioner from CLI
@@ -449,20 +455,20 @@ impl ClusterServer {
         let stats = self.stats.clone();
         let rate_limiter = self.rate_limiter.clone();
         let max_request_size = self.cli.max_request_size;
-        
+
         // Read timeout for connection data - prevents slowloris attacks
         let read_timeout = rate_limiter.idle_timeout();
-        
+
         // Get TLS acceptor for connection handling
         #[cfg(feature = "tls")]
         let tls_acceptor = self.tls_acceptor.clone();
-        
+
         // Connection timeout for TLS handshake
         #[cfg(feature = "tls")]
         let connection_timeout = Duration::from_secs(30);
 
         // Track active connection handles for graceful shutdown
-        let active_connections: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> = 
+        let active_connections: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
             Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
         // Spawn periodic rate limiter cleanup task
@@ -488,7 +494,7 @@ impl ClusterServer {
                     match result {
                         Ok((tcp_stream, addr)) => {
                             let client_ip = addr.ip();
-                            
+
                             // Check rate limiter before accepting connection
                             match rate_limiter.try_connection(client_ip).await {
                                 Ok(conn_guard) => {
@@ -497,16 +503,16 @@ impl ClusterServer {
                                     let conn_stats = stats.clone();
                                     let connections = active_connections.clone();
                                     let req_limiter = rate_limiter.clone();
-                                    
+
                                     #[cfg(feature = "tls")]
                                     let tls_acceptor = tls_acceptor.clone();
-                                    
+
                                     // Track connection in stats
                                     conn_stats.connection_opened();
-                                    
+
                                     let handle = tokio::spawn(async move {
                                         // conn_guard will be dropped when connection ends
-                                        
+
                                         // Handle TLS handshake if enabled
                                         #[cfg(feature = "tls")]
                                         let result = if let Some(ref acceptor) = tls_acceptor {
@@ -528,7 +534,7 @@ impl ClusterServer {
                                                             );
                                                         }
                                                     }
-                                                    
+
                                                     handle_connection_with_rate_limit_async(
                                                         tls_stream,
                                                         router,
@@ -560,7 +566,7 @@ impl ClusterServer {
                                                 read_timeout,
                                             ).await
                                         };
-                                        
+
                                         #[cfg(not(feature = "tls"))]
                                         let result = handle_connection_with_rate_limit_async(
                                             tcp_stream,
@@ -571,14 +577,14 @@ impl ClusterServer {
                                             max_request_size,
                                             read_timeout,
                                         ).await;
-                                        
+
                                         conn_stats.connection_closed();
                                         drop(conn_guard); // Explicitly drop to release rate limit slot
                                         if let Err(e) = result {
                                             debug!("Connection from {} closed: {}", addr, e);
                                         }
                                     });
-                                    
+
                                     // Track the handle for graceful shutdown
                                     connections.lock().await.push(handle);
                                 }
@@ -611,40 +617,45 @@ impl ClusterServer {
 
         // Graceful shutdown: stop accepting new connections and wait for existing ones
         drop(listener);
-        
+
         // Wait for active connections to complete with timeout
         let drain_timeout = tokio::time::Duration::from_secs(10);
         let active = active_connections.lock().await;
         let connection_count = active.len();
-        
+
         if connection_count > 0 {
-            info!("Waiting for {} active connections to complete...", connection_count);
-            
+            info!(
+                "Waiting for {} active connections to complete...",
+                connection_count
+            );
+
             // Clean up completed handles and wait for remaining
-            let pending: Vec<_> = active.iter()
-                .filter(|h| !h.is_finished())
-                .collect();
-            
+            let pending: Vec<_> = active.iter().filter(|h| !h.is_finished()).collect();
+
             if !pending.is_empty() {
                 info!("Draining {} in-flight connections...", pending.len());
                 match tokio::time::timeout(drain_timeout, async {
                     for handle in pending {
                         let _ = handle;
                     }
-                }).await {
+                })
+                .await
+                {
                     Ok(_) => info!("All connections drained"),
-                    Err(_) => warn!("Connection drain timeout, some connections may be interrupted"),
+                    Err(_) => {
+                        warn!("Connection drain timeout, some connections may be interrupted")
+                    }
                 }
             }
         }
         drop(active);
-        
+
         // Flush topic data
         info!("Flushing topic data...");
         if let Err(e) = self.topic_manager.flush_all().await {
             warn!("Error flushing topic data: {}", e);
         }
-        
+
         // If we're the leader, try to step down gracefully
         {
             let raft = self.raft_node.read().await;
@@ -653,7 +664,7 @@ impl ClusterServer {
                 // Leadership will transfer automatically when we disconnect
             }
         }
-        
+
         info!("Server shutdown complete");
         Ok(())
     }
@@ -748,62 +759,75 @@ impl RequestRouter {
             handler,
         }
     }
-    
+
     /// Determine routing for a publish request
-    async fn route_publish(&self, topic: &str, partition: Option<u32>, key: &Option<Bytes>) -> RoutingDecision {
+    async fn route_publish(
+        &self,
+        topic: &str,
+        partition: Option<u32>,
+        key: &Option<Bytes>,
+    ) -> RoutingDecision {
         let coord = match &self.coordinator {
             Some(c) => c.read().await,
             None => return RoutingDecision::Local, // Standalone mode
         };
-        
+
         // Get partition from coordinator
         let partition_id = match partition {
             Some(p) => p,
             None => {
                 // Select partition based on key or round-robin
-                match coord.select_partition(topic, key.as_ref().map(|b| b.as_ref())).await {
+                match coord
+                    .select_partition(topic, key.as_ref().map(|b| b.as_ref()))
+                    .await
+                {
                     Some(p) => p,
-                    None => return RoutingDecision::NotFound { 
-                        reason: format!("Topic '{}' not found", topic) 
-                    },
+                    None => {
+                        return RoutingDecision::NotFound {
+                            reason: format!("Topic '{}' not found", topic),
+                        }
+                    }
                 }
             }
         };
-        
+
         // Find partition leader
         match coord.partition_leader(topic, partition_id).await {
             Some(leader) if leader == self.local_node_id => RoutingDecision::Local,
-            Some(leader) => RoutingDecision::Forward { 
-                node_id: leader, 
-                partition: partition_id 
+            Some(leader) => RoutingDecision::Forward {
+                node_id: leader,
+                partition: partition_id,
             },
-            None => RoutingDecision::NotFound { 
-                reason: format!("No leader for {}/{}", topic, partition_id) 
+            None => RoutingDecision::NotFound {
+                reason: format!("No leader for {}/{}", topic, partition_id),
             },
         }
     }
-    
+
     /// Determine routing for a consume request  
     async fn route_consume(&self, topic: &str, partition: u32) -> RoutingDecision {
         let coord = match &self.coordinator {
             Some(c) => c.read().await,
             None => return RoutingDecision::Local,
         };
-        
+
         // Check if we are in ISR for this partition
         if coord.is_in_isr(topic, partition, &self.local_node_id).await {
             return RoutingDecision::Local;
         }
-        
+
         // Get ISR members and pick one
         match coord.get_isr_member(topic, partition).await {
-            Some(node) => RoutingDecision::Forward { node_id: node, partition },
-            None => RoutingDecision::NotFound { 
-                reason: format!("No ISR member for {}/{}", topic, partition) 
+            Some(node) => RoutingDecision::Forward {
+                node_id: node,
+                partition,
+            },
+            None => RoutingDecision::NotFound {
+                reason: format!("No ISR member for {}/{}", topic, partition),
             },
         }
     }
-    
+
     /// Handle cluster metadata request
     async fn handle_cluster_metadata(&self, topics: &[String]) -> Response {
         // In standalone mode, return minimal info
@@ -813,20 +837,22 @@ impl RequestRouter {
                 brokers: vec![BrokerInfo {
                     node_id: self.local_node_id.clone(),
                     host: "localhost".to_string(),
-                    port: 9092,  // Default port
+                    port: 9092, // Default port
                     rack: None,
                 }],
-                topics: vec![],  // Standalone doesn't track topics in coordinator
+                topics: vec![], // Standalone doesn't track topics in coordinator
             };
         };
-        
+
         let coord = coordinator.read().await;
-        
+
         // Get cluster metadata from coordinator
         let metadata = coord.metadata().read().await;
-        
+
         // Build broker list from registered nodes
-        let brokers: Vec<BrokerInfo> = metadata.nodes.iter()
+        let brokers: Vec<BrokerInfo> = metadata
+            .nodes
+            .iter()
             .map(|(node_id, info)| BrokerInfo {
                 node_id: node_id.clone(),
                 host: info.client_addr.ip().to_string(),
@@ -834,7 +860,7 @@ impl RequestRouter {
                 rack: info.rack.clone(),
             })
             .collect();
-        
+
         // Get controller (Raft leader) from the Raft node
         let raft = self.raft_node.read().await;
         let controller_id = raft.leader().map(|id| {
@@ -845,54 +871,61 @@ impl RequestRouter {
                 self.local_node_id.clone()
             } else {
                 // Find the node with this Raft ID in metadata
-                metadata.nodes.iter()
+                metadata
+                    .nodes
+                    .iter()
                     .find(|(_, info)| hash_node_id(&info.id) == id)
                     .map(|(node_id, _)| node_id.clone())
                     .unwrap_or_else(|| format!("raft-node-{}", id))
             }
         });
-        
+
         // Build topic metadata
         let topic_metadata: Vec<TopicMetadata> = if topics.is_empty() {
             // Return all topics
-            metadata.topics.iter()
+            metadata
+                .topics
+                .iter()
                 .map(|(name, state)| self.build_topic_metadata(name, state))
                 .collect()
         } else {
             // Return requested topics
-            topics.iter()
+            topics
+                .iter()
                 .filter_map(|name| {
-                    metadata.topics.get(name)
+                    metadata
+                        .topics
+                        .get(name)
                         .map(|state| self.build_topic_metadata(name, state))
                 })
                 .collect()
         };
-        
+
         Response::ClusterMetadata {
             controller_id,
             brokers,
             topics: topic_metadata,
         }
     }
-    
+
     /// Build topic metadata from topic state
     fn build_topic_metadata(&self, name: &str, state: &TopicState) -> TopicMetadata {
-        let partitions: Vec<PartitionMetadata> = state.partitions.iter()
+        let partitions: Vec<PartitionMetadata> = state
+            .partitions
+            .iter()
             .enumerate()
-            .map(|(idx, pstate)| {
-                PartitionMetadata {
-                    partition: idx as u32,
-                    leader: pstate.leader.clone(),
-                    replicas: pstate.replica_nodes().into_iter().cloned().collect(),
-                    isr: pstate.isr_nodes().into_iter().cloned().collect(),
-                    offline: !pstate.online,
-                }
+            .map(|(idx, pstate)| PartitionMetadata {
+                partition: idx as u32,
+                leader: pstate.leader.clone(),
+                replicas: pstate.replica_nodes().into_iter().cloned().collect(),
+                isr: pstate.isr_nodes().into_iter().cloned().collect(),
+                offline: !pstate.online,
             })
             .collect();
-        
+
         TopicMetadata {
             name: name.to_string(),
-            is_internal: name.starts_with("__"),  // Convention for internal topics
+            is_internal: name.starts_with("__"), // Convention for internal topics
             partitions,
         }
     }
@@ -909,42 +942,41 @@ impl RequestRouter {
         if let Request::GetClusterMetadata { topics } = &request {
             return self.handle_cluster_metadata(topics).await;
         }
-        
+
         // Determine routing decision
         let decision = match &request {
-            Request::Publish { topic, partition, key, .. } => {
-                self.route_publish(topic, *partition, key).await
-            }
-            Request::Consume { topic, partition, .. } => {
-                self.route_consume(topic, *partition).await
-            }
+            Request::Publish {
+                topic,
+                partition,
+                key,
+                ..
+            } => self.route_publish(topic, *partition, key).await,
+            Request::Consume {
+                topic, partition, ..
+            } => self.route_consume(topic, *partition).await,
             // Authentication - handle locally (auth manager is local)
-            Request::Authenticate { .. } |
-            Request::SaslAuthenticate { .. } |
-            Request::ScramClientFirst { .. } |
-            Request::ScramClientFinal { .. } => {
-                RoutingDecision::Local
-            }
+            Request::Authenticate { .. }
+            | Request::SaslAuthenticate { .. }
+            | Request::ScramClientFirst { .. }
+            | Request::ScramClientFinal { .. } => RoutingDecision::Local,
             // Metadata and control operations - handle locally (any node can serve)
-            Request::CreateTopic { .. } | 
-            Request::ListTopics |
-            Request::DeleteTopic { .. } |
-            Request::GetOffset { .. } |
-            Request::GetOffsetBounds { .. } |
-            Request::GetOffsetForTimestamp { .. } |
-            Request::CommitOffset { .. } |
-            Request::GetMetadata { .. } |
-            Request::Ping |
-            Request::RegisterSchema { .. } |
-            Request::GetSchema { .. } |
-            Request::GetClusterMetadata { .. } |
-            Request::ListGroups |
-            Request::DescribeGroup { .. } |
-            Request::DeleteGroup { .. } => {
-                RoutingDecision::Local
-            }
+            Request::CreateTopic { .. }
+            | Request::ListTopics
+            | Request::DeleteTopic { .. }
+            | Request::GetOffset { .. }
+            | Request::GetOffsetBounds { .. }
+            | Request::GetOffsetForTimestamp { .. }
+            | Request::CommitOffset { .. }
+            | Request::GetMetadata { .. }
+            | Request::Ping
+            | Request::RegisterSchema { .. }
+            | Request::GetSchema { .. }
+            | Request::GetClusterMetadata { .. }
+            | Request::ListGroups
+            | Request::DescribeGroup { .. }
+            | Request::DeleteGroup { .. } => RoutingDecision::Local,
         };
-        
+
         match decision {
             RoutingDecision::Local => {
                 // Handle locally
@@ -956,7 +988,7 @@ impl RequestRouter {
                     partition = partition,
                     "Request routed to partition leader"
                 );
-                
+
                 // Return NOT_LEADER_FOR_PARTITION error following Kafka protocol.
                 // Clients should handle this by fetching fresh metadata and
                 // connecting directly to the partition leader. This is the standard
@@ -968,11 +1000,9 @@ impl RequestRouter {
                     ),
                 }
             }
-            RoutingDecision::NotFound { reason } => {
-                Response::Error {
-                    message: format!("UNKNOWN_TOPIC_OR_PARTITION: {}", reason),
-                }
-            }
+            RoutingDecision::NotFound { reason } => Response::Error {
+                message: format!("UNKNOWN_TOPIC_OR_PARTITION: {}", reason),
+            },
         }
     }
 }
@@ -1013,13 +1043,19 @@ where
         }
 
         let msg_len = u32::from_be_bytes(len_buf) as usize;
-        
+
         // Check request size against configured limit
         if msg_len > max_request_size {
-            warn!("Request from {} too large: {} > {} bytes", client_ip, msg_len, max_request_size);
+            warn!(
+                "Request from {} too large: {} > {} bytes",
+                client_ip, msg_len, max_request_size
+            );
             // Send error response before closing
             let error_response = Response::Error {
-                message: format!("REQUEST_TOO_LARGE: {} > {} bytes", msg_len, max_request_size),
+                message: format!(
+                    "REQUEST_TOO_LARGE: {} > {} bytes",
+                    msg_len, max_request_size
+                ),
             };
             if let Ok(bytes) = error_response.to_bytes() {
                 let len = bytes.len() as u32;
@@ -1064,7 +1100,10 @@ where
             Ok(Ok(_)) => {}
             Ok(Err(e)) => return Err(e.into()),
             Err(_) => {
-                debug!("Read timeout during message body from {} - closing connection", client_ip);
+                debug!(
+                    "Read timeout during message body from {} - closing connection",
+                    client_ip
+                );
                 return Ok(());
             }
         }

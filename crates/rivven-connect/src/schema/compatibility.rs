@@ -1,6 +1,8 @@
 //! Schema compatibility checking
 
-use crate::schema::types::{CompatibilityLevel, Schema, SchemaRegistryError, SchemaRegistryResult, SchemaType};
+use crate::schema::types::{
+    CompatibilityLevel, Schema, SchemaRegistryError, SchemaRegistryResult, SchemaType,
+};
 use serde_json::Value as JsonValue;
 
 /// Result of a compatibility check
@@ -55,7 +57,9 @@ impl CompatibilityChecker {
         // Determine which schemas to check against
         let schemas_to_check: Vec<&Schema> = match self.level {
             CompatibilityLevel::None => return Ok(CompatibilityResult::compatible()),
-            CompatibilityLevel::Backward | CompatibilityLevel::Forward | CompatibilityLevel::Full => {
+            CompatibilityLevel::Backward
+            | CompatibilityLevel::Forward
+            | CompatibilityLevel::Full => {
                 // Only check against the latest
                 existing_schemas.last().into_iter().collect()
             }
@@ -235,10 +239,7 @@ impl CompatibilityChecker {
                 CompatibilityLevel::Forward => {
                     for field in &old_required {
                         if !new_p.contains_key(*field) {
-                            messages.push(format!(
-                                "FORWARD: required field '{}' removed",
-                                field
-                            ));
+                            messages.push(format!("FORWARD: required field '{}' removed", field));
                         }
                     }
                 }
@@ -311,33 +312,54 @@ mod tests {
     fn test_backward_add_optional_field() {
         let checker = CompatibilityChecker::new(CompatibilityLevel::Backward);
 
-        let old = json_schema(r#"{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}"#);
-        let new = json_schema(r#"{"type":"object","properties":{"id":{"type":"integer"},"name":{"type":"string"}},"required":["id"]}"#);
+        let old = json_schema(
+            r#"{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}"#,
+        );
+        let new = json_schema(
+            r#"{"type":"object","properties":{"id":{"type":"integer"},"name":{"type":"string"}},"required":["id"]}"#,
+        );
 
         let result = checker.check(&new, &[old]).unwrap();
-        assert!(result.is_compatible, "Adding optional field should be backward compatible");
+        assert!(
+            result.is_compatible,
+            "Adding optional field should be backward compatible"
+        );
     }
 
     #[test]
     fn test_backward_add_required_field() {
         let checker = CompatibilityChecker::new(CompatibilityLevel::Backward);
 
-        let old = json_schema(r#"{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}"#);
-        let new = json_schema(r#"{"type":"object","properties":{"id":{"type":"integer"},"name":{"type":"string"}},"required":["id","name"]}"#);
+        let old = json_schema(
+            r#"{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}"#,
+        );
+        let new = json_schema(
+            r#"{"type":"object","properties":{"id":{"type":"integer"},"name":{"type":"string"}},"required":["id","name"]}"#,
+        );
 
         let result = checker.check(&new, &[old]).unwrap();
-        assert!(!result.is_compatible, "Adding required field should NOT be backward compatible");
+        assert!(
+            !result.is_compatible,
+            "Adding required field should NOT be backward compatible"
+        );
     }
 
     #[test]
     fn test_forward_remove_required_field() {
         let checker = CompatibilityChecker::new(CompatibilityLevel::Forward);
 
-        let old = json_schema(r#"{"type":"object","properties":{"id":{"type":"integer"},"name":{"type":"string"}},"required":["id","name"]}"#);
-        let new = json_schema(r#"{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}"#);
+        let old = json_schema(
+            r#"{"type":"object","properties":{"id":{"type":"integer"},"name":{"type":"string"}},"required":["id","name"]}"#,
+        );
+        let new = json_schema(
+            r#"{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"]}"#,
+        );
 
         let result = checker.check(&new, &[old]).unwrap();
-        assert!(!result.is_compatible, "Removing required field should NOT be forward compatible");
+        assert!(
+            !result.is_compatible,
+            "Removing required field should NOT be forward compatible"
+        );
     }
 
     #[test]
@@ -348,6 +370,9 @@ mod tests {
         let new = json_schema(r#"{"type":"object","properties":{"b":{"type":"integer"}}}"#);
 
         let result = checker.check(&new, &[old]).unwrap();
-        assert!(result.is_compatible, "NONE compatibility should allow any changes");
+        assert!(
+            result.is_compatible,
+            "NONE compatibility should allow any changes"
+        );
     }
 }

@@ -25,11 +25,11 @@
 //!       max_events: 1000
 //! ```
 
+use super::super::prelude::*;
 use crate::connectors::{AnySource, SourceFactory};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::stream::BoxStream;
-use super::super::prelude::*;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -356,7 +356,10 @@ impl DataGenerator {
                 map.insert("_sequence".to_string(), serde_json::json!(seq));
             }
             if self.config.include_timestamp {
-                map.insert("_timestamp".to_string(), serde_json::json!(now.to_rfc3339()));
+                map.insert(
+                    "_timestamp".to_string(),
+                    serde_json::json!(now.to_rfc3339()),
+                );
             }
             for (key, value) in &self.config.custom_fields {
                 map.insert(key.clone(), value.clone());
@@ -369,7 +372,15 @@ impl DataGenerator {
     fn extract_id(&self, data: &serde_json::Value) -> String {
         // Try common ID field names
         if let serde_json::Value::Object(map) = data {
-            for key in &["user_id", "order_id", "event_id", "metric_id", "key", "id", "value"] {
+            for key in &[
+                "user_id",
+                "order_id",
+                "event_id",
+                "metric_id",
+                "key",
+                "id",
+                "value",
+            ] {
                 if let Some(serde_json::Value::String(id)) = map.get(*key) {
                     return id.clone();
                 }
@@ -424,7 +435,10 @@ impl DataGenerator {
                 map.insert("_sequence".to_string(), serde_json::json!(seq));
             }
             if self.config.include_timestamp {
-                map.insert("_timestamp".to_string(), serde_json::json!(now.to_rfc3339()));
+                map.insert(
+                    "_timestamp".to_string(),
+                    serde_json::json!(now.to_rfc3339()),
+                );
             }
             // Add custom fields
             for (key, value) in &self.config.custom_fields {
@@ -453,19 +467,15 @@ impl DataGenerator {
 
     fn generate_user(&mut self, seq: u64) -> serde_json::Value {
         const FIRST_NAMES: &[&str] = &[
-            "Alice", "Bob", "Carol", "David", "Eve", "Frank", "Grace", "Henry",
-            "Ivy", "Jack", "Kate", "Leo", "Mia", "Noah", "Olivia", "Peter",
+            "Alice", "Bob", "Carol", "David", "Eve", "Frank", "Grace", "Henry", "Ivy", "Jack",
+            "Kate", "Leo", "Mia", "Noah", "Olivia", "Peter",
         ];
         const LAST_NAMES: &[&str] = &[
-            "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller",
-            "Davis", "Martinez", "Anderson", "Taylor", "Thomas", "Moore", "White",
+            "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis",
+            "Martinez", "Anderson", "Taylor", "Thomas", "Moore", "White",
         ];
-        const DOMAINS: &[&str] = &[
-            "example.com", "test.org", "demo.net", "mail.io", "acme.co",
-        ];
-        const COUNTRIES: &[&str] = &[
-            "US", "UK", "DE", "FR", "JP", "AU", "CA", "BR", "IN", "MX",
-        ];
+        const DOMAINS: &[&str] = &["example.com", "test.org", "demo.net", "mail.io", "acme.co"];
+        const COUNTRIES: &[&str] = &["US", "UK", "DE", "FR", "JP", "AU", "CA", "BR", "IN", "MX"];
 
         let first = self.rng.choose(FIRST_NAMES);
         let last = self.rng.choose(LAST_NAMES);
@@ -486,11 +496,24 @@ impl DataGenerator {
 
     fn generate_order(&mut self, seq: u64) -> serde_json::Value {
         const PRODUCTS: &[&str] = &[
-            "Widget Pro", "Gadget X", "Super Tool", "Mega Device", "Ultra Kit",
-            "Power Pack", "Smart Hub", "Data Box", "Cloud Unit", "Sync Module",
+            "Widget Pro",
+            "Gadget X",
+            "Super Tool",
+            "Mega Device",
+            "Ultra Kit",
+            "Power Pack",
+            "Smart Hub",
+            "Data Box",
+            "Cloud Unit",
+            "Sync Module",
         ];
         const STATUSES: &[&str] = &[
-            "pending", "confirmed", "processing", "shipped", "delivered", "cancelled",
+            "pending",
+            "confirmed",
+            "processing",
+            "shipped",
+            "delivered",
+            "cancelled",
         ];
         const CURRENCIES: &[&str] = &["USD", "EUR", "GBP", "JPY", "AUD"];
 
@@ -514,12 +537,18 @@ impl DataGenerator {
 
     fn generate_event(&mut self, seq: u64) -> serde_json::Value {
         const EVENT_TYPES: &[&str] = &[
-            "page_view", "click", "signup", "purchase", "logout", "error",
-            "search", "add_to_cart", "remove_from_cart", "checkout",
+            "page_view",
+            "click",
+            "signup",
+            "purchase",
+            "logout",
+            "error",
+            "search",
+            "add_to_cart",
+            "remove_from_cart",
+            "checkout",
         ];
-        const SOURCES: &[&str] = &[
-            "web", "mobile_ios", "mobile_android", "api", "webhook",
-        ];
+        const SOURCES: &[&str] = &["web", "mobile_ios", "mobile_android", "api", "webhook"];
 
         let event_type = self.rng.choose(EVENT_TYPES);
 
@@ -556,12 +585,17 @@ impl DataGenerator {
 
     fn generate_metric(&mut self, seq: u64, now: DateTime<Utc>) -> serde_json::Value {
         const METRIC_NAMES: &[&str] = &[
-            "cpu_usage", "memory_used", "disk_io", "network_rx", "network_tx",
-            "requests_per_sec", "latency_ms", "error_rate", "queue_depth",
+            "cpu_usage",
+            "memory_used",
+            "disk_io",
+            "network_rx",
+            "network_tx",
+            "requests_per_sec",
+            "latency_ms",
+            "error_rate",
+            "queue_depth",
         ];
-        const HOSTS: &[&str] = &[
-            "web-01", "web-02", "api-01", "api-02", "db-01", "cache-01",
-        ];
+        const HOSTS: &[&str] = &["web-01", "web-02", "api-01", "api-02", "db-01", "cache-01"];
 
         let metric = self.rng.choose(METRIC_NAMES);
         let host = self.rng.choose(HOSTS);
@@ -1122,7 +1156,10 @@ mod tests {
         // Should have mix of operations
         assert!(inserts > 0, "Should have inserts");
         // After initial inserts, should have updates and deletes
-        assert!(updates > 0 || deletes > 0, "Should have updates or deletes after building pool");
+        assert!(
+            updates > 0 || deletes > 0,
+            "Should have updates or deletes after building pool"
+        );
         assert_eq!(inserts + updates + deletes, 100);
     }
 
@@ -1158,9 +1195,21 @@ mod tests {
         let update_ratio = updates as f64 / 1000.0;
         let delete_ratio = deletes as f64 / 1000.0;
 
-        assert!(insert_ratio > 0.5 && insert_ratio < 0.7, "Insert ratio ~60%: {}", insert_ratio);
-        assert!(update_ratio > 0.2 && update_ratio < 0.4, "Update ratio ~30%: {}", update_ratio);
-        assert!(delete_ratio > 0.05 && delete_ratio < 0.15, "Delete ratio ~10%: {}", delete_ratio);
+        assert!(
+            insert_ratio > 0.5 && insert_ratio < 0.7,
+            "Insert ratio ~60%: {}",
+            insert_ratio
+        );
+        assert!(
+            update_ratio > 0.2 && update_ratio < 0.4,
+            "Update ratio ~30%: {}",
+            update_ratio
+        );
+        assert!(
+            delete_ratio > 0.05 && delete_ratio < 0.15,
+            "Delete ratio ~10%: {}",
+            delete_ratio
+        );
     }
 
     #[test]

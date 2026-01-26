@@ -13,7 +13,7 @@ use rivven_core::consumer_group::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard, PoisonError};
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -44,7 +44,7 @@ pub enum CoordinatorError {
 
     #[error("Invalid session timeout: {0}")]
     InvalidSessionTimeout(String),
-    
+
     #[error("Internal error: lock poisoned")]
     LockPoisoned,
 }
@@ -68,15 +68,23 @@ impl ConsumerCoordinator {
             groups: Arc::new(RwLock::new(HashMap::new())),
         }
     }
-    
+
     /// Acquire a read lock on groups, handling poisoned locks gracefully
-    fn read_groups(&self) -> CoordinatorResult<RwLockReadGuard<'_, HashMap<GroupId, ConsumerGroup>>> {
-        self.groups.read().map_err(|_| CoordinatorError::LockPoisoned)
+    fn read_groups(
+        &self,
+    ) -> CoordinatorResult<RwLockReadGuard<'_, HashMap<GroupId, ConsumerGroup>>> {
+        self.groups
+            .read()
+            .map_err(|_| CoordinatorError::LockPoisoned)
     }
-    
+
     /// Acquire a write lock on groups, handling poisoned locks gracefully
-    fn write_groups(&self) -> CoordinatorResult<RwLockWriteGuard<'_, HashMap<GroupId, ConsumerGroup>>> {
-        self.groups.write().map_err(|_| CoordinatorError::LockPoisoned)
+    fn write_groups(
+        &self,
+    ) -> CoordinatorResult<RwLockWriteGuard<'_, HashMap<GroupId, ConsumerGroup>>> {
+        self.groups
+            .write()
+            .map_err(|_| CoordinatorError::LockPoisoned)
     }
 
     /// JoinGroup - Consumer joins a group (triggers rebalance)
@@ -99,7 +107,8 @@ impl ConsumerCoordinator {
         });
 
         // Generate member_id if not provided (rejoin uses existing)
-        let member_id = member_id.unwrap_or_else(|| format!("{}-{}", client_id, uuid::Uuid::new_v4()));
+        let member_id =
+            member_id.unwrap_or_else(|| format!("{}-{}", client_id, uuid::Uuid::new_v4()));
 
         // Add member (triggers rebalance)
         group.add_member(member_id.clone(), client_id, subscriptions, metadata);
@@ -150,10 +159,9 @@ impl ConsumerCoordinator {
         }
 
         // Only leader can provide assignments
-        if Some(&member_id) == group.leader_id.as_ref()
-            && !assignments.is_empty() {
-                group.complete_rebalance(assignments);
-            }
+        if Some(&member_id) == group.leader_id.as_ref() && !assignments.is_empty() {
+            group.complete_rebalance(assignments);
+        }
 
         // Return this member's assignment
         let assignment = group
@@ -263,7 +271,7 @@ impl ConsumerCoordinator {
     }
 
     /// Background task: Check for timeouts and trigger rebalances
-    /// 
+    ///
     /// Note: This can fail if the lock is poisoned. In production, the caller
     /// should handle this by logging and continuing, as timeout checks are
     /// best-effort.
@@ -279,7 +287,7 @@ impl ConsumerCoordinator {
                 }
             }
         }
-        
+
         Ok(())
     }
 }
@@ -436,7 +444,12 @@ mod tests {
         );
 
         let sync_response = coordinator
-            .sync_group("test-group".to_string(), member_id, generation_id, assignments)
+            .sync_group(
+                "test-group".to_string(),
+                member_id,
+                generation_id,
+                assignments,
+            )
             .unwrap();
 
         assert_eq!(sync_response.assignment.len(), 1);

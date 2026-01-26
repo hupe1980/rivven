@@ -2,14 +2,14 @@ use crate::{Config, Error, Message, Partition, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info};
+use tracing::info;
 
 /// Represents a topic with multiple partitions
 #[derive(Debug)]
 pub struct Topic {
     /// Topic name
     name: String,
-    
+
     /// Partitions in this topic
     partitions: Vec<Arc<Partition>>,
 }
@@ -17,11 +17,14 @@ pub struct Topic {
 impl Topic {
     /// Create a new topic with the specified number of partitions
     pub async fn new(config: &Config, name: String, num_partitions: u32) -> Result<Self> {
-        info!("Creating topic '{}' with {} partitions", name, num_partitions);
-        
+        info!(
+            "Creating topic '{}' with {} partitions",
+            name, num_partitions
+        );
+
         let mut partitions = Vec::new();
         for id in 0..num_partitions {
-             partitions.push(Arc::new(Partition::new(config, &name, id).await?));
+            partitions.push(Arc::new(Partition::new(config, &name, id).await?));
         }
 
         Ok(Self { name, partitions })
@@ -101,7 +104,7 @@ impl TopicManager {
             "Creating TopicManager with {} default partitions",
             config.default_partitions
         );
-        
+
         Self {
             topics: Arc::new(RwLock::new(HashMap::new())),
             config,
@@ -115,17 +118,13 @@ impl TopicManager {
         num_partitions: Option<u32>,
     ) -> Result<Arc<Topic>> {
         let mut topics = self.topics.write().await;
-        
+
         if topics.contains_key(&name) {
             return Err(Error::Other(format!("Topic '{}' already exists", name)));
         }
 
         let num_partitions = num_partitions.unwrap_or(self.config.default_partitions);
-        let topic = Arc::new(Topic::new(
-            &self.config,
-            name.clone(),
-            num_partitions,
-        ).await?);
+        let topic = Arc::new(Topic::new(&self.config, name.clone(), num_partitions).await?);
 
         topics.insert(name, topic.clone());
         Ok(topic)
@@ -164,7 +163,7 @@ impl TopicManager {
         topics
             .remove(name)
             .ok_or_else(|| Error::TopicNotFound(name.to_string()))?;
-        
+
         info!("Deleted topic '{}'", name);
         Ok(())
     }
@@ -194,7 +193,9 @@ mod tests {
     #[tokio::test]
     async fn test_topic_creation() {
         let config = get_test_config();
-        let topic = Topic::new(&config, "test-topic".to_string(), 3).await.unwrap();
+        let topic = Topic::new(&config, "test-topic".to_string(), 3)
+            .await
+            .unwrap();
         assert_eq!(topic.name(), "test-topic");
         assert_eq!(topic.num_partitions(), 3);
     }
@@ -202,8 +203,10 @@ mod tests {
     #[tokio::test]
     async fn test_topic_append_and_read() {
         let config = get_test_config();
-        let topic = Topic::new(&config, "test-topic".to_string(), 2).await.unwrap();
-        
+        let topic = Topic::new(&config, "test-topic".to_string(), 2)
+            .await
+            .unwrap();
+
         let msg = Message::new(Bytes::from("test"));
         let offset = topic.append(0, msg).await.unwrap();
         assert_eq!(offset, 0);
@@ -216,8 +219,11 @@ mod tests {
     async fn test_topic_manager() {
         let config = get_test_config();
         let manager = TopicManager::new(config);
-        
-        let topic = manager.create_topic("test".to_string(), None).await.unwrap();
+
+        let topic = manager
+            .create_topic("test".to_string(), None)
+            .await
+            .unwrap();
         assert_eq!(topic.num_partitions(), 3);
 
         let retrieved = manager.get_topic("test").await.unwrap();

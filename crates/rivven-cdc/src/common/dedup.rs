@@ -145,12 +145,7 @@ impl KeyStrategy {
             }
             KeyStrategy::TransactionPosition => {
                 // Use database and timestamp as a fallback for transaction position
-                format!(
-                    "{}:{}:{}",
-                    event.database,
-                    event.table,
-                    event.timestamp
-                )
+                format!("{}:{}:{}", event.database, event.table, event.timestamp)
             }
             KeyStrategy::Custom(f) => f(event),
         }
@@ -279,7 +274,9 @@ impl DeduplicatorStatsSnapshot {
 
     /// Calculate bloom filter false positive rate.
     pub fn bloom_fp_rate(&self) -> f64 {
-        let true_positives = self.duplicates_found.saturating_sub(self.bloom_false_positives);
+        let true_positives = self
+            .duplicates_found
+            .saturating_sub(self.bloom_false_positives);
         let total_positives = true_positives + self.bloom_false_positives;
         if total_positives == 0 {
             return 0.0;
@@ -292,7 +289,10 @@ impl Deduplicator {
     /// Create a new deduplicator.
     pub fn new(config: DeduplicatorConfig) -> Self {
         let bloom = if config.bloom_size_bits > 0 {
-            Some(BloomFilter::new(config.bloom_size_bits, config.bloom_hash_count))
+            Some(BloomFilter::new(
+                config.bloom_size_bits,
+                config.bloom_hash_count,
+            ))
         } else {
             None
         };
@@ -334,7 +334,9 @@ impl Deduplicator {
 
         // Bloom said yes, but LRU says no - false positive
         if self.config.bloom_size_bits > 0 {
-            self.stats.bloom_false_positives.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .bloom_false_positives
+                .fetch_add(1, Ordering::Relaxed);
         }
         self.stats.lru_misses.fetch_add(1, Ordering::Relaxed);
         false
@@ -351,7 +353,7 @@ impl Deduplicator {
 
         // Add to LRU cache
         let mut lru = self.lru.write().await;
-        
+
         // Update existing or insert new
         if let Some(entry) = lru.cache.get_mut(&key) {
             entry.seen_at = Instant::now();
@@ -405,20 +407,23 @@ impl Deduplicator {
     pub async fn cleanup(&self) {
         let mut lru = self.lru.write().await;
         let now = Instant::now();
-        
+
         // Remove expired entries
-        lru.cache.retain(|_, entry| entry.seen_at.elapsed() < self.config.ttl);
-        
+        lru.cache
+            .retain(|_, entry| entry.seen_at.elapsed() < self.config.ttl);
+
         // Rebuild order queue - collect keys first to avoid borrow conflict
-        let valid_keys: Vec<_> = lru.order.iter()
+        let valid_keys: Vec<_> = lru
+            .order
+            .iter()
             .filter(|key| lru.cache.contains_key(*key))
             .cloned()
             .collect();
         lru.order = std::collections::VecDeque::from(valid_keys);
-        
+
         lru.last_cleanup = now;
         self.stats.cleanups.fetch_add(1, Ordering::Relaxed);
-        
+
         debug!(
             "Deduplicator cleanup: {} entries remaining",
             lru.cache.len()

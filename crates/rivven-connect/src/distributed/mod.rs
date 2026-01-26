@@ -64,9 +64,15 @@ mod task;
 mod types;
 
 pub use assignment::{AssignmentDecision, AssignmentStrategy, NodeLoad, TaskAssigner};
-pub use coordinator::{ConnectCoordinator, CoordinatorConfig, CoordinatorResult, CoordinatorStatus, ConnectorInfo, ConnectorState};
+pub use coordinator::{
+    ConnectCoordinator, ConnectorInfo, ConnectorState, CoordinatorConfig, CoordinatorResult,
+    CoordinatorStatus,
+};
 pub use election::{ElectionEvent, ElectionState, LeaderElection, LeaderInfo};
-pub use membership::{ConnectMembership, MemberInfo, MemberState, MembershipManager, MembershipSnapshot, NodeResources};
+pub use membership::{
+    ConnectMembership, MemberInfo, MemberState, MembershipManager, MembershipSnapshot,
+    NodeResources,
+};
 pub use protocol::{
     CoordinationMessage, HeartbeatMessage, HeartbeatResponse, JoinRequest, JoinResponse,
     LeaderElectionMessage, NodeCapabilities, NodeLoadInfo, RebalanceReason, RebalanceTrigger,
@@ -74,6 +80,6 @@ pub use protocol::{
 };
 pub use task::{ConnectorTask, SingletonState, TaskConfig, TaskState, TaskStatus, WorkRange};
 pub use types::{
-    ConnectorConfig, ConnectorId, ConnectorMode, DistributedError, DistributedResult,
-    Epoch, FailoverConfig, Generation, NodeId, TaskId,
+    ConnectorConfig, ConnectorId, ConnectorMode, DistributedError, DistributedResult, Epoch,
+    FailoverConfig, Generation, NodeId, TaskId,
 };

@@ -1,7 +1,7 @@
 //! Task assignment strategies for distributed connectors
 
-use crate::distributed::types::*;
 use crate::distributed::task::{ConnectorTask, SingletonState};
+use crate::distributed::types::*;
 use std::collections::HashMap;
 
 /// Assignment decision for a task
@@ -70,10 +70,10 @@ impl NodeLoad {
         if !self.is_healthy || self.current_tasks >= self.max_tasks {
             return 0.0;
         }
-        
+
         let task_capacity = 1.0 - (self.current_tasks as f32 / self.max_tasks as f32);
         let resource_capacity = 1.0 - (self.cpu_usage.max(self.memory_usage));
-        
+
         task_capacity.min(resource_capacity)
     }
 
@@ -116,7 +116,7 @@ impl TaskAssigner {
     /// Remove a node (when it leaves the cluster)
     pub fn remove_node(&mut self, node: &NodeId) {
         self.node_loads.remove(node);
-        
+
         // Update singleton states
         for state in self.singletons.values_mut() {
             state.remove_node(node);
@@ -131,7 +131,8 @@ impl TaskAssigner {
     /// Register a singleton connector
     pub fn register_singleton(&mut self, connector: ConnectorId) {
         if !self.singletons.contains_key(&connector) {
-            self.singletons.insert(connector.clone(), SingletonState::new(connector));
+            self.singletons
+                .insert(connector.clone(), SingletonState::new(connector));
         }
     }
 
@@ -146,14 +147,14 @@ impl TaskAssigner {
     }
 
     /// Assign a task to a node
-    /// 
+    ///
     /// For singleton tasks, this handles leader election.
     /// For scalable tasks, this uses the configured strategy.
     pub fn assign_task(&mut self, task: &mut ConnectorTask) -> AssignmentDecision {
         if task.config.is_singleton {
             return self.assign_singleton_task(task);
         }
-        
+
         match task.assigned_node.as_ref() {
             // Already assigned - check if we should reassign
             Some(current) => {
@@ -163,14 +164,14 @@ impl TaskAssigner {
                         if self.strategy == AssignmentStrategy::Sticky {
                             return AssignmentDecision::Keep;
                         }
-                        
+
                         // Only reassign if there's significant imbalance
                         if load.available_capacity() > 0.2 {
                             return AssignmentDecision::Keep;
                         }
                     }
                 }
-                
+
                 // Node unhealthy or overloaded - reassign
                 if let Some(new_node) = self.select_node_for_task(task) {
                     let from = current.clone();
@@ -180,7 +181,7 @@ impl TaskAssigner {
                     AssignmentDecision::Unassign
                 }
             }
-            
+
             // Not assigned - find a node
             None => {
                 if let Some(node) = self.select_node_for_task(task) {
@@ -197,14 +198,17 @@ impl TaskAssigner {
     fn assign_singleton_task(&mut self, task: &mut ConnectorTask) -> AssignmentDecision {
         // Ensure singleton state exists
         if !self.singletons.contains_key(&task.connector) {
-            self.singletons.insert(task.connector.clone(), SingletonState::new(task.connector.clone()));
+            self.singletons.insert(
+                task.connector.clone(),
+                SingletonState::new(task.connector.clone()),
+            );
         }
-        
+
         // First, gather information we need
         let connector = task.connector.clone();
         let task_assigned_node = task.assigned_node.clone();
         let task_id = task.id.clone();
-        
+
         // Check current leader status
         let leader_status = {
             let state = self.singletons.get(&connector).unwrap();
@@ -249,23 +253,24 @@ impl TaskAssigner {
                 // No leader
             }
         }
-        
+
         // No leader or failover failed - elect one from healthy nodes
-        let healthy: Vec<NodeId> = self.healthy_nodes()
+        let healthy: Vec<NodeId> = self
+            .healthy_nodes()
             .iter()
             .map(|n| n.node.clone())
             .collect();
-        
+
         if healthy.is_empty() {
             return AssignmentDecision::Unassign;
         }
-        
+
         // Get standbys
         let standbys: Vec<NodeId> = {
             let state = self.singletons.get(&connector).unwrap();
             state.standbys.clone()
         };
-        
+
         // Prefer nodes in standby list first
         for standby in standbys {
             if healthy.contains(&standby) {
@@ -275,7 +280,7 @@ impl TaskAssigner {
                 return AssignmentDecision::Assign(standby);
             }
         }
-        
+
         // Otherwise pick the least loaded healthy node
         if let Some(node) = self.least_loaded_node() {
             let state = self.singletons.get_mut(&connector).unwrap();
@@ -283,7 +288,7 @@ impl TaskAssigner {
             self.assignments.insert(task_id, node.clone());
             return AssignmentDecision::Assign(node);
         }
-        
+
         AssignmentDecision::Unassign
     }
 
@@ -299,16 +304,17 @@ impl TaskAssigner {
     }
 
     fn round_robin_select(&mut self) -> Option<NodeId> {
-        let healthy: Vec<NodeId> = self.healthy_nodes()
+        let healthy: Vec<NodeId> = self
+            .healthy_nodes()
             .iter()
             .filter(|n| n.can_accept_tasks())
             .map(|n| n.node.clone())
             .collect();
-        
+
         if healthy.is_empty() {
             return None;
         }
-        
+
         self.rr_counter = (self.rr_counter + 1) % healthy.len();
         Some(healthy[self.rr_counter].clone())
     }
@@ -317,56 +323,66 @@ impl TaskAssigner {
         self.healthy_nodes()
             .into_iter()
             .filter(|n| n.can_accept_tasks())
-            .max_by(|a, b| a.available_capacity().partial_cmp(&b.available_capacity()).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                a.available_capacity()
+                    .partial_cmp(&b.available_capacity())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|n| n.node.clone())
     }
 
     fn random_select(&self) -> Option<NodeId> {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        
+
         let binding = self.healthy_nodes();
-        let healthy: Vec<_> = binding.iter()
-            .filter(|n| n.can_accept_tasks())
-            .collect();
-        
+        let healthy: Vec<_> = binding.iter().filter(|n| n.can_accept_tasks()).collect();
+
         if healthy.is_empty() {
             return None;
         }
-        
+
         // Use timestamp for pseudo-randomness
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        
+
         let mut hasher = DefaultHasher::new();
         now.hash(&mut hasher);
         let index = (hasher.finish() as usize) % healthy.len();
-        
+
         Some(healthy[index].node.clone())
     }
 
     fn rack_aware_select(&self) -> Option<NodeId> {
         // Group nodes by rack
         let mut racks: HashMap<Option<String>, Vec<&NodeLoad>> = HashMap::new();
-        
+
         for node in self.healthy_nodes() {
             if node.can_accept_tasks() {
                 racks.entry(node.rack.clone()).or_default().push(node);
             }
         }
-        
+
         // Find the rack with most available capacity
-        let best_rack = racks.iter()
-            .max_by_key(|(_, nodes)| {
-                (nodes.iter().map(|n| (n.available_capacity() * 100.0) as u32).sum::<u32>()) / nodes.len() as u32
-            });
-        
+        let best_rack = racks.iter().max_by_key(|(_, nodes)| {
+            (nodes
+                .iter()
+                .map(|n| (n.available_capacity() * 100.0) as u32)
+                .sum::<u32>())
+                / nodes.len() as u32
+        });
+
         if let Some((_, nodes)) = best_rack {
             // Pick least loaded node in that rack
-            nodes.iter()
-                .max_by(|a, b| a.available_capacity().partial_cmp(&b.available_capacity()).unwrap_or(std::cmp::Ordering::Equal))
+            nodes
+                .iter()
+                .max_by(|a, b| {
+                    a.available_capacity()
+                        .partial_cmp(&b.available_capacity())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
                 .map(|n| n.node.clone())
         } else {
             None
@@ -374,29 +390,30 @@ impl TaskAssigner {
     }
 
     /// Rebalance tasks across nodes
-    /// 
+    ///
     /// Returns a list of tasks that need to be moved.
     pub fn rebalance(&mut self, tasks: &mut [ConnectorTask]) -> Vec<(TaskId, NodeId, NodeId)> {
         let mut moves = Vec::new();
-        
+
         // Don't rebalance singletons - they use leader election
-        let scalable_tasks: Vec<_> = tasks.iter_mut()
+        let scalable_tasks: Vec<_> = tasks
+            .iter_mut()
             .filter(|t| !t.config.is_singleton)
             .collect();
-        
+
         if scalable_tasks.is_empty() {
             return moves;
         }
-        
+
         // Calculate ideal distribution
         let healthy_count = self.healthy_nodes().len();
         if healthy_count == 0 {
             return moves;
         }
-        
+
         let ideal_per_node = scalable_tasks.len() / healthy_count;
         let remainder = scalable_tasks.len() % healthy_count;
-        
+
         // Count current distribution
         let mut current_distribution: HashMap<NodeId, usize> = HashMap::new();
         for task in &scalable_tasks {
@@ -404,11 +421,11 @@ impl TaskAssigner {
                 *current_distribution.entry(node.clone()).or_default() += 1;
             }
         }
-        
+
         // Find overloaded and underloaded nodes
         let mut overloaded: Vec<(NodeId, usize)> = Vec::new();
         let mut underloaded: Vec<(NodeId, usize)> = Vec::new();
-        
+
         for load in self.healthy_nodes() {
             let current = *current_distribution.get(&load.node).unwrap_or(&0);
             let target = if underloaded.len() < remainder {
@@ -416,14 +433,14 @@ impl TaskAssigner {
             } else {
                 ideal_per_node
             };
-            
+
             if current > target + 1 {
                 overloaded.push((load.node.clone(), current - target));
             } else if current < target {
                 underloaded.push((load.node.clone(), target - current));
             }
         }
-        
+
         // Move tasks from overloaded to underloaded nodes
         // This is a simplified algorithm - production would use more sophisticated balancing
         for task in scalable_tasks {
@@ -434,7 +451,7 @@ impl TaskAssigner {
                             moves.push((task.id.clone(), from.clone(), to.clone()));
                             *needed -= 1;
                             overloaded[pos].1 -= 1;
-                            
+
                             if overloaded[pos].1 == 0 {
                                 overloaded.remove(pos);
                             }
@@ -446,7 +463,7 @@ impl TaskAssigner {
                 }
             }
         }
-        
+
         moves
     }
 }

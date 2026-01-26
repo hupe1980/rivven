@@ -49,13 +49,13 @@ mod sandbox;
 mod store;
 mod types;
 
-pub use abi::{PluginAbi, AbiVersion};
+pub use abi::{AbiVersion, PluginAbi};
 pub use host::HostFunctions;
-pub use loader::{PluginLoader, LoadError};
+pub use loader::{LoadError, PluginLoader};
 pub use runtime::{PluginRuntime, RuntimeConfig};
-pub use sandbox::{SandboxConfig, ResourceLimits};
-pub use store::{PluginStore, PluginEntry};
+pub use sandbox::{ResourceLimits, SandboxConfig};
+pub use store::{PluginEntry, PluginStore};
 pub use types::{
-    PluginConfig, PluginError, PluginResult, PluginManifest, PluginType,
-    WasmSource, WasmSink, WasmTransform,
+    PluginConfig, PluginError, PluginManifest, PluginResult, PluginType, WasmSink, WasmSource,
+    WasmTransform,
 };

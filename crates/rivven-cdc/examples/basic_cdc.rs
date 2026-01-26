@@ -1,19 +1,18 @@
+use rivven_cdc::common::CdcSource;
 /// Basic CDC Example
-/// 
+///
 /// This demonstrates how to use Rivven's native Postgres CDC connector.
-/// 
+///
 /// Prerequisites:
 /// 1. Postgres 10+ with `wal_level=logical`
 /// 2. CREATE PUBLICATION rivven_pub FOR ALL TABLES;
 /// 3. Replication user with appropriate permissions
-/// 
+///
 /// Run with:
 /// ```
 /// cargo run --example basic_cdc --features postgres
 /// ```
-
 use rivven_cdc::postgres::{PostgresCdc, PostgresCdcConfig};
-use rivven_cdc::common::CdcSource;
 use tracing_subscriber;
 
 #[tokio::main]
@@ -24,8 +23,9 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // Connection string format: host=localhost port=5432 dbname=testdb user=postgres password=postgres
-    let conn_str = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "host=localhost port=5432 dbname=testdb user=postgres password=postgres".to_string());
+    let conn_str = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+        "host=localhost port=5432 dbname=testdb user=postgres password=postgres".to_string()
+    });
 
     let slot_name = "rivven_slot";
     let publication = "rivven_pub";
@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Take the event receiver and print events
     let mut rx = cdc.take_event_receiver().expect("event receiver");
-    
+
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             println!("\nShutting down...");
@@ -58,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
             }
         } => {}
     }
-    
+
     cdc.stop().await?;
     Ok(())
 }

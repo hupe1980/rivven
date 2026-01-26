@@ -34,11 +34,9 @@ pub mod prelude {
     pub use crate::crd::{
         ClusterReference, ConnectCondition, ConnectConfigSpec, ConnectMetricsSpec, ConnectPhase,
         ConnectTlsSpec, ConnectorStatus, GlobalConnectSettings, HealthConfigSpec, RateLimitSpec,
-        RetryConfigSpec, RivvenConnect, RivvenConnectSpec, RivvenConnectStatus,
-        SinkConnectorSpec, SourceConnectorSpec, SourceTopicConfigSpec, TableSpec,
-        TopicSettingsSpec,
+        RetryConfigSpec, RivvenConnect, RivvenConnectSpec, RivvenConnectStatus, SinkConnectorSpec,
+        SourceConnectorSpec, SourceTopicConfigSpec, TableSpec, TopicSettingsSpec,
     };
     pub use crate::error::{OperatorError, Result};
     pub use crate::resources::ResourceBuilder;
 }
-

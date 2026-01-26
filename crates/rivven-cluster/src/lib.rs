@@ -65,28 +65,27 @@ pub mod replication;
 pub mod transport;
 
 // Re-export main types
-pub use config::{ClusterConfig, ClusterMode, ReplicationConfig, SwimConfig, RaftConfig, TopicDefaults};
+pub use config::{
+    ClusterConfig, ClusterMode, RaftConfig, ReplicationConfig, SwimConfig, TopicDefaults,
+};
 pub use consumer_coordinator::{ConsumerCoordinator, CoordinatorError, CoordinatorResult};
 pub use coordinator::{ClusterCoordinator, ClusterHealth, CoordinatorState};
 pub use error::{ClusterError, Result};
 pub use membership::{Membership, MembershipEvent, SwimMessage};
 pub use metadata::{ClusterMetadata, MetadataCommand, MetadataResponse, MetadataStore};
-pub use node::{Node, NodeId, NodeInfo, NodeState, NodeCapabilities};
-pub use observability::{RaftMetrics, ClusterMetrics, NetworkMetrics, init_metrics};
+pub use node::{Node, NodeCapabilities, NodeId, NodeInfo, NodeState};
+pub use observability::{init_metrics, ClusterMetrics, NetworkMetrics, RaftMetrics};
 pub use partition::{PartitionId, PartitionState, TopicConfig, TopicState};
 pub use placement::{PartitionPlacer, PlacementConfig, PlacementStrategy};
 pub use protocol::{Acks, ClusterRequest, ClusterResponse};
+#[cfg(feature = "quic")]
+pub use quic_transport::{QuicConfig, QuicStats, QuicTransport, TlsConfig};
 pub use raft::{
-    RaftController, RaftNodeId, RaftNode, RaftNodeConfig,
-    LogStore, StateMachine as MetadataStateMachine,
-    NetworkFactory as RaftNetworkFactory,
-    TypeConfig as RaftTypeConfig,
-    hash_node_id,
+    hash_node_id, LogStore, NetworkFactory as RaftNetworkFactory, RaftController, RaftNode,
+    RaftNodeConfig, RaftNodeId, StateMachine as MetadataStateMachine, TypeConfig as RaftTypeConfig,
 };
 pub use replication::{PartitionReplication, ReplicationManager};
 pub use transport::{Transport, TransportConfig};
-#[cfg(feature = "quic")]
-pub use quic_transport::{QuicTransport, QuicConfig, TlsConfig, QuicStats};
 
 /// Re-export common types
 pub mod prelude {
@@ -98,4 +97,3 @@ pub mod prelude {
     pub use crate::protocol::Acks;
     pub use crate::raft::RaftController;
 }
-

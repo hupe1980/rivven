@@ -33,7 +33,7 @@ impl OffsetManager {
         offset: u64,
     ) {
         let mut offsets = self.offsets.write().await;
-        
+
         offsets
             .entry(consumer_group.to_string())
             .or_insert_with(HashMap::new)
@@ -50,7 +50,7 @@ impl OffsetManager {
         partition: u32,
     ) -> Option<u64> {
         let offsets = self.offsets.read().await;
-        
+
         offsets
             .get(consumer_group)
             .and_then(|topics| topics.get(topic))
@@ -100,9 +100,9 @@ mod tests {
     #[tokio::test]
     async fn test_offset_management() {
         let manager = OffsetManager::new();
-        
+
         manager.commit_offset("group1", "topic1", 0, 100).await;
-        
+
         let offset = manager.get_offset("group1", "topic1", 0).await;
         assert_eq!(offset, Some(100));
 
@@ -113,10 +113,10 @@ mod tests {
     #[tokio::test]
     async fn test_reset_offsets() {
         let manager = OffsetManager::new();
-        
+
         manager.commit_offset("group1", "topic1", 0, 100).await;
         manager.reset_offsets("group1").await;
-        
+
         let offset = manager.get_offset("group1", "topic1", 0).await;
         assert_eq!(offset, None);
     }

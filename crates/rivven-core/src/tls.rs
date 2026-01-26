@@ -306,7 +306,7 @@ impl TlsConfig {
             certificate: Some(CertificateSource::SelfSigned {
                 common_name: common_name.to_string(),
             }),
-            private_key: None, // Generated with self-signed cert
+            private_key: None,          // Generated with self-signed cert
             insecure_skip_verify: true, // Required for self-signed
             ..Default::default()
         }
@@ -327,11 +327,7 @@ impl TlsConfig {
     }
 
     /// Create mTLS configuration from PEM files
-    pub fn mtls_from_pem_files<P1, P2, P3>(
-        cert_path: P1,
-        key_path: P2,
-        ca_path: P3,
-    ) -> Self 
+    pub fn mtls_from_pem_files<P1, P2, P3>(cert_path: P1, key_path: P2, ca_path: P3) -> Self
     where
         P1: Into<PathBuf>,
         P2: Into<PathBuf>,
@@ -346,12 +342,8 @@ impl TlsConfig {
             private_key: Some(PrivateKeySource::File {
                 path: key_path.into(),
             }),
-            client_ca: Some(CertificateSource::File {
-                path: ca.clone(),
-            }),
-            root_ca: Some(CertificateSource::File {
-                path: ca,
-            }),
+            client_ca: Some(CertificateSource::File { path: ca.clone() }),
+            root_ca: Some(CertificateSource::File { path: ca }),
             mtls_mode: MtlsMode::Required,
             ..Default::default()
         }
@@ -503,8 +495,9 @@ pub fn load_certificates(source: &CertificateSource) -> TlsResult<Vec<Certificat
         }
         CertificateSource::Pem { content } => parse_pem_certificates(content.as_bytes()),
         CertificateSource::Der { content } => {
-            let der = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, content)
-                .map_err(|e| TlsError::InvalidCertificate(format!("Invalid base64: {}", e)))?;
+            let der =
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, content)
+                    .map_err(|e| TlsError::InvalidCertificate(format!("Invalid base64: {}", e)))?;
             Ok(vec![CertificateDer::from(der)])
         }
         CertificateSource::SelfSigned { common_name } => {
@@ -570,7 +563,7 @@ pub fn generate_self_signed(
 
     let mut cert_params = rcgen::CertificateParams::new(subject_alt_names)
         .map_err(|e| TlsError::SelfSignedGenerationError(e.to_string()))?;
-    
+
     // Set the distinguished name with proper common name
     cert_params.distinguished_name = rcgen::DistinguishedName::new();
     cert_params.distinguished_name.push(
@@ -673,31 +666,30 @@ impl fmt::Debug for TlsAcceptor {
 /// Build rustls ServerConfig from TlsConfig
 fn build_server_config(config: &TlsConfig) -> TlsResult<ServerConfig> {
     // Handle self-signed certificates specially to ensure cert and key match
-    let (certs, key) = if let Some(CertificateSource::SelfSigned { common_name }) = &config.certificate {
-        // Generate both cert and key together to ensure they match
-        let (cert, key) = generate_self_signed(common_name)?;
-        (vec![cert], key)
-    } else {
-        // Load certificates from explicit sources
-        let certs = if let Some(ref cert_source) = config.certificate {
-            load_certificates(cert_source)?
+    let (certs, key) =
+        if let Some(CertificateSource::SelfSigned { common_name }) = &config.certificate {
+            // Generate both cert and key together to ensure they match
+            let (cert, key) = generate_self_signed(common_name)?;
+            (vec![cert], key)
         } else {
-            return Err(TlsError::ConfigError(
-                "Server certificate required".to_string(),
-            ));
+            // Load certificates from explicit sources
+            let certs = if let Some(ref cert_source) = config.certificate {
+                load_certificates(cert_source)?
+            } else {
+                return Err(TlsError::ConfigError(
+                    "Server certificate required".to_string(),
+                ));
+            };
+
+            // Load private key
+            let key = if let Some(ref key_source) = config.private_key {
+                load_private_key(key_source)?
+            } else {
+                return Err(TlsError::ConfigError("Private key required".to_string()));
+            };
+
+            (certs, key)
         };
-        
-        // Load private key
-        let key = if let Some(ref key_source) = config.private_key {
-            load_private_key(key_source)?
-        } else {
-            return Err(TlsError::ConfigError(
-                "Private key required".to_string(),
-            ));
-        };
-        
-        (certs, key)
-    };
 
     // Build TLS versions
     let versions: Vec<&'static rustls::SupportedProtocolVersion> = match config.min_version {
@@ -722,20 +714,14 @@ fn build_server_config(config: &TlsConfig) -> TlsResult<ServerConfig> {
                     rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store))
                         .build()
                         .map_err(|e| {
-                            TlsError::ConfigError(format!(
-                                "Failed to build client verifier: {}",
-                                e
-                            ))
+                            TlsError::ConfigError(format!("Failed to build client verifier: {}", e))
                         })?
                 } else {
                     rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store))
                         .allow_unauthenticated()
                         .build()
                         .map_err(|e| {
-                            TlsError::ConfigError(format!(
-                                "Failed to build client verifier: {}",
-                                e
-                            ))
+                            TlsError::ConfigError(format!("Failed to build client verifier: {}", e))
                         })?
                 };
 
@@ -807,11 +793,7 @@ impl TlsConnector {
     }
 
     /// Connect to a server with TLS
-    pub async fn connect<IO>(
-        &self,
-        stream: IO,
-        server_name: &str,
-    ) -> TlsResult<TlsClientStream<IO>>
+    pub async fn connect<IO>(&self, stream: IO, server_name: &str) -> TlsResult<TlsClientStream<IO>>
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
@@ -1214,7 +1196,7 @@ pub fn certificate_fingerprint(cert: &CertificateDer<'_>) -> String {
 }
 
 /// Verify certificate chain
-/// 
+///
 /// Note: This is a basic sanity check. The actual TLS handshake performs
 /// full chain validation using WebPKI through rustls.
 pub fn verify_certificate_chain(
@@ -1236,7 +1218,11 @@ pub fn verify_certificate_chain(
     // Log certificate chain info for debugging
     for (i, cert) in chain.iter().enumerate() {
         let fingerprint = certificate_fingerprint(cert);
-        tracing::debug!("Certificate chain[{}]: fingerprint={}", i, &fingerprint[..16]);
+        tracing::debug!(
+            "Certificate chain[{}]: fingerprint={}",
+            i,
+            &fingerprint[..16]
+        );
     }
 
     Ok(())
@@ -1354,10 +1340,14 @@ impl TlsIdentity {
 
                 for rdn in parsed.subject().iter_rdn() {
                     for attr in rdn.iter() {
-                        if attr.attr_type() == &x509_parser::oid_registry::OID_X509_ORGANIZATION_NAME {
+                        if attr.attr_type()
+                            == &x509_parser::oid_registry::OID_X509_ORGANIZATION_NAME
+                        {
                             org = attr.as_str().ok().map(|s| s.to_string());
                         }
-                        if attr.attr_type() == &x509_parser::oid_registry::OID_X509_ORGANIZATIONAL_UNIT {
+                        if attr.attr_type()
+                            == &x509_parser::oid_registry::OID_X509_ORGANIZATIONAL_UNIT
+                        {
                             ou = attr.as_str().ok().map(|s| s.to_string());
                         }
                     }
@@ -1444,9 +1434,9 @@ impl TlsSecurityAudit {
         }
 
         if config.session_cache_size == 0 {
-            audit.recommendations.push(
-                "Consider enabling session cache for better performance".to_string(),
-            );
+            audit
+                .recommendations
+                .push("Consider enabling session cache for better performance".to_string());
         }
 
         if config.cert_reload_interval == Duration::ZERO {
@@ -1457,9 +1447,9 @@ impl TlsSecurityAudit {
         }
 
         if config.pinned_certificates.is_empty() && !config.insecure_skip_verify {
-            audit.recommendations.push(
-                "Consider certificate pinning for high-security deployments".to_string(),
-            );
+            audit
+                .recommendations
+                .push("Consider certificate pinning for high-security deployments".to_string());
         }
 
         audit
@@ -1502,71 +1492,73 @@ mod tests {
     async fn test_tls_server_client_handshake() {
         // Install crypto provider (required by rustls 0.23+)
         let _ = rustls::crypto::ring::default_provider().install_default();
-        
+
         // Use SelfSigned source which generates at runtime
         let server_config = TlsConfig {
             enabled: true,
-            certificate: Some(CertificateSource::SelfSigned { 
+            certificate: Some(CertificateSource::SelfSigned {
                 common_name: "localhost".to_string(),
             }),
             // Key is auto-generated with self-signed
             mtls_mode: MtlsMode::Disabled,
             ..Default::default()
         };
-        
+
         // Create client config that skips verification (for self-signed)
         let client_config = TlsConfig {
             enabled: true,
             insecure_skip_verify: true,
             ..Default::default()
         };
-        
+
         // Create acceptor and connector
         let acceptor = TlsAcceptor::new(&server_config).unwrap();
         let connector = TlsConnector::new(&client_config).unwrap();
-        
+
         // Start a TCP listener
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        
+
         // Server task: accept TLS connection and echo data
         let server_task = tokio::spawn(async move {
             let (tcp_stream, _) = listener.accept().await.unwrap();
-            let mut tls_stream: TlsServerStream<tokio::net::TcpStream> = acceptor.accept_tcp(tcp_stream).await.unwrap();
-            
+            let mut tls_stream: TlsServerStream<tokio::net::TcpStream> =
+                acceptor.accept_tcp(tcp_stream).await.unwrap();
+
             // Read data
             let mut buf = [0u8; 32];
             let n = tls_stream.read(&mut buf).await.unwrap();
-            
+
             // Echo it back
             tls_stream.write_all(&buf[..n]).await.unwrap();
             tls_stream.flush().await.unwrap();
-            
+
             n
         });
-        
+
         // Client task: connect and send data
         let client_task = tokio::spawn(async move {
-            let mut stream: TlsClientStream<tokio::net::TcpStream> = connector.connect_tcp(addr, "localhost").await.unwrap();
-            
+            let mut stream: TlsClientStream<tokio::net::TcpStream> =
+                connector.connect_tcp(addr, "localhost").await.unwrap();
+
             // Send test message
             let message = b"Hello, TLS!";
             stream.write_all(message).await.unwrap();
             stream.flush().await.unwrap();
-            
+
             // Read response
             let mut response = [0u8; 32];
             let n = stream.read(&mut response).await.unwrap();
-            
+
             (message.to_vec(), response[..n].to_vec())
         });
-        
+
         // Wait for both tasks
         let (server_result, client_result) = tokio::join!(server_task, client_task);
-        
+
         let server_bytes_read = server_result.unwrap();
         let (sent, received) = client_result.unwrap();
-        
+
         // Verify echo worked
         assert_eq!(server_bytes_read, sent.len());
         assert_eq!(sent, received);
@@ -1574,113 +1566,138 @@ mod tests {
 
     #[tokio::test]
     async fn test_mtls_server_client_handshake() {
-        use rcgen::{CertificateParams, DnType, IsCa, BasicConstraints, KeyUsagePurpose};
-        
+        use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyUsagePurpose};
+
         // Install crypto provider (required by rustls 0.23+)
         let _ = rustls::crypto::ring::default_provider().install_default();
-        
+
         // Generate a shared CA certificate
         let mut ca_params = CertificateParams::default();
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        ca_params.key_usages = vec![
-            KeyUsagePurpose::KeyCertSign,
-            KeyUsagePurpose::CrlSign,
-        ];
-        ca_params.distinguished_name.push(DnType::CommonName, "Rivven Test CA");
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+        ca_params
+            .distinguished_name
+            .push(DnType::CommonName, "Rivven Test CA");
         let ca_key_pair = rcgen::KeyPair::generate().unwrap();
         let ca_cert = ca_params.self_signed(&ca_key_pair).unwrap();
         let ca_cert_pem = ca_cert.pem();
-        
+
         // Generate server certificate signed by CA
         let mut server_params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
-        server_params.distinguished_name.push(DnType::CommonName, "localhost");
+        server_params
+            .distinguished_name
+            .push(DnType::CommonName, "localhost");
         let server_key_pair = rcgen::KeyPair::generate().unwrap();
-        let server_cert = server_params.signed_by(&server_key_pair, &ca_cert, &ca_key_pair).unwrap();
+        let server_cert = server_params
+            .signed_by(&server_key_pair, &ca_cert, &ca_key_pair)
+            .unwrap();
         let server_cert_pem = server_cert.pem();
         let server_key_pem = server_key_pair.serialize_pem();
-        
+
         // Generate client certificate signed by CA
-        let mut client_params = CertificateParams::new(vec!["client.rivven.local".to_string()]).unwrap();
-        client_params.distinguished_name.push(DnType::CommonName, "client.rivven.local");
+        let mut client_params =
+            CertificateParams::new(vec!["client.rivven.local".to_string()]).unwrap();
+        client_params
+            .distinguished_name
+            .push(DnType::CommonName, "client.rivven.local");
         let client_key_pair = rcgen::KeyPair::generate().unwrap();
-        let client_cert = client_params.signed_by(&client_key_pair, &ca_cert, &ca_key_pair).unwrap();
+        let client_cert = client_params
+            .signed_by(&client_key_pair, &ca_cert, &ca_key_pair)
+            .unwrap();
         let client_cert_pem = client_cert.pem();
         let client_key_pem = client_key_pair.serialize_pem();
-        
+
         // Server config with mTLS required
         let server_config = TlsConfig {
             enabled: true,
-            certificate: Some(CertificateSource::Pem { content: server_cert_pem }),
-            private_key: Some(PrivateKeySource::Pem { content: server_key_pem }),
-            client_ca: Some(CertificateSource::Pem { content: ca_cert_pem.clone() }),
+            certificate: Some(CertificateSource::Pem {
+                content: server_cert_pem,
+            }),
+            private_key: Some(PrivateKeySource::Pem {
+                content: server_key_pem,
+            }),
+            client_ca: Some(CertificateSource::Pem {
+                content: ca_cert_pem.clone(),
+            }),
             mtls_mode: MtlsMode::Required,
             insecure_skip_verify: false,
             ..Default::default()
         };
-        
+
         // Client config with client cert and CA trust
         let client_config = TlsConfig {
             enabled: true,
-            certificate: Some(CertificateSource::Pem { content: client_cert_pem }),
-            private_key: Some(PrivateKeySource::Pem { content: client_key_pem }),
-            root_ca: Some(CertificateSource::Pem { content: ca_cert_pem }),
+            certificate: Some(CertificateSource::Pem {
+                content: client_cert_pem,
+            }),
+            private_key: Some(PrivateKeySource::Pem {
+                content: client_key_pem,
+            }),
+            root_ca: Some(CertificateSource::Pem {
+                content: ca_cert_pem,
+            }),
             insecure_skip_verify: false,
             ..Default::default()
         };
-        
+
         // Create acceptor and connector
         let acceptor = TlsAcceptor::new(&server_config).unwrap();
         let connector = TlsConnector::new(&client_config).unwrap();
-        
+
         // Start a TCP listener
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        
+
         // Server task
         let server_task = tokio::spawn(async move {
             let (tcp_stream, _) = listener.accept().await.unwrap();
-            let mut tls_stream: TlsServerStream<tokio::net::TcpStream> = acceptor.accept_tcp(tcp_stream).await.unwrap();
-            
+            let mut tls_stream: TlsServerStream<tokio::net::TcpStream> =
+                acceptor.accept_tcp(tcp_stream).await.unwrap();
+
             // Check if we can see peer certificates (mTLS)
             let has_peer_cert = tls_stream.peer_certificates().is_some();
-            
+
             // Read data
             let mut buf = [0u8; 32];
             let n = tls_stream.read(&mut buf).await.unwrap();
             tls_stream.write_all(&buf[..n]).await.unwrap();
             tls_stream.flush().await.unwrap();
-            
+
             (n, has_peer_cert)
         });
-        
+
         // Client task
         let client_task = tokio::spawn(async move {
-            let mut stream: TlsClientStream<tokio::net::TcpStream> = connector.connect_tcp(addr, "localhost").await.unwrap();
-            
+            let mut stream: TlsClientStream<tokio::net::TcpStream> =
+                connector.connect_tcp(addr, "localhost").await.unwrap();
+
             // Send test message
             let message = b"mTLS Test!";
             stream.write_all(message).await.unwrap();
             stream.flush().await.unwrap();
-            
+
             // Read response
             let mut response = [0u8; 32];
             let n = stream.read(&mut response).await.unwrap();
-            
+
             (message.to_vec(), response[..n].to_vec())
         });
-        
+
         // Wait for both tasks
         let (server_result, client_result) = tokio::join!(server_task, client_task);
-        
+
         let (server_bytes_read, has_peer_cert) = server_result.unwrap();
         let (sent, received) = client_result.unwrap();
-        
+
         // Verify echo worked
         assert_eq!(server_bytes_read, sent.len());
         assert_eq!(sent, received);
-        
+
         // Verify mTLS - server saw client certificate
-        assert!(has_peer_cert, "Server should have received client certificate in mTLS");
+        assert!(
+            has_peer_cert,
+            "Server should have received client certificate in mTLS"
+        );
     }
 
     #[test]
@@ -1768,7 +1785,10 @@ mod tests {
         let (cert, _) = generate_self_signed("service.rivven.internal").unwrap();
         let identity = TlsIdentity::from_certificate(&cert);
 
-        assert_eq!(identity.common_name, Some("service.rivven.internal".to_string()));
+        assert_eq!(
+            identity.common_name,
+            Some("service.rivven.internal".to_string())
+        );
         assert!(identity.is_valid);
         assert!(identity.valid_from.is_some());
         assert!(identity.valid_until.is_some());

@@ -56,19 +56,22 @@ static METRICS_INITIALIZED: OnceLock<()> = OnceLock::new();
 pub fn init_metrics(
     addr: std::net::SocketAddr,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    METRICS_INITIALIZED.get_or_init(|| {
-        match metrics_exporter_prometheus::PrometheusBuilder::new()
+    METRICS_INITIALIZED.get_or_init(
+        || match metrics_exporter_prometheus::PrometheusBuilder::new()
             .with_http_listener(addr)
             .install()
         {
             Ok(()) => {
-                tracing::info!("Prometheus metrics server listening on http://{}/metrics", addr);
+                tracing::info!(
+                    "Prometheus metrics server listening on http://{}/metrics",
+                    addr
+                );
             }
             Err(e) => {
                 tracing::error!("Failed to start Prometheus exporter: {}", e);
             }
-        }
-    });
+        },
+    );
     Ok(())
 }
 

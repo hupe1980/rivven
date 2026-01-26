@@ -1,7 +1,7 @@
 //! Test harness for CDC integration tests
 //!
 //! Provides production-grade test infrastructure using testcontainers-rs.
-//! 
+//!
 //! Features:
 //! - Automatic PostgreSQL container lifecycle management
 //! - Automatic MySQL/MariaDB container lifecycle management
@@ -9,23 +9,20 @@
 //! - Async-first design with proper cleanup
 //! - Test isolation with unique slot/publication names
 
-pub mod postgres;
-pub mod mysql;
-pub mod rivven_context;
 pub mod assertions;
 pub mod data_generators;
+pub mod mysql;
+pub mod postgres;
+pub mod rivven_context;
 
-pub use postgres::{PostgresTestContainer, TestContext};
-pub use mysql::{MySqlTestContainer, MariaDbTestContainer};
-pub use rivven_context::RivvenTestContext;
-pub use assertions::{CdcEventVecExt, get_string_field};
+pub use assertions::{get_string_field, CdcEventVecExt};
 pub use data_generators::{
-    generate_user_inserts_for_table,
-    generate_bulk_inserts,
-    generate_mixed_workload,
-    generate_all_types_insert,
-    scenarios,
+    generate_all_types_insert, generate_bulk_inserts, generate_mixed_workload,
+    generate_user_inserts_for_table, scenarios,
 };
+pub use mysql::{MariaDbTestContainer, MySqlTestContainer};
+pub use postgres::{PostgresTestContainer, TestContext};
+pub use rivven_context::RivvenTestContext;
 
 use std::sync::Once;
 
@@ -38,7 +35,7 @@ pub fn init_test_logging() {
             .with_env_filter(
                 tracing_subscriber::EnvFilter::from_default_env()
                     .add_directive("rivven_cdc=debug".parse().unwrap())
-                    .add_directive("testcontainers=info".parse().unwrap())
+                    .add_directive("testcontainers=info".parse().unwrap()),
             )
             .with_test_writer()
             .try_init()

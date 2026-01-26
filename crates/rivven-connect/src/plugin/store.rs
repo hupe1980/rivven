@@ -80,9 +80,9 @@ impl PluginStore {
     pub fn unregister(&self, name: &str) -> PluginResult<PluginEntry> {
         let entry = {
             let mut plugins = self.plugins.write();
-            plugins.remove(name).ok_or_else(|| {
-                PluginError::NotFound(name.to_string())
-            })?
+            plugins
+                .remove(name)
+                .ok_or_else(|| PluginError::NotFound(name.to_string()))?
         };
 
         {
@@ -184,9 +184,15 @@ impl PluginStore {
 
         PluginStoreStats {
             total: plugins.len(),
-            sources: by_type.get(&PluginType::Source).map(|v| v.len()).unwrap_or(0),
+            sources: by_type
+                .get(&PluginType::Source)
+                .map(|v| v.len())
+                .unwrap_or(0),
             sinks: by_type.get(&PluginType::Sink).map(|v| v.len()).unwrap_or(0),
-            transforms: by_type.get(&PluginType::Transform).map(|v| v.len()).unwrap_or(0),
+            transforms: by_type
+                .get(&PluginType::Transform)
+                .map(|v| v.len())
+                .unwrap_or(0),
             total_instances: plugins.values().map(|e| e.instance_count).sum(),
         }
     }
@@ -252,7 +258,7 @@ mod tests {
         store.register(module).unwrap();
 
         assert!(store.contains("test-source"));
-        
+
         let entry = store.get("test-source").unwrap();
         assert_eq!(entry.name, "test-source");
         assert_eq!(entry.manifest.plugin_type, PluginType::Source);
@@ -262,9 +268,15 @@ mod tests {
     fn test_list_by_type() {
         let store = PluginStore::new();
 
-        store.register(test_module("source1", PluginType::Source)).unwrap();
-        store.register(test_module("source2", PluginType::Source)).unwrap();
-        store.register(test_module("sink1", PluginType::Sink)).unwrap();
+        store
+            .register(test_module("source1", PluginType::Source))
+            .unwrap();
+        store
+            .register(test_module("source2", PluginType::Source))
+            .unwrap();
+        store
+            .register(test_module("sink1", PluginType::Sink))
+            .unwrap();
 
         let sources = store.list_by_type(PluginType::Source);
         assert_eq!(sources.len(), 2);
@@ -279,7 +291,9 @@ mod tests {
     fn test_unregister() {
         let store = PluginStore::new();
 
-        store.register(test_module("test", PluginType::Source)).unwrap();
+        store
+            .register(test_module("test", PluginType::Source))
+            .unwrap();
         assert!(store.contains("test"));
 
         store.unregister("test").unwrap();
@@ -289,7 +303,9 @@ mod tests {
     #[test]
     fn test_instance_counting() {
         let store = PluginStore::new();
-        store.register(test_module("test", PluginType::Source)).unwrap();
+        store
+            .register(test_module("test", PluginType::Source))
+            .unwrap();
 
         assert_eq!(store.increment_instances("test").unwrap(), 1);
         assert_eq!(store.increment_instances("test").unwrap(), 2);
@@ -300,10 +316,18 @@ mod tests {
     fn test_stats() {
         let store = PluginStore::new();
 
-        store.register(test_module("s1", PluginType::Source)).unwrap();
-        store.register(test_module("s2", PluginType::Source)).unwrap();
-        store.register(test_module("sink1", PluginType::Sink)).unwrap();
-        store.register(test_module("t1", PluginType::Transform)).unwrap();
+        store
+            .register(test_module("s1", PluginType::Source))
+            .unwrap();
+        store
+            .register(test_module("s2", PluginType::Source))
+            .unwrap();
+        store
+            .register(test_module("sink1", PluginType::Sink))
+            .unwrap();
+        store
+            .register(test_module("t1", PluginType::Transform))
+            .unwrap();
 
         store.increment_instances("s1").unwrap();
         store.increment_instances("s1").unwrap();

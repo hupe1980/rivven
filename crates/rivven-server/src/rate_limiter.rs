@@ -7,14 +7,14 @@
 //! - Request size limits
 //! - Connection tracking and cleanup
 
+use rivven_core::metrics::CoreMetrics;
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
-use rivven_core::metrics::CoreMetrics;
 
 /// Configuration for rate limiting
 #[derive(Debug, Clone)]
@@ -66,7 +66,7 @@ impl TokenBucket {
         let mut last = self.last_refill.write().await;
         let elapsed = last.elapsed();
         let refill_amount = (elapsed.as_secs_f64() * self.refill_rate as f64) as u64;
-        
+
         if refill_amount > 0 {
             let current = self.tokens.load(Ordering::Relaxed);
             let new_tokens = (current + refill_amount).min(self.capacity);
@@ -81,12 +81,11 @@ impl TokenBucket {
             if current == 0 {
                 return false;
             }
-            if self.tokens.compare_exchange(
-                current,
-                current - 1,
-                Ordering::SeqCst,
-                Ordering::Relaxed,
-            ).is_ok() {
+            if self
+                .tokens
+                .compare_exchange(current, current - 1, Ordering::SeqCst, Ordering::Relaxed)
+                .is_ok()
+            {
                 return true;
             }
         }
@@ -209,10 +208,7 @@ impl RateLimiter {
 
     /// Check if a new connection from the given IP should be allowed
     /// Returns a guard that will release the connection on drop
-    pub async fn try_connection(
-        &self,
-        ip: IpAddr,
-    ) -> Result<ConnectionGuard, ConnectionResult> {
+    pub async fn try_connection(&self, ip: IpAddr) -> Result<ConnectionGuard, ConnectionResult> {
         // Check global limit first
         let total = self.total_connections.load(Ordering::Relaxed);
         if total >= self.config.max_total_connections {
@@ -317,7 +313,7 @@ impl RateLimiter {
     pub async fn cleanup_stale(&self) {
         let mut states = self.ip_states.write().await;
         let stale_timeout = self.config.idle_timeout * 2; // Give extra time
-        
+
         let mut to_remove = Vec::new();
         for (ip, state) in states.iter() {
             if state.is_stale(stale_timeout).await {
@@ -359,17 +355,20 @@ mod tests {
         // First two connections should succeed
         let guard1 = limiter.try_connection(ip).await;
         assert!(guard1.is_ok());
-        
+
         let guard2 = limiter.try_connection(ip).await;
         assert!(guard2.is_ok());
 
         // Third connection should fail
         let result = limiter.try_connection(ip).await;
-        assert_eq!(result.unwrap_err(), ConnectionResult::TooManyConnectionsFromIp);
+        assert_eq!(
+            result.unwrap_err(),
+            ConnectionResult::TooManyConnectionsFromIp
+        );
 
         // Drop one guard, should allow another connection
         drop(guard1);
-        
+
         let guard3 = limiter.try_connection(ip).await;
         assert!(guard3.is_ok());
     }
@@ -393,7 +392,10 @@ mod tests {
 
         // Third connection should fail even from different IP
         let result = limiter.try_connection(ip3).await;
-        assert_eq!(result.unwrap_err(), ConnectionResult::TooManyTotalConnections);
+        assert_eq!(
+            result.unwrap_err(),
+            ConnectionResult::TooManyTotalConnections
+        );
     }
 
     #[tokio::test]

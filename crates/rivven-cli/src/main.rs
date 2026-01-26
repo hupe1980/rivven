@@ -3,11 +3,11 @@
 //! This is the main CLI for interacting with Rivven servers.
 //! For CDC (Change Data Capture), use the separate `rivven-connect` binary.
 
+use bytes::Bytes;
 use clap::{Parser, Subcommand};
 use rivven_client::Client;
 use rivven_core::Config;
 use rivven_server::Server;
-use bytes::Bytes;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -193,8 +193,7 @@ async fn main() -> anyhow::Result<()> {
     // Initialize tracing
     tracing_subscriber::registry()
         .with(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -212,9 +211,12 @@ async fn main() -> anyhow::Result<()> {
             println!("Starting Rivven server...");
             println!("  Bind: {}:{}", bind, port);
             println!("  Partitions: {}", partitions);
-            println!("  Persistence: {}", if persist { &data_dir } else { "disabled" });
+            println!(
+                "  Persistence: {}",
+                if persist { &data_dir } else { "disabled" }
+            );
             println!();
-            
+
             let config = Config::default()
                 .with_port(port)
                 .with_bind_address(bind)
@@ -223,16 +225,16 @@ async fn main() -> anyhow::Result<()> {
                 .with_data_dir(data_dir);
 
             let server = Server::new(config).await?;
-            
+
             // Setup graceful shutdown
             let running = Arc::new(AtomicBool::new(true));
             let r = running.clone();
-            
+
             ctrlc::set_handler(move || {
                 println!("\nShutting down...");
                 r.store(false, Ordering::SeqCst);
             })?;
-            
+
             server.start().await?;
         }
 
@@ -244,13 +246,16 @@ async fn main() -> anyhow::Result<()> {
             } => {
                 let mut client = Client::connect(&server).await?;
                 let num_partitions = client.create_topic(name.clone(), Some(partitions)).await?;
-                println!("✓ Created topic '{}' with {} partitions", name, num_partitions);
+                println!(
+                    "✓ Created topic '{}' with {} partitions",
+                    name, num_partitions
+                );
             }
 
             TopicCommands::List { server } => {
                 let mut client = Client::connect(&server).await?;
                 let topics = client.list_topics().await?;
-                
+
                 if topics.is_empty() {
                     println!("No topics found");
                 } else {
@@ -279,7 +284,7 @@ async fn main() -> anyhow::Result<()> {
             GroupCommands::List { server } => {
                 let mut client = Client::connect(&server).await?;
                 let groups = client.list_groups().await?;
-                
+
                 if groups.is_empty() {
                     println!("No consumer groups found");
                 } else {
@@ -293,7 +298,7 @@ async fn main() -> anyhow::Result<()> {
             GroupCommands::Describe { name, server } => {
                 let mut client = Client::connect(&server).await?;
                 let offsets = client.describe_group(&name).await?;
-                
+
                 println!("Consumer Group: {}", name);
                 if offsets.is_empty() {
                     println!("  No committed offsets");
@@ -324,7 +329,7 @@ async fn main() -> anyhow::Result<()> {
             key,
         } => {
             let mut client = Client::connect(&server).await?;
-            
+
             let offset = if let Some(p) = partition {
                 client
                     .publish_to_partition(
@@ -336,11 +341,7 @@ async fn main() -> anyhow::Result<()> {
                     .await?
             } else {
                 client
-                    .publish_with_key(
-                        &topic,
-                        key.clone().map(Bytes::from),
-                        Bytes::from(message),
-                    )
+                    .publish_with_key(&topic, key.clone().map(Bytes::from), Bytes::from(message))
                     .await?
             };
 
@@ -356,23 +357,28 @@ async fn main() -> anyhow::Result<()> {
             follow,
         } => {
             let mut client = Client::connect(&server).await?;
-            
+
             if follow {
                 // Follow mode - continuous consumption
                 let running = Arc::new(AtomicBool::new(true));
                 let r = running.clone();
-                
+
                 ctrlc::set_handler(move || {
                     println!("\n✓ Stopping consumer...");
                     r.store(false, Ordering::SeqCst);
                 })?;
-                
+
                 let mut current_offset = offset;
-                println!("Following topic '{}' partition {} (Ctrl+C to stop)...", topic, partition);
-                
+                println!(
+                    "Following topic '{}' partition {} (Ctrl+C to stop)...",
+                    topic, partition
+                );
+
                 while running.load(Ordering::SeqCst) {
-                    let messages = client.consume(&topic, partition, current_offset, 10).await?;
-                    
+                    let messages = client
+                        .consume(&topic, partition, current_offset, 10)
+                        .await?;
+
                     for msg in &messages {
                         let value = String::from_utf8_lossy(&msg.value);
                         let key = msg
@@ -380,14 +386,11 @@ async fn main() -> anyhow::Result<()> {
                             .as_ref()
                             .map(|k| String::from_utf8_lossy(k))
                             .unwrap_or_else(|| "null".into());
-                        
-                        println!(
-                            "[offset={}] key={} value={}",
-                            msg.offset, key, value
-                        );
+
+                        println!("[offset={}] key={} value={}", msg.offset, key, value);
                         current_offset = msg.offset + 1;
                     }
-                    
+
                     if messages.is_empty() {
                         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                     }
@@ -412,11 +415,8 @@ async fn main() -> anyhow::Result<()> {
                             .as_ref()
                             .map(|k| String::from_utf8_lossy(k))
                             .unwrap_or_else(|| "null".into());
-                        
-                        println!(
-                            "  [offset={}] key={} value={}",
-                            msg.offset, key, value
-                        );
+
+                        println!("  [offset={}] key={} value={}", msg.offset, key, value);
                     }
                 }
             }

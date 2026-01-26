@@ -716,9 +716,7 @@ mod tests {
 
         // Record various latencies
         for i in 1..=100 {
-            metrics
-                .record_latency(Duration::from_micros(i * 10))
-                .await;
+            metrics.record_latency(Duration::from_micros(i * 10)).await;
         }
 
         let snapshot = metrics.snapshot().await;

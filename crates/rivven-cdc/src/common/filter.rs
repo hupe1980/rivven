@@ -178,11 +178,7 @@ impl CdcFilter {
     }
 
     /// Filter and mask columns in a JSON object
-    fn filter_json(
-        &self,
-        value: &mut serde_json::Value,
-        table_config: Option<&TableColumnConfig>,
-    ) {
+    fn filter_json(&self, value: &mut serde_json::Value, table_config: Option<&TableColumnConfig>) {
         if let serde_json::Value::Object(map) = value {
             // Collect columns to remove
             let mut to_remove = Vec::new();

@@ -217,8 +217,8 @@ impl Capabilities {
             env: true,
             clock: true,
             random: true,
-            allowed_hosts: Vec::new(),  // Empty = all allowed
-            allowed_paths: Vec::new(),  // Empty = all allowed
+            allowed_hosts: Vec::new(), // Empty = all allowed
+            allowed_paths: Vec::new(), // Empty = all allowed
             allowed_env_vars: Vec::new(),
         }
     }
@@ -231,9 +231,9 @@ impl Capabilities {
         if self.allowed_hosts.is_empty() {
             return true; // Empty = all allowed
         }
-        self.allowed_hosts.iter().any(|allowed| {
-            allowed == host || host.ends_with(&format!(".{}", allowed))
-        })
+        self.allowed_hosts
+            .iter()
+            .any(|allowed| allowed == host || host.ends_with(&format!(".{}", allowed)))
     }
 
     /// Check if a path is allowed for reading
@@ -244,9 +244,9 @@ impl Capabilities {
         if self.allowed_paths.is_empty() {
             return true; // Empty = all allowed
         }
-        self.allowed_paths.iter().any(|allowed| {
-            path.starts_with(allowed)
-        })
+        self.allowed_paths
+            .iter()
+            .any(|allowed| path.starts_with(allowed))
     }
 
     /// Check if a path is allowed for writing
@@ -257,9 +257,9 @@ impl Capabilities {
         if self.allowed_paths.is_empty() {
             return true;
         }
-        self.allowed_paths.iter().any(|allowed| {
-            path.starts_with(allowed)
-        })
+        self.allowed_paths
+            .iter()
+            .any(|allowed| path.starts_with(allowed))
     }
 
     /// Check if an environment variable is allowed
@@ -271,7 +271,8 @@ impl Capabilities {
             return true;
         }
         self.allowed_env_vars.iter().any(|allowed| {
-            allowed == name || (allowed.ends_with('*') && name.starts_with(&allowed[..allowed.len()-1]))
+            allowed == name
+                || (allowed.ends_with('*') && name.starts_with(&allowed[..allowed.len() - 1]))
         })
     }
 }
@@ -283,18 +284,18 @@ mod tests {
     #[test]
     fn test_host_filtering() {
         let mut caps = Capabilities::safe();
-        
+
         // Network disabled
         assert!(!caps.is_host_allowed("example.com"));
-        
+
         // Enable network with specific hosts
         caps.network = true;
         caps.allowed_hosts = vec!["api.example.com".to_string(), "example.org".to_string()];
-        
+
         assert!(caps.is_host_allowed("api.example.com"));
         assert!(caps.is_host_allowed("example.org"));
         assert!(!caps.is_host_allowed("other.com"));
-        
+
         // Subdomain matching
         assert!(caps.is_host_allowed("sub.example.org"));
     }
@@ -304,7 +305,7 @@ mod tests {
         let mut caps = Capabilities::safe();
         caps.fs_read = true;
         caps.allowed_paths = vec![std::path::PathBuf::from("/data")];
-        
+
         assert!(caps.is_path_read_allowed(std::path::Path::new("/data/file.txt")));
         assert!(caps.is_path_read_allowed(std::path::Path::new("/data/subdir/file.txt")));
         assert!(!caps.is_path_read_allowed(std::path::Path::new("/etc/passwd")));
@@ -315,7 +316,7 @@ mod tests {
         let mut caps = Capabilities::safe();
         caps.env = true;
         caps.allowed_env_vars = vec!["API_KEY".to_string(), "MY_*".to_string()];
-        
+
         assert!(caps.is_env_var_allowed("API_KEY"));
         assert!(caps.is_env_var_allowed("MY_VAR"));
         assert!(caps.is_env_var_allowed("MY_OTHER_VAR"));

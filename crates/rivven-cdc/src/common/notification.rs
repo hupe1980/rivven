@@ -137,7 +137,6 @@ pub enum Severity {
     Critical,
 }
 
-
 /// Additional data for notifications.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NotificationData {
@@ -253,11 +252,7 @@ pub struct Notification {
 
 impl Notification {
     /// Create a new notification.
-    pub fn new(
-        notification_type: NotificationType,
-        connector: &str,
-        message: &str,
-    ) -> Self {
+    pub fn new(notification_type: NotificationType, connector: &str, message: &str) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
             notification_type,
@@ -280,20 +275,13 @@ impl Notification {
     }
 
     /// Create initial snapshot progress notification.
-    pub fn snapshot_progress(
-        connector: &str,
-        table: &str,
-        completed: u64,
-        total: u64,
-    ) -> Self {
+    pub fn snapshot_progress(connector: &str, table: &str, completed: u64, total: u64) -> Self {
         Self::new(
             NotificationType::InitialSnapshotInProgress,
             connector,
             &format!("Snapshot in progress: {}/{} tables", completed, total),
         )
-        .with_data(
-            NotificationData::with_progress(total, completed).table(table),
-        )
+        .with_data(NotificationData::with_progress(total, completed).table(table))
     }
 
     /// Create table completed notification.
@@ -377,9 +365,7 @@ impl Notification {
                 table, chunk, total_chunks, percent
             ),
         )
-        .with_data(
-            NotificationData::with_progress(total_chunks, chunk).table(table),
-        )
+        .with_data(NotificationData::with_progress(total_chunks, chunk).table(table))
     }
 
     /// Create incremental snapshot completed notification.
@@ -387,15 +373,9 @@ impl Notification {
         Self::new(
             NotificationType::IncrementalSnapshotCompleted,
             connector,
-            &format!(
-                "Incremental snapshot completed for {} tables",
-                tables.len()
-            ),
+            &format!("Incremental snapshot completed for {} tables", tables.len()),
         )
-        .with_data(
-            NotificationData::empty()
-                .property("tables", serde_json::json!(tables)),
-        )
+        .with_data(NotificationData::empty().property("tables", serde_json::json!(tables)))
     }
 
     /// Create streaming started notification.
@@ -456,23 +436,14 @@ impl Notification {
 
     /// Create error notification.
     pub fn error(connector: &str, error: &str) -> Self {
-        Self::new(
-            NotificationType::Error,
-            connector,
-            error,
-        )
-        .with_severity(Severity::Error)
-        .with_data(NotificationData::with_error(error))
+        Self::new(NotificationType::Error, connector, error)
+            .with_severity(Severity::Error)
+            .with_data(NotificationData::with_error(error))
     }
 
     /// Create warning notification.
     pub fn warning(connector: &str, message: &str) -> Self {
-        Self::new(
-            NotificationType::Warning,
-            connector,
-            message,
-        )
-        .with_severity(Severity::Warning)
+        Self::new(NotificationType::Warning, connector, message).with_severity(Severity::Warning)
     }
 
     /// Set severity.
@@ -629,7 +600,10 @@ impl Notifier {
 
     /// Send snapshot started notification.
     pub fn snapshot_started(&self, total_tables: u64) {
-        self.notify(Notification::snapshot_started(&self.connector, total_tables));
+        self.notify(Notification::snapshot_started(
+            &self.connector,
+            total_tables,
+        ));
     }
 
     /// Send snapshot progress notification.
@@ -655,7 +629,10 @@ impl Notifier {
 
     /// Send snapshot completed notification.
     pub fn snapshot_completed(&self, total_rows: u64) {
-        self.notify(Notification::snapshot_completed(&self.connector, total_rows));
+        self.notify(Notification::snapshot_completed(
+            &self.connector,
+            total_rows,
+        ));
     }
 
     /// Send streaming started notification.
@@ -824,8 +801,7 @@ mod tests {
 
     #[test]
     fn test_notification_snapshot_progress() {
-        let notif =
-            Notification::snapshot_progress("connector-1", "public.users", 3, 10);
+        let notif = Notification::snapshot_progress("connector-1", "public.users", 3, 10);
 
         assert_eq!(
             notif.notification_type,
@@ -837,13 +813,7 @@ mod tests {
 
     #[test]
     fn test_notification_table_completed() {
-        let notif = Notification::table_completed(
-            "connector-1",
-            "public.orders",
-            1000,
-            5,
-            10,
-        );
+        let notif = Notification::table_completed("connector-1", "public.orders", 1000, 5, 10);
 
         assert_eq!(
             notif.notification_type,
@@ -885,8 +855,7 @@ mod tests {
             NotificationType::IncrementalSnapshotResumed
         );
 
-        let progress =
-            Notification::incremental_snapshot_progress("conn", "public.users", 5, 10);
+        let progress = Notification::incremental_snapshot_progress("conn", "public.users", 5, 10);
         assert_eq!(
             progress.notification_type,
             NotificationType::IncrementalSnapshotInProgress
@@ -903,20 +872,26 @@ mod tests {
     #[test]
     fn test_notification_streaming() {
         let started = Notification::streaming_started("conn", "0/16B3748");
-        assert_eq!(started.notification_type, NotificationType::StreamingStarted);
         assert_eq!(
-            started.data.position,
-            Some("0/16B3748".to_string())
+            started.notification_type,
+            NotificationType::StreamingStarted
         );
+        assert_eq!(started.data.position, Some("0/16B3748".to_string()));
 
         let paused = Notification::streaming_paused("conn");
         assert_eq!(paused.notification_type, NotificationType::StreamingPaused);
 
         let resumed = Notification::streaming_resumed("conn");
-        assert_eq!(resumed.notification_type, NotificationType::StreamingResumed);
+        assert_eq!(
+            resumed.notification_type,
+            NotificationType::StreamingResumed
+        );
 
         let stopped = Notification::streaming_stopped("conn");
-        assert_eq!(stopped.notification_type, NotificationType::StreamingStopped);
+        assert_eq!(
+            stopped.notification_type,
+            NotificationType::StreamingStopped
+        );
     }
 
     #[test]
@@ -953,25 +928,17 @@ mod tests {
 
     #[test]
     fn test_notification_with_severity() {
-        let notif = Notification::new(
-            NotificationType::StatusChange,
-            "conn",
-            "Status changed",
-        )
-        .with_severity(Severity::Critical);
+        let notif = Notification::new(NotificationType::StatusChange, "conn", "Status changed")
+            .with_severity(Severity::Critical);
 
         assert_eq!(notif.severity, Severity::Critical);
     }
 
     #[test]
     fn test_notification_add_data() {
-        let notif = Notification::new(
-            NotificationType::StatusChange,
-            "conn",
-            "Test",
-        )
-        .add_data("key1", serde_json::json!("value1"))
-        .add_data("key2", serde_json::json!(42));
+        let notif = Notification::new(NotificationType::StatusChange, "conn", "Test")
+            .add_data("key1", serde_json::json!("value1"))
+            .add_data("key2", serde_json::json!(42));
 
         assert!(notif.data.properties.contains_key("key1"));
         assert!(notif.data.properties.contains_key("key2"));
@@ -980,10 +947,10 @@ mod tests {
     #[test]
     fn test_notification_stats() {
         let stats = NotificationStats::default();
-        
+
         let snapshot_notif = Notification::snapshot_started("conn", 10);
         stats.record(&snapshot_notif, false);
-        
+
         let error_notif = Notification::error("conn", "error");
         stats.record(&error_notif, true);
 
@@ -1109,10 +1076,13 @@ mod tests {
     #[tokio::test]
     async fn test_log_sink() {
         let sink = LogSink;
-        
+
         // These should not panic
-        sink.process(&Notification::error("conn", "Error message")).await;
-        sink.process(&Notification::warning("conn", "Warning")).await;
-        sink.process(&Notification::streaming_started("conn", "0/0")).await;
+        sink.process(&Notification::error("conn", "Error message"))
+            .await;
+        sink.process(&Notification::warning("conn", "Warning"))
+            .await;
+        sink.process(&Notification::streaming_started("conn", "0/0"))
+            .await;
     }
 }

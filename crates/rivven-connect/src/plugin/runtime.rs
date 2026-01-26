@@ -12,8 +12,8 @@ use crate::plugin::types::{PluginConfig, PluginError, PluginManifest, PluginResu
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// Runtime configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,7 +169,10 @@ impl PluginRuntime {
     }
 
     /// Load a plugin from file
-    pub async fn load_plugin(&self, path: impl AsRef<std::path::Path>) -> PluginResult<PluginManifest> {
+    pub async fn load_plugin(
+        &self,
+        path: impl AsRef<std::path::Path>,
+    ) -> PluginResult<PluginManifest> {
         let module = self.loader.load_file(path).await?;
         let manifest = module.manifest.clone();
         self.store.register(module)?;
@@ -281,7 +284,11 @@ impl PluginRuntime {
 
     /// List plugins by type
     pub fn list_sources(&self) -> Vec<PluginManifest> {
-        self.store.sources().into_iter().map(|e| e.manifest).collect()
+        self.store
+            .sources()
+            .into_iter()
+            .map(|e| e.manifest)
+            .collect()
     }
 
     pub fn list_sinks(&self) -> Vec<PluginManifest> {
@@ -289,7 +296,11 @@ impl PluginRuntime {
     }
 
     pub fn list_transforms(&self) -> Vec<PluginManifest> {
-        self.store.transforms().into_iter().map(|e| e.manifest).collect()
+        self.store
+            .transforms()
+            .into_iter()
+            .map(|e| e.manifest)
+            .collect()
     }
 
     /// Discover plugins in search paths

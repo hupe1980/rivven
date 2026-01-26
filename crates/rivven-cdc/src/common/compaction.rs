@@ -229,7 +229,11 @@ impl CompactedEntry {
             key,
             timestamp: event.timestamp,
             is_tombstone,
-            tombstone_created_at: if is_tombstone { Some(Instant::now()) } else { None },
+            tombstone_created_at: if is_tombstone {
+                Some(Instant::now())
+            } else {
+                None
+            },
             event: if is_tombstone { None } else { Some(event) },
             offset,
         }
@@ -287,7 +291,8 @@ impl CompactionStats {
 
     pub fn record_compaction_run(&self, duration: Duration) {
         self.compaction_runs.fetch_add(1, Ordering::Relaxed);
-        self.total_compaction_time_ms.fetch_add(duration.as_millis() as u64, Ordering::Relaxed);
+        self.total_compaction_time_ms
+            .fetch_add(duration.as_millis() as u64, Ordering::Relaxed);
     }
 
     pub fn snapshot(&self) -> CompactionStatsSnapshot {
@@ -364,7 +369,7 @@ impl Compactor {
         let entry = CompactedEntry::from_event(key.clone(), event, offset);
 
         let mut log = self.log.write().await;
-        
+
         if log.contains_key(&key) {
             self.dirty_count.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -418,10 +423,7 @@ impl Compactor {
     /// Get all current entries (snapshot).
     pub async fn snapshot(&self) -> Vec<CompactedEntry> {
         let log = self.log.read().await;
-        log.values()
-            .filter(|e| !e.is_tombstone)
-            .cloned()
-            .collect()
+        log.values().filter(|e| !e.is_tombstone).cloned().collect()
     }
 
     /// Get all entries including tombstones.
@@ -440,7 +442,7 @@ impl Compactor {
         }
 
         let dirty_ratio = dirty as f64 / total as f64;
-        
+
         // Check ratio threshold
         if dirty_ratio >= self.config.min_cleanable_ratio {
             return true;
@@ -490,11 +492,13 @@ impl Compactor {
 
         // Reset dirty count
         self.dirty_count.store(0, Ordering::Relaxed);
-        self.total_count.store(after_count as u64, Ordering::Relaxed);
+        self.total_count
+            .store(after_count as u64, Ordering::Relaxed);
         *self.last_compaction.write().await = Some(Instant::now());
 
         // Update stats
-        self.stats.record_compacted((before_count - after_count) as u64);
+        self.stats
+            .record_compacted((before_count - after_count) as u64);
         self.stats.record_removed(removed);
         self.stats.record_tombstone_expired(tombstones_expired);
         self.stats.record_compaction_run(duration);
@@ -514,7 +518,10 @@ impl Compactor {
     }
 
     /// Compact a batch of events (stateless).
-    pub fn compact_batch(events: &[CdcEvent], key_strategy: &CompactionKeyStrategy) -> Vec<CdcEvent> {
+    pub fn compact_batch(
+        events: &[CdcEvent],
+        key_strategy: &CompactionKeyStrategy,
+    ) -> Vec<CdcEvent> {
         let mut latest: HashMap<String, (usize, &CdcEvent)> = HashMap::new();
 
         for (i, event) in events.iter().enumerate() {
@@ -645,10 +652,7 @@ impl SegmentedCompactor {
         let mut sealed = self.sealed_segments.write().await;
 
         // Create new active segment
-        let old_active = std::mem::replace(
-            &mut *active,
-            Compactor::new(self.config.clone()),
-        );
+        let old_active = std::mem::replace(&mut *active, Compactor::new(self.config.clone()));
 
         // Compact and seal the old segment
         old_active.compact().await;
@@ -783,10 +787,10 @@ mod tests {
         let strategy = CompactionKeyStrategy::FullRow;
         let event1 = make_event("users", 1, CdcOp::Insert);
         let event2 = make_event("users", 2, CdcOp::Insert);
-        
+
         let key1 = strategy.extract(&event1);
         let key2 = strategy.extract(&event2);
-        
+
         // Different rows should have different keys
         assert_ne!(key1, key2);
     }
@@ -843,7 +847,7 @@ mod tests {
     #[tokio::test]
     async fn test_compactor_append() {
         let compactor = Compactor::new(CompactionConfig::default());
-        
+
         let event = make_event("users", 1, CdcOp::Insert);
         let offset = compactor.append(event).await;
 
@@ -857,7 +861,7 @@ mod tests {
             .key_strategy(CompactionKeyStrategy::PrimaryKey(vec!["id".to_string()]))
             .build();
         let compactor = Compactor::new(config);
-        
+
         let event = make_event("users", 1, CdcOp::Insert);
         compactor.append(event.clone()).await;
 
@@ -872,7 +876,7 @@ mod tests {
             .key_strategy(CompactionKeyStrategy::PrimaryKey(vec!["id".to_string()]))
             .build();
         let compactor = Compactor::new(config);
-        
+
         // Insert same key multiple times
         for i in 0..5 {
             let mut event = make_event("users", 1, CdcOp::Update);
@@ -894,7 +898,7 @@ mod tests {
     #[tokio::test]
     async fn test_compactor_snapshot() {
         let compactor = Compactor::new(CompactionConfig::default());
-        
+
         for i in 0..10 {
             let event = make_event("users", i, CdcOp::Insert);
             compactor.append(event).await;
@@ -910,11 +914,11 @@ mod tests {
             .key_strategy(CompactionKeyStrategy::PrimaryKey(vec!["id".to_string()]))
             .build();
         let compactor = Compactor::new(config);
-        
+
         // Insert then delete
         let insert = make_event("users", 1, CdcOp::Insert);
         compactor.append(insert).await;
-        
+
         let delete = make_event("users", 1, CdcOp::Delete);
         compactor.append(delete).await;
 
@@ -960,11 +964,11 @@ mod tests {
             .tombstone_retention(Duration::ZERO)
             .build();
         let compactor = Compactor::new(config);
-        
+
         // Add events then delete
         let insert = make_event("users", 1, CdcOp::Insert);
         compactor.append(insert).await;
-        
+
         let delete = make_event("users", 1, CdcOp::Delete);
         compactor.append(delete).await;
 
@@ -993,27 +997,31 @@ mod tests {
     #[tokio::test]
     async fn test_compactor_clear() {
         let compactor = Compactor::new(CompactionConfig::default());
-        
+
         for i in 0..10 {
             let event = make_event("users", i, CdcOp::Insert);
             compactor.append(event).await;
         }
 
         assert!(!compactor.is_empty().await);
-        
+
         compactor.clear().await;
-        
+
         assert!(compactor.is_empty().await);
     }
 
     #[tokio::test]
     async fn test_compactor_get_by_table() {
         let compactor = Compactor::new(CompactionConfig::default());
-        
+
         // Add events from different tables
         for i in 0..5 {
-            compactor.append(make_event("users", i, CdcOp::Insert)).await;
-            compactor.append(make_event("orders", i, CdcOp::Insert)).await;
+            compactor
+                .append(make_event("users", i, CdcOp::Insert))
+                .await;
+            compactor
+                .append(make_event("orders", i, CdcOp::Insert))
+                .await;
         }
 
         let users = compactor.get_by_table("public", "users").await;
@@ -1059,9 +1067,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_segmented_compactor_basic() {
-        let config = CompactionConfig::builder()
-            .segment_size(10)
-            .build();
+        let config = CompactionConfig::builder().segment_size(10).build();
         let compactor = SegmentedCompactor::new(config);
 
         // Add events
@@ -1075,9 +1081,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_segmented_compactor_snapshot() {
-        let config = CompactionConfig::builder()
-            .segment_size(100)
-            .build();
+        let config = CompactionConfig::builder().segment_size(100).build();
         let compactor = SegmentedCompactor::new(config);
 
         for i in 0..20 {

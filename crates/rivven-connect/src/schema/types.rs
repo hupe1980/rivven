@@ -86,9 +86,10 @@ impl Schema {
     /// Parse JSON schema
     pub fn parse_json(&self) -> SchemaRegistryResult<serde_json::Value> {
         if self.schema_type != SchemaType::Json {
-            return Err(SchemaRegistryError::InvalidSchemaType(
-                format!("Expected JSON, got {}", self.schema_type),
-            ));
+            return Err(SchemaRegistryError::InvalidSchemaType(format!(
+                "Expected JSON, got {}",
+                self.schema_type
+            )));
         }
         serde_json::from_str(&self.schema)
             .map_err(|e| SchemaRegistryError::ParseError(e.to_string()))

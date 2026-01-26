@@ -42,25 +42,25 @@
 use crate::error::{ClusterError, Result};
 use crate::node::NodeId;
 use crate::protocol::{
-    decode_request, decode_response, encode_request, encode_response,
-    ClusterRequest, ClusterResponse,
+    decode_request, decode_response, encode_request, encode_response, ClusterRequest,
+    ClusterResponse,
 };
 
 use bytes::{BufMut, BytesMut};
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use quinn::{
-    congestion, ClientConfig, Connection, Endpoint, RecvStream, SendStream,
-    ServerConfig, TransportConfig as QuinnTransportConfig, VarInt,
+    congestion, ClientConfig, Connection, Endpoint, RecvStream, SendStream, ServerConfig,
+    TransportConfig as QuinnTransportConfig, VarInt,
 };
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 use tokio::time::timeout;
-use tracing::{debug, info, warn, instrument};
+use tracing::{debug, info, instrument, warn};
 
 // ============================================================================
 // Configuration
@@ -101,7 +101,7 @@ impl Default for QuicConfig {
             max_concurrent_streams: 256,
             initial_window: 14720,
             max_udp_payload_size: 1350,
-            stream_receive_window: 1024 * 1024,      // 1 MB
+            stream_receive_window: 1024 * 1024,         // 1 MB
             connection_receive_window: 8 * 1024 * 1024, // 8 MB
             enable_0rtt: true,
             max_connections_per_peer: 2,
@@ -120,7 +120,7 @@ impl QuicConfig {
             max_concurrent_streams: 512,
             initial_window: 65535,
             max_udp_payload_size: 1452,
-            stream_receive_window: 4 * 1024 * 1024,     // 4 MB
+            stream_receive_window: 4 * 1024 * 1024, // 4 MB
             connection_receive_window: 32 * 1024 * 1024, // 32 MB
             enable_0rtt: true,
             max_connections_per_peer: 4,
@@ -182,10 +182,10 @@ impl TlsConfig {
     pub fn self_signed(common_name: &str) -> Result<Self> {
         let cert = rcgen::generate_simple_self_signed(vec![common_name.to_string()])
             .map_err(|e| ClusterError::CryptoError(format!("Failed to generate cert: {}", e)))?;
-        
+
         let cert_der = CertificateDer::from(cert.cert.der().to_vec());
         let key_der = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
-        
+
         Ok(Self {
             cert_chain: vec![cert_der],
             private_key: PrivateKeyDer::Pkcs8(key_der),
@@ -197,19 +197,17 @@ impl TlsConfig {
 
     /// Load certificates from PEM files
     pub fn from_pem_files(cert_path: &str, key_path: &str) -> Result<Self> {
-        let cert_pem = std::fs::read(cert_path)
-            .map_err(ClusterError::Io)?;
-        let key_pem = std::fs::read(key_path)
-            .map_err(ClusterError::Io)?;
-        
+        let cert_pem = std::fs::read(cert_path).map_err(ClusterError::Io)?;
+        let key_pem = std::fs::read(key_path).map_err(ClusterError::Io)?;
+
         let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem.as_slice())
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| ClusterError::CryptoError(format!("Failed to parse cert: {}", e)))?;
-        
+
         let key = rustls_pemfile::private_key(&mut key_pem.as_slice())
             .map_err(|e| ClusterError::CryptoError(format!("Failed to parse key: {}", e)))?
             .ok_or_else(|| ClusterError::CryptoError("No private key found".to_string()))?;
-        
+
         Ok(Self {
             cert_chain: certs,
             private_key: key,
@@ -221,25 +219,22 @@ impl TlsConfig {
 
     /// Load certificates from PEM files with CA for mTLS
     pub fn mtls_from_pem_files(cert_path: &str, key_path: &str, ca_path: &str) -> Result<Self> {
-        let cert_pem = std::fs::read(cert_path)
-            .map_err(ClusterError::Io)?;
-        let key_pem = std::fs::read(key_path)
-            .map_err(ClusterError::Io)?;
-        let ca_pem = std::fs::read(ca_path)
-            .map_err(ClusterError::Io)?;
-        
+        let cert_pem = std::fs::read(cert_path).map_err(ClusterError::Io)?;
+        let key_pem = std::fs::read(key_path).map_err(ClusterError::Io)?;
+        let ca_pem = std::fs::read(ca_path).map_err(ClusterError::Io)?;
+
         let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_pem.as_slice())
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| ClusterError::CryptoError(format!("Failed to parse cert: {}", e)))?;
-        
+
         let key = rustls_pemfile::private_key(&mut key_pem.as_slice())
             .map_err(|e| ClusterError::CryptoError(format!("Failed to parse key: {}", e)))?
             .ok_or_else(|| ClusterError::CryptoError("No private key found".to_string()))?;
-        
+
         let ca_certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut ca_pem.as_slice())
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| ClusterError::CryptoError(format!("Failed to parse CA cert: {}", e)))?;
-        
+
         Ok(Self {
             cert_chain: certs,
             private_key: key,
@@ -273,48 +268,56 @@ impl PeerIdentity {
         // Get peer certificates from the connection
         let peer_certs = connection.peer_identity()?;
         let certs: &Vec<CertificateDer<'static>> = peer_certs.downcast_ref()?;
-        
+
         if certs.is_empty() {
             return None;
         }
-        
+
         // Parse the first certificate (leaf certificate)
         let cert_der = &certs[0];
-        
+
         // Calculate fingerprint
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(cert_der.as_ref());
         let fingerprint = hex::encode(hasher.finalize());
-        
+
         // Parse with x509-parser if available, otherwise just return fingerprint
-        let (common_name, dns_names) = match x509_parser::parse_x509_certificate(cert_der.as_ref()) {
+        let (common_name, dns_names) = match x509_parser::parse_x509_certificate(cert_der.as_ref())
+        {
             Ok((_, cert)) => {
                 // Extract Common Name
-                let cn = cert.subject().iter_common_name()
+                let cn = cert
+                    .subject()
+                    .iter_common_name()
                     .next()
                     .and_then(|attr| attr.as_str().ok())
                     .map(|s| s.to_string());
-                
+
                 // Extract Subject Alternative Names (DNS)
-                let sans: Vec<String> = cert.subject_alternative_name()
+                let sans: Vec<String> = cert
+                    .subject_alternative_name()
                     .ok()
                     .flatten()
                     .map(|san| {
-                        san.value.general_names.iter()
+                        san.value
+                            .general_names
+                            .iter()
                             .filter_map(|gn| match gn {
-                                x509_parser::prelude::GeneralName::DNSName(name) => Some(name.to_string()),
+                                x509_parser::prelude::GeneralName::DNSName(name) => {
+                                    Some(name.to_string())
+                                }
                                 _ => None,
                             })
                             .collect()
                     })
                     .unwrap_or_default();
-                
+
                 (cn, sans)
             }
             Err(_) => (None, vec![]),
         };
-        
+
         Some(Self {
             common_name,
             dns_names,
@@ -369,19 +372,20 @@ impl ManagedConnection {
     }
 
     async fn open_bi_stream(&self) -> Result<(SendStream, RecvStream)> {
-        let _permit = self.stream_semaphore
+        let _permit = self
+            .stream_semaphore
             .clone()
             .acquire_owned()
             .await
             .map_err(|_| ClusterError::ConnectionClosed)?;
-        
+
         self.active_streams.fetch_add(1, Ordering::SeqCst);
-        
-        let stream = self.connection
-            .open_bi()
-            .await
-            .map_err(|e| ClusterError::ConnectionFailed(format!("Failed to open stream: {}", e)))?;
-        
+
+        let stream =
+            self.connection.open_bi().await.map_err(|e| {
+                ClusterError::ConnectionFailed(format!("Failed to open stream: {}", e))
+            })?;
+
         Ok(stream)
     }
 }
@@ -406,9 +410,10 @@ impl PeerConnectionPool {
     /// Get the best available connection
     fn get_connection(&self) -> Option<Arc<ManagedConnection>> {
         let conns = self.connections.read();
-        
+
         // Find healthiest connection with lowest active streams
-        conns.iter()
+        conns
+            .iter()
             .filter(|c| c.is_healthy())
             .min_by_key(|c| c.active_streams.load(Ordering::Relaxed))
             .cloned()
@@ -417,10 +422,10 @@ impl PeerConnectionPool {
     /// Add a new connection to the pool
     fn add_connection(&self, conn: Arc<ManagedConnection>) {
         let mut conns = self.connections.write();
-        
+
         // Remove unhealthy connections first
         conns.retain(|c| c.is_healthy());
-        
+
         if conns.len() < self.max_connections {
             conns.push(conn);
         }
@@ -538,26 +543,26 @@ impl QuicTransport {
         // Build server TLS config
         let server_crypto = Self::build_server_crypto(&tls_config)?;
         let mut server_config = ServerConfig::with_crypto(Arc::new(server_crypto));
-        
+
         // Configure transport parameters
         let transport_config = Self::build_transport_config(&config);
         server_config.transport_config(Arc::new(transport_config));
-        
+
         // Build client config
         let client_config = Self::build_client_config(&tls_config, &config)?;
-        
+
         // Create endpoint
         let mut endpoint = Endpoint::server(server_config, bind_addr)
             .map_err(|e| ClusterError::Network(format!("Failed to create endpoint: {}", e)))?;
-        
+
         endpoint.set_default_client_config(client_config);
-        
+
         info!(
-            node = %local_node, 
+            node = %local_node,
             addr = %bind_addr,
             "QUIC transport initialized"
         );
-        
+
         Ok(Self {
             local_node,
             endpoint,
@@ -586,40 +591,45 @@ impl QuicTransport {
                 // Build root store from CA certs
                 let mut roots = rustls::RootCertStore::empty();
                 for cert in &tls.ca_certs {
-                    roots.add(cert.clone())
-                        .map_err(|e| ClusterError::CryptoError(format!("Failed to add CA: {:?}", e)))?;
+                    roots.add(cert.clone()).map_err(|e| {
+                        ClusterError::CryptoError(format!("Failed to add CA: {:?}", e))
+                    })?;
                 }
-                
+
                 if roots.is_empty() {
                     return Err(ClusterError::CryptoError(
-                        "mTLS enabled but no CA certificates provided".to_string()
+                        "mTLS enabled but no CA certificates provided".to_string(),
                     ));
                 }
-                
+
                 // Build verifier
                 let verifier = if tls.mtls_mode == MtlsMode::Required {
                     rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
                         .build()
-                        .map_err(|e| ClusterError::CryptoError(format!("Failed to build verifier: {}", e)))?
+                        .map_err(|e| {
+                            ClusterError::CryptoError(format!("Failed to build verifier: {}", e))
+                        })?
                 } else {
                     // Optional - allow anonymous clients but verify if cert provided
                     rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
                         .allow_unauthenticated()
                         .build()
-                        .map_err(|e| ClusterError::CryptoError(format!("Failed to build verifier: {}", e)))?
+                        .map_err(|e| {
+                            ClusterError::CryptoError(format!("Failed to build verifier: {}", e))
+                        })?
                 };
-                
+
                 rustls::ServerConfig::builder()
                     .with_client_cert_verifier(verifier)
                     .with_single_cert(tls.cert_chain.clone(), tls.private_key.clone_key())
                     .map_err(|e| ClusterError::CryptoError(format!("TLS config error: {}", e)))?
             }
         };
-        
+
         let mut server_config = server_config;
         server_config.max_early_data_size = u32::MAX;
         server_config.alpn_protocols = vec![b"rivven".to_vec()];
-        
+
         quinn::crypto::rustls::QuicServerConfig::try_from(server_config)
             .map_err(|e| ClusterError::CryptoError(format!("QUIC server config error: {}", e)))
     }
@@ -628,20 +638,21 @@ impl QuicTransport {
     fn build_client_config(tls: &TlsConfig, config: &QuicConfig) -> Result<ClientConfig> {
         // Build root certificate store for server verification
         let mut roots = rustls::RootCertStore::empty();
-        
+
         // Add custom CA certs
         for cert in &tls.ca_certs {
-            roots.add(cert.clone())
+            roots
+                .add(cert.clone())
                 .map_err(|e| ClusterError::CryptoError(format!("Failed to add CA: {:?}", e)))?;
         }
-        
+
         // Add system roots as fallback
         if let Ok(native_certs) = rustls_native_certs::load_native_certs() {
             for cert in native_certs {
                 let _ = roots.add(cert);
             }
         }
-        
+
         // Build client config with or without client certificate
         let crypto = if tls.skip_verification {
             // Dangerous: skip verification (for testing only)
@@ -670,37 +681,38 @@ impl QuicTransport {
                 .with_root_certificates(roots)
                 .with_no_client_auth()
         };
-        
+
         let mut client_config = ClientConfig::new(Arc::new(
-            quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
-                .map_err(|e| ClusterError::CryptoError(format!("QUIC crypto config error: {}", e)))?
+            quinn::crypto::rustls::QuicClientConfig::try_from(crypto).map_err(|e| {
+                ClusterError::CryptoError(format!("QUIC crypto config error: {}", e))
+            })?,
         ));
-        
+
         // Apply transport config
         let transport = Self::build_transport_config(config);
         client_config.transport_config(Arc::new(transport));
-        
+
         Ok(client_config)
     }
 
     /// Build Quinn transport configuration
     fn build_transport_config(config: &QuicConfig) -> QuinnTransportConfig {
         let mut transport = QuinnTransportConfig::default();
-        
+
         transport.max_concurrent_bidi_streams(VarInt::from_u32(config.max_concurrent_streams));
         transport.initial_mtu(config.max_udp_payload_size);
         transport.stream_receive_window(VarInt::from_u32(config.stream_receive_window));
         transport.receive_window(VarInt::from_u32(config.connection_receive_window));
         transport.keep_alive_interval(Some(config.keep_alive_interval));
         transport.max_idle_timeout(Some(config.idle_timeout.try_into().unwrap()));
-        
+
         // Congestion control
         if config.use_bbr {
             transport.congestion_controller_factory(Arc::new(congestion::BbrConfig::default()));
         } else {
             transport.congestion_controller_factory(Arc::new(congestion::CubicConfig::default()));
         }
-        
+
         transport
     }
 
@@ -733,7 +745,7 @@ impl QuicTransport {
         let config = self.config.clone();
         let stats = self.stats.clone();
         let shutdown = self.shutdown.clone();
-        
+
         tokio::spawn(async move {
             while !shutdown.load(Ordering::Relaxed) {
                 tokio::select! {
@@ -743,7 +755,7 @@ impl QuicTransport {
                             let config = config.clone();
                             let stats = stats.clone();
                             let connections = connections.clone();
-                            
+
                             tokio::spawn(async move {
                                 if let Err(e) = Self::handle_incoming(
                                     incoming, handler, config, stats, connections
@@ -758,10 +770,10 @@ impl QuicTransport {
                     }
                 }
             }
-            
+
             info!("QUIC transport acceptor shutting down");
         });
-        
+
         Ok(())
     }
 
@@ -773,14 +785,17 @@ impl QuicTransport {
         stats: Arc<QuicStats>,
         _connections: Arc<DashMap<NodeId, PeerConnectionPool>>,
     ) -> Result<()> {
-        let connection = incoming.await
+        let connection = incoming
+            .await
             .map_err(|e| ClusterError::ConnectionFailed(format!("Accept failed: {}", e)))?;
-        
-        stats.connections_established.fetch_add(1, Ordering::Relaxed);
-        
+
+        stats
+            .connections_established
+            .fetch_add(1, Ordering::Relaxed);
+
         let remote = connection.remote_address();
         debug!(peer = %remote, "Accepted QUIC connection");
-        
+
         // Handle streams from this connection
         loop {
             match connection.accept_bi().await {
@@ -788,9 +803,11 @@ impl QuicTransport {
                     let handler = handler.clone();
                     let config = config.clone();
                     let stats = stats.clone();
-                    
+
                     tokio::spawn(async move {
-                        if let Err(e) = Self::handle_stream(send, recv, handler, config, stats).await {
+                        if let Err(e) =
+                            Self::handle_stream(send, recv, handler, config, stats).await
+                        {
                             debug!(error = %e, "Stream handling error");
                         }
                     });
@@ -805,7 +822,7 @@ impl QuicTransport {
                 }
             }
         }
-        
+
         Ok(())
     }
 
@@ -818,25 +835,29 @@ impl QuicTransport {
         stats: Arc<QuicStats>,
     ) -> Result<()> {
         stats.streams_opened.fetch_add(1, Ordering::Relaxed);
-        
+
         // Read request
         let request_bytes = Self::read_message(&mut recv, &config).await?;
-        stats.bytes_received.fetch_add(request_bytes.len() as u64, Ordering::Relaxed);
-        
+        stats
+            .bytes_received
+            .fetch_add(request_bytes.len() as u64, Ordering::Relaxed);
+
         // Decode and handle
         let request = decode_request(&request_bytes)?;
-        
+
         if let Some(handler) = handler {
             let response = handler(request);
             let response_bytes = encode_response(&response)?;
-            
+
             Self::write_message(&mut send, &response_bytes, &config).await?;
-            stats.bytes_sent.fetch_add(response_bytes.len() as u64, Ordering::Relaxed);
+            stats
+                .bytes_sent
+                .fetch_add(response_bytes.len() as u64, Ordering::Relaxed);
         }
-        
+
         send.finish()
             .map_err(|e| ClusterError::Network(format!("Failed to finish stream: {}", e)))?;
-        
+
         Ok(())
     }
 
@@ -848,23 +869,23 @@ impl QuicTransport {
             .await
             .map_err(|_| ClusterError::Timeout)?
             .map_err(|e| ClusterError::Network(format!("Failed to read length: {}", e)))?;
-        
+
         let len = u32::from_be_bytes(len_buf) as usize;
-        
+
         if len > crate::protocol::MAX_MESSAGE_SIZE {
             return Err(ClusterError::MessageTooLarge {
                 size: len,
                 max: crate::protocol::MAX_MESSAGE_SIZE,
             });
         }
-        
+
         // Read message body
         let mut body = vec![0u8; len];
         timeout(config.request_timeout, recv.read_exact(&mut body))
             .await
             .map_err(|_| ClusterError::Timeout)?
             .map_err(|e| ClusterError::Network(format!("Failed to read body: {}", e)))?;
-        
+
         Ok(body)
     }
 
@@ -873,12 +894,12 @@ impl QuicTransport {
         let mut buf = BytesMut::with_capacity(4 + data.len());
         buf.put_u32(data.len() as u32);
         buf.put_slice(data);
-        
+
         timeout(config.request_timeout, send.write_all(&buf))
             .await
             .map_err(|_| ClusterError::Timeout)?
             .map_err(|e| ClusterError::Network(format!("Failed to write: {}", e)))?;
-        
+
         Ok(())
     }
 
@@ -886,23 +907,25 @@ impl QuicTransport {
     #[instrument(skip(self, request), fields(node = %node_id))]
     pub async fn send(&self, node_id: &NodeId, request: ClusterRequest) -> Result<ClusterResponse> {
         let conn = self.get_or_create_connection(node_id).await?;
-        
+
         self.stats.requests_sent.fetch_add(1, Ordering::Relaxed);
-        
+
         // Open bidirectional stream
         let (mut send, mut recv) = conn.open_bi_stream().await?;
         self.stats.streams_opened.fetch_add(1, Ordering::Relaxed);
-        
+
         conn.touch();
-        
+
         // Send request
         let request_bytes = encode_request(&request)?;
         Self::write_message(&mut send, &request_bytes, &self.config).await?;
-        self.stats.bytes_sent.fetch_add(request_bytes.len() as u64, Ordering::Relaxed);
-        
+        self.stats
+            .bytes_sent
+            .fetch_add(request_bytes.len() as u64, Ordering::Relaxed);
+
         send.finish()
             .map_err(|e| ClusterError::Network(format!("Failed to finish send: {}", e)))?;
-        
+
         // Receive response
         let response_bytes = match Self::read_message(&mut recv, &self.config).await {
             Ok(bytes) => bytes,
@@ -916,42 +939,47 @@ impl QuicTransport {
                 return Err(e);
             }
         };
-        
-        self.stats.bytes_received.fetch_add(response_bytes.len() as u64, Ordering::Relaxed);
-        self.stats.responses_received.fetch_add(1, Ordering::Relaxed);
-        
+
+        self.stats
+            .bytes_received
+            .fetch_add(response_bytes.len() as u64, Ordering::Relaxed);
+        self.stats
+            .responses_received
+            .fetch_add(1, Ordering::Relaxed);
+
         let response = decode_response(&response_bytes)?;
-        
+
         conn.active_streams.fetch_sub(1, Ordering::SeqCst);
-        
+
         Ok(response)
     }
 
     /// Send a request without waiting for a response (fire and forget)
     pub async fn send_async(&self, node_id: &NodeId, request: ClusterRequest) -> Result<()> {
         let conn = self.get_or_create_connection(node_id).await?;
-        
+
         let (mut send, _recv) = conn.open_bi_stream().await?;
-        
+
         let request_bytes = encode_request(&request)?;
         Self::write_message(&mut send, &request_bytes, &self.config).await?;
-        
+
         send.finish()
             .map_err(|e| ClusterError::Network(format!("Failed to finish: {}", e)))?;
-        
+
         conn.active_streams.fetch_sub(1, Ordering::SeqCst);
-        
+
         Ok(())
     }
 
     /// Broadcast a request to all peers
-    pub async fn broadcast(&self, request: ClusterRequest) -> Vec<(NodeId, Result<ClusterResponse>)> {
-        let peers: Vec<_> = self.peer_addrs.iter()
-            .map(|e| e.key().clone())
-            .collect();
-        
+    pub async fn broadcast(
+        &self,
+        request: ClusterRequest,
+    ) -> Vec<(NodeId, Result<ClusterResponse>)> {
+        let peers: Vec<_> = self.peer_addrs.iter().map(|e| e.key().clone()).collect();
+
         let mut futures = Vec::with_capacity(peers.len());
-        
+
         for peer in peers {
             let request = request.clone();
             let this = self;
@@ -960,7 +988,7 @@ impl QuicTransport {
                 (peer, result)
             });
         }
-        
+
         futures::future::join_all(futures).await
     }
 
@@ -972,27 +1000,34 @@ impl QuicTransport {
                 return Ok(conn);
             }
         }
-        
+
         // Create new connection
-        let addr = *self.peer_addrs.get(node_id)
+        let addr = *self
+            .peer_addrs
+            .get(node_id)
             .ok_or_else(|| ClusterError::NodeNotFound(node_id.clone()))?;
-        
-        let connection = self.endpoint
+
+        let connection = self
+            .endpoint
             .connect(addr, "localhost") // Server name for TLS
             .map_err(|e| ClusterError::ConnectionFailed(format!("Connect error: {}", e)))?
             .await
             .map_err(|e| {
-                self.stats.connections_failed.fetch_add(1, Ordering::Relaxed);
+                self.stats
+                    .connections_failed
+                    .fetch_add(1, Ordering::Relaxed);
                 ClusterError::ConnectionFailed(format!("Connection failed: {}", e))
             })?;
-        
-        self.stats.connections_established.fetch_add(1, Ordering::Relaxed);
-        
+
+        self.stats
+            .connections_established
+            .fetch_add(1, Ordering::Relaxed);
+
         let managed = Arc::new(ManagedConnection::new(
             connection,
             self.config.max_concurrent_streams,
         ));
-        
+
         // Add to pool
         if let Some(pool) = self.connections.get(node_id) {
             pool.add_connection(managed.clone());
@@ -1001,7 +1036,7 @@ impl QuicTransport {
             pool.add_connection(managed.clone());
             self.connections.insert(node_id.clone(), pool);
         }
-        
+
         Ok(managed)
     }
 
@@ -1018,7 +1053,7 @@ impl QuicTransport {
     /// Shutdown the transport
     pub async fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
-        
+
         // Close all connections gracefully
         for pool in self.connections.iter() {
             let conns = pool.connections.read();
@@ -1026,12 +1061,12 @@ impl QuicTransport {
                 conn.connection.close(VarInt::from_u32(0), b"shutdown");
             }
         }
-        
+
         self.endpoint.close(VarInt::from_u32(0), b"shutdown");
-        
+
         // Wait for endpoint to finish
         self.endpoint.wait_idle().await;
-        
+
         info!(node = %self.local_node, "QUIC transport shutdown complete");
     }
 }
@@ -1127,9 +1162,11 @@ mod tests {
     #[test]
     fn test_stats_snapshot() {
         let stats = QuicStats::default();
-        stats.connections_established.fetch_add(5, Ordering::Relaxed);
+        stats
+            .connections_established
+            .fetch_add(5, Ordering::Relaxed);
         stats.bytes_sent.fetch_add(1000, Ordering::Relaxed);
-        
+
         let snap = stats.snapshot();
         assert_eq!(snap.connections_established, 5);
         assert_eq!(snap.bytes_sent, 1000);

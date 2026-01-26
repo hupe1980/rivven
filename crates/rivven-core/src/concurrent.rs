@@ -42,12 +42,12 @@
 //! ```
 
 use bytes::Bytes;
-use crossbeam_channel::{bounded, unbounded, Sender, Receiver, TrySendError, TryRecvError};
+use crossbeam_channel::{bounded, unbounded, Receiver, Sender, TryRecvError, TrySendError};
 use parking_lot::RwLock;
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, AtomicPtr, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 // ============================================================================
@@ -76,7 +76,7 @@ impl<T> std::ops::DerefMut for CacheAligned<T> {
 // ============================================================================
 
 /// A high-performance bounded MPMC queue using crossbeam-channel
-/// 
+///
 /// This queue is optimized for producer-consumer patterns common in streaming:
 /// - Network receive -> Message processing
 /// - Message batching -> Disk write
@@ -190,7 +190,8 @@ impl<T> LockFreeQueue<T> {
         let count = batch.len();
         if count > 0 {
             self.len.fetch_sub(count, Ordering::Relaxed);
-            self.total_dequeued.fetch_add(count as u64, Ordering::Relaxed);
+            self.total_dequeued
+                .fetch_add(count as u64, Ordering::Relaxed);
         }
         batch
     }
@@ -285,12 +286,12 @@ impl LogSegment {
         } else {
             Vec::with_capacity(capacity)
         };
-        
+
         if !preallocate {
             // Set len to 0 but capacity is reserved
             data.clear();
         }
-        
+
         Self {
             data,
             write_pos: AtomicUsize::new(0),
@@ -307,18 +308,18 @@ impl LogSegment {
         }
 
         let needed = 4 + data.len(); // 4 bytes for length prefix
-        
+
         // CAS loop to reserve space
         loop {
             let current_pos = self.write_pos.load(Ordering::Acquire);
             let new_pos = current_pos + needed;
-            
+
             if new_pos > self.data.len() {
                 // Segment is full, seal it
                 self.sealed.store(true, Ordering::Release);
                 return None;
             }
-            
+
             // Try to reserve space
             match self.write_pos.compare_exchange_weak(
                 current_pos,
@@ -334,12 +335,8 @@ impl LogSegment {
                         // Write length prefix (big-endian)
                         let len = data.len() as u32;
                         let len_bytes = len.to_be_bytes();
-                        std::ptr::copy_nonoverlapping(
-                            len_bytes.as_ptr(),
-                            ptr.add(current_pos),
-                            4,
-                        );
-                        
+                        std::ptr::copy_nonoverlapping(len_bytes.as_ptr(), ptr.add(current_pos), 4);
+
                         // Write data
                         std::ptr::copy_nonoverlapping(
                             data.as_ptr(),
@@ -347,7 +344,7 @@ impl LogSegment {
                             data.len(),
                         );
                     }
-                    
+
                     let offset = self.base_offset + current_pos as u64;
                     return Some((current_pos, offset));
                 }
@@ -362,19 +359,19 @@ impl LogSegment {
     /// Read an entry at the given position
     fn read(&self, position: usize) -> Option<&[u8]> {
         let committed = self.write_pos.load(Ordering::Acquire);
-        
+
         if position + 4 > committed {
             return None;
         }
-        
+
         // Read length prefix
         let len_bytes: [u8; 4] = self.data[position..position + 4].try_into().ok()?;
         let len = u32::from_be_bytes(len_bytes) as usize;
-        
+
         if position + 4 + len > committed {
             return None;
         }
-        
+
         Some(&self.data[position + 4..position + 4 + len])
     }
 
@@ -390,7 +387,7 @@ impl LogSegment {
 }
 
 /// A lock-free append-only log for high-throughput message storage
-/// 
+///
 /// Design goals:
 /// - Lock-free appends from multiple producers
 /// - Sequential reads optimized for batching
@@ -409,12 +406,8 @@ pub struct AppendOnlyLog {
 impl AppendOnlyLog {
     /// Create a new append-only log
     pub fn new(config: AppendLogConfig) -> Self {
-        let initial_segment = Arc::new(LogSegment::new(
-            0,
-            config.segment_size,
-            config.preallocate,
-        ));
-        
+        let initial_segment = Arc::new(LogSegment::new(0, config.segment_size, config.preallocate));
+
         Self {
             config,
             segments: RwLock::new(vec![initial_segment]),
@@ -431,13 +424,14 @@ impl AppendOnlyLog {
                 let segments = self.segments.read();
                 if let Some(segment) = segments.last() {
                     if let Some((_, offset)) = segment.try_append(data) {
-                        self.total_bytes.fetch_add(data.len() as u64, Ordering::Relaxed);
+                        self.total_bytes
+                            .fetch_add(data.len() as u64, Ordering::Relaxed);
                         self.total_entries.fetch_add(1, Ordering::Relaxed);
                         return offset;
                     }
                 }
             }
-            
+
             // Segment is full, need to create a new one
             self.rotate_segment();
         }
@@ -446,18 +440,18 @@ impl AppendOnlyLog {
     /// Append a batch of entries, returns vec of offsets
     pub fn append_batch(&self, entries: &[&[u8]]) -> Vec<u64> {
         let mut offsets = Vec::with_capacity(entries.len());
-        
+
         for data in entries {
             offsets.push(self.append(data));
         }
-        
+
         offsets
     }
 
     /// Rotate to a new segment
     fn rotate_segment(&self) {
         let mut segments = self.segments.write();
-        
+
         // Double-check the last segment is actually sealed
         if let Some(last) = segments.last() {
             if !last.is_sealed() {
@@ -465,22 +459,22 @@ impl AppendOnlyLog {
                 return;
             }
         }
-        
+
         // Calculate next base offset
         let next_base = segments
             .last()
             .map(|s| s.base_offset + s.committed_size() as u64)
             .unwrap_or(0);
-        
+
         // Create new segment
         let new_segment = Arc::new(LogSegment::new(
             next_base,
             self.config.segment_size,
             self.config.preallocate,
         ));
-        
+
         segments.push(new_segment);
-        
+
         // Remove old segments if we have too many
         while segments.len() > self.config.max_segments {
             segments.remove(0);
@@ -491,16 +485,16 @@ impl AppendOnlyLog {
     pub fn read(&self, start_offset: u64, max_entries: usize) -> Vec<Bytes> {
         let segments = self.segments.read();
         let mut entries = Vec::with_capacity(max_entries);
-        
+
         // Find the segment containing start_offset
         for segment in segments.iter() {
             if segment.base_offset > start_offset {
                 continue;
             }
-            
+
             let relative_pos = (start_offset - segment.base_offset) as usize;
             let mut pos = relative_pos;
-            
+
             while entries.len() < max_entries {
                 match segment.read(pos) {
                     Some(data) => {
@@ -511,7 +505,7 @@ impl AppendOnlyLog {
                 }
             }
         }
-        
+
         entries
     }
 
@@ -548,7 +542,7 @@ impl AppendOnlyLog {
 const SHARD_COUNT: usize = 64;
 
 /// A cache-friendly sharded concurrent hash map
-/// 
+///
 /// Uses multiple shards to reduce contention. Each shard has its own lock,
 /// so operations on different keys in different shards can proceed in parallel.
 pub struct ConcurrentHashMap<K, V> {
@@ -561,7 +555,7 @@ impl<K: Hash + Eq + Clone, V: Clone> ConcurrentHashMap<K, V> {
     pub fn new() -> Self {
         // Initialize all shards
         let shards = std::array::from_fn(|_| CacheAligned(RwLock::new(HashMap::new())));
-        
+
         Self {
             shards,
             len: AtomicUsize::new(0),
@@ -579,7 +573,7 @@ impl<K: Hash + Eq + Clone, V: Clone> ConcurrentHashMap<K, V> {
     pub fn insert(&self, key: K, value: V) -> Option<V> {
         let shard_idx = self.shard_index(&key);
         let mut shard = self.shards[shard_idx].write();
-        
+
         let old = shard.insert(key, value);
         if old.is_none() {
             self.len.fetch_add(1, Ordering::Relaxed);
@@ -605,7 +599,7 @@ impl<K: Hash + Eq + Clone, V: Clone> ConcurrentHashMap<K, V> {
     pub fn remove(&self, key: &K) -> Option<V> {
         let shard_idx = self.shard_index(key);
         let mut shard = self.shards[shard_idx].write();
-        
+
         let removed = shard.remove(key);
         if removed.is_some() {
             self.len.fetch_sub(1, Ordering::Relaxed);
@@ -630,7 +624,7 @@ impl<K: Hash + Eq + Clone, V: Clone> ConcurrentHashMap<K, V> {
     {
         let shard_idx = self.shard_index(key);
         let mut shard = self.shards[shard_idx].write();
-        
+
         if let Some(value) = shard.get_mut(key) {
             f(value);
             Some(value.clone())
@@ -643,7 +637,7 @@ impl<K: Hash + Eq + Clone, V: Clone> ConcurrentHashMap<K, V> {
     pub fn get_or_insert(&self, key: K, default: V) -> V {
         let shard_idx = self.shard_index(&key);
         let mut shard = self.shards[shard_idx].write();
-        
+
         if let Some(value) = shard.get(&key) {
             value.clone()
         } else {
@@ -660,7 +654,7 @@ impl<K: Hash + Eq + Clone, V: Clone> ConcurrentHashMap<K, V> {
     {
         let shard_idx = self.shard_index(&key);
         let mut shard = self.shards[shard_idx].write();
-        
+
         if let Some(value) = shard.get(&key) {
             value.clone()
         } else {
@@ -674,14 +668,14 @@ impl<K: Hash + Eq + Clone, V: Clone> ConcurrentHashMap<K, V> {
     /// Iterate over all entries (snapshot)
     pub fn snapshot(&self) -> Vec<(K, V)> {
         let mut entries = Vec::new();
-        
+
         for shard in &self.shards {
             let shard = shard.read();
             for (k, v) in shard.iter() {
                 entries.push((k.clone(), v.clone()));
             }
         }
-        
+
         entries
     }
 
@@ -721,20 +715,20 @@ struct SkipNode<K, V> {
 impl<K, V> SkipNode<K, V> {
     fn new(key: K, value: V, height: usize) -> *mut Self {
         let forward = std::array::from_fn(|_| AtomicPtr::new(std::ptr::null_mut()));
-        
+
         let node = Box::new(Self {
             key,
             value: UnsafeCell::new(value),
             forward,
             height,
         });
-        
+
         Box::into_raw(node)
     }
 }
 
 /// A concurrent skip list optimized for offset lookups
-/// 
+///
 /// Provides O(log n) lookups for finding messages by offset, which is
 /// critical for efficient consumer fetching.
 pub struct ConcurrentSkipList<K: Ord + Clone, V: Clone> {
@@ -757,7 +751,7 @@ impl<K: Ord + Clone + Default, V: Clone + Default> ConcurrentSkipList<K, V> {
     pub fn new() -> Self {
         // Create head sentinel
         let head = SkipNode::new(K::default(), V::default(), MAX_HEIGHT);
-        
+
         Self {
             head,
             max_level: AtomicUsize::new(1),
@@ -771,19 +765,19 @@ impl<K: Ord + Clone + Default, V: Clone + Default> ConcurrentSkipList<K, V> {
         // XORShift random number generation
         let mut level = 1;
         let mut x = self.rand_state.load(Ordering::Relaxed);
-        
+
         loop {
             x ^= x << 13;
             x ^= x >> 7;
             x ^= x << 17;
             self.rand_state.store(x, Ordering::Relaxed);
-            
+
             if x & 1 == 0 || level >= MAX_HEIGHT {
                 break;
             }
             level += 1;
         }
-        
+
         level
     }
 
@@ -791,7 +785,7 @@ impl<K: Ord + Clone + Default, V: Clone + Default> ConcurrentSkipList<K, V> {
     pub fn insert(&self, key: K, value: V) {
         let height = self.random_level();
         let new_node = SkipNode::new(key.clone(), value, height);
-        
+
         // Update max level if needed
         let mut current_max = self.max_level.load(Ordering::Relaxed);
         while height > current_max {
@@ -805,12 +799,13 @@ impl<K: Ord + Clone + Default, V: Clone + Default> ConcurrentSkipList<K, V> {
                 Err(m) => current_max = m,
             }
         }
-        
+
         // Find position and insert
         let mut update = [std::ptr::null_mut::<SkipNode<K, V>>(); MAX_HEIGHT];
         let mut current = self.head;
 
-        #[allow(clippy::needless_range_loop)] // Intentional: unsafe pointer array requires explicit indexing
+        #[allow(clippy::needless_range_loop)]
+        // Intentional: unsafe pointer array requires explicit indexing
         for i in (0..self.max_level.load(Ordering::Acquire)).rev() {
             // SAFETY: We traverse from head which is always valid. Each `forward` pointer
             // is either null or points to a valid SkipNode allocated by `insert`.
@@ -826,7 +821,7 @@ impl<K: Ord + Clone + Default, V: Clone + Default> ConcurrentSkipList<K, V> {
                 update[i] = current;
             }
         }
-        
+
         // Insert node at each level
         #[allow(clippy::needless_range_loop)]
         for i in 0..height {
@@ -834,20 +829,24 @@ impl<K: Ord + Clone + Default, V: Clone + Default> ConcurrentSkipList<K, V> {
             // which was found during traversal. `new_node` was just allocated above.
             // Release ordering ensures the new node's data is visible before the pointer.
             unsafe {
-                let pred = if update[i].is_null() { self.head } else { update[i] };
+                let pred = if update[i].is_null() {
+                    self.head
+                } else {
+                    update[i]
+                };
                 let next = (*pred).forward[i].load(Ordering::Acquire);
                 (*new_node).forward[i].store(next, Ordering::Release);
                 (*pred).forward[i].store(new_node, Ordering::Release);
             }
         }
-        
+
         self.len.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Find a value by key
     pub fn get(&self, key: &K) -> Option<V> {
         let mut current = self.head;
-        
+
         for i in (0..self.max_level.load(Ordering::Acquire)).rev() {
             // SAFETY: Traversal starts from `self.head` which is always valid.
             // All forward pointers are either null or point to valid SkipNodes.
@@ -868,7 +867,7 @@ impl<K: Ord + Clone + Default, V: Clone + Default> ConcurrentSkipList<K, V> {
                 }
             }
         }
-        
+
         None
     }
 
@@ -877,7 +876,7 @@ impl<K: Ord + Clone + Default, V: Clone + Default> ConcurrentSkipList<K, V> {
     pub fn floor(&self, key: &K) -> Option<(K, V)> {
         let mut current = self.head;
         let mut result: Option<*mut SkipNode<K, V>> = None;
-        
+
         for i in (0..self.max_level.load(Ordering::Acquire)).rev() {
             // SAFETY: Traversal starts from `self.head` which is always valid.
             // All forward pointers are either null or point to valid SkipNodes.
@@ -897,17 +896,15 @@ impl<K: Ord + Clone + Default, V: Clone + Default> ConcurrentSkipList<K, V> {
                 }
             }
         }
-        
+
         // SAFETY: `node` was obtained from traversal and is a valid SkipNode pointer.
-        result.map(|node| unsafe {
-            ((*node).key.clone(), (*(*node).value.get()).clone())
-        })
+        result.map(|node| unsafe { ((*node).key.clone(), (*(*node).value.get()).clone()) })
     }
 
     /// Find the smallest key greater than or equal to the given key
     pub fn ceiling(&self, key: &K) -> Option<(K, V)> {
         let mut current = self.head;
-        
+
         for i in (0..self.max_level.load(Ordering::Acquire)).rev() {
             // SAFETY: Traversal starts from `self.head` which is always valid.
             // All forward pointers are either null or point to valid SkipNodes.
@@ -921,7 +918,7 @@ impl<K: Ord + Clone + Default, V: Clone + Default> ConcurrentSkipList<K, V> {
                 }
             }
         }
-        
+
         // SAFETY: `current` is a valid node from traversal (or head).
         // The next pointer is either null or points to a valid SkipNode.
         unsafe {
@@ -948,7 +945,7 @@ impl<K: Ord + Clone + Default, V: Clone + Default> ConcurrentSkipList<K, V> {
     pub fn range(&self, start: &K, end: &K, limit: usize) -> Vec<(K, V)> {
         let mut entries = Vec::with_capacity(limit.min(1000));
         let mut current = self.head;
-        
+
         // Find start position
         for i in (0..self.max_level.load(Ordering::Acquire)).rev() {
             // SAFETY: Traversal starts from `self.head` which is always valid.
@@ -963,7 +960,7 @@ impl<K: Ord + Clone + Default, V: Clone + Default> ConcurrentSkipList<K, V> {
                 }
             }
         }
-        
+
         // Collect entries in range
         // SAFETY: `current` is valid from traversal. We iterate level-0 forward pointers
         // which are either null or point to valid SkipNodes allocated by `insert`.
@@ -977,7 +974,7 @@ impl<K: Ord + Clone + Default, V: Clone + Default> ConcurrentSkipList<K, V> {
                 node = (*node).forward[0].load(Ordering::Acquire);
             }
         }
-        
+
         entries
     }
 }
@@ -1012,19 +1009,19 @@ impl<K: Ord + Clone, V: Clone> Drop for ConcurrentSkipList<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
     use std::sync::Arc;
+    use std::thread;
 
     #[test]
     fn test_lock_free_queue() {
         let queue = LockFreeQueue::<i32>::bounded(100);
-        
+
         assert!(queue.is_empty());
-        
+
         queue.push(1).unwrap();
         queue.push(2).unwrap();
         queue.push(3).unwrap();
-        
+
         assert_eq!(queue.len(), 3);
         assert_eq!(queue.pop(), Some(1));
         assert_eq!(queue.pop(), Some(2));
@@ -1036,7 +1033,7 @@ mod tests {
     fn test_lock_free_queue_concurrent() {
         let queue = Arc::new(LockFreeQueue::<i32>::bounded(1000));
         let mut handles = vec![];
-        
+
         // Spawn producers
         for i in 0..4 {
             let q = queue.clone();
@@ -1046,14 +1043,14 @@ mod tests {
                 }
             }));
         }
-        
+
         // Wait for producers
         for h in handles {
             h.join().unwrap();
         }
-        
+
         assert_eq!(queue.len(), 1000);
-        
+
         // Consume all
         let batch = queue.pop_batch(1000);
         assert_eq!(batch.len(), 1000);
@@ -1067,12 +1064,12 @@ mod tests {
             preallocate: true,
         };
         let log = AppendOnlyLog::new(config);
-        
+
         let offset1 = log.append(b"hello");
         let offset2 = log.append(b"world");
-        
+
         assert!(offset2 > offset1);
-        
+
         let entries = log.read(offset1, 10);
         assert_eq!(entries.len(), 2);
         assert_eq!(&entries[0][..], b"hello");
@@ -1083,7 +1080,7 @@ mod tests {
     fn test_concurrent_hash_map() {
         let map = Arc::new(ConcurrentHashMap::<String, i32>::new());
         let mut handles = vec![];
-        
+
         // Concurrent inserts
         for i in 0..4 {
             let m = map.clone();
@@ -1093,13 +1090,13 @@ mod tests {
                 }
             }));
         }
-        
+
         for h in handles {
             h.join().unwrap();
         }
-        
+
         assert_eq!(map.len(), 1000);
-        
+
         // Verify reads
         assert_eq!(map.get(&"key-0-0".to_string()), Some(0));
         assert_eq!(map.get(&"key-3-249".to_string()), Some(999));
@@ -1108,20 +1105,20 @@ mod tests {
     #[test]
     fn test_skip_list() {
         let list = ConcurrentSkipList::<u64, String>::new();
-        
+
         list.insert(10, "ten".to_string());
         list.insert(20, "twenty".to_string());
         list.insert(5, "five".to_string());
         list.insert(15, "fifteen".to_string());
-        
+
         assert_eq!(list.len(), 4);
         assert_eq!(list.get(&10), Some("ten".to_string()));
         assert_eq!(list.get(&99), None);
-        
+
         // Floor test
         assert_eq!(list.floor(&12), Some((10, "ten".to_string())));
         assert_eq!(list.floor(&15), Some((15, "fifteen".to_string())));
-        
+
         // Ceiling test
         assert_eq!(list.ceiling(&12), Some((15, "fifteen".to_string())));
         assert_eq!(list.ceiling(&1), Some((5, "five".to_string())));
@@ -1130,14 +1127,14 @@ mod tests {
     #[test]
     fn test_skip_list_range() {
         let list = ConcurrentSkipList::<u64, String>::new();
-        
+
         for i in 0..100 {
             list.insert(i * 10, format!("value-{}", i));
         }
-        
+
         let range = list.range(&150, &350, 100);
         assert!(!range.is_empty());
-        
+
         // Should include 150, 160, ..., 350
         for (k, _) in &range {
             assert!(*k >= 150 && *k <= 350);

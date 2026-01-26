@@ -393,7 +393,8 @@ mod tests {
 
     #[test]
     fn test_exponential_backoff() {
-        let mut backoff = ExponentialBackoff::new(Duration::from_millis(100), Duration::from_secs(10));
+        let mut backoff =
+            ExponentialBackoff::new(Duration::from_millis(100), Duration::from_secs(10));
 
         assert_eq!(backoff.next_backoff(), Duration::from_millis(100));
         assert_eq!(backoff.next_backoff(), Duration::from_millis(200));

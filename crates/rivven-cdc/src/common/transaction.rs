@@ -274,19 +274,22 @@ impl TransactionStats {
     fn record_complete(&self, event_count: u64) {
         self.transactions_completed.fetch_add(1, Ordering::Relaxed);
         self.transactions_complete.fetch_add(1, Ordering::Relaxed);
-        self.events_processed.fetch_add(event_count, Ordering::Relaxed);
+        self.events_processed
+            .fetch_add(event_count, Ordering::Relaxed);
     }
 
     fn record_timeout(&self, event_count: u64) {
         self.transactions_completed.fetch_add(1, Ordering::Relaxed);
         self.transactions_timeout.fetch_add(1, Ordering::Relaxed);
-        self.events_processed.fetch_add(event_count, Ordering::Relaxed);
+        self.events_processed
+            .fetch_add(event_count, Ordering::Relaxed);
     }
 
     fn record_overflow(&self, event_count: u64) {
         self.transactions_completed.fetch_add(1, Ordering::Relaxed);
         self.transactions_overflow.fetch_add(1, Ordering::Relaxed);
-        self.events_processed.fetch_add(event_count, Ordering::Relaxed);
+        self.events_processed
+            .fetch_add(event_count, Ordering::Relaxed);
     }
 
     fn record_pass_through(&self) {
@@ -295,7 +298,8 @@ impl TransactionStats {
     }
 
     fn set_buffered(&self, events: u64, txns: u64) {
-        self.current_buffered_events.store(events, Ordering::Relaxed);
+        self.current_buffered_events
+            .store(events, Ordering::Relaxed);
         self.current_buffered_txns.store(txns, Ordering::Relaxed);
     }
 
@@ -393,9 +397,13 @@ impl TransactionGrouper {
             if let Some(oldest_id) = self.find_oldest_txn(&buffers) {
                 if let Some(buffer) = buffers.remove(&oldest_id) {
                     let count = buffer.events.len() as u64;
-                    self.total_buffered_events.fetch_sub(count, Ordering::Relaxed);
+                    self.total_buffered_events
+                        .fetch_sub(count, Ordering::Relaxed);
                     self.stats.record_overflow(count);
-                    warn!("Evicted oldest transaction {} due to buffer limit", oldest_id);
+                    warn!(
+                        "Evicted oldest transaction {} due to buffer limit",
+                        oldest_id
+                    );
                     drop(buffers);
                     return Some(buffer.into_batch(oldest_id, true));
                 }
@@ -403,7 +411,9 @@ impl TransactionGrouper {
         }
 
         // Add event to buffer
-        let buffer = buffers.entry(txn_id.clone()).or_insert_with(TransactionBuffer::new);
+        let buffer = buffers
+            .entry(txn_id.clone())
+            .or_insert_with(TransactionBuffer::new);
         buffer.add(event);
         self.total_buffered_events.fetch_add(1, Ordering::Relaxed);
 
@@ -415,7 +425,8 @@ impl TransactionGrouper {
         if should_complete || should_force_size {
             if let Some(buffer) = buffers.remove(&txn_id) {
                 let count = buffer.events.len() as u64;
-                self.total_buffered_events.fetch_sub(count, Ordering::Relaxed);
+                self.total_buffered_events
+                    .fetch_sub(count, Ordering::Relaxed);
 
                 // Update stats
                 self.stats.set_buffered(
@@ -428,7 +439,10 @@ impl TransactionGrouper {
                     debug!("Transaction {} complete with {} events", txn_id, count);
                 } else {
                     self.stats.record_overflow(count);
-                    warn!("Transaction {} forced due to size limits ({} events)", txn_id, count);
+                    warn!(
+                        "Transaction {} forced due to size limits ({} events)",
+                        txn_id, count
+                    );
                 }
 
                 return Some(buffer.into_batch(txn_id, !should_complete));
@@ -460,9 +474,14 @@ impl TransactionGrouper {
         for txn_id in expired {
             if let Some(buffer) = buffers.remove(&txn_id) {
                 let count = buffer.events.len() as u64;
-                self.total_buffered_events.fetch_sub(count, Ordering::Relaxed);
+                self.total_buffered_events
+                    .fetch_sub(count, Ordering::Relaxed);
                 self.stats.record_timeout(count);
-                warn!("Transaction {} timed out after {:?}", txn_id, buffer.elapsed());
+                warn!(
+                    "Transaction {} timed out after {:?}",
+                    txn_id,
+                    buffer.elapsed()
+                );
                 timed_out.push(buffer.into_batch(txn_id, true));
             }
         }
@@ -495,7 +514,11 @@ impl TransactionGrouper {
 
     /// Get a specific transaction's current buffer size.
     pub async fn txn_buffer_size(&self, txn_id: &str) -> Option<usize> {
-        self.buffers.read().await.get(txn_id).map(|b| b.events.len())
+        self.buffers
+            .read()
+            .await
+            .get(txn_id)
+            .map(|b| b.events.len())
     }
 
     /// Get total buffered event count.
@@ -516,21 +539,22 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn make_event(
-        table: &str,
-        txn_id: &str,
-        seq: u64,
-        total: u64,
-        is_last: bool,
-    ) -> CdcEvent {
-        let mut txn = TransactionMetadata::new(txn_id, format!("lsn-{}", seq), seq)
-            .with_total(total);
+    fn make_event(table: &str, txn_id: &str, seq: u64, total: u64, is_last: bool) -> CdcEvent {
+        let mut txn =
+            TransactionMetadata::new(txn_id, format!("lsn-{}", seq), seq).with_total(total);
         if is_last {
             txn = txn.with_last();
         }
 
-        CdcEvent::insert("postgres", "mydb", "public", table, json!({"id": seq}), 1705000000)
-            .with_transaction(txn)
+        CdcEvent::insert(
+            "postgres",
+            "mydb",
+            "public",
+            table,
+            json!({"id": seq}),
+            1705000000,
+        )
+        .with_transaction(txn)
     }
 
     #[tokio::test]
@@ -580,7 +604,9 @@ mod tests {
 
         // Interleaved events from two transactions
         grouper.add(make_event("users", "txn-a", 0, 2, false)).await;
-        grouper.add(make_event("orders", "txn-b", 0, 2, false)).await;
+        grouper
+            .add(make_event("orders", "txn-b", 0, 2, false))
+            .await;
         grouper.add(make_event("users", "txn-a", 1, 2, true)).await;
 
         let stats = grouper.stats();
@@ -599,7 +625,7 @@ mod tests {
         let grouper = TransactionGrouper::new(
             TransactionConfig::builder()
                 .pass_through_non_txn(true)
-                .build()
+                .build(),
         );
 
         // Event without transaction metadata
@@ -620,7 +646,7 @@ mod tests {
         let grouper = TransactionGrouper::new(
             TransactionConfig::builder()
                 .pass_through_non_txn(false)
-                .build()
+                .build(),
         );
 
         let event = CdcEvent::insert("pg", "db", "s", "users", json!({"id": 1}), 1705000000);
@@ -631,11 +657,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_force_flush_on_size_limit() {
-        let grouper = TransactionGrouper::new(
-            TransactionConfig::builder()
-                .max_events_per_txn(3)
-                .build()
-        );
+        let grouper =
+            TransactionGrouper::new(TransactionConfig::builder().max_events_per_txn(3).build());
 
         // Add events until limit
         grouper.add(make_event("t", "txn-big", 0, 100, false)).await;
@@ -657,7 +680,7 @@ mod tests {
         let grouper = TransactionGrouper::new(
             TransactionConfig::builder()
                 .txn_timeout(Duration::from_millis(10))
-                .build()
+                .build(),
         );
 
         // Add incomplete transaction
@@ -697,11 +720,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_evict_oldest_on_buffer_limit() {
-        let grouper = TransactionGrouper::new(
-            TransactionConfig::builder()
-                .max_buffered_txns(2)
-                .build()
-        );
+        let grouper =
+            TransactionGrouper::new(TransactionConfig::builder().max_buffered_txns(2).build());
 
         // Fill buffer
         grouper.add(make_event("t", "txn-old", 0, 10, false)).await;
@@ -722,8 +742,13 @@ mod tests {
         let grouper = TransactionGrouper::new(TransactionConfig::default());
 
         grouper.add(make_event("users", "txn-1", 0, 3, false)).await;
-        grouper.add(make_event("orders", "txn-1", 1, 3, false)).await;
-        let batch = grouper.add(make_event("users", "txn-1", 2, 3, true)).await.unwrap();
+        grouper
+            .add(make_event("orders", "txn-1", 1, 3, false))
+            .await;
+        let batch = grouper
+            .add(make_event("users", "txn-1", 2, 3, true))
+            .await
+            .unwrap();
 
         let by_table = batch.events_by_table();
         assert_eq!(by_table.get("public.users").map(|v| v.len()), Some(2));
@@ -749,7 +774,9 @@ mod tests {
         grouper.add(make_event("t", "txn-1", 1, 2, true)).await;
 
         // Pass-through event
-        grouper.add(CdcEvent::insert("pg", "db", "s", "t", json!({}), 0)).await;
+        grouper
+            .add(CdcEvent::insert("pg", "db", "s", "t", json!({}), 0))
+            .await;
 
         let stats = grouper.stats();
         assert_eq!(stats.transactions_complete(), 1);
@@ -800,7 +827,9 @@ mod tests {
     async fn test_batch_commit_timestamp() {
         let grouper = TransactionGrouper::new(TransactionConfig::default());
 
-        let mut txn = TransactionMetadata::new("txn-ts", "lsn-1", 0).with_total(1).with_last();
+        let mut txn = TransactionMetadata::new("txn-ts", "lsn-1", 0)
+            .with_total(1)
+            .with_last();
         txn.commit_ts = Some(1705000000000);
 
         let event = CdcEvent::insert("pg", "db", "s", "t", json!({}), 0).with_transaction(txn);
@@ -816,12 +845,16 @@ mod tests {
         // Simulate a large transaction with many events
         let total = 100;
         for i in 0..total - 1 {
-            let batch = grouper.add(make_event("t", "txn-large", i, total, false)).await;
+            let batch = grouper
+                .add(make_event("t", "txn-large", i, total, false))
+                .await;
             assert!(batch.is_none());
         }
 
         // Final event
-        let batch = grouper.add(make_event("t", "txn-large", total - 1, total, true)).await;
+        let batch = grouper
+            .add(make_event("t", "txn-large", total - 1, total, true))
+            .await;
         assert!(batch.is_some());
         assert_eq!(batch.unwrap().len(), total as usize);
     }
@@ -838,9 +871,7 @@ mod tests {
         );
         assert!(batch.is_empty());
 
-        let batch = TransactionBatch::single(
-            CdcEvent::insert("pg", "db", "s", "t", json!({}), 0)
-        );
+        let batch = TransactionBatch::single(CdcEvent::insert("pg", "db", "s", "t", json!({}), 0));
         assert!(!batch.is_empty());
     }
 }

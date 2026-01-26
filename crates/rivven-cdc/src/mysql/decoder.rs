@@ -11,7 +11,7 @@
 //! - XID_EVENT (transaction commit)
 //! - QUERY_EVENT
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use bytes::{Buf, Bytes};
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
@@ -88,7 +88,7 @@ impl EventType {
             _ => EventType::Unknown,
         }
     }
-    
+
     pub fn is_row_event(&self) -> bool {
         matches!(
             self,
@@ -192,21 +192,21 @@ pub struct EventHeader {
 
 impl EventHeader {
     pub const SIZE: usize = 19;
-    
+
     pub fn parse(data: &[u8]) -> Result<Self> {
         if data.len() < Self::SIZE {
             bail!("Event header too short: {} bytes", data.len());
         }
-        
+
         let mut cursor = Cursor::new(data);
-        
+
         let timestamp = cursor.get_u32_le();
         let event_type = EventType::from_u8(cursor.get_u8());
         let server_id = cursor.get_u32_le();
         let event_length = cursor.get_u32_le();
         let next_position = cursor.get_u32_le();
         let flags = cursor.get_u16_le();
-        
+
         Ok(Self {
             timestamp,
             event_type,
@@ -223,34 +223,34 @@ impl EventHeader {
 pub enum BinlogEvent {
     /// Format description - contains binlog format info
     FormatDescription(FormatDescriptionEvent),
-    
+
     /// Table map - maps table ID to schema
     TableMap(TableMapEvent),
-    
+
     /// Row insert
     WriteRows(RowsEvent),
-    
+
     /// Row update  
     UpdateRows(RowsEvent),
-    
+
     /// Row delete
     DeleteRows(RowsEvent),
-    
+
     /// Transaction commit
     Xid(XidEvent),
-    
+
     /// Query (DDL/DML statements)
     Query(QueryEvent),
-    
+
     /// Rotate to new binlog file
     Rotate(RotateEvent),
-    
+
     /// GTID for transaction
     Gtid(GtidEvent),
-    
+
     /// Heartbeat
     Heartbeat,
-    
+
     /// Unknown or unhandled event
     Unknown(EventType),
 }
@@ -284,7 +284,7 @@ pub struct RowsEvent {
     pub table_id: u64,
     pub flags: u16,
     pub column_count: usize,
-    pub columns_before_image: Vec<u8>, // bitmap
+    pub columns_before_image: Vec<u8>,        // bitmap
     pub columns_after_image: Option<Vec<u8>>, // bitmap (for UPDATE)
     pub rows: Vec<RowData>,
 }
@@ -307,9 +307,27 @@ pub enum ColumnValue {
     Decimal(String),
     String(String),
     Bytes(Vec<u8>),
-    Date { year: u16, month: u8, day: u8 },
-    Time { hours: u8, minutes: u8, seconds: u8, microseconds: u32, negative: bool },
-    DateTime { year: u16, month: u8, day: u8, hour: u8, minute: u8, second: u8, microsecond: u32 },
+    Date {
+        year: u16,
+        month: u8,
+        day: u8,
+    },
+    Time {
+        hours: u8,
+        minutes: u8,
+        seconds: u8,
+        microseconds: u32,
+        negative: bool,
+    },
+    DateTime {
+        year: u16,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+        microsecond: u32,
+    },
     Timestamp(u32),
     Year(u16),
     Json(serde_json::Value),
@@ -361,7 +379,7 @@ impl GtidEvent {
             self.uuid[10], self.uuid[11], self.uuid[12], self.uuid[13], self.uuid[14], self.uuid[15]
         )
     }
-    
+
     pub fn gtid_string(&self) -> String {
         format!("{}:{}", self.uuid_string(), self.gno)
     }
@@ -388,18 +406,22 @@ impl BinlogDecoder {
             format: None,
         }
     }
-    
+
     /// Decode a binlog event
     pub fn decode(&mut self, data: &Bytes) -> Result<BinlogEvent> {
         if data.len() < EventHeader::SIZE {
             bail!("Event data too short: {} bytes", data.len());
         }
-        
+
         let header = EventHeader::parse(data)?;
         let payload = &data[EventHeader::SIZE..];
-        
-        trace!("Decoding {:?} event, {} bytes payload", header.event_type, payload.len());
-        
+
+        trace!(
+            "Decoding {:?} event, {} bytes payload",
+            header.event_type,
+            payload.len()
+        );
+
         match header.event_type {
             EventType::FormatDescriptionEvent => {
                 let event = self.decode_format_description(payload)?;
@@ -439,47 +461,41 @@ impl BinlogDecoder {
                 let event = self.decode_gtid(payload)?;
                 Ok(BinlogEvent::Gtid(event))
             }
-            EventType::HeartbeatLogEvent => {
-                Ok(BinlogEvent::Heartbeat)
-            }
+            EventType::HeartbeatLogEvent => Ok(BinlogEvent::Heartbeat),
             other => {
                 debug!("Unhandled event type: {:?}", other);
                 Ok(BinlogEvent::Unknown(other))
             }
         }
     }
-    
+
     /// Get table info from cache
     pub fn get_table(&self, table_id: u64) -> Option<&TableMapEvent> {
         self.table_cache.get(&table_id)
     }
-    
+
     fn decode_format_description(&self, data: &[u8]) -> Result<FormatDescriptionEvent> {
         let mut cursor = Cursor::new(data);
-        
+
         let binlog_version = cursor.get_u16_le();
-        
+
         let mut server_version_bytes = [0u8; 50];
         cursor.read_exact(&mut server_version_bytes)?;
         let server_version = String::from_utf8_lossy(&server_version_bytes)
             .trim_end_matches('\0')
             .to_string();
-        
+
         let create_timestamp = cursor.get_u32_le();
         let header_length = cursor.get_u8();
-        
+
         // Skip event type header lengths
         let remaining = data.len() - cursor.position() as usize;
         if remaining > 0 {
             cursor.advance(remaining - 1);
         }
-        
-        let checksum_type = if remaining > 0 {
-            cursor.get_u8()
-        } else {
-            0
-        };
-        
+
+        let checksum_type = if remaining > 0 { cursor.get_u8() } else { 0 };
+
         Ok(FormatDescriptionEvent {
             binlog_version,
             server_version,
@@ -488,50 +504,51 @@ impl BinlogDecoder {
             checksum_type,
         })
     }
-    
+
     fn decode_table_map(&self, data: &[u8]) -> Result<TableMapEvent> {
         let mut cursor = Cursor::new(data);
-        
+
         // Table ID (6 bytes)
         let table_id = read_table_id(&mut cursor)?;
-        
+
         // Flags
         let flags = cursor.get_u16_le();
-        
+
         // Schema name (length-prefixed)
         let schema_len = cursor.get_u8() as usize;
         let mut schema_bytes = vec![0u8; schema_len];
         cursor.read_exact(&mut schema_bytes)?;
         let schema_name = String::from_utf8_lossy(&schema_bytes).to_string();
         cursor.get_u8(); // null terminator
-        
+
         // Table name (length-prefixed)
         let table_len = cursor.get_u8() as usize;
         let mut table_bytes = vec![0u8; table_len];
         cursor.read_exact(&mut table_bytes)?;
         let table_name = String::from_utf8_lossy(&table_bytes).to_string();
         cursor.get_u8(); // null terminator
-        
+
         // Column count (packed integer)
         let column_count = read_packed_int(&mut cursor)? as usize;
-        
+
         // Column types
         let mut column_types = Vec::with_capacity(column_count);
         for _ in 0..column_count {
             column_types.push(ColumnType::from_u8(cursor.get_u8()));
         }
-        
+
         // Metadata length (packed integer)
         let metadata_len = read_packed_int(&mut cursor)? as usize;
-        
+
         // Column metadata
-        let column_metadata = self.decode_column_metadata(&column_types, &mut cursor, metadata_len)?;
-        
+        let column_metadata =
+            self.decode_column_metadata(&column_types, &mut cursor, metadata_len)?;
+
         // Null bitmap
         let null_bitmap_len = column_count.div_ceil(8);
         let mut null_bitmap = vec![0u8; null_bitmap_len];
         cursor.read_exact(&mut null_bitmap)?;
-        
+
         Ok(TableMapEvent {
             table_id,
             flags,
@@ -543,7 +560,7 @@ impl BinlogDecoder {
             null_bitmap,
         })
     }
-    
+
     fn decode_column_metadata(
         &self,
         column_types: &[ColumnType],
@@ -551,14 +568,17 @@ impl BinlogDecoder {
         _metadata_len: usize,
     ) -> Result<Vec<u16>> {
         let mut metadata = Vec::with_capacity(column_types.len());
-        
+
         for col_type in column_types {
             let meta = match col_type {
-                ColumnType::Float | ColumnType::Double | ColumnType::Blob |
-                ColumnType::TinyBlob | ColumnType::MediumBlob | ColumnType::LongBlob |
-                ColumnType::Json | ColumnType::Geometry => {
-                    cursor.get_u8() as u16
-                }
+                ColumnType::Float
+                | ColumnType::Double
+                | ColumnType::Blob
+                | ColumnType::TinyBlob
+                | ColumnType::MediumBlob
+                | ColumnType::LongBlob
+                | ColumnType::Json
+                | ColumnType::Geometry => cursor.get_u8() as u16,
                 ColumnType::Bit | ColumnType::Varchar | ColumnType::VarString => {
                     cursor.get_u16_le()
                 }
@@ -567,9 +587,7 @@ impl BinlogDecoder {
                     let scale = cursor.get_u8();
                     ((precision as u16) << 8) | (scale as u16)
                 }
-                ColumnType::String | ColumnType::Enum | ColumnType::Set => {
-                    cursor.get_u16_le()
-                }
+                ColumnType::String | ColumnType::Enum | ColumnType::Set => cursor.get_u16_le(),
                 ColumnType::Time2 | ColumnType::DateTime2 | ColumnType::Timestamp2 => {
                     cursor.get_u8() as u16
                 }
@@ -577,35 +595,45 @@ impl BinlogDecoder {
             };
             metadata.push(meta);
         }
-        
+
         Ok(metadata)
     }
-    
-    fn decode_rows_event(&self, data: &[u8], is_update: bool, event_type: EventType) -> Result<RowsEvent> {
+
+    fn decode_rows_event(
+        &self,
+        data: &[u8],
+        is_update: bool,
+        event_type: EventType,
+    ) -> Result<RowsEvent> {
         let mut cursor = Cursor::new(data);
-        
+
         // Table ID (6 bytes)
         let table_id = read_table_id(&mut cursor)?;
-        
+
         // Flags
         let flags = cursor.get_u16_le();
-        
+
         // Extra data length for v2 events
-        if matches!(event_type, EventType::WriteRowsEventV2 | EventType::UpdateRowsEventV2 | EventType::DeleteRowsEventV2) {
+        if matches!(
+            event_type,
+            EventType::WriteRowsEventV2
+                | EventType::UpdateRowsEventV2
+                | EventType::DeleteRowsEventV2
+        ) {
             let extra_len = cursor.get_u16_le();
             if extra_len > 2 {
                 cursor.advance((extra_len - 2) as usize);
             }
         }
-        
+
         // Column count
         let column_count = read_packed_int(&mut cursor)? as usize;
-        
+
         // Columns bitmap (present columns)
         let bitmap_len = column_count.div_ceil(8);
         let mut columns_before_image = vec![0u8; bitmap_len];
         cursor.read_exact(&mut columns_before_image)?;
-        
+
         // For UPDATE events, second bitmap
         let columns_after_image = if is_update {
             let mut bitmap = vec![0u8; bitmap_len];
@@ -614,7 +642,7 @@ impl BinlogDecoder {
         } else {
             None
         };
-        
+
         // Decode rows
         let table_map = self.table_cache.get(&table_id);
         let rows = self.decode_row_data(
@@ -626,7 +654,7 @@ impl BinlogDecoder {
             is_update,
             event_type,
         )?;
-        
+
         Ok(RowsEvent {
             table_id,
             flags,
@@ -636,7 +664,7 @@ impl BinlogDecoder {
             rows,
         })
     }
-    
+
     #[allow(clippy::too_many_arguments)]
     fn decode_row_data(
         &self,
@@ -649,63 +677,91 @@ impl BinlogDecoder {
         event_type: EventType,
     ) -> Result<Vec<RowData>> {
         let mut rows = Vec::new();
-        
+
         while cursor.has_remaining() {
             // Check if we have enough data for at least a null bitmap
             let present_count = count_set_bits(columns_bitmap);
             let null_bitmap_len = present_count.div_ceil(8);
-            
+
             if cursor.remaining() < null_bitmap_len {
                 break;
             }
-            
-            let is_delete = matches!(event_type, EventType::DeleteRowsEventV1 | EventType::DeleteRowsEventV2);
-            
+
+            let is_delete = matches!(
+                event_type,
+                EventType::DeleteRowsEventV1 | EventType::DeleteRowsEventV2
+            );
+
             if is_update || is_delete {
                 // Before image (for UPDATE/DELETE)
                 let mut null_bitmap = vec![0u8; null_bitmap_len];
                 cursor.read_exact(&mut null_bitmap)?;
-                
-                let values = self.decode_row_values(cursor, table_map, column_count, columns_bitmap, &null_bitmap)?;
-                
+
+                let values = self.decode_row_values(
+                    cursor,
+                    table_map,
+                    column_count,
+                    columns_bitmap,
+                    &null_bitmap,
+                )?;
+
                 if is_update {
                     // After image
-                    let update_present_count = count_set_bits(update_bitmap.unwrap_or(columns_bitmap));
+                    let update_present_count =
+                        count_set_bits(update_bitmap.unwrap_or(columns_bitmap));
                     let update_null_bitmap_len = update_present_count.div_ceil(8);
-                    
+
                     if cursor.remaining() < update_null_bitmap_len {
-                        rows.push(RowData { before: Some(values), after: None });
+                        rows.push(RowData {
+                            before: Some(values),
+                            after: None,
+                        });
                         break;
                     }
-                    
+
                     let mut after_null_bitmap = vec![0u8; update_null_bitmap_len];
                     cursor.read_exact(&mut after_null_bitmap)?;
-                    
+
                     let after_values = self.decode_row_values(
-                        cursor, 
-                        table_map, 
-                        column_count, 
-                        update_bitmap.unwrap_or(columns_bitmap), 
-                        &after_null_bitmap
+                        cursor,
+                        table_map,
+                        column_count,
+                        update_bitmap.unwrap_or(columns_bitmap),
+                        &after_null_bitmap,
                     )?;
-                    
-                    rows.push(RowData { before: Some(values), after: Some(after_values) });
+
+                    rows.push(RowData {
+                        before: Some(values),
+                        after: Some(after_values),
+                    });
                 } else {
-                    rows.push(RowData { before: Some(values), after: None });
+                    rows.push(RowData {
+                        before: Some(values),
+                        after: None,
+                    });
                 }
             } else {
                 // INSERT - only after image
                 let mut null_bitmap = vec![0u8; null_bitmap_len];
                 cursor.read_exact(&mut null_bitmap)?;
-                
-                let values = self.decode_row_values(cursor, table_map, column_count, columns_bitmap, &null_bitmap)?;
-                rows.push(RowData { before: None, after: Some(values) });
+
+                let values = self.decode_row_values(
+                    cursor,
+                    table_map,
+                    column_count,
+                    columns_bitmap,
+                    &null_bitmap,
+                )?;
+                rows.push(RowData {
+                    before: None,
+                    after: Some(values),
+                });
             }
         }
-        
+
         Ok(rows)
     }
-    
+
     fn decode_row_values(
         &self,
         cursor: &mut Cursor<&[u8]>,
@@ -716,38 +772,38 @@ impl BinlogDecoder {
     ) -> Result<Vec<ColumnValue>> {
         let mut values = Vec::with_capacity(column_count);
         let mut null_idx = 0;
-        
+
         for col_idx in 0..column_count {
             // Check if column is present
             if !is_bit_set(columns_bitmap, col_idx) {
                 continue;
             }
-            
+
             // Check if value is null
             if is_bit_set(null_bitmap, null_idx) {
                 values.push(ColumnValue::Null);
                 null_idx += 1;
                 continue;
             }
-            
+
             let col_type = table_map
                 .and_then(|tm| tm.column_types.get(col_idx))
                 .copied()
                 .unwrap_or(ColumnType::VarString);
-            
+
             let metadata = table_map
                 .and_then(|tm| tm.column_metadata.get(col_idx))
                 .copied()
                 .unwrap_or(0);
-            
+
             let value = self.decode_column_value(cursor, col_type, metadata)?;
             values.push(value);
             null_idx += 1;
         }
-        
+
         Ok(values)
     }
-    
+
     fn decode_column_value(
         &self,
         cursor: &mut Cursor<&[u8]>,
@@ -755,12 +811,8 @@ impl BinlogDecoder {
         metadata: u16,
     ) -> Result<ColumnValue> {
         match col_type {
-            ColumnType::Tiny => {
-                Ok(ColumnValue::SignedInt(cursor.get_i8() as i64))
-            }
-            ColumnType::Short => {
-                Ok(ColumnValue::SignedInt(cursor.get_i16_le() as i64))
-            }
+            ColumnType::Tiny => Ok(ColumnValue::SignedInt(cursor.get_i8() as i64)),
+            ColumnType::Short => Ok(ColumnValue::SignedInt(cursor.get_i16_le() as i64)),
             ColumnType::Int24 => {
                 let b1 = cursor.get_u8() as u32;
                 let b2 = cursor.get_u8() as u32;
@@ -774,18 +826,10 @@ impl BinlogDecoder {
                 };
                 Ok(ColumnValue::SignedInt(signed as i64))
             }
-            ColumnType::Long => {
-                Ok(ColumnValue::SignedInt(cursor.get_i32_le() as i64))
-            }
-            ColumnType::LongLong => {
-                Ok(ColumnValue::SignedInt(cursor.get_i64_le()))
-            }
-            ColumnType::Float => {
-                Ok(ColumnValue::Float(cursor.get_f32_le()))
-            }
-            ColumnType::Double => {
-                Ok(ColumnValue::Double(cursor.get_f64_le()))
-            }
+            ColumnType::Long => Ok(ColumnValue::SignedInt(cursor.get_i32_le() as i64)),
+            ColumnType::LongLong => Ok(ColumnValue::SignedInt(cursor.get_i64_le())),
+            ColumnType::Float => Ok(ColumnValue::Float(cursor.get_f32_le())),
+            ColumnType::Double => Ok(ColumnValue::Double(cursor.get_f64_le())),
             ColumnType::Year => {
                 let year = cursor.get_u8() as u16 + 1900;
                 Ok(ColumnValue::Year(year))
@@ -832,9 +876,7 @@ impl BinlogDecoder {
                     microsecond: 0,
                 })
             }
-            ColumnType::Timestamp => {
-                Ok(ColumnValue::Timestamp(cursor.get_u32_le()))
-            }
+            ColumnType::Timestamp => Ok(ColumnValue::Timestamp(cursor.get_u32_le())),
             ColumnType::Timestamp2 => {
                 let _ts = cursor.get_u32();
                 let frac = read_fractional_seconds(cursor, metadata as u8)?;
@@ -852,7 +894,7 @@ impl BinlogDecoder {
                 // Packed datetime2
                 let packed = read_datetime2_packed(cursor)?;
                 let frac = read_fractional_seconds(cursor, metadata as u8)?;
-                
+
                 let year_month = (packed >> 22) & 0x1FFFF;
                 let year = (year_month / 13) as u16;
                 let month = (year_month % 13) as u8;
@@ -860,7 +902,7 @@ impl BinlogDecoder {
                 let hour = ((packed >> 12) & 0x1F) as u8;
                 let minute = ((packed >> 6) & 0x3F) as u8;
                 let second = (packed & 0x3F) as u8;
-                
+
                 Ok(ColumnValue::DateTime {
                     year,
                     month,
@@ -874,14 +916,18 @@ impl BinlogDecoder {
             ColumnType::Time2 => {
                 let packed = read_time2_packed(cursor)?;
                 let frac = read_fractional_seconds(cursor, metadata as u8)?;
-                
+
                 let negative = (packed & 0x800000) == 0;
-                let value = if negative { 0x800000 - (packed & 0x7FFFFF) } else { packed & 0x7FFFFF };
-                
+                let value = if negative {
+                    0x800000 - (packed & 0x7FFFFF)
+                } else {
+                    packed & 0x7FFFFF
+                };
+
                 let hours = ((value >> 12) & 0x3FF) as u8;
                 let minutes = ((value >> 6) & 0x3F) as u8;
                 let seconds = (value & 0x3F) as u8;
-                
+
                 Ok(ColumnValue::Time {
                     hours,
                     minutes,
@@ -898,12 +944,14 @@ impl BinlogDecoder {
                 };
                 let mut bytes = vec![0u8; len];
                 cursor.read_exact(&mut bytes)?;
-                Ok(ColumnValue::String(String::from_utf8_lossy(&bytes).to_string()))
+                Ok(ColumnValue::String(
+                    String::from_utf8_lossy(&bytes).to_string(),
+                ))
             }
             ColumnType::String => {
                 let real_type = (metadata >> 8) as u8;
                 let max_len = metadata & 0xFF;
-                
+
                 if real_type == ColumnType::Enum as u8 {
                     let val = if max_len == 1 {
                         cursor.get_u8() as u16
@@ -926,10 +974,15 @@ impl BinlogDecoder {
                     };
                     let mut bytes = vec![0u8; len];
                     cursor.read_exact(&mut bytes)?;
-                    Ok(ColumnValue::String(String::from_utf8_lossy(&bytes).to_string()))
+                    Ok(ColumnValue::String(
+                        String::from_utf8_lossy(&bytes).to_string(),
+                    ))
                 }
             }
-            ColumnType::Blob | ColumnType::TinyBlob | ColumnType::MediumBlob | ColumnType::LongBlob => {
+            ColumnType::Blob
+            | ColumnType::TinyBlob
+            | ColumnType::MediumBlob
+            | ColumnType::LongBlob => {
                 let len_bytes = metadata as usize;
                 let len = match len_bytes {
                     1 => cursor.get_u8() as usize,
@@ -1004,38 +1057,42 @@ impl BinlogDecoder {
             }
         }
     }
-    
+
     fn decode_xid(&self, data: &[u8]) -> Result<XidEvent> {
         let mut cursor = Cursor::new(data);
         let xid = cursor.get_u64_le();
         Ok(XidEvent { xid })
     }
-    
+
     fn decode_query(&self, data: &[u8]) -> Result<QueryEvent> {
         let mut cursor = Cursor::new(data);
-        
+
         let thread_id = cursor.get_u32_le();
         let exec_time = cursor.get_u32_le();
         let schema_len = cursor.get_u8() as usize;
         let error_code = cursor.get_u16_le();
-        
+
         // Status vars length
         let status_vars_len = cursor.get_u16_le() as usize;
         cursor.advance(status_vars_len);
-        
+
         // Schema
         let mut schema_bytes = vec![0u8; schema_len];
         cursor.read_exact(&mut schema_bytes)?;
         let schema = String::from_utf8_lossy(&schema_bytes).to_string();
         cursor.get_u8(); // null terminator
-        
+
         // Query
         let remaining = data.len() - cursor.position() as usize;
-        let query_len = if remaining > 4 { remaining - 4 } else { remaining }; // Exclude checksum
+        let query_len = if remaining > 4 {
+            remaining - 4
+        } else {
+            remaining
+        }; // Exclude checksum
         let mut query_bytes = vec![0u8; query_len];
         cursor.read_exact(&mut query_bytes)?;
         let query = String::from_utf8_lossy(&query_bytes).to_string();
-        
+
         Ok(QueryEvent {
             thread_id,
             exec_time,
@@ -1044,42 +1101,46 @@ impl BinlogDecoder {
             query,
         })
     }
-    
+
     fn decode_rotate(&self, data: &[u8]) -> Result<RotateEvent> {
         let mut cursor = Cursor::new(data);
-        
+
         let position = cursor.get_u64_le();
-        
+
         let remaining = data.len() - cursor.position() as usize;
-        let name_len = if remaining > 4 { remaining - 4 } else { remaining };
+        let name_len = if remaining > 4 {
+            remaining - 4
+        } else {
+            remaining
+        };
         let mut name_bytes = vec![0u8; name_len];
         cursor.read_exact(&mut name_bytes)?;
         let next_binlog = String::from_utf8_lossy(&name_bytes)
             .trim_end_matches('\0')
             .to_string();
-        
+
         Ok(RotateEvent {
             position,
             next_binlog,
         })
     }
-    
+
     fn decode_gtid(&self, data: &[u8]) -> Result<GtidEvent> {
         let mut cursor = Cursor::new(data);
-        
+
         let flags = cursor.get_u8();
-        
+
         let mut uuid = [0u8; 16];
         cursor.read_exact(&mut uuid)?;
-        
+
         let gno = cursor.get_u64_le();
-        
+
         let logical_clock_ts_type = if cursor.has_remaining() {
             cursor.get_u8()
         } else {
             0
         };
-        
+
         Ok(GtidEvent {
             flags,
             uuid,
@@ -1162,7 +1223,7 @@ fn decode_decimal(cursor: &mut Cursor<&[u8]>, precision: usize, scale: usize) ->
     let int_leftover = int_digits % 9;
     let frac_words = scale / 9;
     let frac_leftover = scale % 9;
-    
+
     let leftover_bytes = |digits: usize| -> usize {
         match digits {
             0 => 0,
@@ -1173,34 +1234,34 @@ fn decode_decimal(cursor: &mut Cursor<&[u8]>, precision: usize, scale: usize) ->
             _ => 4,
         }
     };
-    
+
     let int_leftover_bytes = leftover_bytes(int_leftover);
     let frac_leftover_bytes = leftover_bytes(frac_leftover);
-    
+
     let total_bytes = int_leftover_bytes + int_words * 4 + frac_words * 4 + frac_leftover_bytes;
-    
+
     let mut bytes = vec![0u8; total_bytes];
     cursor.read_exact(&mut bytes)?;
-    
+
     // Flip sign bit (stored inverted for sorting)
     let negative = (bytes[0] & 0x80) == 0;
     bytes[0] ^= 0x80;
-    
+
     // If negative, flip all bytes (stored as complement for sorting)
     if negative {
         for b in bytes.iter_mut() {
             *b = !*b;
         }
     }
-    
+
     let mut result = String::new();
     if negative {
         result.push('-');
     }
-    
+
     let mut cursor_bytes = Cursor::new(bytes.as_slice());
     let mut int_part = String::new();
-    
+
     // Integer leftover
     if int_leftover_bytes > 0 {
         let val = read_be_int(&mut cursor_bytes, int_leftover_bytes)?;
@@ -1208,7 +1269,7 @@ fn decode_decimal(cursor: &mut Cursor<&[u8]>, precision: usize, scale: usize) ->
             int_part.push_str(&val.to_string());
         }
     }
-    
+
     // Integer words
     for _ in 0..int_words {
         let val = cursor_bytes.get_u32();
@@ -1221,29 +1282,29 @@ fn decode_decimal(cursor: &mut Cursor<&[u8]>, precision: usize, scale: usize) ->
             int_part.push_str(&format!("{:09}", val));
         }
     }
-    
+
     if int_part.is_empty() {
         int_part.push('0');
     }
-    
+
     result.push_str(&int_part);
-    
+
     if scale > 0 {
         result.push('.');
-        
+
         // Fractional words
         for _ in 0..frac_words {
             let val = cursor_bytes.get_u32();
             result.push_str(&format!("{:09}", val));
         }
-        
+
         // Fractional leftover
         if frac_leftover_bytes > 0 {
             let val = read_be_int(&mut cursor_bytes, frac_leftover_bytes)?;
             result.push_str(&format!("{:0width$}", val, width = frac_leftover));
         }
     }
-    
+
     Ok(result)
 }
 
@@ -1258,7 +1319,7 @@ fn read_be_int(cursor: &mut Cursor<&[u8]>, bytes: usize) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_event_type_from_u8() {
         assert_eq!(EventType::from_u8(15), EventType::FormatDescriptionEvent);
@@ -1271,7 +1332,7 @@ mod tests {
         assert_eq!(EventType::from_u8(33), EventType::GtidLogEvent);
         assert_eq!(EventType::from_u8(255), EventType::Unknown);
     }
-    
+
     #[test]
     fn test_is_row_event() {
         assert!(EventType::WriteRowsEventV2.is_row_event());
@@ -1284,7 +1345,7 @@ mod tests {
         assert!(!EventType::FormatDescriptionEvent.is_row_event());
         assert!(!EventType::TableMapEvent.is_row_event());
     }
-    
+
     #[test]
     fn test_count_set_bits() {
         assert_eq!(count_set_bits(&[0b11111111]), 8);
@@ -1294,7 +1355,7 @@ mod tests {
         assert_eq!(count_set_bits(&[0b00000001]), 1);
         assert_eq!(count_set_bits(&[]), 0);
     }
-    
+
     #[test]
     fn test_is_bit_set() {
         let bitmap = vec![0b00000101];
@@ -1302,24 +1363,30 @@ mod tests {
         assert!(!is_bit_set(&bitmap, 1));
         assert!(is_bit_set(&bitmap, 2));
         assert!(!is_bit_set(&bitmap, 3));
-        
+
         // Multi-byte bitmap
         let bitmap2 = vec![0b10000000, 0b00000001];
         assert!(is_bit_set(&bitmap2, 7));
         assert!(is_bit_set(&bitmap2, 8));
         assert!(!is_bit_set(&bitmap2, 0));
     }
-    
+
     #[test]
     fn test_gtid_event_uuid_string() {
         let event = GtidEvent {
             flags: 0,
-            uuid: [0x3E, 0x11, 0xFA, 0x47, 0x71, 0xCA, 0x11, 0xE1, 0x9E, 0x33, 0xC8, 0x0A, 0xA9, 0x42, 0x95, 0x62],
+            uuid: [
+                0x3E, 0x11, 0xFA, 0x47, 0x71, 0xCA, 0x11, 0xE1, 0x9E, 0x33, 0xC8, 0x0A, 0xA9, 0x42,
+                0x95, 0x62,
+            ],
             gno: 1,
             logical_clock_ts_type: 0,
         };
         assert_eq!(event.uuid_string(), "3e11fa47-71ca-11e1-9e33-c80aa9429562");
-        assert_eq!(event.gtid_string(), "3e11fa47-71ca-11e1-9e33-c80aa9429562:1");
+        assert_eq!(
+            event.gtid_string(),
+            "3e11fa47-71ca-11e1-9e33-c80aa9429562:1"
+        );
     }
 
     #[test]
@@ -1406,11 +1473,26 @@ mod tests {
         let _ = ColumnValue::Decimal("123.45".to_string());
         let _ = ColumnValue::String("hello".to_string());
         let _ = ColumnValue::Bytes(vec![1, 2, 3]);
-        let _ = ColumnValue::Date { year: 2024, month: 1, day: 15 };
-        let _ = ColumnValue::Time { hours: 12, minutes: 30, seconds: 45, microseconds: 0, negative: false };
-        let _ = ColumnValue::DateTime { 
-            year: 2024, month: 1, day: 15, 
-            hour: 12, minute: 30, second: 45, microsecond: 0 
+        let _ = ColumnValue::Date {
+            year: 2024,
+            month: 1,
+            day: 15,
+        };
+        let _ = ColumnValue::Time {
+            hours: 12,
+            minutes: 30,
+            seconds: 45,
+            microseconds: 0,
+            negative: false,
+        };
+        let _ = ColumnValue::DateTime {
+            year: 2024,
+            month: 1,
+            day: 15,
+            hour: 12,
+            minute: 30,
+            second: 45,
+            microsecond: 0,
         };
         let _ = ColumnValue::Timestamp(1705312245);
         let _ = ColumnValue::Year(2024);
@@ -1426,7 +1508,7 @@ mod tests {
             before: Some(vec![ColumnValue::SignedInt(1)]),
             after: Some(vec![ColumnValue::SignedInt(2)]),
         };
-        
+
         let event = RowsEvent {
             table_id: 42,
             flags: 0,
@@ -1435,7 +1517,7 @@ mod tests {
             columns_after_image: Some(vec![0b1]),
             rows: vec![row_data],
         };
-        
+
         assert_eq!(event.table_id, 42);
         assert_eq!(event.rows.len(), 1);
         assert!(event.rows[0].before.is_some());

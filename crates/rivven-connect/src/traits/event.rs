@@ -184,13 +184,11 @@ impl SourceEvent {
     /// Get the "before" value for CDC events (update/delete old data)
     pub fn before(&self) -> Option<&serde_json::Value> {
         match self.event_type {
-            SourceEventType::Update => self.data.get("before").and_then(|v| {
-                if v.is_null() {
-                    None
-                } else {
-                    Some(v)
-                }
-            }),
+            SourceEventType::Update => {
+                self.data
+                    .get("before")
+                    .and_then(|v| if v.is_null() { None } else { Some(v) })
+            }
             SourceEventType::Delete => Some(&self.data),
             _ => None,
         }
@@ -328,7 +326,10 @@ impl SourceEventType {
 
     /// Check if this is a data operation
     pub fn is_data(&self) -> bool {
-        matches!(self, Self::Record | Self::Insert | Self::Update | Self::Delete)
+        matches!(
+            self,
+            Self::Record | Self::Insert | Self::Update | Self::Delete
+        )
     }
 
     /// Check if this is a CDC operation

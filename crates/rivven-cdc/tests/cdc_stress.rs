@@ -203,7 +203,10 @@ async fn test_sustained_load() {
         capture_rate * 100.0
     );
 
-    println!("✅ Sustained load test passed! Capture rate: {:.1}%", capture_rate * 100.0);
+    println!(
+        "✅ Sustained load test passed! Capture rate: {:.1}%",
+        capture_rate * 100.0
+    );
 
     ctx.cleanup().await.unwrap();
     rivven.stop_cdc().await.unwrap();
@@ -329,9 +332,13 @@ async fn test_mixed_workload_stress() {
             name TEXT NOT NULL,
             value INTEGER DEFAULT 0,
             updated_at TIMESTAMP DEFAULT NOW()
-        )"
-    ).await.unwrap();
-    pg.execute("ALTER TABLE stress_mixed REPLICA IDENTITY FULL").await.unwrap();
+        )",
+    )
+    .await
+    .unwrap();
+    pg.execute("ALTER TABLE stress_mixed REPLICA IDENTITY FULL")
+        .await
+        .unwrap();
 
     let mut rivven = RivvenTestContext::new().await.unwrap();
     rivven
@@ -361,7 +368,7 @@ async fn test_mixed_workload_stress() {
 
     for op in &operations {
         pg.execute(op).await.unwrap();
-        
+
         if op.starts_with("INSERT") {
             insert_count += 1;
         } else if op.starts_with("UPDATE") {
@@ -393,9 +400,18 @@ async fn test_mixed_workload_stress() {
     println!("\n📡 CDC captured {} events", events.len());
 
     // Count by operation type
-    let insert_events = events.iter().filter(|e| matches!(e.op, CdcOp::Insert)).count();
-    let update_events = events.iter().filter(|e| matches!(e.op, CdcOp::Update)).count();
-    let delete_events = events.iter().filter(|e| matches!(e.op, CdcOp::Delete)).count();
+    let insert_events = events
+        .iter()
+        .filter(|e| matches!(e.op, CdcOp::Insert))
+        .count();
+    let update_events = events
+        .iter()
+        .filter(|e| matches!(e.op, CdcOp::Update))
+        .count();
+    let delete_events = events
+        .iter()
+        .filter(|e| matches!(e.op, CdcOp::Delete))
+        .count();
 
     println!("   Insert events: {}", insert_events);
     println!("   Update events: {}", update_events);
@@ -493,7 +509,10 @@ async fn test_burst_recovery() {
     let events = rivven.parse_events(&messages).unwrap();
     events.assert().has_count(total_expected);
 
-    println!("✅ Burst recovery test passed! All {} events captured.", total_expected);
+    println!(
+        "✅ Burst recovery test passed! All {} events captured.",
+        total_expected
+    );
 
     ctx.cleanup().await.unwrap();
     rivven.stop_cdc().await.unwrap();
@@ -631,7 +650,7 @@ async fn test_large_transaction() {
             )
         })
         .collect();
-    
+
     let stmt_refs: Vec<&str> = statements.iter().map(|s| s.as_str()).collect();
     pg.execute_batch(&stmt_refs).await.unwrap();
 
@@ -651,7 +670,10 @@ async fn test_large_transaction() {
     let events = rivven.parse_events(&messages).unwrap();
     events.assert().has_count(tx_size);
 
-    println!("✅ Large transaction test passed! All {} events captured.", tx_size);
+    println!(
+        "✅ Large transaction test passed! All {} events captured.",
+        tx_size
+    );
 
     ctx.cleanup().await.unwrap();
     rivven.stop_cdc().await.unwrap();

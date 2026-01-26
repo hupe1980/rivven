@@ -86,11 +86,7 @@ pub enum ElectionEvent {
 
 impl LeaderElection {
     /// Create a new leader election
-    pub fn new(
-        node_id: NodeId,
-        connector_id: ConnectorId,
-        failure_timeout: Duration,
-    ) -> Self {
+    pub fn new(node_id: NodeId, connector_id: ConnectorId, failure_timeout: Duration) -> Self {
         let (event_tx, _) = broadcast::channel(16);
 
         Self {
@@ -164,15 +160,17 @@ impl LeaderElection {
 
         // Must be candidate and generation must match
         if *state != ElectionState::Candidate {
-            return Err(DistributedError::InvalidStateTransition(
-                format!("Cannot claim leadership from state {:?}", *state),
-            ));
+            return Err(DistributedError::InvalidStateTransition(format!(
+                "Cannot claim leadership from state {:?}",
+                *state
+            )));
         }
 
         if generation < *current_gen {
-            return Err(DistributedError::InvalidStateTransition(
-                format!("Stale generation {} < {}", generation, *current_gen),
-            ));
+            return Err(DistributedError::InvalidStateTransition(format!(
+                "Stale generation {} < {}",
+                generation, *current_gen
+            )));
         }
 
         *state = ElectionState::Leader;
@@ -202,9 +200,10 @@ impl LeaderElection {
 
         // Check generation
         if leader_info.generation < *generation {
-            return Err(DistributedError::InvalidStateTransition(
-                format!("Stale leader generation {} < {}", leader_info.generation, *generation),
-            ));
+            return Err(DistributedError::InvalidStateTransition(format!(
+                "Stale leader generation {} < {}",
+                leader_info.generation, *generation
+            )));
         }
 
         // If we were leader, we lost it
@@ -220,7 +219,9 @@ impl LeaderElection {
         *state = ElectionState::Follower;
         *generation = leader_info.generation;
 
-        let _ = self.event_tx.send(ElectionEvent::NewLeader(leader_info.clone()));
+        let _ = self
+            .event_tx
+            .send(ElectionEvent::NewLeader(leader_info.clone()));
 
         *leader = Some(leader_info);
 
@@ -228,7 +229,11 @@ impl LeaderElection {
     }
 
     /// Process a heartbeat from the leader
-    pub fn process_heartbeat(&self, leader_id: &NodeId, generation: Generation) -> DistributedResult<()> {
+    pub fn process_heartbeat(
+        &self,
+        leader_id: &NodeId,
+        generation: Generation,
+    ) -> DistributedResult<()> {
         let mut leader = self.leader.write();
         let current_gen = self.generation.read();
 
@@ -370,9 +375,7 @@ impl ElectionManager {
         let elections = self.elections.read();
         elections
             .iter()
-            .filter_map(|(id, e)| {
-                e.check_leader_timeout().map(|node| (id.clone(), node))
-            })
+            .filter_map(|(id, e)| e.check_leader_timeout().map(|node| (id.clone(), node)))
             .collect()
     }
 }
@@ -414,7 +417,8 @@ mod tests {
         let node2 = NodeId::new("node-2");
         let connector = ConnectorId::new("test-cdc");
 
-        let election = LeaderElection::new(node1.clone(), connector.clone(), Duration::from_secs(10));
+        let election =
+            LeaderElection::new(node1.clone(), connector.clone(), Duration::from_secs(10));
 
         // Accept external leader
         let leader_info = LeaderInfo::new(node2.clone(), connector, Generation::new(5));
@@ -429,7 +433,8 @@ mod tests {
     fn test_stale_generation_rejected() {
         let node = NodeId::new("node-1");
         let connector = ConnectorId::new("test-cdc");
-        let election = LeaderElection::new(node.clone(), connector.clone(), Duration::from_secs(10));
+        let election =
+            LeaderElection::new(node.clone(), connector.clone(), Duration::from_secs(10));
 
         // Start election - this sets generation to 1
         election.start_election().unwrap();
@@ -437,7 +442,7 @@ mod tests {
 
         // Claim leadership to become leader, then we can start again
         election.claim_leadership(Generation::new(1)).unwrap();
-        
+
         // Step down and start a new election (generation becomes 2)
         election.step_down();
         election.start_election().unwrap();
@@ -446,6 +451,6 @@ mod tests {
         // Try to accept stale leader with generation 1
         let leader_info = LeaderInfo::new(NodeId::new("node-2"), connector, Generation::new(1));
         let result = election.accept_leader(leader_info);
-        assert!(result.is_err());  // Should reject because gen 1 < gen 2
+        assert!(result.is_err()); // Should reject because gen 1 < gen 2
     }
 }

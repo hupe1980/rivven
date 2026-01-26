@@ -7,8 +7,8 @@
 //!
 //! Run with: cargo bench -p rivven-cdc
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
-use rivven_cdc::{CdcEvent, CdcOp, CdcFilter, CdcFilterConfig, PostgresTypeMapper};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use rivven_cdc::{CdcEvent, CdcFilter, CdcFilterConfig, CdcOp, PostgresTypeMapper};
 use serde_json::json;
 
 fn benchmark_schema_inference(c: &mut Criterion) {
@@ -156,7 +156,11 @@ fn benchmark_filter_evaluation(c: &mut Criterion) {
             "*_log".to_string(),
             "temp_*".to_string(),
         ],
-        mask_columns: vec!["password".to_string(), "ssn".to_string(), "credit_card".to_string()],
+        mask_columns: vec![
+            "password".to_string(),
+            "ssn".to_string(),
+            "credit_card".to_string(),
+        ],
         global_exclude_columns: vec!["internal_id".to_string(), "created_by".to_string()],
         ..Default::default()
     };

@@ -42,8 +42,8 @@ pub use client::{SchemaRegistry, SchemaRegistryClient};
 pub use compatibility::{CompatibilityChecker, CompatibilityResult};
 pub use embedded::{EmbeddedRegistry, EmbeddedRegistryConfig};
 pub use external::{ExternalRegistry, ExternalRegistryConfig};
-pub use inference::{SchemaInference, InferredSchema, infer_schema, infer_schema_from_samples};
+pub use inference::{infer_schema, infer_schema_from_samples, InferredSchema, SchemaInference};
 pub use types::{
-    CompatibilityLevel, Schema, SchemaId, SchemaType, SchemaVersion, Subject, SubjectVersion,
-    SchemaRegistryConfig, SchemaRegistryError, SchemaRegistryResult,
+    CompatibilityLevel, Schema, SchemaId, SchemaRegistryConfig, SchemaRegistryError,
+    SchemaRegistryResult, SchemaType, SchemaVersion, Subject, SubjectVersion,
 };

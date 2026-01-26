@@ -54,16 +54,37 @@ pub mod common;
 
 // Re-export common types at crate root
 pub use common::{
-    CdcError, CdcEvent, CdcOp, CdcSource, Result,
-    CdcFilter, CdcFilterConfig, TableColumnConfig,
-    RateLimiter, CircuitBreaker, CircuitState, ExponentialBackoff,
-    Validator, CONNECTION_TIMEOUT_SECS, IO_TIMEOUT_SECS, MAX_MESSAGE_SIZE,
-    // Phase 3.5: Snapshot Support
-    SnapshotCoordinator, SnapshotConfig, SnapshotProgress, SnapshotState, ProgressStore,
+    CdcError,
+    CdcEvent,
+    CdcFilter,
+    CdcFilterConfig,
+    CdcOp,
+    CdcSource,
+    CircuitBreaker,
+    CircuitState,
+    CompatibilityMode,
     // Phase 3.6: Routing
-    EventRouter, RouteRule, RouteCondition, RouteDecision,
+    EventRouter,
+    ExponentialBackoff,
+    ProgressStore,
+    RateLimiter,
+    Result,
+    RouteCondition,
+    RouteDecision,
+    RouteRule,
     // Schema Evolution
-    SchemaTracker, SchemaVersion, CompatibilityMode,
+    SchemaTracker,
+    SchemaVersion,
+    SnapshotConfig,
+    // Phase 3.5: Snapshot Support
+    SnapshotCoordinator,
+    SnapshotProgress,
+    SnapshotState,
+    TableColumnConfig,
+    Validator,
+    CONNECTION_TIMEOUT_SECS,
+    IO_TIMEOUT_SECS,
+    MAX_MESSAGE_SIZE,
 };
 
 // PostgreSQL CDC - feature-gated

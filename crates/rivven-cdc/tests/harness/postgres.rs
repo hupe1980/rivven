@@ -30,10 +30,14 @@ impl PostgresTestContainer {
         let container = Postgres::default()
             .with_cmd(vec![
                 "postgres",
-                "-c", "wal_level=logical",
-                "-c", "max_replication_slots=50",
-                "-c", "max_wal_senders=50",
-                "-c", "wal_sender_timeout=0",
+                "-c",
+                "wal_level=logical",
+                "-c",
+                "max_replication_slots=50",
+                "-c",
+                "max_wal_senders=50",
+                "-c",
+                "wal_sender_timeout=0",
             ])
             .start()
             .await
@@ -153,7 +157,10 @@ impl PostgresTestContainer {
         let client = self.new_client().await?;
         client
             .execute(
-                &format!("SELECT pg_create_logical_replication_slot('{}', 'pgoutput')", name),
+                &format!(
+                    "SELECT pg_create_logical_replication_slot('{}', 'pgoutput')",
+                    name
+                ),
                 &[],
             )
             .await?;
@@ -274,7 +281,7 @@ impl PostgresTestContainer {
     /// Cleanup any leftover test replication slots from previous runs
     pub async fn cleanup_test_slots(&self) -> Result<()> {
         let client = self.new_client().await?;
-        
+
         // Find slots that match our test pattern
         let rows = client
             .query(
@@ -282,11 +289,11 @@ impl PostgresTestContainer {
                 &[],
             )
             .await?;
-        
+
         for row in rows {
             let slot_name: &str = row.get(0);
             tracing::debug!("Cleaning up leftover slot: {}", slot_name);
-            
+
             // Terminate any active connection
             let _ = client
                 .execute(
@@ -294,9 +301,9 @@ impl PostgresTestContainer {
                     &[&slot_name],
                 )
                 .await;
-            
+
             sleep(Duration::from_millis(100)).await;
-            
+
             // Drop the slot
             let _ = client
                 .execute(
@@ -305,7 +312,7 @@ impl PostgresTestContainer {
                 )
                 .await;
         }
-        
+
         Ok(())
     }
 }
@@ -338,11 +345,17 @@ impl TestContext {
             "SELECT pg_terminate_backend(active_pid) FROM pg_replication_slots WHERE slot_name = '{}'",
             self.slot_name
         )).await;
-        
+
         sleep(Duration::from_millis(100)).await;
         self.pg.drop_replication_slot(&self.slot_name).await.ok();
-        let _ = self.pg.execute(&format!("DROP PUBLICATION IF EXISTS {}", self.publication_name)).await;
-        
+        let _ = self
+            .pg
+            .execute(&format!(
+                "DROP PUBLICATION IF EXISTS {}",
+                self.publication_name
+            ))
+            .await;
+
         Ok(())
     }
 }

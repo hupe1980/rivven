@@ -131,7 +131,9 @@ impl BatchConfigBuilder {
             max_events: self.max_events.unwrap_or(default.max_events),
             max_bytes: self.max_bytes.unwrap_or(default.max_bytes),
             max_delay: self.max_delay.unwrap_or(default.max_delay),
-            preserve_transactions: self.preserve_transactions.unwrap_or(default.preserve_transactions),
+            preserve_transactions: self
+                .preserve_transactions
+                .unwrap_or(default.preserve_transactions),
             min_events: self.min_events.unwrap_or(default.min_events),
         }
     }

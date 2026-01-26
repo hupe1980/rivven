@@ -1,7 +1,7 @@
 //! Coordination protocol messages for distributed Connect
 
-use crate::distributed::types::*;
 use crate::distributed::task::{TaskState, TaskStatus};
+use crate::distributed::types::*;
 use serde::{Deserialize, Serialize};
 
 /// Protocol version for coordination messages
@@ -193,7 +193,10 @@ pub enum WorkerAction {
     /// Resume a task
     ResumeTask { task_id: TaskId },
     /// Update task configuration
-    UpdateTask { task_id: TaskId, config: serde_json::Value },
+    UpdateTask {
+        task_id: TaskId,
+        config: serde_json::Value,
+    },
 }
 
 /// Task assignment message

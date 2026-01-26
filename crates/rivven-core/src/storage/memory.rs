@@ -4,7 +4,13 @@ use super::traits::StorageBackend;
 pub struct MemoryStorage;
 
 impl StorageBackend for MemoryStorage {
-    fn store(&self, _topic: &str, _partition: u32, _offset: u64, _data: &[u8]) -> crate::Result<()> {
+    fn store(
+        &self,
+        _topic: &str,
+        _partition: u32,
+        _offset: u64,
+        _data: &[u8],
+    ) -> crate::Result<()> {
         // No-op for memory storage
         Ok(())
     }

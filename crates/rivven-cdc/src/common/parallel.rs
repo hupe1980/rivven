@@ -166,7 +166,7 @@ impl TableWorkerStats {
 
     pub fn record_event(&self, latency: Duration) {
         self.events_processed.fetch_add(1, Ordering::Relaxed);
-        
+
         // Exponential moving average for latency
         let latency_us = latency.as_micros() as u64;
         let current = self.avg_latency_us.load(Ordering::Relaxed);
@@ -215,7 +215,10 @@ impl ParallelSourceStats {
 
     pub async fn register_table(&self, table: &str) -> Arc<TableWorkerStats> {
         let stats = Arc::new(TableWorkerStats::new());
-        self.tables.write().await.insert(table.to_string(), stats.clone());
+        self.tables
+            .write()
+            .await
+            .insert(table.to_string(), stats.clone());
         stats
     }
 
@@ -311,10 +314,10 @@ impl TableAssignment {
 pub trait TableEventProducer: Send + Sync {
     /// Start producing events for a table.
     async fn start(&mut self, table: &TableAssignment) -> Result<()>;
-    
+
     /// Get next event (None = no more events).
     async fn next_event(&mut self) -> Result<Option<CdcEvent>>;
-    
+
     /// Stop producing events.
     async fn stop(&mut self) -> Result<()>;
 }
@@ -360,9 +363,13 @@ impl ParallelCoordinator {
         F: FnOnce() -> P + Send + 'static,
         P: TableEventProducer + 'static,
     {
-        let permit = self.semaphore.clone().acquire_owned().await
+        let permit = self
+            .semaphore
+            .clone()
+            .acquire_owned()
+            .await
             .map_err(|_| CdcError::replication("Semaphore closed"))?;
-        
+
         let table_name = table.full_name();
         let table_for_worker = table.clone();
         let table_stats = self.stats.register_table(&table_name).await;
@@ -379,7 +386,11 @@ impl ParallelCoordinator {
 
             let mut producer = producer_factory();
             if let Err(e) = producer.start(&table_for_worker).await {
-                error!("Failed to start producer for {}: {}", table_for_worker.full_name(), e);
+                error!(
+                    "Failed to start producer for {}: {}",
+                    table_for_worker.full_name(),
+                    e
+                );
                 stats.worker_stopped();
                 return;
             }
@@ -448,7 +459,11 @@ impl ParallelCoordinator {
             }
 
             if let Err(e) = producer.stop().await {
-                warn!("Error stopping producer for {}: {}", table_for_worker.full_name(), e);
+                warn!(
+                    "Error stopping producer for {}: {}",
+                    table_for_worker.full_name(),
+                    e
+                );
             }
 
             stats.worker_stopped();
@@ -509,10 +524,15 @@ impl ParallelCoordinator {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
                 worker.handle.abort();
-                warn!("Aborted worker for {} due to timeout", worker.table.full_name());
+                warn!(
+                    "Aborted worker for {} due to timeout",
+                    worker.table.full_name()
+                );
             } else {
                 match tokio::time::timeout(remaining, worker.handle).await {
-                    Ok(Ok(())) => debug!("Worker for {} stopped gracefully", worker.table.full_name()),
+                    Ok(Ok(())) => {
+                        debug!("Worker for {} stopped gracefully", worker.table.full_name())
+                    }
                     Ok(Err(e)) => warn!("Worker for {} panicked: {}", worker.table.full_name(), e),
                     Err(_) => {
                         warn!("Worker for {} timed out", worker.table.full_name());
@@ -631,10 +651,7 @@ mod tests {
         let config = ParallelConfig::default();
         let coordinator = ParallelCoordinator::new(config);
 
-        let events = vec![
-            make_event("users", 1),
-            make_event("users", 2),
-        ];
+        let events = vec![make_event("users", 1), make_event("users", 2)];
 
         let table = TableAssignment::new("public", "users");
         let events_clone = events.clone();
@@ -648,11 +665,10 @@ mod tests {
         // Receive events
         let mut received = Vec::new();
         let mut rx = coordinator.take_receiver().await.unwrap();
-        
-        while let Ok(Some(event)) = tokio::time::timeout(
-            Duration::from_millis(100),
-            rx.recv(),
-        ).await {
+
+        while let Ok(Some(event)) =
+            tokio::time::timeout(Duration::from_millis(100), rx.recv()).await
+        {
             received.push(event);
         }
 
@@ -663,18 +679,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_parallel_coordinator_multiple_tables() {
-        let config = ParallelConfig::builder()
-            .concurrency(4)
-            .build();
+        let config = ParallelConfig::builder().concurrency(4).build();
         let coordinator = ParallelCoordinator::new(config);
 
         // Add multiple tables
         for i in 0..3 {
             let table_name = format!("table_{}", i);
-            let events = vec![
-                make_event(&table_name, 1),
-                make_event(&table_name, 2),
-            ];
+            let events = vec![make_event(&table_name, 1), make_event(&table_name, 2)];
             let table = TableAssignment::new("public", &table_name);
             coordinator
                 .add_table(table, move || MemoryEventProducer::new(events))
@@ -686,11 +697,8 @@ mod tests {
 
         let mut rx = coordinator.take_receiver().await.unwrap();
         let mut count = 0;
-        
-        while let Ok(Some(_)) = tokio::time::timeout(
-            Duration::from_millis(200),
-            rx.recv(),
-        ).await {
+
+        while let Ok(Some(_)) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await {
             count += 1;
         }
 
@@ -702,7 +710,7 @@ mod tests {
     #[tokio::test]
     async fn test_worker_stats() {
         let stats = TableWorkerStats::new();
-        
+
         stats.record_event(Duration::from_micros(100));
         stats.record_event(Duration::from_micros(200));
         stats.record_dropped();
@@ -715,7 +723,7 @@ mod tests {
     #[tokio::test]
     async fn test_parallel_source_stats() {
         let stats = ParallelSourceStats::new();
-        
+
         stats.register_table("users").await;
         stats.record_event();
         stats.record_event();
@@ -745,10 +753,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_event_producer() {
-        let events = vec![
-            make_event("users", 1),
-            make_event("users", 2),
-        ];
+        let events = vec![make_event("users", 1), make_event("users", 2)];
         let mut producer = MemoryEventProducer::new(events);
 
         let table = TableAssignment::new("public", "users");

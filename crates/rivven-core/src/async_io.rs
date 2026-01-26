@@ -271,7 +271,7 @@ impl AsyncFile {
             .read(true)
             .write(true)
             .create(true)
-            .truncate(false)  // Preserve existing data
+            .truncate(false) // Preserve existing data
             .open(path)
             .await?;
 
@@ -284,10 +284,7 @@ impl AsyncFile {
 
     /// Open a file read-only
     pub async fn open_read<P: AsRef<Path>>(path: P, io: Arc<AsyncIo>) -> io::Result<Self> {
-        let file = OpenOptions::new()
-            .read(true)
-            .open(path)
-            .await?;
+        let file = OpenOptions::new().read(true).open(path).await?;
 
         Ok(Self {
             file: TokioMutex::new(file),
@@ -299,26 +296,30 @@ impl AsyncFile {
     /// Async read at a specific offset
     pub async fn read_at(&self, offset: u64, len: usize) -> io::Result<Bytes> {
         self.io.stats.inflight.fetch_add(1, Ordering::Relaxed);
-        
+
         let result = async {
             let mut file = self.file.lock().await;
             file.seek(io::SeekFrom::Start(offset)).await?;
-            
+
             let mut buf = BytesMut::with_capacity(len);
             buf.resize(len, 0);
-            
+
             let bytes_read = file.read(&mut buf).await?;
             buf.truncate(bytes_read);
-            
+
             Ok::<_, io::Error>(buf.freeze())
-        }.await;
+        }
+        .await;
 
         self.io.stats.inflight.fetch_sub(1, Ordering::Relaxed);
 
         match &result {
             Ok(data) => {
                 self.io.stats.read_ops.fetch_add(1, Ordering::Relaxed);
-                self.io.stats.bytes_read.fetch_add(data.len() as u64, Ordering::Relaxed);
+                self.io
+                    .stats
+                    .bytes_read
+                    .fetch_add(data.len() as u64, Ordering::Relaxed);
             }
             Err(_) => {
                 self.io.stats.failed_ops.fetch_add(1, Ordering::Relaxed);
@@ -335,22 +336,26 @@ impl AsyncFile {
         let result = async {
             let mut file = self.file.lock().await;
             file.seek(io::SeekFrom::Start(offset)).await?;
-            
+
             let written = file.write(data).await?;
-            
+
             if self.io.config.sync_on_write {
                 file.sync_all().await?;
             }
-            
+
             Ok::<_, io::Error>(written)
-        }.await;
+        }
+        .await;
 
         self.io.stats.inflight.fetch_sub(1, Ordering::Relaxed);
 
         match &result {
             Ok(written) => {
                 self.io.stats.write_ops.fetch_add(1, Ordering::Relaxed);
-                self.io.stats.bytes_written.fetch_add(*written as u64, Ordering::Relaxed);
+                self.io
+                    .stats
+                    .bytes_written
+                    .fetch_add(*written as u64, Ordering::Relaxed);
             }
             Err(_) => {
                 self.io.stats.failed_ops.fetch_add(1, Ordering::Relaxed);
@@ -364,7 +369,8 @@ impl AsyncFile {
     pub async fn read(&self, len: usize) -> io::Result<Bytes> {
         let pos = self.position.load(Ordering::Relaxed);
         let data = self.read_at(pos, len).await?;
-        self.position.fetch_add(data.len() as u64, Ordering::Relaxed);
+        self.position
+            .fetch_add(data.len() as u64, Ordering::Relaxed);
         Ok(data)
     }
 
@@ -429,8 +435,16 @@ pub struct BatchBuilder {
 }
 
 enum BatchOp {
-    Read { path: std::path::PathBuf, offset: u64, len: usize },
-    Write { path: std::path::PathBuf, offset: u64, data: Vec<u8> },
+    Read {
+        path: std::path::PathBuf,
+        offset: u64,
+        len: usize,
+    },
+    Write {
+        path: std::path::PathBuf,
+        offset: u64,
+        data: Vec<u8>,
+    },
 }
 
 /// Result of a batch operation
@@ -478,31 +492,35 @@ impl BatchBuilder {
         use futures::future::join_all;
 
         let io = self.io;
-        let futures: Vec<_> = self.ops.into_iter().map(|op| {
-            let io = io.clone();
-            async move {
-                match op {
-                    BatchOp::Read { path, offset, len } => {
-                        match AsyncFile::open(&path, io).await {
-                            Ok(file) => match file.read_at(offset, len).await {
-                                Ok(data) => BatchResult::Read(data),
+        let futures: Vec<_> = self
+            .ops
+            .into_iter()
+            .map(|op| {
+                let io = io.clone();
+                async move {
+                    match op {
+                        BatchOp::Read { path, offset, len } => {
+                            match AsyncFile::open(&path, io).await {
+                                Ok(file) => match file.read_at(offset, len).await {
+                                    Ok(data) => BatchResult::Read(data),
+                                    Err(e) => BatchResult::Error(e),
+                                },
                                 Err(e) => BatchResult::Error(e),
-                            },
-                            Err(e) => BatchResult::Error(e),
+                            }
                         }
-                    }
-                    BatchOp::Write { path, offset, data } => {
-                        match AsyncFile::open(&path, io).await {
-                            Ok(file) => match file.write_at(offset, &data).await {
-                                Ok(written) => BatchResult::Write(written),
+                        BatchOp::Write { path, offset, data } => {
+                            match AsyncFile::open(&path, io).await {
+                                Ok(file) => match file.write_at(offset, &data).await {
+                                    Ok(written) => BatchResult::Write(written),
+                                    Err(e) => BatchResult::Error(e),
+                                },
                                 Err(e) => BatchResult::Error(e),
-                            },
-                            Err(e) => BatchResult::Error(e),
+                            }
                         }
                     }
                 }
-            }
-        }).collect();
+            })
+            .collect();
 
         join_all(futures).await
     }
@@ -523,7 +541,11 @@ pub struct AsyncSegment {
 
 impl AsyncSegment {
     /// Create or open a segment
-    pub async fn open<P: AsRef<Path>>(path: P, base_offset: u64, io: Arc<AsyncIo>) -> io::Result<Self> {
+    pub async fn open<P: AsRef<Path>>(
+        path: P,
+        base_offset: u64,
+        io: Arc<AsyncIo>,
+    ) -> io::Result<Self> {
         let file = AsyncFile::open(&path, io).await?;
         let size = file.size().await.unwrap_or(0);
 
@@ -647,14 +669,14 @@ mod tests {
     async fn test_batch_operations() {
         let io = AsyncIo::new(AsyncIoConfig::default()).unwrap();
         let dir = tempdir().unwrap();
-        
+
         let path1 = dir.path().join("batch1.dat");
         let path2 = dir.path().join("batch2.dat");
 
         // First create files with some data
         let file1 = AsyncFile::open(&path1, io.clone()).await.unwrap();
         let file2 = AsyncFile::open(&path2, io.clone()).await.unwrap();
-        
+
         file1.write_at(0, b"file1 data").await.unwrap();
         file2.write_at(0, b"file2 data").await.unwrap();
 
@@ -666,12 +688,12 @@ mod tests {
             .await;
 
         assert_eq!(results.len(), 2);
-        
+
         match &results[0] {
             BatchResult::Read(data) => assert_eq!(&data[..], b"file1 data"),
             _ => panic!("Expected read result"),
         }
-        
+
         match &results[1] {
             BatchResult::Read(data) => assert_eq!(&data[..], b"file2 data"),
             _ => panic!("Expected read result"),
@@ -686,10 +708,10 @@ mod tests {
         let path = dir.path().join("durable.dat");
 
         let file = AsyncFile::open(&path, io.clone()).await.unwrap();
-        
+
         // Write with sync
         file.write_at(0, b"durable data").await.unwrap();
-        
+
         // Explicit sync
         file.sync().await.unwrap();
 

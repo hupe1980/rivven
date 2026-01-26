@@ -5,8 +5,7 @@
 
 use clap::{Parser, ValueEnum};
 use rivven_cluster::config::{
-    ClusterConfig, ClusterMode as ClusterModeConfig,
-    SwimConfig, RaftConfig, ReplicationConfig,
+    ClusterConfig, ClusterMode as ClusterModeConfig, RaftConfig, ReplicationConfig, SwimConfig,
 };
 use rivven_core::Config;
 use std::net::SocketAddr;
@@ -318,19 +317,18 @@ impl Cli {
         self.cluster_bind
             .unwrap_or_else(|| SocketAddr::new(self.bind.ip(), self.bind.port() + 1))
     }
-    
+
     /// Get effective node ID (generated from hostname if not specified)
     pub fn effective_node_id(&self) -> String {
-        self.node_id.clone()
-            .unwrap_or_else(|| {
-                format!(
-                    "{}-{}",
-                    gethostname::gethostname()
-                        .to_string_lossy()
-                        .into_owned(),
-                    self.cluster_bind.map(|a| a.port()).unwrap_or(self.bind.port() + 1)
-                )
-            })
+        self.node_id.clone().unwrap_or_else(|| {
+            format!(
+                "{}-{}",
+                gethostname::gethostname().to_string_lossy().into_owned(),
+                self.cluster_bind
+                    .map(|a| a.port())
+                    .unwrap_or(self.bind.port() + 1)
+            )
+        })
     }
 
     /// Check if running in cluster mode
@@ -355,9 +353,12 @@ mod tests {
     fn test_cluster_mode() {
         let cli = Cli::parse_from([
             "rivven-server",
-            "--mode", "cluster",
-            "--node-id", "node-1",
-            "--seeds", "host1:9093,host2:9093",
+            "--mode",
+            "cluster",
+            "--node-id",
+            "node-1",
+            "--seeds",
+            "host1:9093,host2:9093",
         ]);
         assert_eq!(cli.mode, DeploymentMode::Cluster);
         assert_eq!(cli.node_id, Some("node-1".to_string()));
@@ -368,8 +369,10 @@ mod tests {
     fn test_validation_min_isr_exceeds_replication() {
         let cli = Cli::parse_from([
             "rivven-server",
-            "--replication-factor", "2",
-            "--min-isr", "3",
+            "--replication-factor",
+            "2",
+            "--min-isr",
+            "3",
         ]);
         assert!(cli.validate().is_err());
     }
@@ -378,11 +381,16 @@ mod tests {
     fn test_cluster_config_generation() {
         let cli = Cli::parse_from([
             "rivven-server",
-            "--mode", "cluster",
-            "--node-id", "node-1",
-            "--bind", "192.168.1.1:9092",
-            "--cluster-bind", "192.168.1.1:9093",
-            "--rack", "rack-a",
+            "--mode",
+            "cluster",
+            "--node-id",
+            "node-1",
+            "--bind",
+            "192.168.1.1:9092",
+            "--cluster-bind",
+            "192.168.1.1:9093",
+            "--rack",
+            "rack-a",
         ]);
 
         let cluster_config = cli.to_cluster_config();

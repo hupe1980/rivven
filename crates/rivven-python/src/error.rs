@@ -1,7 +1,7 @@
 //! Python error types for Rivven
 
-use pyo3::prelude::*;
 use pyo3::exceptions::PyException;
+use pyo3::prelude::*;
 use std::fmt;
 
 /// Rivven error type exposed to Python
@@ -87,7 +87,11 @@ impl RivvenError {
     }
 
     fn __repr__(&self) -> String {
-        format!("RivvenError({:?}, {:?})", self.error_type.to_string(), self.message)
+        format!(
+            "RivvenError({:?}, {:?})",
+            self.error_type.to_string(),
+            self.message
+        )
     }
 }
 
@@ -169,9 +173,7 @@ impl From<rivven_client::Error> for RivvenError {
             rivven_client::Error::AllServersUnavailable => {
                 Self::connection("All servers unavailable")
             }
-            rivven_client::Error::Timeout(msg) => {
-                Self::connection(format!("Timeout: {}", msg))
-            }
+            rivven_client::Error::Timeout(msg) => Self::connection(format!("Timeout: {}", msg)),
             rivven_client::Error::AuthenticationFailed(msg) => {
                 Self::server(format!("Authentication failed: {}", msg))
             }

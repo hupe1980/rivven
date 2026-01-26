@@ -102,7 +102,7 @@ impl Partitioner {
     /// Hash on key columns.
     fn key_hash(&self, event: &CdcEvent, columns: &[String]) -> u32 {
         let mut hasher = DefaultHasher::new();
-        
+
         // Include table in hash for cross-table uniqueness
         event.schema.hash(&mut hasher);
         event.table.hash(&mut hasher);
@@ -171,9 +171,9 @@ impl ConsistentHasher {
     pub fn new(num_partitions: u32, virtual_nodes: u32) -> Self {
         let virtual_nodes = virtual_nodes.max(1);
         let num_partitions = num_partitions.max(1);
-        
+
         let mut ring = Vec::with_capacity((num_partitions * virtual_nodes) as usize);
-        
+
         for partition in 0..num_partitions {
             for vnode in 0..virtual_nodes {
                 let key = format!("partition-{}-vnode-{}", partition, vnode);
@@ -181,9 +181,9 @@ impl ConsistentHasher {
                 ring.push((hash, partition));
             }
         }
-        
+
         ring.sort_by_key(|(hash, _)| *hash);
-        
+
         Self {
             num_partitions,
             virtual_nodes,
@@ -198,7 +198,7 @@ impl ConsistentHasher {
         }
 
         let hash = hash_key(key);
-        
+
         // Binary search for first hash >= key hash
         match self.ring.binary_search_by_key(&hash, |(h, _)| *h) {
             Ok(idx) => self.ring[idx].1,
@@ -239,7 +239,7 @@ fn hash_key(key: &str) -> u64 {
 /// Extract key from event.
 fn extract_key(event: &CdcEvent, columns: &[String]) -> String {
     let mut parts = vec![event.schema.clone(), event.table.clone()];
-    
+
     let data = event.after.as_ref().or(event.before.as_ref());
     if let Some(obj) = data {
         for col in columns {
@@ -248,7 +248,7 @@ fn extract_key(event: &CdcEvent, columns: &[String]) -> String {
             }
         }
     }
-    
+
     parts.join(":")
 }
 
@@ -265,7 +265,11 @@ pub struct PartitionAssignment {
 
 impl PartitionAssignment {
     pub fn new(partition: u32, key: String, hash: u64) -> Self {
-        Self { partition, key, hash }
+        Self {
+            partition,
+            key,
+            hash,
+        }
     }
 }
 
@@ -283,7 +287,7 @@ impl BatchPartitioner {
 
     /// Partition a batch of events.
     pub fn partition_batch<'a>(&self, events: &'a [CdcEvent]) -> Vec<(u32, Vec<&'a CdcEvent>)> {
-        let mut partitions: Vec<Vec<&'a CdcEvent>> = 
+        let mut partitions: Vec<Vec<&'a CdcEvent>> =
             vec![Vec::new(); self.partitioner.num_partitions as usize];
 
         for event in events {
@@ -301,7 +305,7 @@ impl BatchPartitioner {
 
     /// Partition events into owned groups.
     pub fn partition_batch_owned(&self, events: Vec<CdcEvent>) -> Vec<(u32, Vec<CdcEvent>)> {
-        let mut partitions: Vec<Vec<CdcEvent>> = 
+        let mut partitions: Vec<Vec<CdcEvent>> =
             vec![Vec::new(); self.partitioner.num_partitions as usize];
 
         for event in events {
@@ -348,7 +352,7 @@ impl PartitionStats {
         if self.total_events == 0 {
             return vec![0.0; self.event_counts.len()];
         }
-        
+
         self.event_counts
             .iter()
             .map(|&count| (count as f64 / self.total_events as f64) * 100.0)
@@ -362,13 +366,15 @@ impl PartitionStats {
         }
 
         let mean = self.total_events as f64 / self.event_counts.len() as f64;
-        let variance: f64 = self.event_counts
+        let variance: f64 = self
+            .event_counts
             .iter()
             .map(|&count| {
                 let diff = count as f64 - mean;
                 diff * diff
             })
-            .sum::<f64>() / self.event_counts.len() as f64;
+            .sum::<f64>()
+            / self.event_counts.len() as f64;
 
         variance.sqrt()
     }
@@ -419,9 +425,9 @@ mod tests {
     #[test]
     fn test_partitioner_round_robin() {
         let partitioner = Partitioner::new(4, PartitionStrategy::RoundRobin);
-        
+
         let event = make_event("users", 1);
-        
+
         let p0 = partitioner.partition(&event);
         let p1 = partitioner.partition(&event);
         let p2 = partitioner.partition(&event);
@@ -439,7 +445,7 @@ mod tests {
     #[test]
     fn test_partitioner_key_hash() {
         let partitioner = Partitioner::new(16, PartitionStrategy::KeyHash(vec!["id".to_string()]));
-        
+
         let event1 = make_event("users", 1);
         let event2 = make_event("users", 1); // Same key
         let event3 = make_event("users", 2); // Different key
@@ -459,7 +465,7 @@ mod tests {
     #[test]
     fn test_partitioner_table_hash() {
         let partitioner = Partitioner::new(8, PartitionStrategy::TableHash);
-        
+
         let event1 = make_event("users", 1);
         let event2 = make_event("users", 2);
         let event3 = make_event("orders", 1);
@@ -478,10 +484,10 @@ mod tests {
     #[test]
     fn test_partitioner_full_table_hash() {
         let partitioner = Partitioner::new(8, PartitionStrategy::FullTableHash);
-        
+
         let mut event1 = make_event("users", 1);
         event1.schema = "public".to_string();
-        
+
         let mut event2 = make_event("users", 1);
         event2.schema = "private".to_string();
 
@@ -496,7 +502,7 @@ mod tests {
     #[test]
     fn test_partitioner_sticky() {
         let partitioner = Partitioner::new(8, PartitionStrategy::Sticky(5));
-        
+
         let event1 = make_event("users", 1);
         let event2 = make_event("orders", 2);
 
@@ -514,8 +520,11 @@ mod tests {
             0
         }
 
-        let partitioner = Partitioner::new(8, PartitionStrategy::Custom(CustomPartitioner::new(always_zero)));
-        
+        let partitioner = Partitioner::new(
+            8,
+            PartitionStrategy::Custom(CustomPartitioner::new(always_zero)),
+        );
+
         let event = make_event("users", 1);
         assert_eq!(partitioner.partition(&event), 0);
     }
@@ -523,7 +532,7 @@ mod tests {
     #[test]
     fn test_consistent_hasher_creation() {
         let hasher = ConsistentHasher::new(4, 100);
-        
+
         assert_eq!(hasher.num_partitions(), 4);
         assert_eq!(hasher.virtual_nodes(), 100);
     }
@@ -531,7 +540,7 @@ mod tests {
     #[test]
     fn test_consistent_hasher_partition() {
         let hasher = ConsistentHasher::new(4, 100);
-        
+
         let p1 = hasher.partition("key1");
         let p2 = hasher.partition("key1");
         let p3 = hasher.partition("key2");
@@ -546,7 +555,7 @@ mod tests {
     #[test]
     fn test_consistent_hasher_event() {
         let hasher = ConsistentHasher::new(8, 50);
-        
+
         let event1 = make_event("users", 1);
         let event2 = make_event("users", 1);
         let event3 = make_event("users", 2);
@@ -566,7 +575,7 @@ mod tests {
     #[test]
     fn test_batch_partitioner() {
         let batch_partitioner = BatchPartitioner::new(4, PartitionStrategy::TableHash);
-        
+
         let events = vec![
             make_event("users", 1),
             make_event("users", 2),
@@ -575,7 +584,7 @@ mod tests {
         ];
 
         let partitions = batch_partitioner.partition_batch(&events);
-        
+
         // Should have events distributed across partitions
         let total_events: usize = partitions.iter().map(|(_, e)| e.len()).sum();
         assert_eq!(total_events, 4);
@@ -583,8 +592,9 @@ mod tests {
 
     #[test]
     fn test_batch_partitioner_owned() {
-        let batch_partitioner = BatchPartitioner::new(4, PartitionStrategy::KeyHash(vec!["id".to_string()]));
-        
+        let batch_partitioner =
+            BatchPartitioner::new(4, PartitionStrategy::KeyHash(vec!["id".to_string()]));
+
         let events = vec![
             make_event("users", 1),
             make_event("users", 2),
@@ -593,7 +603,7 @@ mod tests {
         ];
 
         let partitions = batch_partitioner.partition_batch_owned(events);
-        
+
         let total_events: usize = partitions.iter().map(|(_, e)| e.len()).sum();
         assert_eq!(total_events, 4);
     }
@@ -601,7 +611,7 @@ mod tests {
     #[test]
     fn test_partition_stats() {
         let mut stats = PartitionStats::new(4);
-        
+
         stats.record(0);
         stats.record(0);
         stats.record(1);
@@ -616,11 +626,19 @@ mod tests {
     #[test]
     fn test_partition_stats_distribution() {
         let mut stats = PartitionStats::new(4);
-        
-        for _ in 0..25 { stats.record(0); }
-        for _ in 0..25 { stats.record(1); }
-        for _ in 0..25 { stats.record(2); }
-        for _ in 0..25 { stats.record(3); }
+
+        for _ in 0..25 {
+            stats.record(0);
+        }
+        for _ in 0..25 {
+            stats.record(1);
+        }
+        for _ in 0..25 {
+            stats.record(2);
+        }
+        for _ in 0..25 {
+            stats.record(3);
+        }
 
         let dist = stats.distribution();
         assert_eq!(dist.len(), 4);
@@ -632,12 +650,20 @@ mod tests {
     #[test]
     fn test_partition_stats_std_deviation() {
         let mut stats = PartitionStats::new(4);
-        
+
         // Perfectly balanced
-        for _ in 0..100 { stats.record(0); }
-        for _ in 0..100 { stats.record(1); }
-        for _ in 0..100 { stats.record(2); }
-        for _ in 0..100 { stats.record(3); }
+        for _ in 0..100 {
+            stats.record(0);
+        }
+        for _ in 0..100 {
+            stats.record(1);
+        }
+        for _ in 0..100 {
+            stats.record(2);
+        }
+        for _ in 0..100 {
+            stats.record(3);
+        }
 
         let std_dev = stats.std_deviation();
         assert!(std_dev < 0.01); // Should be near zero
@@ -646,12 +672,20 @@ mod tests {
     #[test]
     fn test_partition_stats_is_balanced() {
         let mut stats = PartitionStats::new(4);
-        
+
         // Roughly balanced
-        for _ in 0..95 { stats.record(0); }
-        for _ in 0..100 { stats.record(1); }
-        for _ in 0..105 { stats.record(2); }
-        for _ in 0..100 { stats.record(3); }
+        for _ in 0..95 {
+            stats.record(0);
+        }
+        for _ in 0..100 {
+            stats.record(1);
+        }
+        for _ in 0..105 {
+            stats.record(2);
+        }
+        for _ in 0..100 {
+            stats.record(3);
+        }
 
         // 10% threshold should pass
         assert!(stats.is_balanced(15.0));
@@ -662,7 +696,7 @@ mod tests {
     #[test]
     fn test_partition_assignment() {
         let assignment = PartitionAssignment::new(5, "users:1".to_string(), 12345);
-        
+
         assert_eq!(assignment.partition, 5);
         assert_eq!(assignment.key, "users:1");
         assert_eq!(assignment.hash, 12345);
@@ -693,7 +727,7 @@ mod tests {
     fn test_consistent_hasher_distribution() {
         let hasher = ConsistentHasher::new(8, 100);
         let mut stats = PartitionStats::new(8);
-        
+
         // Partition many keys
         for i in 0..10000 {
             let key = format!("key-{}", i);
@@ -709,7 +743,9 @@ mod tests {
 
     #[test]
     fn test_custom_partitioner_debug() {
-        fn test_fn(_: &CdcEvent, _: u32) -> u32 { 0 }
+        fn test_fn(_: &CdcEvent, _: u32) -> u32 {
+            0
+        }
         let custom = CustomPartitioner::new(test_fn);
         let debug_str = format!("{:?}", custom);
         assert!(debug_str.contains("CustomPartitioner"));
@@ -719,7 +755,7 @@ mod tests {
     fn test_extract_key() {
         let event = make_event("users", 42);
         let key = extract_key(&event, &["id".to_string()]);
-        
+
         assert!(key.contains("public"));
         assert!(key.contains("users"));
         assert!(key.contains("42"));

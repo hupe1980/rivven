@@ -41,7 +41,10 @@ impl TaskId {
 
     /// Get the connector name from task ID
     pub fn connector_name(&self) -> &str {
-        self.0.rsplit_once('-').map(|(name, _)| name).unwrap_or(&self.0)
+        self.0
+            .rsplit_once('-')
+            .map(|(name, _)| name)
+            .unwrap_or(&self.0)
     }
 }
 
@@ -272,7 +275,9 @@ impl From<serde_json::Error> for DistributedError {
 pub type DistributedResult<T> = Result<T, DistributedError>;
 
 /// Generation number for leader election
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 pub struct Generation(pub u64);
 
 impl Generation {
@@ -293,7 +298,9 @@ impl std::fmt::Display for Generation {
 }
 
 /// Epoch for connector assignments (incremented on rebalance)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 pub struct Epoch(pub u64);
 
 impl Epoch {

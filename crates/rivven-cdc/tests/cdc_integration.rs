@@ -14,7 +14,7 @@
 mod harness;
 
 use harness::*;
-use rivven_cdc::common::{CdcEvent, CdcOp, CdcFilter, CdcFilterConfig};
+use rivven_cdc::common::{CdcEvent, CdcFilter, CdcFilterConfig, CdcOp};
 use rivven_cdc::postgres::PostgresTypeMapper;
 use serial_test::serial;
 use std::sync::Arc;
@@ -38,10 +38,10 @@ async fn shared_postgres() -> Arc<PostgresTestContainer> {
         })
         .await
         .clone();
-    
+
     // Clean up any leftover test slots from previous runs
     let _ = pg.cleanup_test_slots().await;
-    
+
     pg
 }
 
@@ -191,9 +191,11 @@ mod crud_tests {
             .unwrap();
 
         // Insert then update
-        pg.execute("INSERT INTO test_update (name, email, age) VALUES ('Bob', 'bob@example.com', 25)")
-            .await
-            .unwrap();
+        pg.execute(
+            "INSERT INTO test_update (name, email, age) VALUES ('Bob', 'bob@example.com', 25)",
+        )
+        .await
+        .unwrap();
 
         sleep(Duration::from_millis(500)).await;
 
@@ -220,9 +222,12 @@ mod crud_tests {
             .has_op_count(CdcOp::Update, 1);
 
         // Verify update event
-        let update_events: Vec<_> = events.iter().filter(|e| matches!(e.op, CdcOp::Update)).collect();
+        let update_events: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e.op, CdcOp::Update))
+            .collect();
         assert!(!update_events.is_empty());
-        
+
         let update_event = &update_events[0];
         assert!(update_event.after.is_some());
 
@@ -244,9 +249,13 @@ mod crud_tests {
                 id SERIAL PRIMARY KEY,
                 name TEXT NOT NULL,
                 email VARCHAR(255)
-            )"
-        ).await.unwrap();
-        pg.execute("ALTER TABLE test_delete REPLICA IDENTITY FULL").await.unwrap();
+            )",
+        )
+        .await
+        .unwrap();
+        pg.execute("ALTER TABLE test_delete REPLICA IDENTITY FULL")
+            .await
+            .unwrap();
 
         let mut rivven = RivvenTestContext::new().await.unwrap();
         rivven
@@ -264,9 +273,11 @@ mod crud_tests {
             .unwrap();
 
         // Insert then delete
-        pg.execute("INSERT INTO test_delete (name, email) VALUES ('Charlie', 'charlie@example.com')")
-            .await
-            .unwrap();
+        pg.execute(
+            "INSERT INTO test_delete (name, email) VALUES ('Charlie', 'charlie@example.com')",
+        )
+        .await
+        .unwrap();
 
         sleep(Duration::from_millis(500)).await;
 
@@ -330,16 +341,15 @@ mod crud_tests {
         sleep(Duration::from_millis(EVENT_PROPAGATION_DELAY_MS * 3)).await;
 
         let messages = rivven
-            .wait_for_messages(
-                "cdc.postgres.public.test_bulk",
-                50,
-                Duration::from_secs(30),
-            )
+            .wait_for_messages("cdc.postgres.public.test_bulk", 50, Duration::from_secs(30))
             .await
             .unwrap();
 
         let events = rivven.parse_events(&messages).unwrap();
-        events.assert().has_count(50).has_op_count(CdcOp::Insert, 50);
+        events
+            .assert()
+            .has_count(50)
+            .has_op_count(CdcOp::Insert, 50);
 
         ctx.cleanup().await.unwrap();
         rivven.stop_cdc().await.unwrap();
@@ -481,9 +491,13 @@ mod transaction_tests {
                 id SERIAL PRIMARY KEY,
                 name TEXT NOT NULL,
                 value INTEGER DEFAULT 0
-            )"
-        ).await.unwrap();
-        pg.execute("ALTER TABLE test_tx_mixed REPLICA IDENTITY FULL").await.unwrap();
+            )",
+        )
+        .await
+        .unwrap();
+        pg.execute("ALTER TABLE test_tx_mixed REPLICA IDENTITY FULL")
+            .await
+            .unwrap();
 
         let mut rivven = RivvenTestContext::new().await.unwrap();
         rivven
@@ -668,7 +682,11 @@ mod schema_tests {
             .unwrap();
 
         let events = rivven.parse_events(&messages).unwrap();
-        events.assert().has_count(1).event_at(0).has_op(CdcOp::Insert);
+        events
+            .assert()
+            .has_count(1)
+            .event_at(0)
+            .has_op(CdcOp::Insert);
 
         // Verify fields exist
         let event = &events[0];
@@ -780,11 +798,14 @@ mod filter_tests {
 
         // Verify masking and exclusion happened
         let after = event.after.as_ref().unwrap();
-        
+
         // Password should be masked
         if let Some(pwd) = after.get("password") {
             assert!(
-                pwd.as_str().map(|s| s.contains("REDACTED")).unwrap_or(false) || pwd.is_null(),
+                pwd.as_str()
+                    .map(|s| s.contains("REDACTED"))
+                    .unwrap_or(false)
+                    || pwd.is_null(),
                 "Password should be redacted"
             );
         }
@@ -826,7 +847,7 @@ mod special_char_tests {
         // Test various Unicode characters
         let test_cases = vec![
             ("José García", "jose@example.com"),      // Accented characters
-            ("山田太郎", "yamada@example.com"),        // Japanese
+            ("山田太郎", "yamada@example.com"),       // Japanese
             ("Иван Петров", "ivan@example.com"),      // Cyrillic
             ("مريم", "mariam@example.com"),           // Arabic
             ("🚀 Rocket User", "rocket@example.com"), // Emoji
@@ -909,7 +930,10 @@ mod special_char_tests {
             .await
             .unwrap();
         let count: i64 = count[0].get(0);
-        assert_eq!(count, 3, "Table should have 3 rows, injection should have failed");
+        assert_eq!(
+            count, 3,
+            "Table should have 3 rows, injection should have failed"
+        );
 
         let messages = rivven
             .wait_for_messages(
@@ -960,11 +984,7 @@ mod special_char_tests {
         sleep(Duration::from_millis(EVENT_PROPAGATION_DELAY_MS * 2)).await;
 
         let messages = rivven
-            .wait_for_messages(
-                "cdc.postgres.public.test_nulls",
-                4,
-                Duration::from_secs(15),
-            )
+            .wait_for_messages("cdc.postgres.public.test_nulls", 4, Duration::from_secs(15))
             .await
             .unwrap();
 
@@ -990,7 +1010,7 @@ mod special_char_tests {
 
 mod resilience_tests {
     use super::*;
-    use rivven_cdc::common::{RateLimiter, CircuitBreaker};
+    use rivven_cdc::common::{CircuitBreaker, RateLimiter};
 
     #[tokio::test]
     #[ignore = "Requires Docker; run with --ignored"]
@@ -1069,11 +1089,7 @@ mod resilience_tests {
     #[tokio::test]
     #[ignore = "Requires Docker; run with --ignored"]
     async fn test_circuit_breaker_half_open_failure() {
-        let breaker = CircuitBreaker::new(
-            2,
-            Duration::from_millis(50),
-            3,
-        );
+        let breaker = CircuitBreaker::new(2, Duration::from_millis(50), 3);
 
         // Open the circuit
         breaker.record_failure().await;
@@ -1180,9 +1196,13 @@ mod concurrency_tests {
             "CREATE TABLE test_rapid (
                 id SERIAL PRIMARY KEY,
                 counter INTEGER DEFAULT 0
-            )"
-        ).await.unwrap();
-        pg.execute("ALTER TABLE test_rapid REPLICA IDENTITY FULL").await.unwrap();
+            )",
+        )
+        .await
+        .unwrap();
+        pg.execute("ALTER TABLE test_rapid REPLICA IDENTITY FULL")
+            .await
+            .unwrap();
 
         let mut rivven = RivvenTestContext::new().await.unwrap();
         rivven
@@ -1207,9 +1227,12 @@ mod concurrency_tests {
         // Rapid updates
         let update_count = 20;
         for i in 1..=update_count {
-            pg.execute(&format!("UPDATE test_rapid SET counter = {} WHERE id = 1", i))
-                .await
-                .unwrap();
+            pg.execute(&format!(
+                "UPDATE test_rapid SET counter = {} WHERE id = 1",
+                i
+            ))
+            .await
+            .unwrap();
         }
 
         sleep(Duration::from_millis(EVENT_PROPAGATION_DELAY_MS * 3)).await;

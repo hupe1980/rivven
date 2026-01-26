@@ -22,11 +22,7 @@ pub struct HostFunctions {
 
 impl HostFunctions {
     /// Create new host functions for a plugin
-    pub fn new(
-        plugin_name: String,
-        config: serde_json::Value,
-        allow_network: bool,
-    ) -> Self {
+    pub fn new(plugin_name: String, config: serde_json::Value, allow_network: bool) -> Self {
         Self {
             plugin_name,
             config: Arc::new(config),
@@ -117,20 +113,16 @@ impl HostFunctions {
             req_builder = req_builder.body(body);
         }
 
-        let response = req_builder.send().await.map_err(|e| {
-            PluginError::ExecutionError(format!("HTTP request failed: {}", e))
-        })?;
+        let response = req_builder
+            .send()
+            .await
+            .map_err(|e| PluginError::ExecutionError(format!("HTTP request failed: {}", e)))?;
 
         let status = response.status().as_u16();
         let headers: Vec<(String, String)> = response
             .headers()
             .iter()
-            .map(|(k, v)| {
-                (
-                    k.to_string(),
-                    v.to_str().unwrap_or_default().to_string(),
-                )
-            })
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or_default().to_string()))
             .collect();
 
         let body = response.bytes().await.map_err(|e| {
@@ -207,7 +199,7 @@ mod tests {
             "endpoint": "http://localhost:8080",
             "timeout": 30
         });
-        
+
         let host = HostFunctions::new("test".to_string(), config, false);
 
         assert_eq!(
@@ -229,13 +221,10 @@ mod tests {
                 }
             }
         });
-        
+
         let host = HostFunctions::new("test".to_string(), config, false);
 
-        assert_eq!(
-            host.get_config("database.host"),
-            Some(json!("localhost"))
-        );
+        assert_eq!(host.get_config("database.host"), Some(json!("localhost")));
         assert_eq!(
             host.get_config("database.credentials.username"),
             Some(json!("admin"))

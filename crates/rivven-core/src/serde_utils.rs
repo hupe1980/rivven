@@ -64,22 +64,20 @@ mod tests {
         let original = TestStruct {
             data: Bytes::from(vec![1, 2, 3, 4, 5]),
         };
-        
+
         let json = serde_json::to_string(&original).unwrap();
         let deserialized: TestStruct = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(original, deserialized);
     }
 
     #[test]
     fn test_bytes_serde_empty() {
-        let original = TestStruct {
-            data: Bytes::new(),
-        };
-        
+        let original = TestStruct { data: Bytes::new() };
+
         let json = serde_json::to_string(&original).unwrap();
         let deserialized: TestStruct = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(original, deserialized);
     }
 
@@ -88,20 +86,20 @@ mod tests {
         let original = TestOptional {
             data: Some(Bytes::from(vec![10, 20, 30])),
         };
-        
+
         let json = serde_json::to_string(&original).unwrap();
         let deserialized: TestOptional = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(original, deserialized);
     }
 
     #[test]
     fn test_option_bytes_none() {
         let original = TestOptional { data: None };
-        
+
         let json = serde_json::to_string(&original).unwrap();
         let deserialized: TestOptional = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(original, deserialized);
     }
 
@@ -110,10 +108,10 @@ mod tests {
         let original = TestStruct {
             data: Bytes::from(b"hello world".to_vec()),
         };
-        
+
         let bytes = bincode::serialize(&original).unwrap();
         let deserialized: TestStruct = bincode::deserialize(&bytes).unwrap();
-        
+
         assert_eq!(original, deserialized);
     }
 }

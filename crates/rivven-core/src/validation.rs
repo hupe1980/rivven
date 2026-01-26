@@ -182,15 +182,11 @@ impl Validator {
     /// Uses the same rules as topic names
     pub fn validate_consumer_group_id(id: &str) -> Result<(), ValidationError> {
         if id.is_empty() || id.len() > MAX_IDENTIFIER_LENGTH {
-            return Err(ValidationError::InvalidConsumerGroupId {
-                id: id.to_string(),
-            });
+            return Err(ValidationError::InvalidConsumerGroupId { id: id.to_string() });
         }
 
         if !TOPIC_NAME_REGEX.is_match(id) {
-            return Err(ValidationError::InvalidConsumerGroupId {
-                id: id.to_string(),
-            });
+            return Err(ValidationError::InvalidConsumerGroupId { id: id.to_string() });
         }
 
         Ok(())
@@ -218,7 +214,7 @@ impl Validator {
             .filter(|c| !c.is_control())
             .take(max_len)
             .collect();
-        
+
         if s.len() > max_len {
             format!("{}...", sanitized)
         } else {
@@ -338,6 +334,9 @@ mod tests {
 
         // Newlines removed
         let with_newlines = "hello\nworld";
-        assert_eq!(Validator::sanitize_for_log(with_newlines, 100), "helloworld");
+        assert_eq!(
+            Validator::sanitize_for_log(with_newlines, 100),
+            "helloworld"
+        );
     }
 }

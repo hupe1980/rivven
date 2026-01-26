@@ -41,23 +41,23 @@ pub mod azure;
 
 // Re-exports for convenience
 #[cfg(feature = "s3")]
-pub use s3::{S3Sink, S3SinkConfig, S3SinkFactory, S3Format, S3Partitioning, S3Compression};
+pub use s3::{S3Compression, S3Format, S3Partitioning, S3Sink, S3SinkConfig, S3SinkFactory};
 
 /// Register all enabled storage connectors with the sink registry
 pub fn register_all(registry: &mut rivven_connect::SinkRegistry) {
     #[cfg(feature = "s3")]
     s3::register(registry);
-    
+
     #[cfg(feature = "gcs")]
     {
         // Future: GCS registration
     }
-    
+
     #[cfg(feature = "azure")]
     {
         // Future: Azure Blob registration
     }
-    
+
     // Suppress unused warning when no features are enabled
     let _ = registry;
 }

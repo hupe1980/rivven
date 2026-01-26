@@ -38,10 +38,10 @@
 //! - Contention: Near-zero with thread-local caching
 
 use bytes::{Bytes, BytesMut};
+use crossbeam_channel::{bounded, Receiver, Sender};
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicUsize, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use crossbeam_channel::{bounded, Sender, Receiver};
 
 // ============================================================================
 // Configuration
@@ -64,10 +64,10 @@ impl SizeClass {
     /// Get the buffer size for this class
     pub const fn size(&self) -> usize {
         match self {
-            Self::Small => 4 * 1024,      // 4 KB
-            Self::Medium => 64 * 1024,    // 64 KB
-            Self::Large => 1024 * 1024,   // 1 MB
-            Self::Huge => 0,              // Dynamic
+            Self::Small => 4 * 1024,    // 4 KB
+            Self::Medium => 64 * 1024,  // 64 KB
+            Self::Large => 1024 * 1024, // 1 MB
+            Self::Huge => 0,            // Dynamic
         }
     }
 
@@ -313,7 +313,11 @@ impl BufferPool {
 
     fn update_bytes_allocated(&self, delta: isize) {
         if delta > 0 {
-            let new = self.stats.bytes_allocated.fetch_add(delta as usize, Ordering::Relaxed) + delta as usize;
+            let new = self
+                .stats
+                .bytes_allocated
+                .fetch_add(delta as usize, Ordering::Relaxed)
+                + delta as usize;
             // Update peak if necessary
             let mut peak = self.stats.peak_bytes.load(Ordering::Relaxed);
             while new > peak {
@@ -328,7 +332,9 @@ impl BufferPool {
                 }
             }
         } else {
-            self.stats.bytes_allocated.fetch_sub((-delta) as usize, Ordering::Relaxed);
+            self.stats
+                .bytes_allocated
+                .fetch_sub((-delta) as usize, Ordering::Relaxed);
         }
     }
 }
@@ -400,16 +406,18 @@ impl PooledBuffer {
     /// Create from pool
     pub fn new(pool: Arc<BufferPool>, size: usize) -> Self {
         // Try thread-local cache first
-        let buf = THREAD_CACHE.with(|cache| {
-            let mut cache = cache.borrow_mut();
-            let class = SizeClass::for_size(size);
-            cache.get(class)
-        }).unwrap_or_else(|| {
-            if pool.config.enable_tracking {
-                pool.stats.cache_misses.fetch_add(1, Ordering::Relaxed);
-            }
-            pool.allocate(size)
-        });
+        let buf = THREAD_CACHE
+            .with(|cache| {
+                let mut cache = cache.borrow_mut();
+                let class = SizeClass::for_size(size);
+                cache.get(class)
+            })
+            .unwrap_or_else(|| {
+                if pool.config.enable_tracking {
+                    pool.stats.cache_misses.fetch_add(1, Ordering::Relaxed);
+                }
+                pool.allocate(size)
+            });
 
         if pool.config.enable_tracking && buf.capacity() > 0 {
             pool.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
@@ -456,11 +464,9 @@ impl Drop for PooledBuffer {
     fn drop(&mut self) {
         if let Some(mut buf) = self.inner.take() {
             buf.clear();
-            
+
             // Try thread-local cache first
-            let returned = THREAD_CACHE.with(|cache| {
-                cache.borrow_mut().put(buf.clone())
-            });
+            let returned = THREAD_CACHE.with(|cache| cache.borrow_mut().put(buf.clone()));
 
             if !returned {
                 // Thread-local cache full, return to global pool
@@ -622,7 +628,7 @@ mod tests {
     #[test]
     fn test_buffer_pool_allocate() {
         let pool = BufferPool::new(BufferPoolConfig::default());
-        
+
         let buf1 = pool.allocate(100);
         assert!(buf1.capacity() >= 100);
         assert!(buf1.capacity() <= SizeClass::Small.size());
@@ -635,12 +641,12 @@ mod tests {
     #[test]
     fn test_buffer_pool_roundtrip() {
         let pool = BufferPool::new(BufferPoolConfig::default());
-        
+
         let buf = pool.allocate(1000);
         let cap = buf.capacity();
-        
+
         pool.deallocate(buf);
-        
+
         let buf2 = pool.allocate(1000);
         assert_eq!(buf2.capacity(), cap);
     }
@@ -648,7 +654,7 @@ mod tests {
     #[test]
     fn test_pooled_buffer() {
         let pool = BufferPool::new(BufferPoolConfig::default());
-        
+
         {
             let mut buf = PooledBuffer::new(pool.clone(), 1000);
             buf.extend_from_slice(b"hello world");
@@ -662,10 +668,10 @@ mod tests {
         let mut chain = BufferChain::new();
         chain.push(Bytes::from_static(b"hello "));
         chain.push(Bytes::from_static(b"world"));
-        
+
         assert_eq!(chain.len(), 11);
         assert_eq!(chain.buffer_count(), 2);
-        
+
         let flat = chain.flatten();
         assert_eq!(&flat[..], b"hello world");
     }
@@ -683,10 +689,10 @@ mod tests {
             ..Default::default()
         };
         let pool = BufferPool::new(config);
-        
+
         let _buf1 = pool.allocate(100);
         let _buf2 = pool.allocate(200);
-        
+
         assert_eq!(pool.stats().allocations.load(Ordering::Relaxed), 2);
     }
 }

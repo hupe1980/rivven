@@ -46,17 +46,17 @@ pub use snowflake::{SnowflakeSink, SnowflakeSinkConfig, SnowflakeSinkFactory};
 pub fn register_all(registry: &mut rivven_connect::SinkRegistry) {
     #[cfg(feature = "snowflake")]
     snowflake::register(registry);
-    
+
     #[cfg(feature = "bigquery")]
     {
         // Future: BigQuery registration
     }
-    
+
     #[cfg(feature = "redshift")]
     {
         // Future: Redshift registration
     }
-    
+
     // Suppress unused warning when no features are enabled
     let _ = registry;
 }

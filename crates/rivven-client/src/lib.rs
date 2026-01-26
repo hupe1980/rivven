@@ -2,7 +2,7 @@ pub mod client;
 pub mod error;
 pub mod resilient;
 
-pub use client::{Client, AuthSession};
+pub use client::{AuthSession, Client};
 pub use error::{Error, Result};
 pub use resilient::{ResilientClient, ResilientClientConfig, ResilientClientConfigBuilder};
 
@@ -17,16 +17,13 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 /// Protocol messages for Rivven
-/// 
+///
 /// WARNING: Variant order must match server's protocol.rs exactly!
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Request {
     /// Authenticate with username/password (SASL/PLAIN compatible)
-    Authenticate {
-        username: String,
-        password: String,
-    },
-    
+    Authenticate { username: String, password: String },
+
     /// Authenticate with SASL bytes (for Kafka client compatibility)
     SaslAuthenticate {
         #[serde(with = "rivven_core::serde_utils::bytes_serde")]
@@ -34,21 +31,21 @@ pub enum Request {
         #[serde(with = "rivven_core::serde_utils::bytes_serde")]
         auth_bytes: Bytes,
     },
-    
+
     /// SCRAM-SHA-256: Client-first message
     ScramClientFirst {
         /// Client-first-message bytes (n,,n=<user>,r=<nonce>)
         #[serde(with = "rivven_core::serde_utils::bytes_serde")]
         message: Bytes,
     },
-    
+
     /// SCRAM-SHA-256: Client-final message  
     ScramClientFinal {
         /// Client-final-message bytes (c=<binding>,r=<nonce>,p=<proof>)
         #[serde(with = "rivven_core::serde_utils::bytes_serde")]
         message: Bytes,
     },
-    
+
     /// Publish a message to a topic
     Publish {
         topic: String,
@@ -77,9 +74,7 @@ pub enum Request {
     ListTopics,
 
     /// Delete a topic
-    DeleteTopic {
-        name: String,
-    },
+    DeleteTopic { name: String },
 
     /// Commit consumer offset
     CommitOffset {
@@ -97,10 +92,8 @@ pub enum Request {
     },
 
     /// Get topic metadata
-    GetMetadata {
-        topic: String,
-    },
-    
+    GetMetadata { topic: String },
+
     /// Get cluster metadata (all topics or specific ones)
     GetClusterMetadata {
         /// Topics to get metadata for (empty = all topics)
@@ -111,34 +104,22 @@ pub enum Request {
     Ping,
 
     /// Register a schema
-    RegisterSchema {
-        subject: String,
-        schema: String,
-    },
+    RegisterSchema { subject: String, schema: String },
 
     /// Get a schema
-    GetSchema {
-        id: i32,
-    },
+    GetSchema { id: i32 },
 
     /// Get offset bounds for a partition
-    GetOffsetBounds {
-        topic: String,
-        partition: u32,
-    },
+    GetOffsetBounds { topic: String, partition: u32 },
 
     /// List all consumer groups
     ListGroups,
 
     /// Describe a consumer group (get all offsets)
-    DescribeGroup {
-        consumer_group: String,
-    },
+    DescribeGroup { consumer_group: String },
 
     /// Delete a consumer group
-    DeleteGroup {
-        consumer_group: String,
-    },
+    DeleteGroup { consumer_group: String },
 
     /// Find offset for a timestamp
     GetOffsetForTimestamp {
@@ -150,7 +131,7 @@ pub enum Request {
 }
 
 /// Protocol responses
-/// 
+///
 /// WARNING: Variant order must match server's protocol.rs exactly!
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Response {
@@ -161,14 +142,14 @@ pub enum Response {
         /// Session timeout in seconds
         expires_in: u64,
     },
-    
+
     /// SCRAM-SHA-256: Server-first message (challenge)
     ScramServerFirst {
         /// Server-first-message bytes (r=<nonce>,s=<salt>,i=<iterations>)
         #[serde(with = "rivven_core::serde_utils::bytes_serde")]
         message: Bytes,
     },
-    
+
     /// SCRAM-SHA-256: Server-final message (verification or error)
     ScramServerFinal {
         /// Server-final-message bytes (v=<verifier> or e=<error>)
@@ -179,28 +160,18 @@ pub enum Response {
         /// Session timeout in seconds (if authentication succeeded)
         expires_in: Option<u64>,
     },
-    
+
     /// Success response with offset
-    Published {
-        offset: u64,
-        partition: u32,
-    },
+    Published { offset: u64, partition: u32 },
 
     /// Messages response
-    Messages {
-        messages: Vec<MessageData>,
-    },
+    Messages { messages: Vec<MessageData> },
 
     /// Topic created
-    TopicCreated {
-        name: String,
-        partitions: u32,
-    },
+    TopicCreated { name: String, partitions: u32 },
 
     /// List of topics
-    Topics {
-        topics: Vec<String>,
-    },
+    Topics { topics: Vec<String> },
 
     /// Topic deleted
     TopicDeleted,
@@ -209,16 +180,11 @@ pub enum Response {
     OffsetCommitted,
 
     /// Offset response
-    Offset {
-        offset: Option<u64>,
-    },
+    Offset { offset: Option<u64> },
 
     /// Metadata
-    Metadata {
-        name: String,
-        partitions: u32,
-    },
-    
+    Metadata { name: String, partitions: u32 },
+
     /// Full cluster metadata for topic(s)
     ClusterMetadata {
         /// Controller node ID (Raft leader)
@@ -230,29 +196,19 @@ pub enum Response {
     },
 
     /// Schema registration result
-    SchemaRegistered {
-        id: i32,
-    },
+    SchemaRegistered { id: i32 },
 
     /// Schema details
-    Schema {
-        id: i32,
-        schema: String,
-    },
+    Schema { id: i32, schema: String },
 
     /// Pong
     Pong,
 
     /// Offset bounds for a partition
-    OffsetBounds {
-        earliest: u64,
-        latest: u64,
-    },
+    OffsetBounds { earliest: u64, latest: u64 },
 
     /// List of consumer groups
-    Groups {
-        groups: Vec<String>,
-    },
+    Groups { groups: Vec<String> },
 
     /// Consumer group details with all offsets
     GroupDescription {
@@ -272,9 +228,7 @@ pub enum Response {
     },
 
     /// Error response
-    Error {
-        message: String,
-    },
+    Error { message: String },
 
     /// Success
     Ok,

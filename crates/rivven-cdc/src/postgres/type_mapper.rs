@@ -19,11 +19,11 @@ impl PostgresTypeMapper {
             16 => json!({"type": "boolean"}),
 
             // Integer types
-            20 => json!({"type": "long"}),  // bigint/int8
-            21 => json!({"type": "int"}),   // smallint/int2
-            23 => json!({"type": "int"}),   // integer/int4
-            26 => json!({"type": "long"}),  // oid
-            28 => json!({"type": "long"}),  // xid
+            20 => json!({"type": "long"}), // bigint/int8
+            21 => json!({"type": "int"}),  // smallint/int2
+            23 => json!({"type": "int"}),  // integer/int4
+            26 => json!({"type": "long"}), // oid
+            28 => json!({"type": "long"}), // xid
 
             // Floating point
             700 => json!({"type": "float"}),  // real/float4
@@ -43,11 +43,11 @@ impl PostgresTypeMapper {
             17 => json!({"type": "bytes"}), // bytea
 
             // Date/Time types
-            1082 => json!({"type": "int", "logicalType": "date"}),                 // date
-            1083 => json!({"type": "int", "logicalType": "time-millis"}),          // time
-            1114 => json!({"type": "long", "logicalType": "timestamp-millis"}),    // timestamp
-            1184 => json!({"type": "long", "logicalType": "timestamp-millis"}),    // timestamptz
-            1186 => json!({"type": "string"}),                                      // interval
+            1082 => json!({"type": "int", "logicalType": "date"}), // date
+            1083 => json!({"type": "int", "logicalType": "time-millis"}), // time
+            1114 => json!({"type": "long", "logicalType": "timestamp-millis"}), // timestamp
+            1184 => json!({"type": "long", "logicalType": "timestamp-millis"}), // timestamptz
+            1186 => json!({"type": "string"}),                     // interval
 
             // JSON types
             114 => json!({"type": "string"}),  // json
@@ -57,9 +57,9 @@ impl PostgresTypeMapper {
             2950 => json!({"type": "string", "logicalType": "uuid"}),
 
             // Network types
-            869 => json!({"type": "string"}),  // inet
-            650 => json!({"type": "string"}),  // cidr
-            829 => json!({"type": "string"}),  // macaddr
+            869 => json!({"type": "string"}), // inet
+            650 => json!({"type": "string"}), // cidr
+            829 => json!({"type": "string"}), // macaddr
 
             // Geometric types
             600 => json!({"type": "string"}), // point
@@ -92,9 +92,9 @@ impl PostgresTypeMapper {
             let field_type = Self::pg_type_to_avro(*type_oid, type_name);
 
             // Make all fields nullable - wrap complex types (arrays, objects with type field) in union
-            let is_complex = field_type.get("type").is_some_and(|t| {
-                t.as_str() == Some("array") || field_type.is_object()
-            });
+            let is_complex = field_type
+                .get("type")
+                .is_some_and(|t| t.as_str() == Some("array") || field_type.is_object());
             let nullable_type = if is_complex {
                 json!(["null", field_type])
             } else {
@@ -126,8 +126,7 @@ impl PostgresTypeMapper {
         columns: &[(String, i32, String)],
     ) -> Result<AvroSchema> {
         let value_schema = Self::generate_avro_schema(namespace, table_name, columns)?;
-        let value_json: serde_json::Value =
-            serde_json::from_str(&value_schema.canonical_form())?;
+        let value_json: serde_json::Value = serde_json::from_str(&value_schema.canonical_form())?;
 
         let envelope_json = json!({
             "type": "record",

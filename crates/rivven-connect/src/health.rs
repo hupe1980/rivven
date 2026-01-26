@@ -56,8 +56,14 @@ impl HealthState {
     /// Check if the system is ready (at least one connector running)
     pub fn is_ready(&self) -> bool {
         self.broker_connected
-            && (self.sources.values().any(|h| h.status == ConnectorStatus::Running)
-                || self.sinks.values().any(|h| h.status == ConnectorStatus::Running))
+            && (self
+                .sources
+                .values()
+                .any(|h| h.status == ConnectorStatus::Running)
+                || self
+                    .sinks
+                    .values()
+                    .any(|h| h.status == ConnectorStatus::Running))
     }
 }
 
@@ -79,7 +85,10 @@ pub async fn start_health_server(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
 
     let listener = TcpListener::bind(addr).await?;
-    info!("Health check endpoint listening on http://{}{}", addr, config.path);
+    info!(
+        "Health check endpoint listening on http://{}{}",
+        addr, config.path
+    );
 
     loop {
         let (mut socket, peer) = listener.accept().await?;
@@ -88,11 +97,11 @@ pub async fn start_health_server(
 
         tokio::spawn(async move {
             let mut buf = [0u8; 1024];
-            
+
             match socket.read(&mut buf).await {
                 Ok(n) if n > 0 => {
                     let request = String::from_utf8_lossy(&buf[..n]);
-                    
+
                     // Parse basic HTTP request
                     let lines: Vec<&str> = request.lines().collect();
                     if lines.is_empty() {
@@ -107,7 +116,10 @@ pub async fn start_health_server(
                     let method = parts[0];
                     let req_path = parts[1];
 
-                    debug!("Health check request: {} {} from {}", method, req_path, peer);
+                    debug!(
+                        "Health check request: {} {} from {}",
+                        method, req_path, peer
+                    );
 
                     let response = if method == "GET" && req_path == path {
                         build_health_response(&state).await
@@ -164,7 +176,11 @@ async fn build_health_response(state: &SharedHealthState) -> String {
     format!(
         "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
         status_code,
-        if is_healthy { "OK" } else { "Service Unavailable" },
+        if is_healthy {
+            "OK"
+        } else {
+            "Service Unavailable"
+        },
         serde_json::to_string_pretty(&body).unwrap_or_default()
     )
 }
@@ -181,7 +197,11 @@ async fn build_ready_response(state: &SharedHealthState) -> String {
     format!(
         "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
         status_code,
-        if is_ready { "OK" } else { "Service Unavailable" },
+        if is_ready {
+            "OK"
+        } else {
+            "Service Unavailable"
+        },
         serde_json::to_string(&body).unwrap_or_default()
     )
 }
@@ -195,7 +215,8 @@ fn build_live_response() -> String {
 }
 
 fn build_404_response() -> String {
-    "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nNot Found".to_string()
+    "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nNot Found"
+        .to_string()
 }
 
 #[cfg(test)]

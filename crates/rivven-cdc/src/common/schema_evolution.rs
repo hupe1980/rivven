@@ -35,8 +35,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 /// Schema compatibility mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum CompatibilityMode {
     /// No compatibility checking
     None,
@@ -55,7 +54,6 @@ pub enum CompatibilityMode {
     FullTransitive,
 }
 
-
 /// A tracked schema version.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaVersion {
@@ -72,15 +70,13 @@ pub struct SchemaVersion {
 }
 
 /// Schema type/format.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum SchemaType {
     #[default]
     Avro,
     Json,
     Protobuf,
 }
-
 
 /// Result of compatibility check.
 #[derive(Debug, Clone)]
@@ -259,14 +255,17 @@ impl SchemaTracker {
         schema_type: SchemaType,
     ) -> Result<u32> {
         let fingerprint = self.compute_fingerprint(&schema);
-        
+
         let mut schemas = self.schemas.write().await;
         let versions = schemas.entry(subject.to_string()).or_insert_with(Vec::new);
 
         // Check if this exact schema already exists
         for v in versions.iter() {
             if v.fingerprint == fingerprint {
-                debug!("Schema already registered for {} at version {}", subject, v.version);
+                debug!(
+                    "Schema already registered for {} at version {}",
+                    subject, v.version
+                );
                 return Ok(v.version);
             }
         }
@@ -285,7 +284,9 @@ impl SchemaTracker {
             schema_type,
         });
 
-        self.stats.schemas_registered.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .schemas_registered
+            .fetch_add(1, Ordering::Relaxed);
         if version > 1 {
             self.stats.evolutions.fetch_add(1, Ordering::Relaxed);
         }
@@ -335,7 +336,9 @@ impl SchemaTracker {
         subject: &str,
         new_schema: &serde_json::Value,
     ) -> CompatibilityResult {
-        self.stats.compatibility_checks.fetch_add(1, Ordering::Relaxed);
+        self.stats
+            .compatibility_checks
+            .fetch_add(1, Ordering::Relaxed);
 
         let mode = self.get_compatibility(subject).await;
         if mode == CompatibilityMode::None {
@@ -362,19 +365,19 @@ impl SchemaTracker {
         };
 
         for old_version in versions_to_check {
-            let (issues, migrations) = self.compare_schemas(
-                &old_version.schema,
-                new_schema,
-                mode,
-            );
+            let (issues, migrations) = self.compare_schemas(&old_version.schema, new_schema, mode);
             all_issues.extend(issues);
             all_migrations.extend(migrations);
         }
 
-        let has_errors = all_issues.iter().any(|i| i.severity == IssueSeverity::Error);
-        
+        let has_errors = all_issues
+            .iter()
+            .any(|i| i.severity == IssueSeverity::Error);
+
         if has_errors {
-            self.stats.incompatible_schemas.fetch_add(1, Ordering::Relaxed);
+            self.stats
+                .incompatible_schemas
+                .fetch_add(1, Ordering::Relaxed);
         }
 
         CompatibilityResult {
@@ -404,10 +407,10 @@ impl SchemaTracker {
         // Check for removed fields
         for removed in old_names.difference(&new_names) {
             let severity = match mode {
-                CompatibilityMode::Backward | CompatibilityMode::Full 
-                | CompatibilityMode::BackwardTransitive | CompatibilityMode::FullTransitive => {
-                    IssueSeverity::Error
-                }
+                CompatibilityMode::Backward
+                | CompatibilityMode::Full
+                | CompatibilityMode::BackwardTransitive
+                | CompatibilityMode::FullTransitive => IssueSeverity::Error,
                 _ => IssueSeverity::Warning,
             };
 
@@ -422,15 +425,15 @@ impl SchemaTracker {
         // Check for added fields
         for added in new_names.difference(&old_names) {
             let field_info = new_fields.get(*added).unwrap();
-            
+
             let severity = if field_info.has_default || field_info.nullable {
                 IssueSeverity::Info
             } else {
                 match mode {
-                    CompatibilityMode::Forward | CompatibilityMode::Full
-                    | CompatibilityMode::ForwardTransitive | CompatibilityMode::FullTransitive => {
-                        IssueSeverity::Error
-                    }
+                    CompatibilityMode::Forward
+                    | CompatibilityMode::Full
+                    | CompatibilityMode::ForwardTransitive
+                    | CompatibilityMode::FullTransitive => IssueSeverity::Error,
                     _ => IssueSeverity::Warning,
                 }
             };
@@ -461,11 +464,8 @@ impl SchemaTracker {
             let new_info = new_fields.get(*name).unwrap();
 
             if old_info.field_type != new_info.field_type {
-                let (severity, rule) = self.check_type_change(
-                    &old_info.field_type,
-                    &new_info.field_type,
-                    mode,
-                );
+                let (severity, rule) =
+                    self.check_type_change(&old_info.field_type, &new_info.field_type, mode);
 
                 issues.push(CompatibilityIssue {
                     severity,
@@ -499,10 +499,10 @@ impl SchemaTracker {
                 });
             } else if old_info.nullable && !new_info.nullable {
                 let severity = match mode {
-                    CompatibilityMode::Backward | CompatibilityMode::Full
-                    | CompatibilityMode::BackwardTransitive | CompatibilityMode::FullTransitive => {
-                        IssueSeverity::Error
-                    }
+                    CompatibilityMode::Backward
+                    | CompatibilityMode::Full
+                    | CompatibilityMode::BackwardTransitive
+                    | CompatibilityMode::FullTransitive => IssueSeverity::Error,
                     _ => IssueSeverity::Warning,
                 };
 
@@ -541,10 +541,10 @@ impl SchemaTracker {
             }
             if old_type == to && new_type == from {
                 let severity = match mode {
-                    CompatibilityMode::Backward | CompatibilityMode::Full
-                    | CompatibilityMode::BackwardTransitive | CompatibilityMode::FullTransitive => {
-                        IssueSeverity::Error
-                    }
+                    CompatibilityMode::Backward
+                    | CompatibilityMode::Full
+                    | CompatibilityMode::BackwardTransitive
+                    | CompatibilityMode::FullTransitive => IssueSeverity::Error,
                     _ => IssueSeverity::Warning,
                 };
                 return (severity, EvolutionRule::NarrowType);
@@ -596,12 +596,11 @@ impl SchemaTracker {
                 }
                 "unknown".to_string()
             }
-            Some(serde_json::Value::Object(obj)) => {
-                obj.get("type")
-                    .and_then(|t| t.as_str())
-                    .unwrap_or("complex")
-                    .to_string()
-            }
+            Some(serde_json::Value::Object(obj)) => obj
+                .get("type")
+                .and_then(|t| t.as_str())
+                .unwrap_or("complex")
+                .to_string(),
             _ => "unknown".to_string(),
         }
     }
@@ -609,9 +608,7 @@ impl SchemaTracker {
     /// Check if field is nullable.
     fn is_nullable(&self, field: &serde_json::Value) -> bool {
         match field.get("type") {
-            Some(serde_json::Value::Array(arr)) => {
-                arr.iter().any(|t| t == "null")
-            }
+            Some(serde_json::Value::Array(arr)) => arr.iter().any(|t| t == "null"),
             _ => false,
         }
     }
@@ -695,11 +692,17 @@ mod tests {
         let tracker = SchemaTracker::new();
         let schema = make_schema(vec![("id", "int", false), ("name", "string", true)]);
 
-        let version = tracker.register("users", schema.clone(), SchemaType::Avro).await.unwrap();
+        let version = tracker
+            .register("users", schema.clone(), SchemaType::Avro)
+            .await
+            .unwrap();
         assert_eq!(version, 1);
 
         // Registering same schema returns same version
-        let version2 = tracker.register("users", schema, SchemaType::Avro).await.unwrap();
+        let version2 = tracker
+            .register("users", schema, SchemaType::Avro)
+            .await
+            .unwrap();
         assert_eq!(version2, 1);
     }
 
@@ -708,7 +711,10 @@ mod tests {
         let tracker = SchemaTracker::new();
         let schema = make_schema(vec![("id", "int", false)]);
 
-        tracker.register("users", schema.clone(), SchemaType::Avro).await.unwrap();
+        tracker
+            .register("users", schema.clone(), SchemaType::Avro)
+            .await
+            .unwrap();
 
         let latest = tracker.get_latest("users").await;
         assert!(latest.is_some());
@@ -726,7 +732,10 @@ mod tests {
         let tracker = SchemaTracker::with_compatibility(CompatibilityMode::Backward);
 
         let v1 = make_schema(vec![("id", "int", false)]);
-        tracker.register("users", v1, SchemaType::Avro).await.unwrap();
+        tracker
+            .register("users", v1, SchemaType::Avro)
+            .await
+            .unwrap();
 
         // Adding optional field is backward compatible
         let v2 = make_schema(vec![("id", "int", false), ("name", "string", true)]);
@@ -740,7 +749,10 @@ mod tests {
         let tracker = SchemaTracker::with_compatibility(CompatibilityMode::Backward);
 
         let v1 = make_schema(vec![("id", "int", false)]);
-        tracker.register("users", v1, SchemaType::Avro).await.unwrap();
+        tracker
+            .register("users", v1, SchemaType::Avro)
+            .await
+            .unwrap();
 
         // Adding required field without default is NOT backward compatible
         let v2 = make_schema(vec![("id", "int", false), ("name", "string", false)]);
@@ -755,14 +767,20 @@ mod tests {
         let tracker = SchemaTracker::with_compatibility(CompatibilityMode::Backward);
 
         let v1 = make_schema(vec![("id", "int", false), ("name", "string", false)]);
-        tracker.register("users", v1, SchemaType::Avro).await.unwrap();
+        tracker
+            .register("users", v1, SchemaType::Avro)
+            .await
+            .unwrap();
 
         // Removing field is NOT backward compatible
         let v2 = make_schema(vec![("id", "int", false)]);
         let result = tracker.check_compatibility("users", &v2).await;
 
         assert!(!result.is_compatible());
-        assert!(result.issues.iter().any(|i| i.rule == EvolutionRule::RemoveField));
+        assert!(result
+            .issues
+            .iter()
+            .any(|i| i.rule == EvolutionRule::RemoveField));
     }
 
     #[tokio::test]
@@ -770,14 +788,20 @@ mod tests {
         let tracker = SchemaTracker::with_compatibility(CompatibilityMode::Backward);
 
         let v1 = make_schema(vec![("count", "int", false)]);
-        tracker.register("stats", v1, SchemaType::Avro).await.unwrap();
+        tracker
+            .register("stats", v1, SchemaType::Avro)
+            .await
+            .unwrap();
 
         // int -> long is allowed (widening)
         let v2 = make_schema(vec![("count", "long", false)]);
         let result = tracker.check_compatibility("stats", &v2).await;
 
         assert!(result.is_compatible());
-        assert!(result.issues.iter().any(|i| i.rule == EvolutionRule::WidenType));
+        assert!(result
+            .issues
+            .iter()
+            .any(|i| i.rule == EvolutionRule::WidenType));
     }
 
     #[tokio::test]
@@ -785,14 +809,20 @@ mod tests {
         let tracker = SchemaTracker::with_compatibility(CompatibilityMode::Backward);
 
         let v1 = make_schema(vec![("count", "long", false)]);
-        tracker.register("stats", v1, SchemaType::Avro).await.unwrap();
+        tracker
+            .register("stats", v1, SchemaType::Avro)
+            .await
+            .unwrap();
 
         // long -> int is NOT backward compatible (narrowing)
         let v2 = make_schema(vec![("count", "int", false)]);
         let result = tracker.check_compatibility("stats", &v2).await;
 
         assert!(!result.is_compatible());
-        assert!(result.issues.iter().any(|i| i.rule == EvolutionRule::NarrowType));
+        assert!(result
+            .issues
+            .iter()
+            .any(|i| i.rule == EvolutionRule::NarrowType));
     }
 
     #[tokio::test]
@@ -800,7 +830,10 @@ mod tests {
         let tracker = SchemaTracker::with_compatibility(CompatibilityMode::None);
 
         let v1 = make_schema(vec![("id", "int", false)]);
-        tracker.register("users", v1, SchemaType::Avro).await.unwrap();
+        tracker
+            .register("users", v1, SchemaType::Avro)
+            .await
+            .unwrap();
 
         // Any change is allowed with None mode
         let v2 = make_schema(vec![("totally_different", "string", false)]);
@@ -815,12 +848,18 @@ mod tests {
 
         // Version 1: just id
         let v1 = make_schema(vec![("id", "int", false)]);
-        let ver1 = tracker.register("users", v1, SchemaType::Avro).await.unwrap();
+        let ver1 = tracker
+            .register("users", v1, SchemaType::Avro)
+            .await
+            .unwrap();
         assert_eq!(ver1, 1);
 
         // Version 2: add name
         let v2 = make_schema(vec![("id", "int", false), ("name", "string", true)]);
-        let ver2 = tracker.register("users", v2, SchemaType::Avro).await.unwrap();
+        let ver2 = tracker
+            .register("users", v2, SchemaType::Avro)
+            .await
+            .unwrap();
         assert_eq!(ver2, 2);
 
         // Version 3: add email
@@ -829,7 +868,10 @@ mod tests {
             ("name", "string", true),
             ("email", "string", true),
         ]);
-        let ver3 = tracker.register("users", v3, SchemaType::Avro).await.unwrap();
+        let ver3 = tracker
+            .register("users", v3, SchemaType::Avro)
+            .await
+            .unwrap();
         assert_eq!(ver3, 3);
 
         let all = tracker.get_all_versions("users").await;
@@ -841,8 +883,14 @@ mod tests {
         let tracker = SchemaTracker::new();
 
         let schema = make_schema(vec![("id", "int", false)]);
-        tracker.register("users", schema.clone(), SchemaType::Avro).await.unwrap();
-        tracker.register("orders", schema, SchemaType::Avro).await.unwrap();
+        tracker
+            .register("users", schema.clone(), SchemaType::Avro)
+            .await
+            .unwrap();
+        tracker
+            .register("orders", schema, SchemaType::Avro)
+            .await
+            .unwrap();
 
         let subjects = tracker.list_subjects().await;
         assert_eq!(subjects.len(), 2);
@@ -859,8 +907,14 @@ mod tests {
         let v1 = make_schema(vec![("id", "int", false)]);
         let v2 = make_schema(vec![("id", "int", false), ("name", "string", true)]);
 
-        tracker.register("users", v1.clone(), SchemaType::Avro).await.unwrap();
-        tracker.register("users", v2.clone(), SchemaType::Avro).await.unwrap();
+        tracker
+            .register("users", v1.clone(), SchemaType::Avro)
+            .await
+            .unwrap();
+        tracker
+            .register("users", v2.clone(), SchemaType::Avro)
+            .await
+            .unwrap();
         tracker.check_compatibility("users", &v1).await;
 
         let stats = tracker.stats();

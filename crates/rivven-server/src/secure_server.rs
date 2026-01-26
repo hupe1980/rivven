@@ -37,15 +37,14 @@ use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
 use rivven_core::{
-    AuthManager, Config, OffsetManager, TopicManager,
-    schema_registry::EmbeddedSchemaRegistry,
-    ServiceAuthManager, ServiceAuthConfig,
+    schema_registry::EmbeddedSchemaRegistry, AuthManager, Config, OffsetManager, ServiceAuthConfig,
+    ServiceAuthManager, TopicManager,
 };
 
 #[cfg(feature = "tls")]
 use rivven_core::{
+    tls::{MtlsMode, TlsAcceptor, TlsConfig, TlsIdentity, TlsServerStream},
     AuthSession,
-    tls::{TlsAcceptor, TlsConfig, TlsServerStream, TlsIdentity, MtlsMode},
 };
 
 use crate::auth_handler::{AuthenticatedHandler, ConnectionAuth};
@@ -61,29 +60,29 @@ use crate::protocol::{Request, Response};
 pub struct SecureServerConfig {
     /// Bind address
     pub bind_addr: SocketAddr,
-    
+
     /// TLS configuration (None = plaintext)
     #[cfg(feature = "tls")]
     pub tls_config: Option<TlsConfig>,
-    
+
     /// Maximum concurrent connections
     pub max_connections: usize,
-    
+
     /// Connection timeout
     pub connection_timeout: Duration,
-    
+
     /// Idle timeout (close connection after inactivity)
     pub idle_timeout: Duration,
-    
+
     /// Maximum message size (bytes)
     pub max_message_size: usize,
-    
+
     /// Require authentication
     pub require_auth: bool,
-    
+
     /// Enable service-to-service auth (mTLS → auto-auth)
     pub enable_service_auth: bool,
-    
+
     /// Service auth configuration
     pub service_auth_config: Option<ServiceAuthConfig>,
 }
@@ -114,14 +113,14 @@ impl Default for SecureServerConfig {
 pub struct ConnectionSecurityContext {
     /// Client IP address
     pub client_addr: SocketAddr,
-    
+
     /// TLS information (if TLS enabled)
     #[cfg(feature = "tls")]
     pub tls_info: Option<TlsConnectionInfo>,
-    
+
     /// Authentication state
     pub auth_state: ConnectionAuth,
-    
+
     /// Service identity (if mTLS authenticated)
     #[cfg(feature = "tls")]
     pub service_identity: Option<ServiceIdentity>,
@@ -133,13 +132,13 @@ pub struct ConnectionSecurityContext {
 pub struct TlsConnectionInfo {
     /// TLS protocol version (e.g., "TLSv1.3")
     pub protocol_version: String,
-    
+
     /// Cipher suite
     pub cipher_suite: Option<String>,
-    
+
     /// Client certificate identity (if mTLS)
     pub client_cert: Option<TlsIdentity>,
-    
+
     /// ALPN protocol
     pub alpn_protocol: Option<String>,
 }
@@ -149,16 +148,16 @@ pub struct TlsConnectionInfo {
 pub struct ServiceIdentity {
     /// Service account ID
     pub service_id: String,
-    
+
     /// Certificate common name
     pub common_name: String,
-    
+
     /// Certificate subject
     pub subject: String,
-    
+
     /// Certificate fingerprint
     pub fingerprint: String,
-    
+
     /// Roles/permissions from service account
     pub roles: Vec<String>,
 }
@@ -177,10 +176,10 @@ pub struct SecureServer {
     /// Service auth for mTLS certificate-based authentication (enabled via config)
     #[allow(dead_code)]
     service_auth_manager: Option<Arc<ServiceAuthManager>>,
-    
+
     #[cfg(feature = "tls")]
     tls_acceptor: Option<TlsAcceptor>,
-    
+
     /// Connection limiter
     connection_semaphore: Arc<Semaphore>,
 }
@@ -195,14 +194,14 @@ impl SecureServer {
         let offset_manager = OffsetManager::new();
         let schema_registry = Arc::new(EmbeddedSchemaRegistry::new(&core_config).await?);
         let auth_manager = Arc::new(AuthManager::new(Default::default()));
-        
+
         // Initialize service auth if configured
         let service_auth_manager = if server_config.enable_service_auth {
             Some(Arc::new(ServiceAuthManager::new()))
         } else {
             None
         };
-        
+
         // Initialize TLS acceptor if configured
         #[cfg(feature = "tls")]
         let tls_acceptor = if let Some(ref tls_config) = server_config.tls_config {
@@ -214,9 +213,9 @@ impl SecureServer {
         } else {
             None
         };
-        
+
         let connection_semaphore = Arc::new(Semaphore::new(server_config.max_connections));
-        
+
         Ok(Self {
             config: server_config,
             topic_manager,
@@ -229,11 +228,11 @@ impl SecureServer {
             connection_semaphore,
         })
     }
-    
+
     /// Start the secure server
     pub async fn start(self) -> anyhow::Result<()> {
         let listener = TcpListener::bind(self.config.bind_addr).await?;
-        
+
         #[cfg(feature = "tls")]
         let mode = if self.tls_acceptor.is_some() {
             if let Some(ref cfg) = self.config.tls_config {
@@ -248,39 +247,46 @@ impl SecureServer {
         } else {
             "plaintext"
         };
-        
+
         #[cfg(not(feature = "tls"))]
         let mode = "plaintext";
-        
+
         info!(
             "Secure server listening on {} (mode: {}, auth: {})",
             self.config.bind_addr,
             mode,
-            if self.config.require_auth { "required" } else { "optional" }
+            if self.config.require_auth {
+                "required"
+            } else {
+                "optional"
+            }
         );
-        
+
         // Create handler for the AuthenticatedHandler
         let auth_handler_inner = RequestHandler::new(
             self.topic_manager.clone(),
             self.offset_manager.clone(),
             self.schema_registry.clone(),
         );
-        
+
         let auth_handler = Arc::new(AuthenticatedHandler::new(
             auth_handler_inner,
             self.auth_manager.clone(),
             self.config.require_auth,
         ));
-        
+
         // Server state for spawned tasks
         let server = Arc::new(self);
-        
+
         loop {
             // Acquire connection permit
             let permit = match server.connection_semaphore.clone().try_acquire_owned() {
                 Ok(permit) => permit,
                 Err(_) => {
-                    warn!("Max connections reached ({}), rejecting", server.config.max_connections);
+                    warn!(
+                        "Max connections reached ({}), rejecting",
+                        server.config.max_connections
+                    );
                     // Accept and immediately close to avoid kernel backlog
                     if let Ok((stream, _)) = listener.accept().await {
                         drop(stream);
@@ -288,17 +294,20 @@ impl SecureServer {
                     continue;
                 }
             };
-            
+
             match listener.accept().await {
                 Ok((tcp_stream, client_addr)) => {
                     let server = server.clone();
                     let auth_handler = auth_handler.clone();
-                    
+
                     tokio::spawn(async move {
                         // Permit is dropped when task completes
                         let _permit = permit;
-                        
-                        if let Err(e) = server.handle_connection(tcp_stream, client_addr, auth_handler).await {
+
+                        if let Err(e) = server
+                            .handle_connection(tcp_stream, client_addr, auth_handler)
+                            .await
+                        {
                             debug!("Connection error from {}: {}", client_addr, e);
                         }
                     });
@@ -310,7 +319,7 @@ impl SecureServer {
             }
         }
     }
-    
+
     /// Handle a single connection
     async fn handle_connection(
         &self,
@@ -320,35 +329,37 @@ impl SecureServer {
     ) -> anyhow::Result<()> {
         // Set TCP options
         tcp_stream.set_nodelay(true)?;
-        
+
         // Apply connection timeout for TLS handshake
         let _timeout = self.config.connection_timeout;
-        
+
         #[cfg(feature = "tls")]
         if let Some(ref tls_acceptor) = self.tls_acceptor {
             // TLS connection
-            let tls_stream = match tokio::time::timeout(
-                _timeout,
-                tls_acceptor.accept_tcp(tcp_stream)
-            ).await {
-                Ok(Ok(stream)) => stream,
-                Ok(Err(e)) => {
-                    warn!("TLS handshake failed from {}: {}", client_addr, e);
-                    return Ok(());
-                }
-                Err(_) => {
-                    warn!("TLS handshake timeout from {}", client_addr);
-                    return Ok(());
-                }
-            };
-            
+            let tls_stream =
+                match tokio::time::timeout(_timeout, tls_acceptor.accept_tcp(tcp_stream)).await {
+                    Ok(Ok(stream)) => stream,
+                    Ok(Err(e)) => {
+                        warn!("TLS handshake failed from {}: {}", client_addr, e);
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        warn!("TLS handshake timeout from {}", client_addr);
+                        return Ok(());
+                    }
+                };
+
             // Extract security context from TLS
-            let security_ctx = self.build_tls_security_context(client_addr, &tls_stream).await?;
-            
+            let security_ctx = self
+                .build_tls_security_context(client_addr, &tls_stream)
+                .await?;
+
             // Handle the secure connection
-            return self.handle_secure_connection(tls_stream, security_ctx, auth_handler).await;
+            return self
+                .handle_secure_connection(tls_stream, security_ctx, auth_handler)
+                .await;
         }
-        
+
         // Plaintext connection (TLS not configured or TLS feature disabled)
         let security_ctx = ConnectionSecurityContext {
             client_addr,
@@ -362,10 +373,11 @@ impl SecureServer {
             #[cfg(feature = "tls")]
             service_identity: None,
         };
-        
-        self.handle_secure_connection(tcp_stream, security_ctx, auth_handler).await
+
+        self.handle_secure_connection(tcp_stream, security_ctx, auth_handler)
+            .await
     }
-    
+
     /// Build security context from TLS connection
     #[cfg(feature = "tls")]
     async fn build_tls_security_context(
@@ -374,23 +386,24 @@ impl SecureServer {
         tls_stream: &TlsServerStream<TcpStream>,
     ) -> anyhow::Result<ConnectionSecurityContext> {
         // Extract TLS info
-        let protocol_version = tls_stream.protocol_version()
+        let protocol_version = tls_stream
+            .protocol_version()
             .map(|v| format!("{:?}", v))
             .unwrap_or_else(|| "unknown".to_string());
-        
-        let alpn = tls_stream.alpn_protocol()
+
+        let alpn = tls_stream
+            .alpn_protocol()
             .map(|p| String::from_utf8_lossy(p).to_string());
-        
+
         // Extract client certificate if present
-        let client_cert = tls_stream.peer_certificates()
-            .and_then(|certs| {
-                if certs.is_empty() {
-                    None
-                } else {
-                    Some(TlsIdentity::from_certificate(&certs[0]))
-                }
-            });
-        
+        let client_cert = tls_stream.peer_certificates().and_then(|certs| {
+            if certs.is_empty() {
+                None
+            } else {
+                Some(TlsIdentity::from_certificate(&certs[0]))
+            }
+        });
+
         // Build TLS info
         let tls_info = TlsConnectionInfo {
             protocol_version,
@@ -398,24 +411,28 @@ impl SecureServer {
             client_cert: client_cert.clone(),
             alpn_protocol: alpn,
         };
-        
+
         // Determine auth state based on client certificate
         let (auth_state, service_identity) = if let Some(ref cert_identity) = client_cert {
             // mTLS: Try to authenticate via service auth
             if let Some(ref svc_auth) = self.service_auth_manager {
-                let cert_subject = cert_identity.subject.clone()
+                let cert_subject = cert_identity
+                    .subject
+                    .clone()
                     .unwrap_or_else(|| cert_identity.common_name.clone().unwrap_or_default());
-                
+
                 if !cert_subject.is_empty() {
                     let client_ip_str = client_addr.ip().to_string();
-                    
+
                     match svc_auth.authenticate_certificate(&cert_subject, &client_ip_str) {
                         Ok(session) => {
                             info!(
                                 "mTLS authenticated service '{}' from {} (cert: {})",
-                                session.service_account, client_addr, cert_identity.common_name.as_deref().unwrap_or("?")
+                                session.service_account,
+                                client_addr,
+                                cert_identity.common_name.as_deref().unwrap_or("?")
                             );
-                            
+
                             let svc_identity = ServiceIdentity {
                                 service_id: session.service_account.clone(),
                                 common_name: cert_identity.common_name.clone().unwrap_or_default(),
@@ -423,7 +440,7 @@ impl SecureServer {
                                 fingerprint: cert_identity.fingerprint.clone(),
                                 roles: session.permissions.clone(),
                             };
-                            
+
                             // Create a corresponding AuthSession for RBAC
                             // Use the auth_manager to create a proper session
                             let auth_session = AuthSession {
@@ -432,11 +449,15 @@ impl SecureServer {
                                 principal_type: rivven_core::PrincipalType::ServiceAccount,
                                 permissions: std::collections::HashSet::new(), // Will be populated from roles
                                 created_at: std::time::Instant::now(),
-                                expires_at: std::time::Instant::now() + session.time_until_expiration(),
+                                expires_at: std::time::Instant::now()
+                                    + session.time_until_expiration(),
                                 client_ip: client_addr.ip().to_string(),
                             };
-                            
-                            (ConnectionAuth::Authenticated(auth_session), Some(svc_identity))
+
+                            (
+                                ConnectionAuth::Authenticated(auth_session),
+                                Some(svc_identity),
+                            )
                         }
                         Err(e) => {
                             warn!(
@@ -452,14 +473,17 @@ impl SecureServer {
                 }
             } else {
                 // No service auth configured, but client provided cert
-                debug!("Client cert provided but service auth not enabled from {}", client_addr);
+                debug!(
+                    "Client cert provided but service auth not enabled from {}",
+                    client_addr
+                );
                 (
                     if self.config.require_auth {
                         ConnectionAuth::Unauthenticated
                     } else {
                         ConnectionAuth::Anonymous
                     },
-                    None
+                    None,
                 )
             }
         } else {
@@ -470,10 +494,10 @@ impl SecureServer {
                 } else {
                     ConnectionAuth::Anonymous
                 },
-                None
+                None,
             )
         };
-        
+
         Ok(ConnectionSecurityContext {
             client_addr,
             tls_info: Some(tls_info),
@@ -481,7 +505,7 @@ impl SecureServer {
             service_identity,
         })
     }
-    
+
     /// Handle a connection with security context
     async fn handle_secure_connection<S>(
         &self,
@@ -495,26 +519,25 @@ impl SecureServer {
         let mut buffer = BytesMut::with_capacity(8192);
         let client_addr = security_ctx.client_addr;
         let client_ip = client_addr.ip().to_string();
-        
+
         #[cfg(feature = "tls")]
         let has_tls = security_ctx.tls_info.is_some();
         #[cfg(not(feature = "tls"))]
         let has_tls = false;
-        
+
         debug!(
             "Connection established: addr={}, tls={}, auth={:?}",
             client_addr,
             has_tls,
             std::mem::discriminant(&security_ctx.auth_state)
         );
-        
+
         loop {
             // Read with idle timeout
             let mut len_buf = [0u8; 4];
-            match tokio::time::timeout(
-                self.config.idle_timeout,
-                stream.read_exact(&mut len_buf)
-            ).await {
+            match tokio::time::timeout(self.config.idle_timeout, stream.read_exact(&mut len_buf))
+                .await
+            {
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
                     debug!("Client {} disconnected gracefully", client_addr);
@@ -526,9 +549,9 @@ impl SecureServer {
                     return Ok(());
                 }
             }
-            
+
             let msg_len = u32::from_be_bytes(len_buf) as usize;
-            
+
             // Validate message size
             if msg_len > self.config.max_message_size {
                 warn!(
@@ -541,22 +564,24 @@ impl SecureServer {
                 self.send_response(&mut stream, &response).await?;
                 continue;
             }
-            
+
             // Read message body with timeout to prevent slow-read DoS
             buffer.clear();
             buffer.resize(msg_len, 0);
-            match tokio::time::timeout(
-                self.config.idle_timeout,
-                stream.read_exact(&mut buffer)
-            ).await {
+            match tokio::time::timeout(self.config.idle_timeout, stream.read_exact(&mut buffer))
+                .await
+            {
                 Ok(Ok(_)) => {}
                 Ok(Err(e)) => return Err(e.into()),
                 Err(_) => {
-                    debug!("Read timeout during message body from {} - closing connection", client_addr);
+                    debug!(
+                        "Read timeout during message body from {} - closing connection",
+                        client_addr
+                    );
                     return Ok(());
                 }
             }
-            
+
             // Parse request
             let request = match Request::from_bytes(&buffer) {
                 Ok(req) => req,
@@ -569,25 +594,19 @@ impl SecureServer {
                     continue;
                 }
             };
-            
+
             // Handle request with auth
-            let response = auth_handler.handle(
-                request,
-                &mut security_ctx.auth_state,
-                &client_ip,
-            ).await;
-            
+            let response = auth_handler
+                .handle(request, &mut security_ctx.auth_state, &client_ip)
+                .await;
+
             // Send response
             self.send_response(&mut stream, &response).await?;
         }
     }
-    
+
     /// Send a response
-    async fn send_response<S>(
-        &self,
-        stream: &mut S,
-        response: &Response,
-    ) -> anyhow::Result<()>
+    async fn send_response<S>(&self, stream: &mut S, response: &Response) -> anyhow::Result<()>
     where
         S: AsyncWrite + Unpin,
     {
@@ -618,57 +637,57 @@ impl SecureServerBuilder {
             server_config: SecureServerConfig::default(),
         }
     }
-    
+
     /// Set bind address
     pub fn bind(mut self, addr: SocketAddr) -> Self {
         self.server_config.bind_addr = addr;
         self
     }
-    
+
     /// Enable TLS
     #[cfg(feature = "tls")]
     pub fn with_tls(mut self, tls_config: TlsConfig) -> Self {
         self.server_config.tls_config = Some(tls_config);
         self
     }
-    
+
     /// Set maximum connections
     pub fn max_connections(mut self, max: usize) -> Self {
         self.server_config.max_connections = max;
         self
     }
-    
+
     /// Set connection timeout
     pub fn connection_timeout(mut self, timeout: Duration) -> Self {
         self.server_config.connection_timeout = timeout;
         self
     }
-    
+
     /// Set idle timeout
     pub fn idle_timeout(mut self, timeout: Duration) -> Self {
         self.server_config.idle_timeout = timeout;
         self
     }
-    
+
     /// Set maximum message size
     pub fn max_message_size(mut self, size: usize) -> Self {
         self.server_config.max_message_size = size;
         self
     }
-    
+
     /// Require authentication
     pub fn require_auth(mut self, require: bool) -> Self {
         self.server_config.require_auth = require;
         self
     }
-    
+
     /// Enable service-to-service authentication
     pub fn enable_service_auth(mut self, config: ServiceAuthConfig) -> Self {
         self.server_config.enable_service_auth = true;
         self.server_config.service_auth_config = Some(config);
         self
     }
-    
+
     /// Build and start the server
     pub async fn build(self) -> anyhow::Result<SecureServer> {
         SecureServer::new(self.core_config, self.server_config).await
@@ -682,7 +701,7 @@ impl SecureServerBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_default_config() {
         let config = SecureServerConfig::default();
@@ -690,7 +709,7 @@ mod tests {
         assert_eq!(config.max_message_size, 10 * 1024 * 1024);
         assert!(!config.require_auth);
     }
-    
+
     #[test]
     fn test_builder() {
         let core_config = Config::default();
@@ -698,8 +717,11 @@ mod tests {
             .bind("127.0.0.1:9999".parse().unwrap())
             .max_connections(5000)
             .require_auth(true);
-        
-        assert_eq!(builder.server_config.bind_addr, "127.0.0.1:9999".parse().unwrap());
+
+        assert_eq!(
+            builder.server_config.bind_addr,
+            "127.0.0.1:9999".parse().unwrap()
+        );
         assert_eq!(builder.server_config.max_connections, 5000);
         assert!(builder.server_config.require_auth);
     }

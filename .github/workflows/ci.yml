@@ -125,8 +125,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Install Rust 1.75
-        uses: dtolnay/rust-toolchain@1.75.0
+      - name: Install Rust 1.80
+        uses: dtolnay/rust-toolchain@1.80.0
       
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

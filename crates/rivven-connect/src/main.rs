@@ -40,8 +40,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 // Use the library modules instead of declaring them
 use rivven_connect::{
-    broker_client, config, connectors, error, health, metrics,
-    sink_runner, source_runner,
+    broker_client, config, connectors, error, health, metrics, sink_runner, source_runner,
 };
 
 use config::ConnectConfig;
@@ -155,7 +154,7 @@ async fn run_all(config: ConnectConfig) -> Result<()> {
 
     let config = Arc::new(config);
     let (shutdown_tx, _) = broadcast::channel::<()>(16);
-    
+
     // Initialize health state
     let health_state: SharedHealthState = Arc::new(tokio::sync::RwLock::new(HealthState {
         started_at: Some(Instant::now()),
@@ -176,12 +175,11 @@ async fn run_all(config: ConnectConfig) -> Result<()> {
     // Start metrics server if enabled
     if config.settings.metrics.enabled {
         let metrics_config = config.settings.metrics.clone();
-        let metrics_state: metrics::SharedMetricsState = Arc::new(tokio::sync::RwLock::new(
-            metrics::MetricsState {
+        let metrics_state: metrics::SharedMetricsState =
+            Arc::new(tokio::sync::RwLock::new(metrics::MetricsState {
                 started_at: Some(Instant::now()),
                 ..Default::default()
-            }
-        ));
+            }));
         tokio::spawn(async move {
             if let Err(e) = metrics::start_metrics_server(metrics_config, metrics_state).await {
                 error!("Metrics server failed: {}", e);
@@ -196,9 +194,9 @@ async fn run_all(config: ConnectConfig) -> Result<()> {
         if !source_config.enabled {
             continue;
         }
-        
+
         info!("Starting source: {} ({})", name, source_config.connector);
-        
+
         let config = config.clone();
         let name = name.clone();
         let source_config = source_config.clone();
@@ -208,23 +206,21 @@ async fn run_all(config: ConnectConfig) -> Result<()> {
         // Initialize health entry
         {
             let mut state = health_state.write().await;
-            state.sources.insert(name.clone(), ConnectorHealth {
-                status: ConnectorStatus::Starting,
-                events_processed: 0,
-                errors_count: 0,
-                last_error: None,
-            });
+            state.sources.insert(
+                name.clone(),
+                ConnectorHealth {
+                    status: ConnectorStatus::Starting,
+                    events_processed: 0,
+                    errors_count: 0,
+                    last_error: None,
+                },
+            );
         }
 
         let task_name = name.clone();
         tasks.push(tokio::spawn(async move {
-            let result = source_runner::run_source(
-                &name,
-                &source_config,
-                &config,
-                &mut shutdown_rx,
-            )
-            .await;
+            let result =
+                source_runner::run_source(&name, &source_config, &config, &mut shutdown_rx).await;
 
             // Update health state
             {
@@ -255,9 +251,9 @@ async fn run_all(config: ConnectConfig) -> Result<()> {
         if !sink_config.enabled {
             continue;
         }
-        
+
         info!("Starting sink: {} ({})", name, sink_config.connector);
-        
+
         let config = config.clone();
         let name = name.clone();
         let sink_config = sink_config.clone();
@@ -267,23 +263,21 @@ async fn run_all(config: ConnectConfig) -> Result<()> {
         // Initialize health entry
         {
             let mut state = health_state.write().await;
-            state.sinks.insert(name.clone(), ConnectorHealth {
-                status: ConnectorStatus::Starting,
-                events_processed: 0,
-                errors_count: 0,
-                last_error: None,
-            });
+            state.sinks.insert(
+                name.clone(),
+                ConnectorHealth {
+                    status: ConnectorStatus::Starting,
+                    events_processed: 0,
+                    errors_count: 0,
+                    last_error: None,
+                },
+            );
         }
 
         let task_name = name.clone();
         tasks.push(tokio::spawn(async move {
-            let result = sink_runner::run_sink(
-                &name,
-                &sink_config,
-                &config,
-                &mut shutdown_rx,
-            )
-            .await;
+            let result =
+                sink_runner::run_sink(&name, &sink_config, &config, &mut shutdown_rx).await;
 
             // Update health state
             {
@@ -332,12 +326,7 @@ async fn run_all(config: ConnectConfig) -> Result<()> {
 
     // Wait for tasks with timeout
     let shutdown_timeout = tokio::time::Duration::from_secs(10);
-    match tokio::time::timeout(
-        shutdown_timeout,
-        futures::future::join_all(tasks),
-    )
-    .await
-    {
+    match tokio::time::timeout(shutdown_timeout, futures::future::join_all(tasks)).await {
         Ok(results) => {
             let failed = results.iter().filter(|r| r.is_err()).count();
             if failed > 0 {
@@ -354,9 +343,7 @@ async fn run_all(config: ConnectConfig) -> Result<()> {
 }
 
 /// Wait for a fatal error from any task
-async fn wait_for_fatal_error(
-    _tasks: &mut [tokio::task::JoinHandle<error::Result<()>>],
-) {
+async fn wait_for_fatal_error(_tasks: &mut [tokio::task::JoinHandle<error::Result<()>>]) {
     // This is a placeholder - in production you'd want more sophisticated
     // failure handling (restart policies, circuit breakers, etc.)
     loop {
@@ -440,41 +427,73 @@ async fn run_sinks_only(config: ConnectConfig) -> Result<()> {
 
 fn validate_config(config: ConnectConfig) -> Result<()> {
     println!("✓ Configuration valid!\n");
-    
+
     println!("Broker:");
     println!("  Bootstrap servers:");
     for server in &config.broker.bootstrap_servers {
         println!("    - {}", server);
     }
-    println!("  Metadata refresh: {}ms", config.broker.metadata_refresh_ms);
-    println!("  Connection timeout: {}ms", config.broker.connection_timeout_ms);
+    println!(
+        "  Metadata refresh: {}ms",
+        config.broker.metadata_refresh_ms
+    );
+    println!(
+        "  Connection timeout: {}ms",
+        config.broker.connection_timeout_ms
+    );
     println!("  Request timeout: {}ms", config.broker.request_timeout_ms);
-    println!("  TLS: {}", if config.broker.tls.enabled { "enabled" } else { "disabled" });
+    println!(
+        "  TLS: {}",
+        if config.broker.tls.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     println!();
 
     println!("Topic Settings:");
-    println!("  Auto-create: {}", if config.settings.topic.auto_create { "enabled" } else { "disabled" });
-    println!("  Default partitions: {}", config.settings.topic.default_partitions);
-    println!("  Default replication: {}", config.settings.topic.default_replication_factor);
+    println!(
+        "  Auto-create: {}",
+        if config.settings.topic.auto_create {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    println!(
+        "  Default partitions: {}",
+        config.settings.topic.default_partitions
+    );
+    println!(
+        "  Default replication: {}",
+        config.settings.topic.default_replication_factor
+    );
     println!();
 
     println!("Retry Policy:");
     println!("  Max retries: {}", config.settings.retry.max_retries);
-    println!("  Initial backoff: {}ms", config.settings.retry.initial_backoff_ms);
+    println!(
+        "  Initial backoff: {}ms",
+        config.settings.retry.initial_backoff_ms
+    );
     println!("  Max backoff: {}ms", config.settings.retry.max_backoff_ms);
     println!();
 
     println!("Endpoints:");
     if config.settings.health.enabled {
-        println!("  Health:  http://0.0.0.0:{}{}", 
-            config.settings.health.port, 
-            config.settings.health.path);
+        println!(
+            "  Health:  http://0.0.0.0:{}{}",
+            config.settings.health.port, config.settings.health.path
+        );
     } else {
         println!("  Health:  disabled");
     }
     if config.settings.metrics.enabled {
-        println!("  Metrics: http://0.0.0.0:{}/metrics", 
-            config.settings.metrics.port);
+        println!(
+            "  Metrics: http://0.0.0.0:{}/metrics",
+            config.settings.metrics.port
+        );
     } else {
         println!("  Metrics: disabled");
     }
@@ -482,26 +501,40 @@ fn validate_config(config: ConnectConfig) -> Result<()> {
 
     let enabled_sources: Vec<_> = config.enabled_sources().collect();
     let disabled_sources = config.sources.len() - enabled_sources.len();
-    
-    println!("Sources ({} enabled, {} disabled):", enabled_sources.len(), disabled_sources);
+
+    println!(
+        "Sources ({} enabled, {} disabled):",
+        enabled_sources.len(),
+        disabled_sources
+    );
     for (name, source) in &config.sources {
         let status = if source.enabled { "✓" } else { "○" };
-        let partitions = source.topic_config
+        let partitions = source
+            .topic_config
             .as_ref()
             .and_then(|tc| tc.partitions)
             .unwrap_or(config.settings.topic.default_partitions);
-        println!("  {} {} ({}) → topic: {} ({} partitions)", 
-            status, name, source.connector, source.topic, partitions);
+        println!(
+            "  {} {} ({}) → topic: {} ({} partitions)",
+            status, name, source.connector, source.topic, partitions
+        );
     }
     println!();
 
     let enabled_sinks: Vec<_> = config.enabled_sinks().collect();
     let disabled_sinks = config.sinks.len() - enabled_sinks.len();
-    
-    println!("Sinks ({} enabled, {} disabled):", enabled_sinks.len(), disabled_sinks);
+
+    println!(
+        "Sinks ({} enabled, {} disabled):",
+        enabled_sinks.len(),
+        disabled_sinks
+    );
     for (name, sink) in &config.sinks {
         let status = if sink.enabled { "✓" } else { "○" };
-        println!("  {} {} ({}) ← topics: {:?}", status, name, sink.connector, sink.topics);
+        println!(
+            "  {} {} ({}) ← topics: {:?}",
+            status, name, sink.connector, sink.topics
+        );
     }
 
     Ok(())
@@ -530,11 +563,19 @@ async fn show_status(config: ConnectConfig, url: Option<String>) -> Result<()> {
     match client.get(&health_url).send().await {
         Ok(response) => {
             let status_code = response.status();
-            let body: serde_json::Value = response.json().await.unwrap_or_else(|_| {
-                serde_json::json!({"error": "Failed to parse response"})
-            });
+            let body: serde_json::Value = response
+                .json()
+                .await
+                .unwrap_or_else(|_| serde_json::json!({"error": "Failed to parse response"}));
 
-            println!("Health Status: {}", if status_code.is_success() { "✓ OK" } else { "✗ UNHEALTHY" });
+            println!(
+                "Health Status: {}",
+                if status_code.is_success() {
+                    "✓ OK"
+                } else {
+                    "✗ UNHEALTHY"
+                }
+            );
             println!();
 
             if let Some(status) = body.get("status") {
@@ -551,16 +592,28 @@ async fn show_status(config: ConnectConfig, url: Option<String>) -> Result<()> {
             if let Some(sources) = body.get("sources").and_then(|s| s.as_object()) {
                 println!("\nSources:");
                 for (name, info) in sources {
-                    let status = info.get("status").and_then(|s| s.as_str()).unwrap_or("unknown");
-                    let events = info.get("events_processed").and_then(|e| e.as_u64()).unwrap_or(0);
-                    let errors = info.get("errors_count").and_then(|e| e.as_u64()).unwrap_or(0);
+                    let status = info
+                        .get("status")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("unknown");
+                    let events = info
+                        .get("events_processed")
+                        .and_then(|e| e.as_u64())
+                        .unwrap_or(0);
+                    let errors = info
+                        .get("errors_count")
+                        .and_then(|e| e.as_u64())
+                        .unwrap_or(0);
                     let status_icon = match status {
                         "running" => "✓",
                         "failed" => "✗",
                         "unhealthy" => "!",
                         _ => "○",
                     };
-                    println!("  {} {} - events: {}, errors: {}", status_icon, name, events, errors);
+                    println!(
+                        "  {} {} - events: {}, errors: {}",
+                        status_icon, name, events, errors
+                    );
                     if let Some(error) = info.get("last_error").and_then(|e| e.as_str()) {
                         println!("      └─ Error: {}", error);
                     }
@@ -570,16 +623,28 @@ async fn show_status(config: ConnectConfig, url: Option<String>) -> Result<()> {
             if let Some(sinks) = body.get("sinks").and_then(|s| s.as_object()) {
                 println!("\nSinks:");
                 for (name, info) in sinks {
-                    let status = info.get("status").and_then(|s| s.as_str()).unwrap_or("unknown");
-                    let events = info.get("events_processed").and_then(|e| e.as_u64()).unwrap_or(0);
-                    let errors = info.get("errors_count").and_then(|e| e.as_u64()).unwrap_or(0);
+                    let status = info
+                        .get("status")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("unknown");
+                    let events = info
+                        .get("events_processed")
+                        .and_then(|e| e.as_u64())
+                        .unwrap_or(0);
+                    let errors = info
+                        .get("errors_count")
+                        .and_then(|e| e.as_u64())
+                        .unwrap_or(0);
                     let status_icon = match status {
                         "running" => "✓",
                         "failed" => "✗",
                         "unhealthy" => "!",
                         _ => "○",
                     };
-                    println!("  {} {} - events: {}, errors: {}", status_icon, name, events, errors);
+                    println!(
+                        "  {} {} - events: {}, errors: {}",
+                        status_icon, name, events, errors
+                    );
                     if let Some(error) = info.get("last_error").and_then(|e| e.as_str()) {
                         println!("      └─ Error: {}", error);
                     }
@@ -720,8 +785,8 @@ const CHECK_TIMEOUT_SECS: u64 = 30;
 async fn check_source_config(_name: &str, source: &config::SourceConfig) -> Result<String> {
     use connectors::postgres_cdc::{PostgresCdcConfig, PostgresCdcSource};
     use rivven_connect::Source;
-    use validator::Validate;
     use std::time::Duration;
+    use validator::Validate;
 
     match source.connector.as_str() {
         "postgres-cdc" => {
@@ -732,25 +797,33 @@ async fn check_source_config(_name: &str, source: &config::SourceConfig) -> Resu
                     .map_err(|e| anyhow::anyhow!("invalid config: {}", e))?;
 
                 // Run validation
-                pg_config.validate()
+                pg_config
+                    .validate()
                     .map_err(|e| anyhow::anyhow!("validation failed: {}", e))?;
 
                 // Use SDK connector check method with timeout
                 let connector = PostgresCdcSource::new();
                 let check_future = connector.check(&pg_config);
-                
-                let check_result = tokio::time::timeout(
-                    Duration::from_secs(CHECK_TIMEOUT_SECS),
-                    check_future
-                )
-                .await
-                .map_err(|_| anyhow::anyhow!("check timed out after {}s", CHECK_TIMEOUT_SECS))?
-                .map_err(|e| anyhow::anyhow!("check failed: {}", e))?;
+
+                let check_result =
+                    tokio::time::timeout(Duration::from_secs(CHECK_TIMEOUT_SECS), check_future)
+                        .await
+                        .map_err(|_| {
+                            anyhow::anyhow!("check timed out after {}s", CHECK_TIMEOUT_SECS)
+                        })?
+                        .map_err(|e| anyhow::anyhow!("check failed: {}", e))?;
 
                 if check_result.is_success() {
-                    Ok(check_result.message.unwrap_or_else(|| "connected".to_string()))
+                    Ok(check_result
+                        .message
+                        .unwrap_or_else(|| "connected".to_string()))
                 } else {
-                    Err(anyhow::anyhow!("{}", check_result.message.unwrap_or_else(|| "check failed".to_string())))
+                    Err(anyhow::anyhow!(
+                        "{}",
+                        check_result
+                            .message
+                            .unwrap_or_else(|| "check failed".to_string())
+                    ))
                 }
             }
             #[cfg(not(feature = "postgres"))]
@@ -765,9 +838,7 @@ async fn check_source_config(_name: &str, source: &config::SourceConfig) -> Resu
             }
             Ok("config valid".to_string())
         }
-        other => {
-            Ok(format!("connector '{}' - no check implemented", other))
-        }
+        other => Ok(format!("connector '{}' - no check implemented", other)),
     }
 }
 
@@ -778,18 +849,27 @@ async fn check_sink_config(_name: &str, sink: &config::SinkConfig) -> Result<Str
     match sink.connector.as_str() {
         "stdout" => {
             // Parse and validate config using SDK types
-            let stdout_config: StdoutSinkConfig = serde_yaml::from_value(sink.config.clone())
-                .unwrap_or_default();
+            let stdout_config: StdoutSinkConfig =
+                serde_yaml::from_value(sink.config.clone()).unwrap_or_default();
 
             // Use SDK connector check method
             let connector = StdoutSink::new();
-            let check_result = connector.check(&stdout_config).await
+            let check_result = connector
+                .check(&stdout_config)
+                .await
                 .map_err(|e| anyhow::anyhow!("check failed: {}", e))?;
 
             if check_result.is_success() {
-                Ok(check_result.message.unwrap_or_else(|| "available".to_string()))
+                Ok(check_result
+                    .message
+                    .unwrap_or_else(|| "available".to_string()))
             } else {
-                Err(anyhow::anyhow!("{}", check_result.message.unwrap_or_else(|| "check failed".to_string())))
+                Err(anyhow::anyhow!(
+                    "{}",
+                    check_result
+                        .message
+                        .unwrap_or_else(|| "check failed".to_string())
+                ))
             }
         }
         #[cfg(feature = "http")]
@@ -800,18 +880,30 @@ async fn check_sink_config(_name: &str, sink: &config::SinkConfig) -> Result<Str
                 .map_err(|e| anyhow::anyhow!("invalid config: {}", e))?;
 
             let connector = HttpWebhookSink::new();
-            let check_result = connector.check(&http_config).await
+            let check_result = connector
+                .check(&http_config)
+                .await
                 .map_err(|e| anyhow::anyhow!("check failed: {}", e))?;
 
             if check_result.is_success() {
-                Ok(check_result.message.unwrap_or_else(|| "URL valid".to_string()))
+                Ok(check_result
+                    .message
+                    .unwrap_or_else(|| "URL valid".to_string()))
             } else {
-                Err(anyhow::anyhow!("{}", check_result.message.unwrap_or_else(|| "check failed".to_string())))
+                Err(anyhow::anyhow!(
+                    "{}",
+                    check_result
+                        .message
+                        .unwrap_or_else(|| "check failed".to_string())
+                ))
             }
         }
         // For external sinks (snowflake, s3), use registry lookup
         // These must be enabled via rivven-warehouse or rivven-storage crates
-        other => Ok(format!("connector '{}' - check not available (built-in connectors only)", other)),
+        other => Ok(format!(
+            "connector '{}' - check not available (built-in connectors only)",
+            other
+        )),
     }
 }
 
@@ -829,7 +921,10 @@ async fn discover_source(config: ConnectConfig, source_name: String, format: Str
         .get(&source_name)
         .ok_or_else(|| anyhow::anyhow!("Source '{}' not found in configuration", source_name))?;
 
-    println!("Discovering schemas from source: {} ({})", source_name, source.connector);
+    println!(
+        "Discovering schemas from source: {} ({})",
+        source_name, source.connector
+    );
     println!();
 
     match source.connector.as_str() {
@@ -840,7 +935,8 @@ async fn discover_source(config: ConnectConfig, source_name: String, format: Str
                 let pg_config: PostgresCdcConfig = serde_yaml::from_value(source.config.clone())
                     .map_err(|e| anyhow::anyhow!("Invalid postgres config: {}", e))?;
 
-                pg_config.validate()
+                pg_config
+                    .validate()
                     .map_err(|e| anyhow::anyhow!("Config validation failed: {}", e))?;
 
                 // Use SDK connector discover method with timeout
@@ -871,12 +967,13 @@ async fn discover_source(config: ConnectConfig, source_name: String, format: Str
                         for stream in &catalog.streams {
                             let namespace = stream.namespace.as_deref().unwrap_or("public");
                             println!("  {}.{}", namespace, stream.name);
-                            
+
                             // Show columns if available in JSON schema
                             if let Some(props) = stream.json_schema.get("properties") {
                                 if let Some(obj) = props.as_object() {
                                     for (col_name, col_schema) in obj {
-                                        let col_type = col_schema.get("type")
+                                        let col_type = col_schema
+                                            .get("type")
                                             .and_then(|t| t.as_str())
                                             .unwrap_or("unknown");
                                         println!("    - {} ({})", col_name, col_type);
@@ -930,10 +1027,10 @@ fn show_schema(connector: &str, format: &str) -> Result<()> {
 
 /// List available connector types
 fn list_connectors() -> Result<()> {
-    use crate::connectors::{create_source_registry, create_sink_registry};
-    
+    use crate::connectors::{create_sink_registry, create_source_registry};
+
     println!("Available Connector Types\n");
-    
+
     println!("SOURCES:");
     let source_registry = create_source_registry();
     for (name, spec) in source_registry.list() {
@@ -961,16 +1058,16 @@ fn list_connectors() -> Result<()> {
     if sink_registry.is_empty() {
         println!("  (no sinks compiled)");
     }
-    
+
     // Show available but not compiled features
     println!();
     println!("FEATURE FLAGS:");
-    
+
     #[cfg(feature = "http")]
     println!("  http            ✓ enabled");
     #[cfg(not(feature = "http"))]
     println!("  http            ✗ disabled (enable with --features http)");
-    
+
     println!();
     println!("EXTERNAL ADAPTERS (add as dependencies to enable):");
     println!("  rivven-storage    S3, GCS, Azure Blob sinks");

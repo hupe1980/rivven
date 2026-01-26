@@ -251,7 +251,9 @@ impl CheckpointStore {
             .await
             .map_err(CdcError::Io)?;
 
-        file.write_all(json.as_bytes()).await.map_err(CdcError::Io)?;
+        file.write_all(json.as_bytes())
+            .await
+            .map_err(CdcError::Io)?;
 
         if self.fsync {
             file.sync_all().await.map_err(CdcError::Io)?;
@@ -294,8 +296,8 @@ impl CheckpointStore {
             .await
             .map_err(CdcError::Io)?;
 
-        let checkpoint: Checkpoint = serde_json::from_str(&contents)
-            .map_err(|e| CdcError::Serialization(e.to_string()))?;
+        let checkpoint: Checkpoint =
+            serde_json::from_str(&contents).map_err(|e| CdcError::Serialization(e.to_string()))?;
 
         // Update cache
         {
@@ -356,7 +358,11 @@ impl CheckpointStore {
         }
 
         if loaded > 0 {
-            info!("Loaded {} checkpoints from {}", loaded, self.base_dir.display());
+            info!(
+                "Loaded {} checkpoints from {}",
+                loaded,
+                self.base_dir.display()
+            );
         }
 
         Ok(())

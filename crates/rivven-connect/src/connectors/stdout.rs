@@ -2,10 +2,10 @@
 //!
 //! A simple sink that writes events to stdout for debugging and testing.
 
+use super::super::prelude::*;
 use crate::connectors::{AnySink, SinkFactory};
 use async_trait::async_trait;
 use futures::StreamExt;
-use super::super::prelude::*;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
@@ -95,10 +95,12 @@ impl Sink for StdoutSink {
         mut events: BoxStream<'static, SourceEvent>,
     ) -> Result<WriteResult> {
         let mut result = WriteResult::new();
-        
+
         // Rate limiting
         let rate_limit = if config.rate_limit > 0 {
-            Some(std::time::Duration::from_secs_f64(1.0 / config.rate_limit as f64))
+            Some(std::time::Duration::from_secs_f64(
+                1.0 / config.rate_limit as f64,
+            ))
         } else {
             None
         };
@@ -131,11 +133,14 @@ pub fn format_event(event: &SourceEvent, config: &StdoutSinkConfig) -> String {
     match config.format {
         OutputFormat::Pretty => {
             let mut output = String::new();
-            
+
             if config.include_timestamp {
-                output.push_str(&format!("[{}] ", event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f")));
+                output.push_str(&format!(
+                    "[{}] ",
+                    event.timestamp.format("%Y-%m-%d %H:%M:%S%.3f")
+                ));
             }
-            
+
             let op = match event.event_type {
                 SourceEventType::Insert => "INSERT",
                 SourceEventType::Update => "UPDATE",
@@ -145,28 +150,28 @@ pub fn format_event(event: &SourceEvent, config: &StdoutSinkConfig) -> String {
                 SourceEventType::Log => "LOG",
                 SourceEventType::Schema => "SCHEMA",
             };
-            
+
             output.push_str(&format!("{}: {}", op, event.stream));
-            
+
             if let Some(ref ns) = event.namespace {
                 output.push_str(&format!(" ({})", ns));
             }
-            
+
             output.push('\n');
-            
+
             if let Ok(pretty) = serde_json::to_string_pretty(&event.data) {
                 output.push_str(&pretty);
             } else {
                 output.push_str(&event.data.to_string());
             }
-            
+
             if config.include_metadata && !event.metadata.extra.is_empty() {
                 output.push_str("\n---metadata---\n");
                 if let Ok(meta) = serde_json::to_string_pretty(&event.metadata.extra) {
                     output.push_str(&meta);
                 }
             }
-            
+
             output
         }
         OutputFormat::Json => {
@@ -206,7 +211,7 @@ impl SinkFactory for StdoutSinkFactory {
 }
 
 /// Wrapper for type-erased sink operations
-#[allow(dead_code)]  // Used by SinkFactory for dynamic dispatch
+#[allow(dead_code)] // Used by SinkFactory for dynamic dispatch
 struct StdoutSinkWrapper(StdoutSink);
 
 #[async_trait]
@@ -263,7 +268,7 @@ mod tests {
 
         let config = StdoutSinkConfig::default();
         let output = format_event(&event, &config);
-        
+
         assert!(output.contains("INSERT"));
         assert!(output.contains("public.users"));
         assert!(output.contains("Alice"));
@@ -284,9 +289,9 @@ mod tests {
             format: OutputFormat::Json,
             ..Default::default()
         };
-        
+
         let output = format_event(&event, &config);
-        
+
         // Should be valid JSON
         let parsed: std::result::Result<serde_json::Value, _> = serde_json::from_str(&output);
         assert!(parsed.is_ok());
@@ -296,7 +301,7 @@ mod tests {
     async fn test_check_always_succeeds() {
         let sink = StdoutSink::new();
         let config = StdoutSinkConfig::default();
-        
+
         let result = sink.check(&config).await.unwrap();
         assert!(result.is_success());
     }

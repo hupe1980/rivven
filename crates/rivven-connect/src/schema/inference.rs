@@ -1,6 +1,8 @@
 //! Schema inference from JSON data
 
-use crate::schema::types::{Schema, SchemaId, SchemaType, SchemaRegistryResult, SchemaRegistryError};
+use crate::schema::types::{
+    Schema, SchemaId, SchemaRegistryError, SchemaRegistryResult, SchemaType,
+};
 use serde_json::{Map, Value as JsonValue};
 use std::collections::{HashMap, HashSet};
 
@@ -239,10 +241,7 @@ impl SchemaInference {
                 // Add nested properties
                 let nested_props = self.build_nested_properties(path);
                 if !nested_props.is_empty() {
-                    field_schema.insert(
-                        "properties".to_string(),
-                        JsonValue::Object(nested_props),
-                    );
+                    field_schema.insert("properties".to_string(), JsonValue::Object(nested_props));
                 }
             }
             "array" => {
@@ -251,7 +250,8 @@ impl SchemaInference {
                 let array_path = format!("{}[]", path);
                 if let Some(item_types) = self.field_types.get(&array_path) {
                     let items_nullable = self.nullable_fields.contains(&array_path);
-                    let items_schema = self.build_field_schema(&array_path, item_types, items_nullable);
+                    let items_schema =
+                        self.build_field_schema(&array_path, item_types, items_nullable);
                     field_schema.insert("items".to_string(), items_schema);
                 }
             }
@@ -383,7 +383,10 @@ mod tests {
         let schema = inferred.schema;
 
         assert_eq!(schema["properties"]["user"]["type"], "object");
-        assert!(schema["properties"]["user"]["properties"]["profile"]["properties"]["email"]["type"] == "string");
+        assert!(
+            schema["properties"]["user"]["properties"]["profile"]["properties"]["email"]["type"]
+                == "string"
+        );
     }
 
     #[test]
