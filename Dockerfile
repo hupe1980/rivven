@@ -19,7 +19,7 @@ ARG BINARY=rivvend
 # ============================================================================
 # Stage 1: Build all binaries
 # ============================================================================
-FROM --platform=$BUILDPLATFORM rust:1.83-bookworm AS builder
+FROM --platform=$BUILDPLATFORM rust:1.89-bookworm AS builder
 
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM

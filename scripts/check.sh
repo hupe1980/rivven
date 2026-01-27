@@ -75,6 +75,15 @@ fi
 # Additional checks
 run_check "Documentation" cargo doc --no-deps --all-features 2>&1 | head -50
 
+# MSRV check (requires the toolchain to be installed)
+MSRV="1.89"
+if rustup run "$MSRV" cargo --version &> /dev/null; then
+    run_check "MSRV ($MSRV)" rustup run "$MSRV" cargo check --all-features --workspace
+else
+    echo -e "${YELLOW}⚠ Rust $MSRV not installed, skipping MSRV check${NC}"
+    echo -e "${YELLOW}  Install with: rustup toolchain install $MSRV${NC}"
+fi
+
 if $TEST; then
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
