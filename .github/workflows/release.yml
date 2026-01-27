@@ -8,10 +8,16 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Prevent concurrent releases
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   validate:
     name: Validate Release
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       
@@ -39,11 +45,17 @@ jobs:
     name: Publish to crates.io
     needs: validate
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      
+      - name: Install trunk
+        uses: taiki-e/install-action@trunk
       
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -84,8 +96,36 @@ jobs:
       - name: Wait for crates.io index
         run: sleep 30
       
+      - name: Publish rivven-connect-derive
+        run: cargo publish -p rivven-connect-derive --token ${{ secrets.CRATES_IO_TOKEN }}
+        continue-on-error: true
+      
+      - name: Wait for crates.io index
+        run: sleep 30
+      
       - name: Publish rivven-connect
         run: cargo publish -p rivven-connect --token ${{ secrets.CRATES_IO_TOKEN }}
+        continue-on-error: true
+      
+      - name: Wait for crates.io index
+        run: sleep 30
+      
+      - name: Publish rivven-queue
+        run: cargo publish -p rivven-queue --token ${{ secrets.CRATES_IO_TOKEN }}
+        continue-on-error: true
+      
+      - name: Wait for crates.io index
+        run: sleep 30
+      
+      - name: Publish rivven-storage
+        run: cargo publish -p rivven-storage --token ${{ secrets.CRATES_IO_TOKEN }}
+        continue-on-error: true
+      
+      - name: Wait for crates.io index
+        run: sleep 30
+      
+      - name: Publish rivven-warehouse
+        run: cargo publish -p rivven-warehouse --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
       
       - name: Wait for crates.io index
@@ -113,6 +153,7 @@ jobs:
     name: Publish to PyPI (${{ matrix.target }})
     needs: validate
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -121,8 +162,6 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-          - os: macos-latest
-            target: x86_64-apple-darwin
           - os: macos-latest
             target: aarch64-apple-darwin
     steps:
@@ -143,6 +182,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
       
       - name: Build wheels
         uses: PyO3/maturin-action@v1
@@ -157,11 +197,13 @@ jobs:
         with:
           name: wheels-${{ matrix.target }}
           path: dist
+          retention-days: 7
 
   pypi-publish:
     name: Publish to PyPI
     needs: pypi
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     environment:
       name: pypi
       url: https://pypi.org/p/rivven
@@ -184,6 +226,7 @@ jobs:
     name: Create GitHub Release
     needs: [publish, pypi-publish, docker, binaries]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
@@ -213,6 +256,7 @@ jobs:
     name: Build Binaries (${{ matrix.target }})
     needs: validate
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -279,11 +323,13 @@ jobs:
         with:
           name: binaries-${{ matrix.suffix }}
           path: dist/*.tar.gz
+          retention-days: 7
 
   docker:
     name: Build & Push Docker Images
     needs: validate
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: write
