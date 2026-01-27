@@ -33,8 +33,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libc6-dev-arm64-cross \
     && rm -rf /var/lib/apt/lists/*
 
-# Add musl targets for static linking
-RUN rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+# Add musl targets for static linking and wasm32 for dashboard
+RUN rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl wasm32-unknown-unknown
+
+# Install trunk for building the dashboard
+RUN cargo install trunk --locked
 
 # Copy workspace files
 COPY Cargo.toml Cargo.lock ./

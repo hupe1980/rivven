@@ -22,6 +22,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      
+      - name: Install trunk
+        uses: taiki-e/install-action@trunk
       
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -49,6 +53,11 @@ jobs:
       
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      
+      - name: Install trunk
+        uses: taiki-e/install-action@trunk
       
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -68,6 +77,11 @@ jobs:
       
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      
+      - name: Install trunk
+        uses: taiki-e/install-action@trunk
       
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -86,6 +100,11 @@ jobs:
       
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      
+      - name: Install trunk
+        uses: taiki-e/install-action@trunk
       
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -106,6 +125,10 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
+          targets: wasm32-unknown-unknown
+      
+      - name: Install trunk
+        uses: taiki-e/install-action@trunk
       
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
@@ -144,6 +167,11 @@ jobs:
       
       - name: Install Rust 1.89
         uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          targets: wasm32-unknown-unknown
+      
+      - name: Install trunk
+        uses: taiki-e/install-action@trunk
       
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
