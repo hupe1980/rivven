@@ -1,7 +1,7 @@
 #![no_main]
-//! Fuzz test for bincode deserialization with arbitrary types
+//! Fuzz test for postcard deserialization with arbitrary types
 //! 
-//! This tests that bincode doesn't have memory safety issues
+//! This tests that postcard doesn't have memory safety issues
 //! when deserializing malformed data into our protocol types.
 
 use libfuzzer_sys::fuzz_target;

@@ -22,6 +22,7 @@ pub struct PostgresTestContainer {
     pub replication_password: String,
 }
 
+#[allow(dead_code)]
 impl PostgresTestContainer {
     /// Start a new PostgreSQL container with logical replication enabled
     pub async fn start() -> Result<Self> {

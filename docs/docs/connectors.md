@@ -248,6 +248,67 @@ sources:
 | `users` | User profiles | user_id, name, email, created_at |
 | `pageviews` | Web analytics | page_url, user_id, timestamp, referrer |
 
+### Kafka Source
+
+Consume events from Apache Kafka (migration path from Kafka).
+
+```yaml
+sources:
+  kafka:
+    connector: kafka
+    topic: rivven-events
+    config:
+      bootstrap_servers: kafka:9092
+      source_topics:
+        - upstream-topic-1
+        - upstream-topic-2
+      consumer_group: rivven-consumer
+      auto_offset_reset: earliest
+      security:
+        protocol: SASL_SSL
+        mechanism: SCRAM-SHA-512
+        username: ${KAFKA_USER}
+        password: ${KAFKA_PASSWORD}
+```
+
+| Parameter | Required | Default | Description |
+|:----------|:---------|:--------|:------------|
+| `bootstrap_servers` | ✓ | - | Kafka broker addresses |
+| `source_topics` | ✓ | - | Topics to consume |
+| `consumer_group` | ✓ | - | Consumer group ID |
+| `auto_offset_reset` | | `latest` | Offset reset policy |
+| `security.protocol` | | `PLAINTEXT` | Security protocol |
+
+### MQTT Source
+
+Subscribe to MQTT topics for IoT data ingestion.
+
+```yaml
+sources:
+  mqtt:
+    connector: mqtt
+    topic: iot-events
+    config:
+      broker_url: mqtt://broker:1883
+      topics:
+        - sensors/+/temperature
+        - sensors/+/humidity
+      client_id: rivven-mqtt-client
+      qos: 1
+      clean_session: true
+      auth:
+        username: ${MQTT_USER}
+        password: ${MQTT_PASSWORD}
+```
+
+| Parameter | Required | Default | Description |
+|:----------|:---------|:--------|:------------|
+| `broker_url` | ✓ | - | MQTT broker URL |
+| `topics` | ✓ | - | MQTT topic patterns (wildcards supported) |
+| `client_id` | | auto | Client identifier |
+| `qos` | | `1` | Quality of Service (0, 1, 2) |
+| `clean_session` | | `true` | Start with clean session |
+
 ---
 
 ## Sinks
@@ -293,6 +354,70 @@ config:
   access_key_id: ${MINIO_ACCESS_KEY}
   secret_access_key: ${MINIO_SECRET_KEY}
 ```
+
+### Google Cloud Storage (GCS)
+
+Write events to Google Cloud Storage.
+
+```yaml
+sinks:
+  gcs:
+    connector: gcs
+    topics: [events]
+    consumer_group: gcs-sink
+    config:
+      bucket: my-data-lake
+      prefix: events
+      project_id: my-gcp-project
+      format: jsonl
+      partition_by: day
+      compression: gzip
+      batch_size: 1000
+      # Authentication: ADC (default), service account key, or workload identity
+      credentials_path: /secrets/gcp-key.json  # Optional
+```
+
+| Parameter | Required | Default | Description |
+|:----------|:---------|:--------|:------------|
+| `bucket` | ✓ | - | GCS bucket name |
+| `prefix` | | - | Object key prefix |
+| `project_id` | ✓ | - | GCP project ID |
+| `format` | | `jsonl` | Output format (json, jsonl) |
+| `credentials_path` | | ADC | Path to service account key |
+
+### Azure Blob Storage
+
+Write events to Azure Blob Storage.
+
+```yaml
+sinks:
+  azure:
+    connector: azure-blob
+    topics: [events]
+    consumer_group: azure-sink
+    config:
+      container: data-lake
+      prefix: events
+      account_name: mystorageaccount
+      format: jsonl
+      partition_by: day
+      # Authentication options
+      connection_string: ${AZURE_STORAGE_CONNECTION_STRING}
+      # Or use account key
+      # account_key: ${AZURE_STORAGE_KEY}
+      # Or use SAS token
+      # sas_token: ${AZURE_SAS_TOKEN}
+```
+
+| Parameter | Required | Default | Description |
+|:----------|:---------|:--------|:------------|
+| `container` | ✓ | - | Blob container name |
+| `account_name` | ✓ | - | Storage account name |
+| `connection_string` | * | - | Full connection string |
+| `account_key` | * | - | Account access key |
+| `sas_token` | * | - | SAS token |
+
+*One of `connection_string`, `account_key`, or `sas_token` is required.
 
 ### Snowflake
 

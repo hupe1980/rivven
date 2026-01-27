@@ -467,7 +467,7 @@ mod schema_evolution_tests {
         events.assert().has_count(2);
 
         // First event should NOT have email field (or have it as null)
-        let first_after = events[0].after.as_ref().unwrap();
+        let _first_after = events[0].after.as_ref().unwrap();
 
         // Second event SHOULD have email field with value
         let second_after = events[1].after.as_ref().unwrap();
@@ -1043,8 +1043,7 @@ mod chaos_tests {
         // Verify final counter value in last update
         let last_update = events
             .iter()
-            .filter(|e| matches!(e.op, CdcOp::Update))
-            .last()
+            .rfind(|e| matches!(e.op, CdcOp::Update))
             .unwrap();
         let counter = last_update
             .after

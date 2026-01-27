@@ -182,8 +182,10 @@ impl EventBatch {
                 CdcOp::Insert => counts.inserts += 1,
                 CdcOp::Update => counts.updates += 1,
                 CdcOp::Delete => counts.deletes += 1,
+                CdcOp::Tombstone => counts.tombstones += 1,
                 CdcOp::Snapshot => counts.snapshots += 1,
                 CdcOp::Truncate => counts.truncates += 1,
+                CdcOp::Schema => counts.schemas += 1,
             }
         }
         counts
@@ -196,13 +198,21 @@ pub struct BatchCounts {
     pub inserts: usize,
     pub updates: usize,
     pub deletes: usize,
+    pub tombstones: usize,
     pub snapshots: usize,
     pub truncates: usize,
+    pub schemas: usize,
 }
 
 impl BatchCounts {
     pub fn total(&self) -> usize {
-        self.inserts + self.updates + self.deletes + self.snapshots + self.truncates
+        self.inserts
+            + self.updates
+            + self.deletes
+            + self.tombstones
+            + self.snapshots
+            + self.truncates
+            + self.schemas
     }
 }
 

@@ -9,7 +9,7 @@
 //!
 //! ## Performance Optimizations
 //!
-//! - **Binary serialization**: Raft RPCs use bincode (5-10x faster than JSON)
+//! - **Binary serialization**: Raft RPCs use postcard (5-10x faster than JSON)
 //! - **Content-Type negotiation**: Supports both `application/octet-stream` (binary) and `application/json`
 //! - **Connection pooling**: HTTP client reuses connections with TCP keepalive
 
@@ -50,7 +50,7 @@ fn deserialize_request<T: DeserializeOwned>(
         .unwrap_or(CONTENT_TYPE_JSON);
 
     if content_type.contains("octet-stream") {
-        bincode::deserialize(body).map_err(|e| format!("bincode deserialize error: {}", e))
+        postcard::from_bytes(body).map_err(|e| format!("postcard deserialize error: {}", e))
     } else {
         serde_json::from_slice(body).map_err(|e| format!("json deserialize error: {}", e))
     }
@@ -69,7 +69,7 @@ fn serialize_response<T: Serialize>(
 
     if accept.contains("octet-stream") {
         let bytes =
-            bincode::serialize(data).map_err(|e| format!("bincode serialize error: {}", e))?;
+            postcard::to_allocvec(data).map_err(|e| format!("postcard serialize error: {}", e))?;
         Ok((Bytes::from(bytes), CONTENT_TYPE_BINARY))
     } else {
         let bytes = serde_json::to_vec(data).map_err(|e| format!("json serialize error: {}", e))?;
@@ -420,7 +420,7 @@ async fn prometheus_metrics_handler(State(state): State<RaftApiState>) -> impl I
     }
 
     // Include core metrics if available via global registry
-    // Note: In production, this would use the shared MetricsRegistry
+    // Note: In production, metrics are recorded via CoreMetrics static methods
     output.push_str("\n# Rivven core metrics\n");
     output.push_str("# HELP rivven_info Build information\n");
     output.push_str("# TYPE rivven_info gauge\n");

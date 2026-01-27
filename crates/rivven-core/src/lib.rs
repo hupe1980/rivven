@@ -6,15 +6,19 @@ pub mod concurrent;
 pub mod config;
 pub mod consumer_group;
 pub mod error;
+pub mod idempotent;
 pub mod message;
 pub mod metrics;
 pub mod offset;
 pub mod partition;
+pub mod quota;
 pub mod schema_registry;
 pub mod serde_utils;
 pub mod service_auth;
 pub mod storage;
 pub mod topic;
+pub mod topic_config;
+pub mod transaction;
 pub mod validation;
 pub mod vectorized;
 pub mod wal;
@@ -24,6 +28,10 @@ pub mod zero_copy;
 pub mod compression;
 
 pub mod async_io;
+
+// Encryption at rest (optional but default)
+#[cfg(feature = "encryption")]
+pub mod encryption;
 
 // Cedar authorization (optional)
 #[cfg(feature = "cedar")]
@@ -54,9 +62,18 @@ pub use concurrent::{
 };
 pub use config::Config;
 pub use error::{Error, Result};
+pub use idempotent::{
+    IdempotentProducerManager, IdempotentProducerStats, PartitionProducerState, ProducerEpoch,
+    ProducerId, ProducerMetadata, SequenceNumber, SequenceResult, NO_SEQUENCE,
+};
 pub use message::Message;
 pub use offset::OffsetManager;
 pub use partition::Partition;
+pub use quota::{
+    EntityQuotaStats, QuotaConfig, QuotaEntity, QuotaEntityType, QuotaManager, QuotaResult,
+    QuotaStats, QuotaStatsSnapshot, QuotaType, DEFAULT_CONSUME_BYTES_RATE,
+    DEFAULT_PRODUCE_BYTES_RATE, DEFAULT_REQUEST_RATE, UNLIMITED,
+};
 pub use schema_registry::{MemorySchemaRegistry, SchemaRegistry};
 pub use storage::{
     ColdStorageBackend, ColdStorageConfig, HotTier, HotTierStats, LocalFsColdStorage,
@@ -64,6 +81,17 @@ pub use storage::{
     TieredStorageStatsSnapshot, WarmTier, WarmTierStats,
 };
 pub use topic::{Topic, TopicManager};
+pub use topic_config::{
+    CleanupPolicy, CompressionType, ConfigValue, TopicConfig, TopicConfigManager,
+    DEFAULT_MAX_MESSAGE_BYTES, DEFAULT_RETENTION_BYTES, DEFAULT_RETENTION_MS,
+    DEFAULT_SEGMENT_BYTES, DEFAULT_SEGMENT_MS,
+};
+pub use transaction::{
+    PendingWrite, Transaction, TransactionCoordinator, TransactionId, TransactionMarker,
+    TransactionOffsetCommit, TransactionPartition, TransactionResult, TransactionState,
+    TransactionStats, TransactionStatsSnapshot, DEFAULT_TRANSACTION_TIMEOUT,
+    MAX_PENDING_TRANSACTIONS,
+};
 pub use vectorized::{
     BatchDecoder, BatchEncoder, BatchMessage, BatchProcessor, RecordBatch, RecordBatchIter,
 };

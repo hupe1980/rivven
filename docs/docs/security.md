@@ -137,14 +137,14 @@ Generate API tokens for services:
 
 ```bash
 # Generate token
-rivven auth token create --name service-a --ttl 365d
+rivvenctl auth token create --name service-a --ttl 365d
 # Output: rvn_a1b2c3d4e5f6...
 
 # List tokens
-rivven auth token list
+rivvenctl auth token list
 
 # Revoke token
-rivven auth token revoke service-a
+rivvenctl auth token revoke service-a
 ```
 
 Use tokens in client:
@@ -256,25 +256,25 @@ Fine-grained topic ACLs:
 
 ```bash
 # Allow user to produce to specific topics
-rivven acl add --principal user:producer-app \
+rivvenctl acl add --principal user:producer-app \
   --resource topic:orders \
   --action produce \
   --allow
 
 # Allow group to consume
-rivven acl add --principal group:analytics-team \
+rivvenctl acl add --principal group:analytics-team \
   --resource topic:events-* \
   --action consume \
   --allow
 
 # Deny access
-rivven acl add --principal user:suspicious \
+rivvenctl acl add --principal user:suspicious \
   --resource topic:* \
   --action "*" \
   --deny
 
 # List ACLs
-rivven acl list
+rivvenctl acl list
 ```
 
 ### Permission Matrix

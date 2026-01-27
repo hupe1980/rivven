@@ -44,22 +44,15 @@ jobs:
         uses: Swatinem/rust-cache@v2
       
       # Publish crates in dependency order
-      - name: Publish rivven-core
-        run: cargo publish -p rivven-core --token ${{ secrets.CRATES_IO_TOKEN }}
+      - name: Publish rivven-protocol
+        run: cargo publish -p rivven-protocol --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true  # Skip if already published
       
       - name: Wait for crates.io index
         run: sleep 30
       
-      - name: Publish rivven-plugin-sdk
-        run: cargo publish -p rivven-plugin-sdk --token ${{ secrets.CRATES_IO_TOKEN }}
-        continue-on-error: true
-      
-      - name: Wait for crates.io index
-        run: sleep 30
-      
-      - name: Publish rivven-plugin-runtime
-        run: cargo publish -p rivven-plugin-runtime --token ${{ secrets.CRATES_IO_TOKEN }}
+      - name: Publish rivven-core
+        run: cargo publish -p rivven-core --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
       
       - name: Wait for crates.io index
@@ -79,15 +72,15 @@ jobs:
       - name: Wait for crates.io index
         run: sleep 30
       
-      - name: Publish rivven-connect
-        run: cargo publish -p rivven-connect --token ${{ secrets.CRATES_IO_TOKEN }}
+      - name: Publish rivven-client
+        run: cargo publish -p rivven-client --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
       
       - name: Wait for crates.io index
         run: sleep 30
       
-      - name: Publish rivven-client
-        run: cargo publish -p rivven-client --token ${{ secrets.CRATES_IO_TOKEN }}
+      - name: Publish rivven-connect
+        run: cargo publish -p rivven-connect --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
       
       - name: Wait for crates.io index
@@ -102,6 +95,13 @@ jobs:
       
       - name: Publish rivven-cli
         run: cargo publish -p rivven-cli --token ${{ secrets.CRATES_IO_TOKEN }}
+        continue-on-error: true
+      
+      - name: Wait for crates.io index
+        run: sleep 30
+      
+      - name: Publish rivven-operator
+        run: cargo publish -p rivven-operator --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
 
   pypi:
@@ -120,8 +120,6 @@ jobs:
             target: x86_64-apple-darwin
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
       
@@ -179,7 +177,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    needs: [publish, pypi-publish]
+    needs: [publish, pypi-publish, docker, binaries]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -190,6 +188,13 @@ jobs:
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
       
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: binaries-*
+          path: release
+          merge-multiple: true
+      
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -197,3 +202,138 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
+          files: release/*
+
+  binaries:
+    name: Build Binaries (${{ matrix.target }})
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            suffix: linux-amd64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            suffix: linux-arm64
+            cross: true
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            suffix: darwin-arm64
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      
+      - name: Install cross-compilation tools (Linux aarch64)
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+      
+      - name: Build binaries
+        run: |
+          cargo build --release --target ${{ matrix.target }} \
+            --package rivven-server \
+            --package rivven-cli \
+            --package rivven-connect \
+            --package rivven-operator
+      
+      - name: Extract version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+      
+      - name: Package binaries
+        run: |
+          mkdir -p dist
+          cd target/${{ matrix.target }}/release
+          
+          # Package each binary
+          for bin in rivvend rivvenctl rivven-connect rivven-operator; do
+            if [ -f "$bin" ]; then
+              tar -czvf ../../../dist/${bin}-${{ steps.version.outputs.VERSION }}-${{ matrix.suffix }}.tar.gz $bin
+            fi
+          done
+      
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.suffix }}
+          path: dist/*.tar.gz
+
+  docker:
+    name: Build & Push Docker Images
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Extract version
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+      
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Build and push rivven (broker)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: BINARY=rivvend
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: Build and push rivven-connect
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: BINARY=rivven-connect
+          tags: |
+            ghcr.io/${{ github.repository }}-connect:latest
+            ghcr.io/${{ github.repository }}-connect:${{ steps.version.outputs.VERSION }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: Build and push rivven-operator
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: BINARY=rivven-operator
+          tags: |
+            ghcr.io/${{ github.repository }}-operator:latest
+            ghcr.io/${{ github.repository }}-operator:${{ steps.version.outputs.VERSION }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

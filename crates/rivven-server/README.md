@@ -10,17 +10,30 @@ The Rivven broker server binary.
 - **Replication** - Multi-node replication with Raft consensus
 - **Authentication** - SCRAM-SHA-256, mTLS, API keys
 - **Authorization** - Cedar policy engine
-- **Dashboard** - Built-in web UI (enabled by default)
+- **Dashboard** - Leptos/WASM web UI (embedded when built with `--features dashboard`)
 
 ## Installation
 
 ```bash
-# Build from source
+# Build from source (without dashboard)
 cargo build -p rivven-server --release
+
+# Build with embedded dashboard
+# First, build the dashboard assets:
+cd crates/rivven-dashboard
+trunk build --release
+cp -r dist/* ../rivven-server/static/
+cd ../..
+
+# Then build the server with dashboard feature:
+cargo build -p rivven-server --release --features dashboard
 
 # Run the server
 ./target/release/rivven-server --data-dir ./data
+# Dashboard available at http://localhost:8080/
 ```
+
+**Note**: The dashboard requires building with the `dashboard` feature, which embeds the WASM assets compiled by trunk. See [rivven-dashboard README](../rivven-dashboard/README.md) for details.
 
 ## Message Partitioning
 

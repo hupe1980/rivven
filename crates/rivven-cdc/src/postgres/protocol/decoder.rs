@@ -273,7 +273,7 @@ mod tests {
     fn test_decode_begin() {
         // Simulated BEGIN message
         let mut data = bytes::BytesMut::new();
-        data.extend_from_slice(&[b'B']); // message type
+        data.extend_from_slice(b"B"); // message type
         data.extend_from_slice(&0x0000000100000000u64.to_be_bytes()); // final_lsn
         data.extend_from_slice(&1705000000000000i64.to_be_bytes()); // timestamp
         data.extend_from_slice(&1u32.to_be_bytes()); // xid

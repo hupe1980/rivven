@@ -348,6 +348,9 @@ pub enum SchemaRegistryError {
     #[error("Serialization error: {0}")]
     SerializationError(String),
 
+    #[error("Storage error: {0}")]
+    StorageError(String),
+
     #[error("Broker error: {0}")]
     BrokerError(String),
 

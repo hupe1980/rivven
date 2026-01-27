@@ -481,6 +481,12 @@ impl SinkFactory for S3SinkFactory {
 // Implement AnySink for S3Sink
 rivven_connect::impl_any_sink!(S3Sink, S3SinkConfig);
 
+/// Register the S3 sink with the given registry
+pub fn register(registry: &mut rivven_connect::SinkRegistry) {
+    use std::sync::Arc;
+    registry.register("s3", Arc::new(S3SinkFactory));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,10 +554,4 @@ mod tests {
         assert_eq!(spec.connector_type, "s3");
         let _sink = factory.create();
     }
-}
-
-/// Register the S3 sink with the given registry
-pub fn register(registry: &mut rivven_connect::SinkRegistry) {
-    use std::sync::Arc;
-    registry.register("s3", Arc::new(S3SinkFactory));
 }

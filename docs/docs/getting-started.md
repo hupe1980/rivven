@@ -42,7 +42,7 @@ cargo build --release
 
 ```bash
 docker pull ghcr.io/hupe1980/rivven:latest
-docker run -p 9092:9092 ghcr.io/hupe1980/rivven:latest server
+docker run -p 9092:9092 ghcr.io/hupe1980/rivven:latest
 ```
 
 ---
@@ -52,7 +52,7 @@ docker run -p 9092:9092 ghcr.io/hupe1980/rivven:latest server
 ### Basic Startup
 
 ```bash
-rivven server
+rivvend
 ```
 
 The broker starts with sensible defaults:
@@ -63,7 +63,7 @@ The broker starts with sensible defaults:
 ### Custom Configuration
 
 ```bash
-rivven server \
+rivvend \
   --bind 0.0.0.0:9092 \
   --data-dir /var/lib/rivven \
   --max-message-size 16777216
@@ -71,10 +71,16 @@ rivven server \
 
 ### With Web Dashboard
 
+The dashboard is embedded in the binary when built with the `dashboard` feature:
+
 ```bash
-rivven-server --dashboard
-# Access at http://localhost:9094/
+# Start server with dashboard enabled
+rivvend --data-dir ./data
+
+# Dashboard available at http://localhost:8080/
 ```
+
+**Note**: The dashboard is embedded during the build. See [Dashboard](dashboard.md) for build instructions.
 
 ---
 
@@ -86,28 +92,26 @@ Rivven Connect manages data pipelines with sources (data ingestion) and sinks (d
 
 ```bash
 # Start broker
-rivven-server --dashboard
+rivvend --data-dir ./data
 
-# Run pipeline (topic auto-created!)
-rivven-connect run --config pipeline.yaml
+# Run connectors (topics auto-created!)
+rivven-connect run --config connect.yaml
 ```
 
 ### Example Configuration
 
+The configuration defines **sources** (publish to broker) and **sinks** (consume from broker):
+
 ```yaml
+# Architecture: Sources → Broker Topics → Sinks
+# The broker is ALWAYS in the middle for durability and replay
+
 version: "1.0"
 
 broker:
-  bootstrap_servers:
-    - 127.0.0.1:9092
+  address: localhost:9092
 
-# Global settings
-settings:
-  topic:
-    auto_create: true        # Auto-create topics
-    default_partitions: 3    # Default partition count
-
-# Data sources
+# Sources: read from external systems, publish to broker topics
 sources:
   demo:
     connector: datagen
@@ -117,7 +121,7 @@ sources:
       events_per_second: 3
       cdc_mode: true
 
-# Data sinks
+# Sinks: consume from broker topics, write to external systems
 sinks:
   console:
     connector: stdout
@@ -130,7 +134,7 @@ sinks:
 ### Validate Configuration
 
 ```bash
-rivven-connect validate --config pipeline.yaml
+rivven-connect validate --config connect.yaml
 ```
 
 Output:
@@ -160,55 +164,55 @@ Sinks (1 enabled):
 
 ```bash
 # Create a topic
-rivven topic create events
+rivvenctl topic create events
 
 # Create with partitions
-rivven topic create orders --partitions 3
+rivvenctl topic create orders --partitions 3
 
 # List topics
-rivven topic list
+rivvenctl topic list
 
 # Delete a topic
-rivven topic delete events
+rivvenctl topic delete events
 ```
 
 ### Publishing Messages
 
 ```bash
 # Simple message
-rivven produce events "Hello, World!"
+rivvenctl produce events "Hello, World!"
 
 # From stdin
-echo '{"user": "alice", "action": "login"}' | rivven produce events
+echo '{"user": "alice", "action": "login"}' | rivvenctl produce events
 
 # Multiple messages
-cat events.jsonl | rivven produce events
+cat events.jsonl | rivvenctl produce events
 ```
 
 ### Consuming Messages
 
 ```bash
 # Consume from beginning
-rivven consume events
+rivvenctl consume events
 
 # Consume from a specific offset
-rivven consume events --offset 100
+rivvenctl consume events --offset 100
 
 # Consume with consumer group
-rivven consume events --group my-app
+rivvenctl consume events --group my-app
 ```
 
 ### Consumer Groups
 
 ```bash
 # List consumer groups
-rivven group list
+rivvenctl group list
 
 # Describe a group
-rivven group describe my-app
+rivvenctl group describe my-app
 
 # Delete a group
-rivven group delete my-app
+rivvenctl group delete my-app
 ```
 
 ---

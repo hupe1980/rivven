@@ -193,7 +193,7 @@ async fn test_node_registration() -> Result<(), Box<dyn std::error::Error>> {
     for i in 1..=3 {
         let node_id = format!("cluster-node-{}", i);
         let info = rivven_cluster::node::NodeInfo {
-            id: node_id.clone().into(),
+            id: node_id.clone(),
             name: Some(format!("Node {}", i)),
             rack: None,
             client_addr: format!("127.0.0.1:{}", 9090 + i).parse().unwrap(),

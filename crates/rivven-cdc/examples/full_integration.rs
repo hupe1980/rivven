@@ -25,7 +25,6 @@ use rivven_cdc::common::CdcSource;
 /// SELECT pg_create_logical_replication_slot('rivven_slot', 'pgoutput');
 /// ```
 use rivven_cdc::postgres::{PostgresCdc, PostgresCdcConfig};
-use tracing_subscriber;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

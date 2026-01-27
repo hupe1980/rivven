@@ -2,6 +2,8 @@
 //!
 //! Provides fluent, readable assertions for CDC events with detailed error messages.
 
+#![allow(dead_code)]
+
 use pretty_assertions::assert_eq;
 use rivven_cdc::{CdcEvent, CdcOp};
 use serde_json::Value;
@@ -61,7 +63,7 @@ impl<'a> CdcEventAssertions<'a> {
 
     /// Assert count of specific operation type
     pub fn has_op_count(self, op: CdcOp, expected: usize) -> Self {
-        let count = self.with_op(op.clone()).len();
+        let count = self.with_op(op).len();
         assert_eq!(
             count, expected,
             "Expected {} {:?} events, got {}",
@@ -76,7 +78,7 @@ impl<'a> CdcEventAssertions<'a> {
     }
 
     /// Assert events are in timestamp order
-    pub fn is_ordered_by_timestamp(self) -> Self {
+    pub fn check_ordered_by_timestamp(self) -> Self {
         for window in self.events.windows(2) {
             assert!(
                 window[0].timestamp <= window[1].timestamp,
@@ -229,7 +231,7 @@ pub fn assert_json_field(event: &CdcEvent, field: &str, expected: impl Into<Valu
     let after = event.after.as_ref().expect("Event has no 'after' data");
     let actual = after
         .get(field)
-        .expect(&format!("Field '{}' not found", field));
+        .unwrap_or_else(|| panic!("Field '{}' not found", field));
     assert_eq!(*actual, expected, "Field '{}' mismatch", field);
 }
 

@@ -951,6 +951,12 @@ impl RequestRouter {
                 key,
                 ..
             } => self.route_publish(topic, *partition, key).await,
+            Request::IdempotentPublish {
+                topic,
+                partition,
+                key,
+                ..
+            } => self.route_publish(topic, *partition, key).await,
             Request::Consume {
                 topic, partition, ..
             } => self.route_consume(topic, *partition).await,
@@ -974,7 +980,30 @@ impl RequestRouter {
             | Request::GetClusterMetadata { .. }
             | Request::ListGroups
             | Request::DescribeGroup { .. }
-            | Request::DeleteGroup { .. } => RoutingDecision::Local,
+            | Request::DeleteGroup { .. }
+            | Request::InitProducerId { .. }
+            // Transaction operations - coordinator runs locally
+            | Request::BeginTransaction { .. }
+            | Request::AddPartitionsToTxn { .. }
+            | Request::AddOffsetsToTxn { .. }
+            | Request::CommitTransaction { .. }
+            | Request::AbortTransaction { .. }
+            // Quota operations - handle locally (any node can serve)
+            | Request::DescribeQuotas { .. }
+            | Request::AlterQuotas { .. }
+            // Admin API operations - handle locally or on leader
+            | Request::AlterTopicConfig { .. }
+            | Request::CreatePartitions { .. }
+            | Request::DeleteRecords { .. }
+            | Request::DescribeTopicConfigs { .. } => RoutingDecision::Local,
+
+            // Transactional publish - route to partition leader like regular publish
+            Request::TransactionalPublish {
+                topic,
+                partition,
+                ref key,
+                ..
+            } => self.route_publish(topic, *partition, key).await,
         };
 
         match decision {
@@ -1142,7 +1171,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::cli::Cli;
     use clap::Parser;
 

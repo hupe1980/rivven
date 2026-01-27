@@ -204,7 +204,7 @@ impl SegmentMetadata {
     ) -> Self {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs();
 
         Self {
@@ -1406,7 +1406,7 @@ impl TieredStorage {
         };
 
         // Parse messages from segment
-        // Segment format: length-prefixed bincode serialized Messages
+        // Segment format: length-prefixed postcard serialized Messages
         let mut messages: Vec<crate::Message> = Vec::new();
         let mut cursor = 0;
 

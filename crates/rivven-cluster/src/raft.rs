@@ -186,7 +186,7 @@ impl LogStore {
     ) -> Option<T> {
         let cf = db.cf_handle(cf_name)?;
         let bytes = db.get_cf(cf, key).ok()??;
-        bincode::deserialize(&bytes).ok()
+        postcard::from_bytes(&bytes).ok()
     }
 
     /// Save state to RocksDB
@@ -195,7 +195,7 @@ impl LogStore {
         key: &[u8],
         value: &T,
     ) -> std::result::Result<(), StorageError<NodeId>> {
-        let bytes = bincode::serialize(value).map_err(|e| StorageError::IO {
+        let bytes = postcard::to_allocvec(value).map_err(|e| StorageError::IO {
             source: StorageIOError::write_logs(openraft::AnyError::new(&e)),
         })?;
         self.db
@@ -218,7 +218,7 @@ impl LogStore {
         if iter.valid() {
             if let Some(value) = iter.value() {
                 let entry: RaftEntry =
-                    bincode::deserialize(value).map_err(|e| StorageError::IO {
+                    postcard::from_bytes(value).map_err(|e| StorageError::IO {
                         source: StorageIOError::read_logs(openraft::AnyError::new(&e)),
                     })?;
                 return Ok(Some(entry));
@@ -233,7 +233,7 @@ impl LogStore {
         match self.db.get_cf(self.cf_logs(), key) {
             Ok(Some(bytes)) => {
                 let entry: RaftEntry =
-                    bincode::deserialize(&bytes).map_err(|e| StorageError::IO {
+                    postcard::from_bytes(&bytes).map_err(|e| StorageError::IO {
                         source: StorageIOError::read_logs(openraft::AnyError::new(&e)),
                     })?;
                 Ok(Some(entry))
@@ -248,7 +248,7 @@ impl LogStore {
     /// Append a log entry
     fn append_log(&self, entry: &RaftEntry) -> std::result::Result<(), StorageError<NodeId>> {
         let key = Self::index_key(entry.log_id.index);
-        let value = bincode::serialize(entry).map_err(|e| StorageError::IO {
+        let value = postcard::to_allocvec(entry).map_err(|e| StorageError::IO {
             source: StorageIOError::write_logs(openraft::AnyError::new(&e)),
         })?;
         self.db
@@ -463,7 +463,7 @@ impl StateMachine {
             membership: membership.clone(),
         };
 
-        let data = bincode::serialize(&snapshot_data).map_err(|e| StorageError::IO {
+        let data = postcard::to_allocvec(&snapshot_data).map_err(|e| StorageError::IO {
             source: StorageIOError::read_state_machine(openraft::AnyError::new(&e)),
         })?;
 
@@ -488,7 +488,7 @@ impl StateMachine {
         data: &[u8],
     ) -> std::result::Result<(), StorageError<NodeId>> {
         let snapshot_data: SnapshotData =
-            bincode::deserialize(data).map_err(|e| StorageError::IO {
+            postcard::from_bytes(data).map_err(|e| StorageError::IO {
                 source: StorageIOError::read_state_machine(openraft::AnyError::new(&e)),
             })?;
 
@@ -630,7 +630,7 @@ impl openraft::storage::RaftSnapshotBuilder<TypeConfig> for StateMachine {
 // ============================================================================
 
 /// Serialization format for Raft RPCs
-/// Binary (bincode) is ~5-10x faster than JSON
+/// Binary (postcard) is ~5-10x faster than JSON
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SerializationFormat {
     /// JSON format (for debugging/compatibility)
@@ -757,7 +757,7 @@ impl Network {
     fn serialize<T: Serialize>(&self, data: &T) -> std::result::Result<Vec<u8>, String> {
         match self.format {
             SerializationFormat::Json => serde_json::to_vec(data).map_err(|e| e.to_string()),
-            SerializationFormat::Binary => bincode::serialize(data).map_err(|e| e.to_string()),
+            SerializationFormat::Binary => postcard::to_allocvec(data).map_err(|e| e.to_string()),
         }
     }
 
@@ -768,7 +768,7 @@ impl Network {
     ) -> std::result::Result<T, String> {
         match self.format {
             SerializationFormat::Json => serde_json::from_slice(data).map_err(|e| e.to_string()),
-            SerializationFormat::Binary => bincode::deserialize(data).map_err(|e| e.to_string()),
+            SerializationFormat::Binary => postcard::from_bytes(data).map_err(|e| e.to_string()),
         }
     }
 

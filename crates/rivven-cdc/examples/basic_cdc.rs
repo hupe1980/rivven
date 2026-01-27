@@ -13,7 +13,6 @@ use rivven_cdc::common::CdcSource;
 /// cargo run --example basic_cdc --features postgres
 /// ```
 use rivven_cdc::postgres::{PostgresCdc, PostgresCdcConfig};
-use tracing_subscriber;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

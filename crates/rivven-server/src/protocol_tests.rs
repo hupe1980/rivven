@@ -9,7 +9,7 @@ use proptest::prelude::*;
 
 // Generate arbitrary strings for testing
 prop_compose! {
-    fn arbitrary_string(max_len: usize)(s in "[a-zA-Z0-9_\\-\\.]{0,100}") -> String {
+    fn arbitrary_string(_max_len: usize)(s in "[a-zA-Z0-9_\\-\\.]{0,100}") -> String {
         s
     }
 }
@@ -197,8 +197,8 @@ mod edge_case_tests {
     }
 
     #[test]
-    fn test_bincode_magic_numbers() {
-        // Common attack vectors for bincode
+    fn test_postcard_magic_numbers() {
+        // Common attack vectors for postcard
         let test_cases: Vec<&[u8]> = vec![
             // Integer overflow attempts
             &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF],

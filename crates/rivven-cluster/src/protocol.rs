@@ -77,6 +77,7 @@ impl ResponseHeader {
 
 /// Request types for cluster operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::large_enum_variant)] // Acceptable for protocol enums - they're short-lived
 pub enum ClusterRequest {
     // ==================== Metadata Requests ====================
     /// Fetch metadata for topics
@@ -300,7 +301,7 @@ impl ErrorCode {
 
 /// Encode a request to bytes
 pub fn encode_request(request: &ClusterRequest) -> Result<Vec<u8>> {
-    bincode::serialize(request).map_err(|e| ClusterError::Serialization(e.to_string()))
+    postcard::to_allocvec(request).map_err(|e| ClusterError::Serialization(e.to_string()))
 }
 
 /// Decode a request from bytes
@@ -311,12 +312,12 @@ pub fn decode_request(bytes: &[u8]) -> Result<ClusterRequest> {
             max: MAX_MESSAGE_SIZE,
         });
     }
-    bincode::deserialize(bytes).map_err(|e| ClusterError::Deserialization(e.to_string()))
+    postcard::from_bytes(bytes).map_err(|e| ClusterError::Deserialization(e.to_string()))
 }
 
 /// Encode a response to bytes
 pub fn encode_response(response: &ClusterResponse) -> Result<Vec<u8>> {
-    bincode::serialize(response).map_err(|e| ClusterError::Serialization(e.to_string()))
+    postcard::to_allocvec(response).map_err(|e| ClusterError::Serialization(e.to_string()))
 }
 
 /// Decode a response from bytes
@@ -327,7 +328,7 @@ pub fn decode_response(bytes: &[u8]) -> Result<ClusterResponse> {
             max: MAX_MESSAGE_SIZE,
         });
     }
-    bincode::deserialize(bytes).map_err(|e| ClusterError::Deserialization(e.to_string()))
+    postcard::from_bytes(bytes).map_err(|e| ClusterError::Deserialization(e.to_string()))
 }
 
 /// Frame a message with length prefix for TCP transmission
@@ -347,7 +348,6 @@ pub fn frame_length(header: &[u8; 4]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn test_request_roundtrip() {
         let header = RequestHeader::new(42, "node-1".to_string());

@@ -1059,6 +1059,473 @@ pub struct ClusterReference {
     pub namespace: Option<String>,
 }
 
+// ============================================================================
+// RivvenTopic CRD - Declarative Topic Management
+// ============================================================================
+
+/// RivvenTopic custom resource for declarative topic management
+///
+/// This CRD allows users to define topics as Kubernetes resources,
+/// enabling GitOps workflows for topic lifecycle management.
+///
+/// # Example
+///
+/// ```yaml
+/// apiVersion: rivven.io/v1alpha1
+/// kind: RivvenTopic
+/// metadata:
+///   name: orders-events
+///   namespace: production
+/// spec:
+///   clusterRef:
+///     name: my-rivven-cluster
+///   partitions: 12
+///   replicationFactor: 3
+///   config:
+///     retentionMs: 604800000   # 7 days
+///     cleanupPolicy: delete
+///     compressionType: lz4
+///   acls:
+///     - principal: "user:order-service"
+///       operations: ["Read", "Write"]
+///     - principal: "user:analytics"
+///       operations: ["Read"]
+/// ```
+// Note: These types are defined for CRD generation and future controller use.
+// They are intentionally not yet constructed - the controller will use them.
+#[allow(dead_code)]
+#[derive(CustomResource, Debug, Clone, Deserialize, Serialize, JsonSchema, Validate)]
+#[kube(
+    group = "rivven.io",
+    version = "v1alpha1",
+    kind = "RivvenTopic",
+    plural = "rivventopics",
+    shortname = "rt",
+    namespaced,
+    status = "RivvenTopicStatus",
+    printcolumn = r#"{"name":"Cluster","type":"string","jsonPath":".spec.clusterRef.name"}"#,
+    printcolumn = r#"{"name":"Partitions","type":"integer","jsonPath":".spec.partitions"}"#,
+    printcolumn = r#"{"name":"Replication","type":"integer","jsonPath":".spec.replicationFactor"}"#,
+    printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
+    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
+)]
+#[serde(rename_all = "camelCase")]
+pub struct RivvenTopicSpec {
+    /// Reference to the RivvenCluster this topic belongs to
+    #[validate(nested)]
+    pub cluster_ref: ClusterReference,
+
+    /// Number of partitions for the topic (1-10000)
+    /// Cannot be decreased after creation
+    #[serde(default = "default_rivven_topic_partitions")]
+    #[validate(range(
+        min = 1,
+        max = 10000,
+        message = "partitions must be between 1 and 10000"
+    ))]
+    pub partitions: i32,
+
+    /// Replication factor for the topic (1-10)
+    /// Must not exceed the number of brokers in the cluster
+    #[serde(default = "default_rivven_topic_replication")]
+    #[validate(range(
+        min = 1,
+        max = 10,
+        message = "replication factor must be between 1 and 10"
+    ))]
+    pub replication_factor: i32,
+
+    /// Topic configuration parameters
+    #[serde(default)]
+    #[validate(nested)]
+    pub config: TopicConfig,
+
+    /// Access control list entries for the topic
+    #[serde(default)]
+    #[validate(length(max = 100, message = "maximum 100 ACL entries allowed"))]
+    #[validate(custom(function = "validate_topic_acls"))]
+    pub acls: Vec<TopicAcl>,
+
+    /// Whether to delete the topic from Rivven when the CRD is deleted
+    /// Default: true (topic is deleted when CRD is removed)
+    #[serde(default = "default_true")]
+    pub delete_on_remove: bool,
+
+    /// Labels to apply to the topic metadata
+    #[serde(default)]
+    #[validate(custom(function = "validate_labels"))]
+    pub topic_labels: BTreeMap<String, String>,
+}
+
+#[allow(dead_code)]
+fn default_rivven_topic_partitions() -> i32 {
+    3
+}
+
+#[allow(dead_code)]
+fn default_rivven_topic_replication() -> i32 {
+    1
+}
+
+/// Topic configuration parameters
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicConfig {
+    /// Retention time in milliseconds (1 hour to 10 years)
+    /// Default: 604800000 (7 days)
+    #[serde(default = "default_topic_retention_ms")]
+    #[validate(range(
+        min = 3600000,
+        max = 315360000000_i64,
+        message = "retention must be between 1 hour and 10 years"
+    ))]
+    pub retention_ms: i64,
+
+    /// Retention size in bytes per partition (-1 for unlimited)
+    /// Default: -1 (unlimited)
+    #[serde(default = "default_topic_retention_bytes")]
+    #[validate(custom(function = "validate_topic_retention_bytes"))]
+    pub retention_bytes: i64,
+
+    /// Segment size in bytes (1MB to 10GB)
+    #[serde(default = "default_topic_segment_bytes")]
+    #[validate(custom(function = "validate_segment_size"))]
+    pub segment_bytes: i64,
+
+    /// Cleanup policy: "delete", "compact", or "delete,compact"
+    #[serde(default = "default_topic_cleanup_policy")]
+    #[validate(custom(function = "validate_topic_cleanup_policy"))]
+    pub cleanup_policy: String,
+
+    /// Compression type: "none", "gzip", "snappy", "lz4", "zstd"
+    #[serde(default = "default_topic_compression")]
+    #[validate(custom(function = "validate_topic_compression"))]
+    pub compression_type: String,
+
+    /// Minimum number of in-sync replicas for writes (1-10)
+    #[serde(default = "default_topic_min_isr")]
+    #[validate(range(min = 1, max = 10, message = "min ISR must be between 1 and 10"))]
+    pub min_insync_replicas: i32,
+
+    /// Maximum message size in bytes (1KB to 100MB)
+    #[serde(default = "default_max_message_bytes")]
+    #[validate(custom(function = "validate_message_size"))]
+    pub max_message_bytes: i64,
+
+    /// Whether to enable message timestamps
+    #[serde(default = "default_true")]
+    pub message_timestamp_enabled: bool,
+
+    /// Timestamp type: "CreateTime" or "LogAppendTime"
+    #[serde(default = "default_topic_timestamp_type")]
+    #[validate(custom(function = "validate_topic_timestamp_type"))]
+    pub message_timestamp_type: String,
+
+    /// Whether to enable idempotent writes
+    #[serde(default = "default_true")]
+    pub idempotent_writes: bool,
+
+    /// Flush interval in milliseconds (0 for no scheduled flush)
+    #[serde(default)]
+    #[validate(range(min = 0, max = 86400000, message = "flush interval must be 0-24 hours"))]
+    pub flush_interval_ms: i64,
+
+    /// Custom configuration key-value pairs
+    #[serde(default)]
+    #[validate(custom(function = "validate_topic_custom_config"))]
+    pub custom: BTreeMap<String, String>,
+}
+
+#[allow(dead_code)]
+fn default_topic_retention_ms() -> i64 {
+    604800000 // 7 days
+}
+
+#[allow(dead_code)]
+fn default_topic_retention_bytes() -> i64 {
+    -1 // unlimited
+}
+
+#[allow(dead_code)]
+fn default_topic_segment_bytes() -> i64 {
+    1073741824 // 1GB
+}
+
+#[allow(dead_code)]
+fn default_topic_cleanup_policy() -> String {
+    "delete".to_string()
+}
+
+#[allow(dead_code)]
+fn default_topic_compression() -> String {
+    "lz4".to_string()
+}
+
+#[allow(dead_code)]
+fn default_topic_min_isr() -> i32 {
+    1
+}
+
+#[allow(dead_code)]
+fn default_topic_timestamp_type() -> String {
+    "CreateTime".to_string()
+}
+
+#[allow(dead_code)]
+fn validate_topic_retention_bytes(value: i64) -> Result<(), ValidationError> {
+    if value == -1 || (1048576..=10995116277760).contains(&value) {
+        Ok(())
+    } else {
+        Err(ValidationError::new("invalid_retention_bytes")
+            .with_message("retention_bytes must be -1 (unlimited) or 1MB-10TB".into()))
+    }
+}
+
+#[allow(dead_code)]
+fn validate_topic_cleanup_policy(policy: &str) -> Result<(), ValidationError> {
+    match policy {
+        "delete" | "compact" | "delete,compact" | "compact,delete" => Ok(()),
+        _ => Err(ValidationError::new("invalid_cleanup_policy").with_message(
+            "cleanup_policy must be 'delete', 'compact', or 'delete,compact'".into(),
+        )),
+    }
+}
+
+#[allow(dead_code)]
+fn validate_topic_compression(compression: &str) -> Result<(), ValidationError> {
+    match compression {
+        "none" | "gzip" | "snappy" | "lz4" | "zstd" | "producer" => Ok(()),
+        _ => Err(ValidationError::new("invalid_compression")
+            .with_message("compression must be none, gzip, snappy, lz4, zstd, or producer".into())),
+    }
+}
+
+#[allow(dead_code)]
+fn validate_topic_timestamp_type(ts_type: &str) -> Result<(), ValidationError> {
+    match ts_type {
+        "CreateTime" | "LogAppendTime" => Ok(()),
+        _ => Err(ValidationError::new("invalid_timestamp_type")
+            .with_message("timestamp type must be 'CreateTime' or 'LogAppendTime'".into())),
+    }
+}
+
+#[allow(dead_code)]
+fn validate_topic_custom_config(config: &BTreeMap<String, String>) -> Result<(), ValidationError> {
+    if config.len() > 50 {
+        return Err(ValidationError::new("too_many_custom_configs")
+            .with_message("maximum 50 custom config entries allowed".into()));
+    }
+    for (key, value) in config {
+        if key.len() > 128 || value.len() > 4096 {
+            return Err(ValidationError::new("config_too_long")
+                .with_message("config key max 128 chars, value max 4096 chars".into()));
+        }
+        // Prevent overriding protected configs
+        let protected = [
+            "retention.ms",
+            "retention.bytes",
+            "segment.bytes",
+            "cleanup.policy",
+        ];
+        if protected.contains(&key.as_str()) {
+            return Err(ValidationError::new("protected_config").with_message(
+                format!(
+                    "'{}' must be set via dedicated field, not custom config",
+                    key
+                )
+                .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Topic ACL entry
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicAcl {
+    /// Principal (e.g., "user:myuser", "group:mygroup", "*")
+    #[validate(length(min = 1, max = 256, message = "principal must be 1-256 characters"))]
+    #[validate(custom(function = "validate_principal"))]
+    pub principal: String,
+
+    /// Allowed operations: Read, Write, Create, Delete, Alter, Describe, All
+    #[validate(length(min = 1, max = 7, message = "must specify 1-7 operations"))]
+    #[validate(custom(function = "validate_operations"))]
+    pub operations: Vec<String>,
+
+    /// Permission type: Allow or Deny (default: Allow)
+    #[serde(default = "default_permission_type")]
+    #[validate(custom(function = "validate_permission_type"))]
+    pub permission_type: String,
+
+    /// Host restriction (default: "*" for any host)
+    #[serde(default = "default_acl_host")]
+    #[validate(length(max = 256, message = "host must be max 256 characters"))]
+    pub host: String,
+}
+
+#[allow(dead_code)]
+fn default_permission_type() -> String {
+    "Allow".to_string()
+}
+
+#[allow(dead_code)]
+fn default_acl_host() -> String {
+    "*".to_string()
+}
+
+#[allow(dead_code)]
+fn validate_principal(principal: &str) -> Result<(), ValidationError> {
+    if principal == "*" {
+        return Ok(());
+    }
+    if let Some((prefix, name)) = principal.split_once(':') {
+        if !["user", "group", "User", "Group"].contains(&prefix) {
+            return Err(ValidationError::new("invalid_principal_prefix")
+                .with_message("principal prefix must be 'user:' or 'group:'".into()));
+        }
+        if name.is_empty() || name.len() > 128 {
+            return Err(ValidationError::new("invalid_principal_name")
+                .with_message("principal name must be 1-128 characters".into()));
+        }
+        Ok(())
+    } else {
+        Err(ValidationError::new("invalid_principal_format")
+            .with_message("principal must be '*' or 'user:name' or 'group:name'".into()))
+    }
+}
+
+fn validate_operations(ops: &[String]) -> Result<(), ValidationError> {
+    let valid_ops = [
+        "Read",
+        "Write",
+        "Create",
+        "Delete",
+        "Alter",
+        "Describe",
+        "All",
+        "DescribeConfigs",
+        "AlterConfigs",
+    ];
+    for op in ops {
+        if !valid_ops.contains(&op.as_str()) {
+            return Err(ValidationError::new("invalid_operation").with_message(
+                format!("'{}' is not a valid operation. Valid: {:?}", op, valid_ops).into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn validate_permission_type(perm: &str) -> Result<(), ValidationError> {
+    match perm {
+        "Allow" | "Deny" => Ok(()),
+        _ => Err(ValidationError::new("invalid_permission_type")
+            .with_message("permission_type must be 'Allow' or 'Deny'".into())),
+    }
+}
+
+#[allow(dead_code)]
+fn validate_topic_acls(acls: &[TopicAcl]) -> Result<(), ValidationError> {
+    // Check for duplicate principal+operation combinations
+    let mut seen = std::collections::HashSet::new();
+    for acl in acls {
+        for op in &acl.operations {
+            let key = format!("{}:{}", acl.principal, op);
+            if !seen.insert(key.clone()) {
+                return Err(ValidationError::new("duplicate_acl")
+                    .with_message(format!("duplicate ACL entry for {}", key).into()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Status of the RivvenTopic resource
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RivvenTopicStatus {
+    /// Current phase: Pending, Creating, Ready, Updating, Deleting, Failed
+    #[serde(default)]
+    pub phase: String,
+
+    /// Human-readable message about current state
+    #[serde(default)]
+    pub message: String,
+
+    /// Actual number of partitions (may differ during scaling)
+    #[serde(default)]
+    pub current_partitions: i32,
+
+    /// Actual replication factor
+    #[serde(default)]
+    pub current_replication_factor: i32,
+
+    /// Whether the topic exists in Rivven
+    #[serde(default)]
+    pub topic_exists: bool,
+
+    /// Observed generation for tracking spec changes
+    #[serde(default)]
+    pub observed_generation: i64,
+
+    /// Conditions for detailed status tracking
+    #[serde(default)]
+    pub conditions: Vec<TopicCondition>,
+
+    /// Last time the topic was successfully synced
+    #[serde(default)]
+    pub last_sync_time: Option<String>,
+
+    /// Partition leader information
+    #[serde(default)]
+    pub partition_info: Vec<PartitionInfo>,
+}
+
+/// Condition for tracking topic status
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicCondition {
+    /// Type of condition: Ready, Synced, ACLsApplied, ConfigApplied
+    pub r#type: String,
+
+    /// Status: True, False, Unknown
+    pub status: String,
+
+    /// Machine-readable reason
+    pub reason: String,
+
+    /// Human-readable message
+    pub message: String,
+
+    /// Last transition time
+    pub last_transition_time: String,
+}
+
+/// Information about a topic partition
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PartitionInfo {
+    /// Partition ID
+    pub partition: i32,
+
+    /// Leader broker ID
+    pub leader: i32,
+
+    /// Replica broker IDs
+    pub replicas: Vec<i32>,
+
+    /// In-sync replica broker IDs
+    pub isr: Vec<i32>,
+}
+
 /// Global connect configuration
 #[allow(dead_code)]
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
@@ -1120,7 +1587,55 @@ pub struct SourceConnectorSpec {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
-    /// Connector-specific configuration (stored in ConfigMap or Secret)
+    // ========================================================================
+    // Typed Connector Configurations (mutually exclusive, validated at runtime)
+    // Use these for built-in connectors to get validation and discoverability.
+    // ========================================================================
+    /// PostgreSQL CDC specific configuration
+    #[serde(default)]
+    #[validate(nested)]
+    pub postgres_cdc: Option<PostgresCdcConfig>,
+
+    /// MySQL CDC specific configuration
+    #[serde(default)]
+    #[validate(nested)]
+    pub mysql_cdc: Option<MysqlCdcConfig>,
+
+    /// HTTP source specific configuration
+    #[serde(default)]
+    #[validate(nested)]
+    pub http: Option<HttpSourceConfig>,
+
+    /// Datagen source specific configuration
+    #[serde(default)]
+    #[validate(nested)]
+    pub datagen: Option<DatagenConfig>,
+
+    /// Kafka source specific configuration (rivven-queue)
+    #[serde(default)]
+    #[validate(nested)]
+    pub kafka: Option<KafkaSourceConfig>,
+
+    /// MQTT source specific configuration (rivven-queue)
+    #[serde(default)]
+    #[validate(nested)]
+    pub mqtt: Option<MqttSourceConfig>,
+
+    /// SQS source specific configuration (rivven-queue)
+    #[serde(default)]
+    #[validate(nested)]
+    pub sqs: Option<SqsSourceConfig>,
+
+    /// Pub/Sub source specific configuration (rivven-queue)
+    #[serde(default)]
+    #[validate(nested)]
+    pub pubsub: Option<PubSubSourceConfig>,
+
+    // ========================================================================
+    // Generic Configuration (for custom connectors or advanced overrides)
+    // ========================================================================
+    /// Generic connector configuration (for custom connectors)
+    /// Use typed fields above for built-in connectors when possible.
     #[serde(default)]
     pub config: serde_json::Value,
 
@@ -1128,11 +1643,6 @@ pub struct SourceConnectorSpec {
     #[serde(default)]
     #[validate(custom(function = "validate_optional_k8s_name"))]
     pub config_secret_ref: Option<String>,
-
-    /// Tables/streams to capture
-    #[serde(default)]
-    #[validate(length(max = 100, message = "maximum 100 tables per source"))]
-    pub tables: Vec<TableSpec>,
 
     /// Topic configuration (partitions, replication)
     #[serde(default)]
@@ -1168,6 +1678,787 @@ pub struct TableSpec {
     /// Override topic for this specific table
     #[serde(default)]
     pub topic: Option<String>,
+
+    /// Columns to include (empty = all columns)
+    #[serde(default)]
+    #[validate(length(max = 500, message = "maximum 500 columns per table"))]
+    pub columns: Vec<String>,
+
+    /// Columns to exclude
+    #[serde(default)]
+    #[validate(length(max = 500, message = "maximum 500 excluded columns per table"))]
+    pub exclude_columns: Vec<String>,
+
+    /// Column masking rules (column -> mask pattern)
+    #[serde(default)]
+    pub column_masks: std::collections::BTreeMap<String, String>,
+}
+
+// ============================================================================
+// Typed CDC Configuration (Best-in-Class Hybrid Approach)
+// ============================================================================
+// These typed configs provide validation and discoverability for built-in
+// connectors while preserving the generic `config` field for custom connectors.
+
+/// PostgreSQL CDC specific configuration
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct PostgresCdcConfig {
+    /// Replication slot name (auto-created if not exists)
+    #[serde(default)]
+    #[validate(length(max = 63, message = "slot name max 63 characters"))]
+    pub slot_name: Option<String>,
+
+    /// PostgreSQL publication name (auto-created if not exists)
+    #[serde(default)]
+    #[validate(length(max = 63, message = "publication name max 63 characters"))]
+    pub publication: Option<String>,
+
+    /// Snapshot mode: initial, never, when_needed, exported, custom
+    #[serde(default)]
+    #[validate(custom(function = "validate_snapshot_mode"))]
+    pub snapshot_mode: Option<String>,
+
+    /// Decoding plugin: pgoutput (default), wal2json, decoderbufs
+    #[serde(default)]
+    #[validate(custom(function = "validate_decoding_plugin"))]
+    pub decoding_plugin: Option<String>,
+
+    /// Include transaction metadata in events
+    #[serde(default)]
+    pub include_transaction_metadata: Option<bool>,
+
+    /// Heartbeat interval in milliseconds (0 = disabled)
+    #[serde(default)]
+    #[validate(range(
+        min = 0,
+        max = 3600000,
+        message = "heartbeat interval must be 0-3600000ms"
+    ))]
+    pub heartbeat_interval_ms: Option<i64>,
+
+    /// Signal table for runtime control (schema.table format)
+    #[serde(default)]
+    pub signal_table: Option<String>,
+
+    /// Tables to capture from PostgreSQL database
+    #[serde(default)]
+    #[validate(length(max = 100, message = "maximum 100 tables per source"))]
+    pub tables: Vec<TableSpec>,
+}
+
+#[allow(dead_code)]
+fn validate_snapshot_mode(mode: &str) -> Result<(), ValidationError> {
+    match mode {
+        "" | "initial" | "never" | "when_needed" | "exported" | "custom" => Ok(()),
+        _ => Err(ValidationError::new("invalid_snapshot_mode").with_message(
+            "snapshot mode must be: initial, never, when_needed, exported, or custom".into(),
+        )),
+    }
+}
+
+#[allow(dead_code)]
+fn validate_decoding_plugin(plugin: &str) -> Result<(), ValidationError> {
+    match plugin {
+        "" | "pgoutput" | "wal2json" | "decoderbufs" => Ok(()),
+        _ => Err(ValidationError::new("invalid_decoding_plugin")
+            .with_message("decoding plugin must be: pgoutput, wal2json, or decoderbufs".into())),
+    }
+}
+
+/// MySQL CDC specific configuration
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct MysqlCdcConfig {
+    /// Server ID for binlog replication (must be unique per cluster)
+    #[serde(default)]
+    #[validate(range(
+        min = 1,
+        max = 4294967295_i64,
+        message = "server ID must be 1-4294967295"
+    ))]
+    pub server_id: Option<i64>,
+
+    /// Snapshot mode: initial, never, when_needed, schema_only
+    #[serde(default)]
+    #[validate(custom(function = "validate_mysql_snapshot_mode"))]
+    pub snapshot_mode: Option<String>,
+
+    /// Include GTID position in events
+    #[serde(default)]
+    pub include_gtid: Option<bool>,
+
+    /// Heartbeat interval in milliseconds
+    #[serde(default)]
+    #[validate(range(
+        min = 0,
+        max = 3600000,
+        message = "heartbeat interval must be 0-3600000ms"
+    ))]
+    pub heartbeat_interval_ms: Option<i64>,
+
+    /// Database history topic for schema changes
+    #[serde(default)]
+    pub database_history_topic: Option<String>,
+
+    /// Tables to capture from MySQL database
+    #[serde(default)]
+    #[validate(length(max = 100, message = "maximum 100 tables per source"))]
+    pub tables: Vec<TableSpec>,
+}
+
+#[allow(dead_code)]
+fn validate_mysql_snapshot_mode(mode: &str) -> Result<(), ValidationError> {
+    match mode {
+        "" | "initial" | "never" | "when_needed" | "schema_only" => Ok(()),
+        _ => Err(
+            ValidationError::new("invalid_mysql_snapshot_mode").with_message(
+                "snapshot mode must be: initial, never, when_needed, or schema_only".into(),
+            ),
+        ),
+    }
+}
+
+/// HTTP source specific configuration
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpSourceConfig {
+    /// Listen address (default: 0.0.0.0)
+    #[serde(default)]
+    pub listen_address: Option<String>,
+
+    /// Listen port
+    #[serde(default)]
+    #[validate(range(min = 1, max = 65535, message = "port must be 1-65535"))]
+    pub port: Option<i32>,
+
+    /// Path prefix for webhook endpoint
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+
+    /// Require authentication
+    #[serde(default)]
+    pub require_auth: Option<bool>,
+
+    /// Authentication secret reference
+    #[serde(default)]
+    pub auth_secret_ref: Option<String>,
+}
+
+/// Datagen source specific configuration
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct DatagenConfig {
+    /// Events per second to generate
+    #[serde(default)]
+    #[validate(range(
+        min = 1,
+        max = 1000000,
+        message = "events per second must be 1-1000000"
+    ))]
+    pub events_per_second: Option<i64>,
+
+    /// Total events to generate (0 = unlimited)
+    #[serde(default)]
+    pub max_events: Option<i64>,
+
+    /// Event schema type: json, avro, simple
+    #[serde(default)]
+    pub schema_type: Option<String>,
+
+    /// Random seed for reproducible generation
+    #[serde(default)]
+    pub seed: Option<i64>,
+}
+
+// ============================================================================
+// Typed Queue Source Configurations (rivven-queue crate)
+// ============================================================================
+
+/// Kafka source specific configuration
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct KafkaSourceConfig {
+    /// Kafka broker addresses
+    #[serde(default)]
+    pub brokers: Option<Vec<String>>,
+
+    /// Kafka topic to consume from
+    #[serde(default)]
+    pub topic: Option<String>,
+
+    /// Consumer group ID
+    #[serde(default)]
+    pub consumer_group: Option<String>,
+
+    /// Start offset: earliest, latest
+    #[serde(default)]
+    #[validate(custom(function = "validate_kafka_start_offset"))]
+    pub start_offset: Option<String>,
+
+    /// Security protocol: plaintext, ssl, sasl_plaintext, sasl_ssl
+    #[serde(default)]
+    #[validate(custom(function = "validate_kafka_security_protocol"))]
+    pub security_protocol: Option<String>,
+
+    /// SASL mechanism: plain, scram-sha-256, scram-sha-512
+    #[serde(default)]
+    pub sasl_mechanism: Option<String>,
+
+    /// SASL username
+    #[serde(default)]
+    pub sasl_username: Option<String>,
+}
+
+#[allow(dead_code)]
+fn validate_kafka_start_offset(offset: &str) -> Result<(), ValidationError> {
+    match offset {
+        "" | "earliest" | "latest" => Ok(()),
+        _ => Err(ValidationError::new("invalid_kafka_start_offset")
+            .with_message("start offset must be: earliest or latest".into())),
+    }
+}
+
+#[allow(dead_code)]
+fn validate_kafka_security_protocol(protocol: &str) -> Result<(), ValidationError> {
+    match protocol {
+        "" | "plaintext" | "ssl" | "sasl_plaintext" | "sasl_ssl" => Ok(()),
+        _ => Err(ValidationError::new("invalid_kafka_security_protocol")
+            .with_message("protocol must be: plaintext, ssl, sasl_plaintext, or sasl_ssl".into())),
+    }
+}
+
+/// MQTT source specific configuration
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct MqttSourceConfig {
+    /// MQTT broker URL (e.g., mqtt://broker:1883)
+    #[serde(default)]
+    pub broker_url: Option<String>,
+
+    /// MQTT topics to subscribe (supports wildcards: +, #)
+    #[serde(default)]
+    pub topics: Option<Vec<String>>,
+
+    /// Client ID
+    #[serde(default)]
+    pub client_id: Option<String>,
+
+    /// QoS level: at_most_once, at_least_once, exactly_once
+    #[serde(default)]
+    #[validate(custom(function = "validate_mqtt_qos"))]
+    pub qos: Option<String>,
+
+    /// Clean session on connect
+    #[serde(default)]
+    pub clean_session: Option<bool>,
+
+    /// MQTT protocol version: v3, v311, v5
+    #[serde(default)]
+    pub mqtt_version: Option<String>,
+
+    /// Username for authentication
+    #[serde(default)]
+    pub username: Option<String>,
+}
+
+#[allow(dead_code)]
+fn validate_mqtt_qos(qos: &str) -> Result<(), ValidationError> {
+    match qos {
+        "" | "at_most_once" | "at_least_once" | "exactly_once" => Ok(()),
+        _ => Err(ValidationError::new("invalid_mqtt_qos")
+            .with_message("QoS must be: at_most_once, at_least_once, or exactly_once".into())),
+    }
+}
+
+/// SQS source specific configuration
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct SqsSourceConfig {
+    /// SQS queue URL
+    #[serde(default)]
+    pub queue_url: Option<String>,
+
+    /// AWS region
+    #[serde(default)]
+    pub region: Option<String>,
+
+    /// Max messages per poll (1-10)
+    #[serde(default)]
+    #[validate(range(min = 1, max = 10, message = "max messages must be 1-10"))]
+    pub max_messages: Option<i32>,
+
+    /// Long polling wait time in seconds
+    #[serde(default)]
+    #[validate(range(min = 0, max = 20, message = "wait time must be 0-20 seconds"))]
+    pub wait_time_seconds: Option<i32>,
+
+    /// Visibility timeout in seconds
+    #[serde(default)]
+    #[validate(range(
+        min = 0,
+        max = 43200,
+        message = "visibility timeout must be 0-43200 seconds"
+    ))]
+    pub visibility_timeout: Option<i32>,
+
+    /// AWS profile name
+    #[serde(default)]
+    pub aws_profile: Option<String>,
+
+    /// IAM role ARN to assume
+    #[serde(default)]
+    pub role_arn: Option<String>,
+}
+
+/// Google Cloud Pub/Sub source specific configuration
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct PubSubSourceConfig {
+    /// GCP project ID
+    #[serde(default)]
+    pub project_id: Option<String>,
+
+    /// Subscription name
+    #[serde(default)]
+    pub subscription: Option<String>,
+
+    /// Topic name (for auto-created subscriptions)
+    #[serde(default)]
+    pub topic: Option<String>,
+
+    /// Max messages per pull request
+    #[serde(default)]
+    #[validate(range(min = 1, max = 1000, message = "max messages must be 1-1000"))]
+    pub max_messages: Option<i32>,
+
+    /// Ack deadline in seconds
+    #[serde(default)]
+    #[validate(range(min = 10, max = 600, message = "ack deadline must be 10-600 seconds"))]
+    pub ack_deadline_seconds: Option<i32>,
+
+    /// Path to service account credentials file
+    #[serde(default)]
+    pub credentials_file: Option<String>,
+
+    /// Use Application Default Credentials
+    #[serde(default)]
+    pub use_adc: Option<bool>,
+}
+
+/// S3 sink specific configuration
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct S3SinkConfig {
+    /// S3 bucket name
+    #[serde(default)]
+    #[validate(length(max = 63, message = "bucket name max 63 characters"))]
+    pub bucket: Option<String>,
+
+    /// S3 region
+    #[serde(default)]
+    pub region: Option<String>,
+
+    /// S3 endpoint URL (for MinIO, LocalStack, etc.)
+    #[serde(default)]
+    pub endpoint_url: Option<String>,
+
+    /// Object key prefix
+    #[serde(default)]
+    pub prefix: Option<String>,
+
+    /// Output format: json, jsonl, parquet, avro
+    #[serde(default)]
+    #[validate(custom(function = "validate_output_format"))]
+    pub format: Option<String>,
+
+    /// Compression: none, gzip, snappy, lz4, zstd
+    #[serde(default)]
+    #[validate(custom(function = "validate_s3_compression"))]
+    pub compression: Option<String>,
+
+    /// Batch size (number of events per file)
+    #[serde(default)]
+    #[validate(range(min = 1, max = 1000000, message = "batch size must be 1-1000000"))]
+    pub batch_size: Option<i64>,
+
+    /// Flush interval in seconds
+    #[serde(default)]
+    #[validate(range(
+        min = 1,
+        max = 86400,
+        message = "flush interval must be 1-86400 seconds"
+    ))]
+    pub flush_interval_seconds: Option<i64>,
+}
+
+#[allow(dead_code)]
+fn validate_output_format(format: &str) -> Result<(), ValidationError> {
+    match format {
+        "" | "json" | "jsonl" | "parquet" | "avro" => Ok(()),
+        _ => Err(ValidationError::new("invalid_output_format")
+            .with_message("format must be: json, jsonl, parquet, or avro".into())),
+    }
+}
+
+#[allow(dead_code)]
+fn validate_s3_compression(compression: &str) -> Result<(), ValidationError> {
+    match compression {
+        "" | "none" | "gzip" | "snappy" | "lz4" | "zstd" => Ok(()),
+        _ => Err(ValidationError::new("invalid_compression")
+            .with_message("compression must be: none, gzip, snappy, lz4, or zstd".into())),
+    }
+}
+
+/// HTTP sink specific configuration
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpSinkConfig {
+    /// Target URL for HTTP requests
+    #[serde(default)]
+    pub url: Option<String>,
+
+    /// HTTP method: POST, PUT, PATCH
+    #[serde(default)]
+    #[validate(custom(function = "validate_http_method"))]
+    pub method: Option<String>,
+
+    /// Content type: application/json, application/x-ndjson
+    #[serde(default)]
+    pub content_type: Option<String>,
+
+    /// Request timeout in milliseconds
+    #[serde(default)]
+    #[validate(range(min = 100, max = 300000, message = "timeout must be 100-300000ms"))]
+    pub timeout_ms: Option<i64>,
+
+    /// Batch size (events per request)
+    #[serde(default)]
+    #[validate(range(min = 1, max = 10000, message = "batch size must be 1-10000"))]
+    pub batch_size: Option<i64>,
+}
+
+#[allow(dead_code)]
+fn validate_http_method(method: &str) -> Result<(), ValidationError> {
+    match method {
+        "" | "POST" | "PUT" | "PATCH" => Ok(()),
+        _ => Err(ValidationError::new("invalid_http_method")
+            .with_message("HTTP method must be: POST, PUT, or PATCH".into())),
+    }
+}
+
+/// Stdout sink specific configuration (for debugging)
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct StdoutSinkConfig {
+    /// Output format: json, pretty, raw
+    #[serde(default)]
+    pub format: Option<String>,
+
+    /// Pretty print JSON output
+    #[serde(default)]
+    pub pretty: Option<bool>,
+
+    /// Include metadata (topic, partition, offset)
+    #[serde(default)]
+    pub include_metadata: Option<bool>,
+}
+
+// ============================================================================
+// Typed Queue Sink Configurations (rivven-queue crate)
+// ============================================================================
+
+/// Kafka sink specific configuration
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct KafkaSinkConfig {
+    /// Kafka broker addresses
+    #[serde(default)]
+    pub brokers: Option<Vec<String>>,
+
+    /// Target Kafka topic
+    #[serde(default)]
+    pub topic: Option<String>,
+
+    /// Acks: none, leader, all
+    #[serde(default)]
+    #[validate(custom(function = "validate_kafka_acks"))]
+    pub acks: Option<String>,
+
+    /// Compression: none, gzip, snappy, lz4, zstd
+    #[serde(default)]
+    pub compression: Option<String>,
+
+    /// Batch size in bytes
+    #[serde(default)]
+    #[validate(range(min = 0, max = 1048576, message = "batch size must be 0-1048576 bytes"))]
+    pub batch_size: Option<i64>,
+
+    /// Linger time in milliseconds
+    #[serde(default)]
+    pub linger_ms: Option<i64>,
+
+    /// Security protocol: plaintext, ssl, sasl_plaintext, sasl_ssl
+    #[serde(default)]
+    pub security_protocol: Option<String>,
+
+    /// SASL mechanism: plain, scram-sha-256, scram-sha-512
+    #[serde(default)]
+    pub sasl_mechanism: Option<String>,
+
+    /// SASL username
+    #[serde(default)]
+    pub sasl_username: Option<String>,
+}
+
+#[allow(dead_code)]
+fn validate_kafka_acks(acks: &str) -> Result<(), ValidationError> {
+    match acks {
+        "" | "none" | "leader" | "all" | "0" | "1" | "-1" => Ok(()),
+        _ => Err(ValidationError::new("invalid_kafka_acks")
+            .with_message("acks must be: none, leader, all, 0, 1, or -1".into())),
+    }
+}
+
+// ============================================================================
+// Typed Storage Sink Configurations (rivven-storage crate)
+// ============================================================================
+
+/// GCS (Google Cloud Storage) sink specific configuration
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct GcsSinkConfig {
+    /// GCS bucket name
+    #[serde(default)]
+    pub bucket: Option<String>,
+
+    /// Object key prefix
+    #[serde(default)]
+    pub prefix: Option<String>,
+
+    /// Output format: json, jsonl, parquet, avro
+    #[serde(default)]
+    pub format: Option<String>,
+
+    /// Compression: none, gzip
+    #[serde(default)]
+    pub compression: Option<String>,
+
+    /// Partitioning: none, daily, hourly
+    #[serde(default)]
+    pub partitioning: Option<String>,
+
+    /// Batch size (events per file)
+    #[serde(default)]
+    #[validate(range(min = 1, max = 1000000, message = "batch size must be 1-1000000"))]
+    pub batch_size: Option<i64>,
+
+    /// Flush interval in seconds
+    #[serde(default)]
+    #[validate(range(
+        min = 1,
+        max = 86400,
+        message = "flush interval must be 1-86400 seconds"
+    ))]
+    pub flush_interval_seconds: Option<i64>,
+
+    /// Path to service account credentials file
+    #[serde(default)]
+    pub credentials_file: Option<String>,
+
+    /// Use Application Default Credentials
+    #[serde(default)]
+    pub use_adc: Option<bool>,
+}
+
+/// Azure Blob Storage sink specific configuration
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct AzureBlobSinkConfig {
+    /// Storage account name
+    #[serde(default)]
+    pub account_name: Option<String>,
+
+    /// Container name
+    #[serde(default)]
+    pub container: Option<String>,
+
+    /// Blob prefix
+    #[serde(default)]
+    pub prefix: Option<String>,
+
+    /// Output format: json, jsonl, parquet, avro
+    #[serde(default)]
+    pub format: Option<String>,
+
+    /// Compression: none, gzip
+    #[serde(default)]
+    pub compression: Option<String>,
+
+    /// Partitioning: none, daily, hourly
+    #[serde(default)]
+    pub partitioning: Option<String>,
+
+    /// Batch size (events per file)
+    #[serde(default)]
+    #[validate(range(min = 1, max = 1000000, message = "batch size must be 1-1000000"))]
+    pub batch_size: Option<i64>,
+
+    /// Flush interval in seconds
+    #[serde(default)]
+    #[validate(range(
+        min = 1,
+        max = 86400,
+        message = "flush interval must be 1-86400 seconds"
+    ))]
+    pub flush_interval_seconds: Option<i64>,
+}
+
+// ============================================================================
+// Typed Warehouse Sink Configurations (rivven-warehouse crate)
+// ============================================================================
+
+/// Snowflake sink specific configuration (Snowpipe Streaming)
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct SnowflakeSinkConfig {
+    /// Snowflake account identifier (e.g., "myorg-account123")
+    #[serde(default)]
+    pub account: Option<String>,
+
+    /// Snowflake user name
+    #[serde(default)]
+    pub user: Option<String>,
+
+    /// Path to PKCS#8 private key file
+    #[serde(default)]
+    pub private_key_path: Option<String>,
+
+    /// Target database name
+    #[serde(default)]
+    pub database: Option<String>,
+
+    /// Target schema name
+    #[serde(default)]
+    pub schema: Option<String>,
+
+    /// Target table name
+    #[serde(default)]
+    pub table: Option<String>,
+
+    /// Snowflake warehouse name
+    #[serde(default)]
+    pub warehouse: Option<String>,
+
+    /// Snowflake role name
+    #[serde(default)]
+    pub role: Option<String>,
+
+    /// Batch size (events per insert)
+    #[serde(default)]
+    #[validate(range(min = 1, max = 100000, message = "batch size must be 1-100000"))]
+    pub batch_size: Option<i64>,
+}
+
+/// BigQuery sink specific configuration
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct BigQuerySinkConfig {
+    /// GCP project ID
+    #[serde(default)]
+    pub project_id: Option<String>,
+
+    /// BigQuery dataset ID
+    #[serde(default)]
+    pub dataset_id: Option<String>,
+
+    /// BigQuery table ID
+    #[serde(default)]
+    pub table_id: Option<String>,
+
+    /// Path to service account credentials file
+    #[serde(default)]
+    pub credentials_file: Option<String>,
+
+    /// Use Application Default Credentials
+    #[serde(default)]
+    pub use_adc: Option<bool>,
+
+    /// Batch size (rows per insert request)
+    #[serde(default)]
+    #[validate(range(min = 1, max = 10000, message = "batch size must be 1-10000"))]
+    pub batch_size: Option<i64>,
+
+    /// Auto-create table if not exists
+    #[serde(default)]
+    pub auto_create_table: Option<bool>,
+}
+
+/// Redshift sink specific configuration
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
+#[serde(rename_all = "camelCase")]
+pub struct RedshiftSinkConfig {
+    /// Redshift cluster endpoint/host
+    #[serde(default)]
+    pub host: Option<String>,
+
+    /// Redshift port (default: 5439)
+    #[serde(default)]
+    #[validate(range(min = 1, max = 65535, message = "port must be 1-65535"))]
+    pub port: Option<i32>,
+
+    /// Database name
+    #[serde(default)]
+    pub database: Option<String>,
+
+    /// Redshift user name
+    #[serde(default)]
+    pub user: Option<String>,
+
+    /// Target schema name
+    #[serde(default)]
+    pub schema: Option<String>,
+
+    /// Target table name
+    #[serde(default)]
+    pub table: Option<String>,
+
+    /// SSL mode: disable, prefer, require, verify-ca, verify-full
+    #[serde(default)]
+    #[validate(custom(function = "validate_redshift_ssl_mode"))]
+    pub ssl_mode: Option<String>,
+
+    /// Batch size (rows per batch insert)
+    #[serde(default)]
+    #[validate(range(min = 1, max = 100000, message = "batch size must be 1-100000"))]
+    pub batch_size: Option<i64>,
+}
+
+#[allow(dead_code)]
+fn validate_redshift_ssl_mode(mode: &str) -> Result<(), ValidationError> {
+    match mode {
+        "" | "disable" | "prefer" | "require" | "verify-ca" | "verify-full" => Ok(()),
+        _ => Err(ValidationError::new("invalid_ssl_mode").with_message(
+            "SSL mode must be: disable, prefer, require, verify-ca, or verify-full".into(),
+        )),
+    }
 }
 
 /// Source topic configuration
@@ -1230,7 +2521,60 @@ pub struct SinkConnectorSpec {
     #[validate(custom(function = "validate_start_offset"))]
     pub start_offset: String,
 
-    /// Connector-specific configuration
+    // ========================================================================
+    // Typed Connector Configurations (mutually exclusive, validated at runtime)
+    // Use these for built-in connectors to get validation and discoverability.
+    // ========================================================================
+    /// S3 sink specific configuration
+    #[serde(default)]
+    #[validate(nested)]
+    pub s3: Option<S3SinkConfig>,
+
+    /// HTTP sink specific configuration
+    #[serde(default)]
+    #[validate(nested)]
+    pub http: Option<HttpSinkConfig>,
+
+    /// Stdout sink specific configuration
+    #[serde(default)]
+    #[validate(nested)]
+    pub stdout: Option<StdoutSinkConfig>,
+
+    /// Kafka sink specific configuration (rivven-queue)
+    #[serde(default)]
+    #[validate(nested)]
+    pub kafka: Option<KafkaSinkConfig>,
+
+    /// GCS sink specific configuration (rivven-storage)
+    #[serde(default)]
+    #[validate(nested)]
+    pub gcs: Option<GcsSinkConfig>,
+
+    /// Azure Blob sink specific configuration (rivven-storage)
+    #[serde(default)]
+    #[validate(nested)]
+    pub azure_blob: Option<AzureBlobSinkConfig>,
+
+    /// Snowflake sink specific configuration (rivven-warehouse)
+    #[serde(default)]
+    #[validate(nested)]
+    pub snowflake: Option<SnowflakeSinkConfig>,
+
+    /// BigQuery sink specific configuration (rivven-warehouse)
+    #[serde(default)]
+    #[validate(nested)]
+    pub bigquery: Option<BigQuerySinkConfig>,
+
+    /// Redshift sink specific configuration (rivven-warehouse)
+    #[serde(default)]
+    #[validate(nested)]
+    pub redshift: Option<RedshiftSinkConfig>,
+
+    // ========================================================================
+    // Generic Configuration (for custom connectors or advanced overrides)
+    // ========================================================================
+    /// Generic connector configuration (for custom connectors)
+    /// Use typed fields above for built-in connectors when possible.
     #[serde(default)]
     pub config: serde_json::Value,
 
@@ -1965,5 +3309,384 @@ mod tests {
         assert!(validate_start_offset("latest").is_ok());
         assert!(validate_start_offset("2024-01-01T00:00:00Z").is_ok());
         assert!(validate_start_offset("invalid").is_err());
+    }
+
+    #[test]
+    fn test_validate_image_valid() {
+        assert!(validate_image("nginx").is_ok());
+        assert!(validate_image("nginx:latest").is_ok());
+        assert!(validate_image("ghcr.io/hupe1980/rivven:0.1.0").is_ok());
+        assert!(validate_image("my-registry.io:5000/image:tag").is_ok());
+        assert!(validate_image("localhost:5000/myimage").is_ok());
+        assert!(validate_image("").is_ok()); // Empty allowed, uses default
+    }
+
+    #[test]
+    fn test_validate_image_invalid() {
+        assert!(validate_image("/absolute/path").is_err()); // Starts with /
+        assert!(validate_image("-invalid").is_err()); // Starts with -
+        assert!(validate_image("image..path").is_err()); // Contains ..
+                                                         // Very long image name
+        let long_name = "a".repeat(300);
+        assert!(validate_image(&long_name).is_err());
+    }
+
+    #[test]
+    fn test_validate_node_selector() {
+        let mut selectors = BTreeMap::new();
+        selectors.insert("node-type".to_string(), "compute".to_string());
+        assert!(validate_node_selector(&selectors).is_ok());
+
+        // Too many selectors
+        let mut many = BTreeMap::new();
+        for i in 0..25 {
+            many.insert(format!("key-{}", i), "value".to_string());
+        }
+        assert!(validate_node_selector(&many).is_err());
+    }
+
+    #[test]
+    fn test_validate_annotations() {
+        let mut annotations = BTreeMap::new();
+        annotations.insert("prometheus.io/scrape".to_string(), "true".to_string());
+        assert!(validate_annotations(&annotations).is_ok());
+
+        // Too many annotations
+        let mut many = BTreeMap::new();
+        for i in 0..55 {
+            many.insert(format!("annotation-{}", i), "value".to_string());
+        }
+        assert!(validate_annotations(&many).is_err());
+    }
+
+    #[test]
+    fn test_validate_labels() {
+        let mut labels = BTreeMap::new();
+        labels.insert("team".to_string(), "platform".to_string());
+        assert!(validate_labels(&labels).is_ok());
+
+        // Reserved prefix
+        let mut reserved = BTreeMap::new();
+        reserved.insert("app.kubernetes.io/custom".to_string(), "value".to_string());
+        assert!(validate_labels(&reserved).is_err());
+    }
+
+    #[test]
+    fn test_validate_raw_config() {
+        let mut config = BTreeMap::new();
+        config.insert("custom.setting".to_string(), "value".to_string());
+        assert!(validate_raw_config(&config).is_ok());
+
+        // Forbidden key
+        let mut forbidden = BTreeMap::new();
+        forbidden.insert("command".to_string(), "/bin/sh".to_string());
+        assert!(validate_raw_config(&forbidden).is_err());
+
+        // Too many entries
+        let mut many = BTreeMap::new();
+        for i in 0..55 {
+            many.insert(format!("config-{}", i), "value".to_string());
+        }
+        assert!(validate_raw_config(&many).is_err());
+    }
+
+    #[test]
+    fn test_validate_int_or_percent() {
+        assert!(validate_optional_int_or_percent("1").is_ok());
+        assert!(validate_optional_int_or_percent("25%").is_ok());
+        assert!(validate_optional_int_or_percent("100%").is_ok());
+        assert!(validate_optional_int_or_percent("").is_ok()); // Empty allowed
+        assert!(validate_optional_int_or_percent("abc").is_err());
+        assert!(validate_optional_int_or_percent("25%%").is_err());
+    }
+
+    #[test]
+    fn test_tls_spec_default() {
+        let tls = TlsSpec::default();
+        assert!(!tls.enabled);
+        assert!(tls.cert_secret_name.is_none());
+        assert!(!tls.mtls_enabled);
+    }
+
+    #[test]
+    fn test_metrics_spec_default() {
+        let metrics = MetricsSpec::default();
+        assert!(metrics.enabled);
+        assert_eq!(metrics.port, 9090);
+    }
+
+    #[test]
+    fn test_pdb_spec_default() {
+        let pdb = PdbSpec::default();
+        assert!(pdb.enabled);
+        assert!(pdb.min_available.is_none());
+        assert_eq!(pdb.max_unavailable, Some("1".to_string()));
+    }
+
+    #[test]
+    fn test_service_monitor_labels() {
+        let mut labels = BTreeMap::new();
+        labels.insert("release".to_string(), "prometheus".to_string());
+        assert!(validate_service_monitor_labels(&labels).is_ok());
+
+        // Too many labels
+        let mut many = BTreeMap::new();
+        for i in 0..15 {
+            many.insert(format!("label-{}", i), "value".to_string());
+        }
+        assert!(validate_service_monitor_labels(&many).is_err());
+    }
+
+    #[test]
+    fn test_cluster_condition_time_format() {
+        let condition = ClusterCondition {
+            condition_type: "Ready".to_string(),
+            status: "True".to_string(),
+            last_transition_time: Some(chrono::Utc::now().to_rfc3339()),
+            reason: Some("AllReplicasReady".to_string()),
+            message: Some("All replicas are ready".to_string()),
+        };
+        assert!(condition.last_transition_time.unwrap().contains('T'));
+    }
+
+    // ========================================================================
+    // Typed Connector Config Tests
+    // ========================================================================
+
+    #[test]
+    fn test_validate_snapshot_mode() {
+        assert!(validate_snapshot_mode("initial").is_ok());
+        assert!(validate_snapshot_mode("never").is_ok());
+        assert!(validate_snapshot_mode("when_needed").is_ok());
+        assert!(validate_snapshot_mode("exported").is_ok());
+        assert!(validate_snapshot_mode("custom").is_ok());
+        assert!(validate_snapshot_mode("").is_ok()); // Empty allowed
+        assert!(validate_snapshot_mode("invalid").is_err());
+    }
+
+    #[test]
+    fn test_validate_decoding_plugin() {
+        assert!(validate_decoding_plugin("pgoutput").is_ok());
+        assert!(validate_decoding_plugin("wal2json").is_ok());
+        assert!(validate_decoding_plugin("decoderbufs").is_ok());
+        assert!(validate_decoding_plugin("").is_ok()); // Empty allowed
+        assert!(validate_decoding_plugin("invalid").is_err());
+    }
+
+    #[test]
+    fn test_validate_mysql_snapshot_mode() {
+        assert!(validate_mysql_snapshot_mode("initial").is_ok());
+        assert!(validate_mysql_snapshot_mode("never").is_ok());
+        assert!(validate_mysql_snapshot_mode("when_needed").is_ok());
+        assert!(validate_mysql_snapshot_mode("schema_only").is_ok());
+        assert!(validate_mysql_snapshot_mode("").is_ok());
+        assert!(validate_mysql_snapshot_mode("invalid").is_err());
+    }
+
+    #[test]
+    fn test_validate_output_format() {
+        assert!(validate_output_format("json").is_ok());
+        assert!(validate_output_format("jsonl").is_ok());
+        assert!(validate_output_format("parquet").is_ok());
+        assert!(validate_output_format("avro").is_ok());
+        assert!(validate_output_format("").is_ok());
+        assert!(validate_output_format("xml").is_err());
+    }
+
+    #[test]
+    fn test_validate_s3_compression() {
+        assert!(validate_s3_compression("none").is_ok());
+        assert!(validate_s3_compression("gzip").is_ok());
+        assert!(validate_s3_compression("snappy").is_ok());
+        assert!(validate_s3_compression("lz4").is_ok());
+        assert!(validate_s3_compression("zstd").is_ok());
+        assert!(validate_s3_compression("").is_ok());
+        assert!(validate_s3_compression("bzip2").is_err());
+    }
+
+    #[test]
+    fn test_validate_http_method() {
+        assert!(validate_http_method("POST").is_ok());
+        assert!(validate_http_method("PUT").is_ok());
+        assert!(validate_http_method("PATCH").is_ok());
+        assert!(validate_http_method("").is_ok());
+        assert!(validate_http_method("GET").is_err());
+        assert!(validate_http_method("DELETE").is_err());
+    }
+
+    #[test]
+    fn test_postgres_cdc_config_default() {
+        let config = PostgresCdcConfig::default();
+        assert!(config.slot_name.is_none());
+        assert!(config.publication.is_none());
+        assert!(config.snapshot_mode.is_none());
+    }
+
+    #[test]
+    fn test_s3_sink_config_default() {
+        let config = S3SinkConfig::default();
+        assert!(config.bucket.is_none());
+        assert!(config.region.is_none());
+        assert!(config.format.is_none());
+    }
+
+    #[test]
+    fn test_table_spec_with_columns() {
+        let table = TableSpec {
+            schema: Some("public".to_string()),
+            table: "orders".to_string(),
+            topic: None,
+            columns: vec!["id".to_string(), "customer_id".to_string()],
+            exclude_columns: vec!["password".to_string()],
+            column_masks: std::collections::BTreeMap::from([(
+                "email".to_string(),
+                "***@***.***".to_string(),
+            )]),
+        };
+        assert_eq!(table.columns.len(), 2);
+        assert_eq!(table.exclude_columns.len(), 1);
+        assert_eq!(table.column_masks.len(), 1);
+    }
+
+    // ========================================================================
+    // Queue Connector Tests (rivven-queue)
+    // ========================================================================
+
+    #[test]
+    fn test_kafka_source_config_default() {
+        let config = KafkaSourceConfig::default();
+        assert!(config.brokers.is_none());
+        assert!(config.topic.is_none());
+        assert!(config.consumer_group.is_none());
+    }
+
+    #[test]
+    fn test_validate_kafka_start_offset() {
+        assert!(validate_kafka_start_offset("earliest").is_ok());
+        assert!(validate_kafka_start_offset("latest").is_ok());
+        assert!(validate_kafka_start_offset("").is_ok());
+        assert!(validate_kafka_start_offset("invalid").is_err());
+    }
+
+    #[test]
+    fn test_validate_kafka_security_protocol() {
+        assert!(validate_kafka_security_protocol("plaintext").is_ok());
+        assert!(validate_kafka_security_protocol("ssl").is_ok());
+        assert!(validate_kafka_security_protocol("sasl_plaintext").is_ok());
+        assert!(validate_kafka_security_protocol("sasl_ssl").is_ok());
+        assert!(validate_kafka_security_protocol("").is_ok());
+        assert!(validate_kafka_security_protocol("invalid").is_err());
+    }
+
+    #[test]
+    fn test_mqtt_source_config_default() {
+        let config = MqttSourceConfig::default();
+        assert!(config.broker_url.is_none());
+        assert!(config.topics.is_none());
+        assert!(config.client_id.is_none());
+    }
+
+    #[test]
+    fn test_validate_mqtt_qos() {
+        assert!(validate_mqtt_qos("at_most_once").is_ok());
+        assert!(validate_mqtt_qos("at_least_once").is_ok());
+        assert!(validate_mqtt_qos("exactly_once").is_ok());
+        assert!(validate_mqtt_qos("").is_ok());
+        assert!(validate_mqtt_qos("invalid").is_err());
+    }
+
+    #[test]
+    fn test_sqs_source_config_default() {
+        let config = SqsSourceConfig::default();
+        assert!(config.queue_url.is_none());
+        assert!(config.region.is_none());
+        assert!(config.max_messages.is_none());
+    }
+
+    #[test]
+    fn test_pubsub_source_config_default() {
+        let config = PubSubSourceConfig::default();
+        assert!(config.project_id.is_none());
+        assert!(config.subscription.is_none());
+        assert!(config.topic.is_none());
+    }
+
+    #[test]
+    fn test_kafka_sink_config_default() {
+        let config = KafkaSinkConfig::default();
+        assert!(config.brokers.is_none());
+        assert!(config.topic.is_none());
+        assert!(config.acks.is_none());
+    }
+
+    #[test]
+    fn test_validate_kafka_acks() {
+        assert!(validate_kafka_acks("none").is_ok());
+        assert!(validate_kafka_acks("leader").is_ok());
+        assert!(validate_kafka_acks("all").is_ok());
+        assert!(validate_kafka_acks("0").is_ok());
+        assert!(validate_kafka_acks("1").is_ok());
+        assert!(validate_kafka_acks("-1").is_ok());
+        assert!(validate_kafka_acks("").is_ok());
+        assert!(validate_kafka_acks("invalid").is_err());
+    }
+
+    // ========================================================================
+    // Storage Connector Tests (rivven-storage)
+    // ========================================================================
+
+    #[test]
+    fn test_gcs_sink_config_default() {
+        let config = GcsSinkConfig::default();
+        assert!(config.bucket.is_none());
+        assert!(config.prefix.is_none());
+        assert!(config.format.is_none());
+    }
+
+    #[test]
+    fn test_azure_blob_sink_config_default() {
+        let config = AzureBlobSinkConfig::default();
+        assert!(config.account_name.is_none());
+        assert!(config.container.is_none());
+        assert!(config.format.is_none());
+    }
+
+    // ========================================================================
+    // Warehouse Connector Tests (rivven-warehouse)
+    // ========================================================================
+
+    #[test]
+    fn test_snowflake_sink_config_default() {
+        let config = SnowflakeSinkConfig::default();
+        assert!(config.account.is_none());
+        assert!(config.user.is_none());
+        assert!(config.database.is_none());
+    }
+
+    #[test]
+    fn test_bigquery_sink_config_default() {
+        let config = BigQuerySinkConfig::default();
+        assert!(config.project_id.is_none());
+        assert!(config.dataset_id.is_none());
+        assert!(config.table_id.is_none());
+    }
+
+    #[test]
+    fn test_redshift_sink_config_default() {
+        let config = RedshiftSinkConfig::default();
+        assert!(config.host.is_none());
+        assert!(config.database.is_none());
+        assert!(config.table.is_none());
+    }
+
+    #[test]
+    fn test_validate_redshift_ssl_mode() {
+        assert!(validate_redshift_ssl_mode("disable").is_ok());
+        assert!(validate_redshift_ssl_mode("prefer").is_ok());
+        assert!(validate_redshift_ssl_mode("require").is_ok());
+        assert!(validate_redshift_ssl_mode("verify-ca").is_ok());
+        assert!(validate_redshift_ssl_mode("verify-full").is_ok());
+        assert!(validate_redshift_ssl_mode("").is_ok());
+        assert!(validate_redshift_ssl_mode("invalid").is_err());
     }
 }

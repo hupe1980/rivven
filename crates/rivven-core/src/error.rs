@@ -12,7 +12,7 @@ pub enum Error {
     InvalidOffset(u64),
 
     #[error("Serialization error: {0}")]
-    SerializationError(#[from] bincode::Error),
+    SerializationError(#[from] postcard::Error),
 
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),

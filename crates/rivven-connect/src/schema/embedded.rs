@@ -91,12 +91,147 @@ impl EmbeddedRegistry {
 
     /// Initialize from topic (load existing schemas)
     pub async fn initialize(&mut self) -> SchemaRegistryResult<()> {
-        if let Some(ref _broker) = self.broker {
-            // TODO: Load existing schemas from topic
-            // For now, start fresh
-            tracing::info!(topic = %self.topic, "Embedded schema registry initialized");
+        let broker = match self.broker.clone() {
+            Some(b) => b,
+            None => {
+                tracing::info!(topic = %self.topic, "Embedded schema registry initialized (no broker)");
+                return Ok(());
+            }
+        };
+
+        // Ensure the schemas topic exists
+        if let Err(e) = broker.create_topic(&self.topic, 1).await {
+            // Ignore error if topic already exists
+            tracing::debug!(topic = %self.topic, error = %e, "Topic creation result (may already exist)");
         }
+
+        // Load existing schemas from topic
+        match self.load_schemas_from_topic(&broker).await {
+            Ok(count) => {
+                tracing::info!(
+                    topic = %self.topic,
+                    schemas_loaded = count,
+                    "Embedded schema registry initialized from topic"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    topic = %self.topic,
+                    error = %e,
+                    "Failed to load schemas from topic, starting fresh"
+                );
+            }
+        }
+
         Ok(())
+    }
+
+    /// Load existing schemas from the _schemas topic
+    async fn load_schemas_from_topic(
+        &mut self,
+        broker: &Arc<BrokerClient>,
+    ) -> SchemaRegistryResult<usize> {
+        // Get topic bounds
+        let (earliest, latest) = broker
+            .get_offset_bounds(&self.topic, 0)
+            .await
+            .map_err(|e| SchemaRegistryError::StorageError(e.to_string()))?;
+
+        if earliest >= latest {
+            // Empty topic
+            return Ok(0);
+        }
+
+        let mut loaded = 0;
+        let mut offset = earliest;
+        let batch_size = 100;
+
+        while offset < latest {
+            let messages = broker
+                .consume_batch(&self.topic, 0, offset, batch_size)
+                .await
+                .map_err(|e| SchemaRegistryError::StorageError(e.to_string()))?;
+
+            if messages.is_empty() {
+                break;
+            }
+
+            for msg in &messages {
+                match serde_json::from_slice::<SchemaEntry>(&msg.value) {
+                    Ok(entry) => {
+                        self.restore_schema_entry(entry);
+                        loaded += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            offset = msg.offset,
+                            error = %e,
+                            "Failed to deserialize schema entry, skipping"
+                        );
+                    }
+                }
+            }
+
+            offset = messages.last().map(|m| m.offset + 1).unwrap_or(latest);
+        }
+
+        Ok(loaded)
+    }
+
+    /// Restore a schema entry into the caches
+    fn restore_schema_entry(&mut self, entry: SchemaEntry) {
+        let subject = Subject::new(&entry.subject);
+        let id = SchemaId::new(entry.id);
+        let version = entry.version;
+
+        // Update next_id if necessary
+        let current = self.next_id.load(Ordering::SeqCst);
+        if entry.id >= current {
+            self.next_id.store(entry.id + 1, Ordering::SeqCst);
+        }
+
+        // Create schema
+        let mut schema = Schema::new(id, entry.schema_type, entry.schema);
+        schema.references = entry.references;
+
+        // Update schema cache
+        {
+            let mut cache = self.schema_cache.write();
+            cache.insert(id, schema);
+        }
+
+        // Update version cache
+        {
+            let mut cache = self.version_cache.write();
+            cache.insert((subject.clone(), version), id);
+        }
+
+        // Update subject cache
+        {
+            let mut cache = self.subject_cache.write();
+            let metadata = cache
+                .entry(subject.clone())
+                .or_insert_with(|| SubjectMetadata {
+                    subject: subject.clone(),
+                    versions: Vec::new(),
+                    compatibility: self.default_compatibility,
+                    id_map: HashMap::new(),
+                });
+
+            // Insert version in sorted order if not already present
+            if !metadata.versions.contains(&version) {
+                metadata.versions.push(version);
+                metadata.versions.sort();
+            }
+            metadata.id_map.insert(version, id);
+        }
+
+        tracing::debug!(
+            subject = %entry.subject,
+            version = version,
+            schema_id = entry.id,
+            "Restored schema from topic"
+        );
     }
 
     /// Register a new schema
@@ -154,7 +289,7 @@ impl EmbeddedRegistry {
         }
 
         // Persist to topic if broker is available
-        if let Some(ref _broker) = self.broker {
+        if let Some(ref broker) = self.broker {
             let entry = SchemaEntry {
                 subject: subject.0.clone(),
                 version,
@@ -165,12 +300,22 @@ impl EmbeddedRegistry {
                 registered_at: chrono::Utc::now().timestamp(),
             };
 
-            let _key = format!("{}/{}", subject.0, version);
-            let _value = serde_json::to_vec(&entry)
+            let key = format!("{}/{}", subject.0, version);
+            let value = serde_json::to_vec(&entry)
                 .map_err(|e| SchemaRegistryError::SerializationError(e.to_string()))?;
 
-            // TODO: Produce to _schemas topic
-            // broker.produce(&self.topic, key.as_bytes(), &value).await?;
+            // Produce to _schemas topic
+            broker
+                .publish_with_key(&self.topic, Some(key.into_bytes()), value)
+                .await
+                .map_err(|e| SchemaRegistryError::StorageError(e.to_string()))?;
+
+            tracing::debug!(
+                subject = %subject,
+                version = version,
+                schema_id = %id,
+                "Persisted schema to topic"
+            );
         }
 
         tracing::info!(

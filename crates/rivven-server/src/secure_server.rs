@@ -407,7 +407,7 @@ impl SecureServer {
         // Build TLS info
         let tls_info = TlsConnectionInfo {
             protocol_version,
-            cipher_suite: None, // TODO: extract from rustls
+            cipher_suite: tls_stream.cipher_suite_name(),
             client_cert: client_cert.clone(),
             alpn_protocol: alpn,
         };

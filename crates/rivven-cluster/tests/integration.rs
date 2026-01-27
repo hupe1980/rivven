@@ -15,6 +15,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 /// Create a test cluster configuration
+#[allow(dead_code)]
 fn test_config(node_id: &str, port: u16, seeds: Vec<String>) -> ClusterConfig {
     let client_addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
     let cluster_addr: SocketAddr = format!("127.0.0.1:{}", port + 1000).parse().unwrap();

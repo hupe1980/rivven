@@ -1,0 +1,197 @@
+# Production RivvenTopic example with full configuration
+# Demonstrates all available options for topic configuration
+apiVersion: rivven.io/v1alpha1
+kind: RivvenTopic
+metadata:
+  name: payment-transactions
+  namespace: production
+  labels:
+    app.kubernetes.io/part-of: payment-system
+    team: payments
+spec:
+  # Reference to the Rivven cluster
+  clusterRef:
+    name: production-cluster
+    namespace: rivven-system
+
+  # High partition count for throughput
+  partitions: 24
+
+  # Replication factor for durability
+  replicationFactor: 3
+
+  # Topic configuration
+  config:
+    # Retention: 30 days
+    retentionMs: 2592000000
+
+    # 100GB per partition retention
+    retentionBytes: 107374182400
+
+    # 512MB segment size
+    segmentBytes: 536870912
+
+    # Delete old segments (not compacted)
+    cleanupPolicy: delete
+
+    # LZ4 compression for performance
+    compressionType: lz4
+
+    # Require 2 ISRs for writes
+    minInsyncReplicas: 2
+
+    # 10MB max message size
+    maxMessageBytes: 10485760
+
+    # Enable message timestamps
+    messageTimestampEnabled: true
+    messageTimestampType: CreateTime
+
+    # Enable idempotent writes
+    idempotentWrites: true
+
+    # Custom configs
+    custom:
+      # Additional topic-specific settings
+      "message.format.version": "3.0"
+
+  # Access control
+  acls:
+    # Payment service can read and write
+    - principal: "user:payment-service"
+      operations:
+        - Read
+        - Write
+        - Describe
+      permissionType: Allow
+
+    # Analytics can only read
+    - principal: "user:analytics-service"
+      operations:
+        - Read
+        - Describe
+      permissionType: Allow
+
+    # Admin group has full access
+    - principal: "group:kafka-admins"
+      operations:
+        - All
+      permissionType: Allow
+
+    # Deny unknown users
+    - principal: "*"
+      operations:
+        - Write
+      permissionType: Deny
+      host: "*"
+
+  # Keep topic when CRD is deleted (for safety)
+  deleteOnRemove: false
+
+  # Topic metadata labels
+  topicLabels:
+    data-classification: pii
+    retention-policy: 30-days
+    compliance: pci-dss
+---
+# CDC topic with log compaction for materialized views
+apiVersion: rivven.io/v1alpha1
+kind: RivvenTopic
+metadata:
+  name: user-profiles-cdc
+  namespace: production
+spec:
+  clusterRef:
+    name: production-cluster
+
+  partitions: 12
+  replicationFactor: 3
+
+  config:
+    # Keep indefinitely (compacted)
+    retentionMs: -1
+
+    # Compact to keep latest per key
+    cleanupPolicy: compact
+
+    # Zstd for better compaction ratio
+    compressionType: zstd
+
+    # Aggressive compaction settings
+    custom:
+      "min.cleanable.dirty.ratio": "0.1"
+      "delete.retention.ms": "86400000"
+
+  acls:
+    - principal: "user:cdc-connector"
+      operations:
+        - Write
+        - Describe
+      permissionType: Allow
+
+    - principal: "user:user-service"
+      operations:
+        - Read
+        - Describe
+      permissionType: Allow
+
+  deleteOnRemove: true
+
+  topicLabels:
+    source: postgres
+    table: users
+    type: cdc
+---
+# High-throughput metrics topic
+apiVersion: rivven.io/v1alpha1
+kind: RivvenTopic
+metadata:
+  name: system-metrics
+  namespace: monitoring
+spec:
+  clusterRef:
+    name: production-cluster
+    namespace: rivven-system
+
+  # Many partitions for parallel consumption
+  partitions: 48
+  replicationFactor: 2
+
+  config:
+    # Short retention (1 day) - metrics are ephemeral
+    retentionMs: 86400000
+
+    # Aggressive segment rotation
+    segmentBytes: 268435456  # 256MB
+
+    # Delete old data
+    cleanupPolicy: delete
+
+    # No compression for lowest latency
+    compressionType: none
+
+    # 1 ISR is enough for metrics
+    minInsyncReplicas: 1
+
+    # Small messages
+    maxMessageBytes: 65536
+
+  acls:
+    # All services can write metrics
+    - principal: "*"
+      operations:
+        - Write
+      permissionType: Allow
+
+    # Prometheus can read
+    - principal: "user:prometheus"
+      operations:
+        - Read
+        - Describe
+      permissionType: Allow
+
+  deleteOnRemove: true
+
+  topicLabels:
+    type: metrics
+    retention: short-term

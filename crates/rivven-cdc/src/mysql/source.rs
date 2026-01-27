@@ -2,6 +2,8 @@
 //!
 //! Captures Change Data Capture events from MySQL/MariaDB using binlog replication.
 
+#[cfg(feature = "mysql-tls")]
+use crate::common::TlsConfig;
 use crate::common::{CdcEvent, CdcOp, CdcSource, Result};
 use anyhow::Context;
 use async_trait::async_trait;
@@ -20,6 +22,11 @@ use super::protocol::MySqlBinlogClient;
 ///
 /// This struct implements a custom Debug that redacts the password field
 /// to prevent accidental leakage to logs.
+///
+/// # TLS Support
+///
+/// TLS encryption is strongly recommended for production deployments.
+/// Enable it via the `tls_config` field with `mysql-tls` feature.
 #[derive(Clone)]
 pub struct MySqlCdcConfig {
     /// MySQL host
@@ -46,11 +53,15 @@ pub struct MySqlCdcConfig {
     pub include_tables: Vec<String>,
     /// Tables to exclude
     pub exclude_tables: Vec<String>,
+    /// TLS configuration (requires `mysql-tls` feature)
+    #[cfg(feature = "mysql-tls")]
+    pub tls_config: Option<TlsConfig>,
 }
 
 impl std::fmt::Debug for MySqlCdcConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MySqlCdcConfig")
+        let mut builder = f.debug_struct("MySqlCdcConfig");
+        builder
             .field("host", &self.host)
             .field("port", &self.port)
             .field("user", &self.user)
@@ -62,8 +73,19 @@ impl std::fmt::Debug for MySqlCdcConfig {
             .field("use_gtid", &self.use_gtid)
             .field("gtid_set", &self.gtid_set)
             .field("include_tables", &self.include_tables)
-            .field("exclude_tables", &self.exclude_tables)
-            .finish()
+            .field("exclude_tables", &self.exclude_tables);
+
+        #[cfg(feature = "mysql-tls")]
+        {
+            let tls_enabled = self
+                .tls_config
+                .as_ref()
+                .map(|c| c.is_enabled())
+                .unwrap_or(false);
+            builder.field("tls_enabled", &tls_enabled);
+        }
+
+        builder.finish()
     }
 }
 
@@ -82,6 +104,8 @@ impl Default for MySqlCdcConfig {
             gtid_set: String::new(),
             include_tables: vec![],
             exclude_tables: vec![],
+            #[cfg(feature = "mysql-tls")]
+            tls_config: None,
         }
     }
 }
@@ -134,6 +158,25 @@ impl MySqlCdcConfig {
 
     pub fn exclude_table(mut self, pattern: impl Into<String>) -> Self {
         self.exclude_tables.push(pattern.into());
+        self
+    }
+
+    /// Set TLS configuration for encrypted connections
+    ///
+    /// Requires the `mysql-tls` feature.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use rivven_cdc::common::{TlsConfig, SslMode};
+    ///
+    /// let config = MySqlCdcConfig::new("localhost", "root")
+    ///     .with_password("secret")
+    ///     .with_tls(TlsConfig::new(SslMode::Require));
+    /// ```
+    #[cfg(feature = "mysql-tls")]
+    pub fn with_tls(mut self, tls_config: TlsConfig) -> Self {
+        self.tls_config = Some(tls_config);
         self
     }
 }
@@ -238,7 +281,47 @@ async fn run_mysql_cdc_loop(
     running: Arc<AtomicBool>,
     event_sender: Option<mpsc::Sender<CdcEvent>>,
 ) -> anyhow::Result<()> {
-    // Connect to MySQL
+    // Connect to MySQL with TLS if configured
+    #[cfg(feature = "mysql-tls")]
+    let mut client = {
+        if let Some(ref tls_config) = config.tls_config {
+            if tls_config.is_enabled() {
+                info!("Connecting to MySQL with TLS (mode: {})", tls_config.mode);
+                MySqlBinlogClient::connect_with_tls(
+                    &config.host,
+                    config.port,
+                    &config.user,
+                    config.password.as_deref(),
+                    config.database.as_deref(),
+                    tls_config,
+                )
+                .await
+                .context("Failed to connect to MySQL with TLS")?
+            } else {
+                MySqlBinlogClient::connect(
+                    &config.host,
+                    config.port,
+                    &config.user,
+                    config.password.as_deref(),
+                    config.database.as_deref(),
+                )
+                .await
+                .context("Failed to connect to MySQL")?
+            }
+        } else {
+            MySqlBinlogClient::connect(
+                &config.host,
+                config.port,
+                &config.user,
+                config.password.as_deref(),
+                config.database.as_deref(),
+            )
+            .await
+            .context("Failed to connect to MySQL")?
+        }
+    };
+
+    #[cfg(not(feature = "mysql-tls"))]
     let mut client = MySqlBinlogClient::connect(
         &config.host,
         config.port,
@@ -250,9 +333,10 @@ async fn run_mysql_cdc_loop(
     .context("Failed to connect to MySQL")?;
 
     info!(
-        "Connected to MySQL {} (connection_id={})",
+        "Connected to MySQL {} (connection_id={}{})",
         client.server_version(),
-        client.connection_id()
+        client.connection_id(),
+        if client.is_tls() { ", TLS" } else { "" }
     );
 
     // Get binlog position if not specified

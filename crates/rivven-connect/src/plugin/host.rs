@@ -85,6 +85,11 @@ impl HostFunctions {
         state.clone()
     }
 
+    /// Check if network access is allowed
+    pub fn allow_network(&self) -> bool {
+        self.allow_network
+    }
+
     /// Make an HTTP request
     pub async fn http_request(
         &self,

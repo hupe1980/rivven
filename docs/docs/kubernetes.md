@@ -163,6 +163,167 @@ auth:
 
 ---
 
+## Rivven Operator (CRDs)
+
+The Rivven Operator provides **declarative management** via Custom Resource Definitions.
+
+### Install the Operator
+
+```bash
+# Install CRDs
+kubectl apply -f https://github.com/hupe1980/rivven/releases/latest/download/rivven-crds.yaml
+
+# Deploy operator
+kubectl apply -f https://github.com/hupe1980/rivven/releases/latest/download/rivven-operator.yaml
+```
+
+### RivvenCluster CRD
+
+```yaml
+apiVersion: rivven.io/v1alpha1
+kind: RivvenCluster
+metadata:
+  name: production
+spec:
+  replicas: 3
+  version: "0.1.0"
+  storage:
+    size: 100Gi
+    storageClassName: fast-ssd
+  config:
+    defaultPartitions: 3
+    defaultReplicationFactor: 2
+  metrics:
+    enabled: true
+```
+
+### RivvenConnect CRD
+
+Manage CDC pipelines declaratively with **typed connector configs**:
+
+```yaml
+apiVersion: rivven.io/v1alpha1
+kind: RivvenConnect
+metadata:
+  name: cdc-pipeline
+spec:
+  clusterRef:
+    name: production
+  replicas: 2
+  
+  sources:
+    - name: postgres-cdc
+      connector: postgres-cdc
+      topic: cdc.events
+      configSecretRef: postgres-credentials
+      # Typed PostgreSQL CDC config (validated)
+      postgresCdc:
+        slotName: rivven_slot
+        publication: rivven_pub
+        snapshotMode: initial
+        decodingPlugin: pgoutput
+        # Tables are inside CDC config (type-safe)
+        tables:
+          - schema: public
+            table: orders
+            columns: [id, customer_id, total]
+          - schema: public
+            table: customers
+            columnMasks:
+              email: "***@***.***"
+  
+  sinks:
+    - name: s3-archive
+      connector: s3
+      topics: ["cdc.*"]
+      consumerGroup: s3-archiver
+      configSecretRef: s3-credentials
+      # Typed S3 config (validated)
+      s3:
+        bucket: data-lake
+        format: parquet
+        compression: zstd
+```
+
+### Custom Connectors
+
+For custom connectors, use the generic `config` field:
+
+```yaml
+sources:
+  - name: my-custom-source
+    connector: my-plugin
+    topic: custom.events
+    config:  # Generic JSON for custom connectors
+      customField: value
+      nested:
+        option: true
+```
+
+### RivvenTopic CRD
+
+Manage topics declaratively for **GitOps workflows**:
+
+```yaml
+apiVersion: rivven.io/v1alpha1
+kind: RivvenTopic
+metadata:
+  name: orders-events
+  namespace: default
+spec:
+  clusterRef:
+    name: production
+  
+  partitions: 12
+  replicationFactor: 3
+  
+  config:
+    retentionMs: 604800000      # 7 days
+    cleanupPolicy: delete
+    compressionType: lz4
+    minInsyncReplicas: 2
+  
+  acls:
+    - principal: "user:order-service"
+      operations: ["Read", "Write"]
+    - principal: "user:analytics"
+      operations: ["Read"]
+  
+  # Keep topic when CRD is deleted
+  deleteOnRemove: false
+  
+  topicLabels:
+    team: orders
+    environment: production
+```
+
+#### Topic Configuration Options
+
+| Field | Description | Default |
+|-------|-------------|---------|
+| `retentionMs` | Retention time in milliseconds | 604800000 (7 days) |
+| `retentionBytes` | Retention size per partition (-1 = unlimited) | -1 |
+| `segmentBytes` | Segment file size | 1073741824 (1GB) |
+| `cleanupPolicy` | `delete`, `compact`, or `delete,compact` | `delete` |
+| `compressionType` | `none`, `gzip`, `snappy`, `lz4`, `zstd` | `lz4` |
+| `minInsyncReplicas` | Minimum ISR for writes | 1 |
+| `maxMessageBytes` | Maximum message size | 1048576 (1MB) |
+
+#### Check Topic Status
+
+```bash
+# List all topics
+kubectl get rivventopics
+
+# NAME            CLUSTER     PARTITIONS   REPLICATION   PHASE   AGE
+# orders-events   production  12           3             Ready   5m
+
+# Detailed status
+kubectl describe rivventopic orders-events
+```
+
+---
+
 ## Manual Deployment
 
 ### Namespace

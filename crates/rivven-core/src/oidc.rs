@@ -127,7 +127,7 @@ mod oidc_impl {
         /// Unique name for this provider
         pub name: String,
 
-        /// OIDC issuer URL (e.g., https://auth.example.com/realms/rivven)
+        /// OIDC issuer URL (e.g., `https://auth.example.com/realms/rivven`)
         pub issuer: String,
 
         /// Expected audience (client_id or API identifier)
@@ -704,7 +704,7 @@ mod oidc_impl {
 
     /// Parse OAUTHBEARER SASL message
     ///
-    /// Format: "n,,\x01auth=Bearer <token>\x01\x01"
+    /// Format: `n,,\x01auth=Bearer <token>\x01\x01`
     pub fn parse_oauthbearer_message(data: &[u8]) -> OidcResult<String> {
         let message = std::str::from_utf8(data)
             .map_err(|_| OidcError::InvalidToken("Invalid UTF-8 in SASL message".to_string()))?;

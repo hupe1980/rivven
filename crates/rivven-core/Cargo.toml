@@ -7,9 +7,10 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-default = ["compression", "cedar", "tls", "metrics"]
+default = ["compression", "cedar", "tls", "metrics", "encryption"]
 compression = ["dep:lz4", "dep:zstd"]
 cedar = ["dep:cedar-policy"]
+encryption = ["dep:secrecy"]
 oidc = ["dep:openidconnect", "dep:oauth2", "dep:jsonwebtoken", "dep:reqwest"]
 tls = ["dep:rustls", "dep:rustls-pemfile", "dep:rustls-native-certs", "dep:tokio-rustls", "dep:rcgen", "dep:x509-parser", "dep:humantime-serde"]
 metrics = ["dep:metrics-exporter-prometheus"]
@@ -18,7 +19,7 @@ metrics = ["dep:metrics-exporter-prometheus"]
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-bincode = { workspace = true }
+postcard = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
@@ -47,6 +48,9 @@ sha2 = "0.10"
 hmac = "0.12"
 hex = "0.4"
 base64 = "0.22"
+
+# Encryption at rest
+secrecy = { version = "0.10", features = ["serde"], optional = true }
 
 # Authorization - Cedar policy engine
 cedar-policy = { workspace = true, optional = true }

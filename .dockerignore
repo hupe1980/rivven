@@ -1,0 +1,37 @@
+# Build artifacts
+target/
+*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Development
+.env
+.env.*
+*.log
+data/
+
+# Tests
+tests/
+**/tests/
+**/benches/
+
+# Python venv
+.venv/
+__pycache__/

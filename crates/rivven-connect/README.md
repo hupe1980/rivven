@@ -268,7 +268,7 @@ pipelines:
 
 ## Schema Registry
 
-`rivven-connect` includes built-in schema registry support with two modes:
+`rivven-connect` includes a comprehensive schema registry with native support for JSON Schema, Apache Avro, and Protocol Buffers.
 
 ### Embedded Mode (Default)
 
@@ -294,10 +294,52 @@ schema_registry:
     password: ${SCHEMA_REGISTRY_PASSWORD}
 ```
 
+### Native Avro Support
+
+Full Apache Avro support with Confluent wire format compatibility:
+
+```rust
+use rivven_connect::schema::{AvroSchema, AvroCodec, AvroCompatibility};
+
+let schema = AvroSchema::parse(r#"{
+    "type": "record",
+    "name": "User",
+    "fields": [
+        {"name": "id", "type": "long"},
+        {"name": "name", "type": "string"}
+    ]
+}"#)?;
+
+let codec = AvroCodec::new(schema);
+let avro_bytes = codec.encode(&json!({"id": 1, "name": "Alice"}))?;
+let confluent_bytes = codec.encode_confluent(&json, schema_id)?;
+```
+
+### Native Protobuf Support
+
+Full Protocol Buffers support with dynamic schema parsing:
+
+```rust
+use rivven_connect::schema::{ProtobufSchema, ProtobufCodec};
+
+let schema = ProtobufSchema::parse(r#"
+    syntax = "proto3";
+    message User {
+        int64 id = 1;
+        string name = 2;
+    }
+"#)?;
+
+let codec = ProtobufCodec::new(schema);
+let proto_bytes = codec.encode(&json!({"id": 1, "name": "Alice"}))?;
+```
+
 ### Features
 
 - **Schema Evolution**: Backward/forward/full compatibility checking
-- **Multiple Formats**: JSON Schema, Avro, Protobuf support
+- **Multiple Formats**: JSON Schema, Avro, Protobuf (all ✅ supported)
+- **Confluent Wire Format**: Compatible with Confluent Schema Registry
+- **Schema Fingerprinting**: MD5 and SHA-256 fingerprints for caching
 - **Auto-inference**: Automatically infer schemas from data samples
 - **Caching**: Built-in schema caching for performance
 

@@ -48,6 +48,18 @@ pub enum OperatorError {
     /// Internal error
     #[error("Internal error: {0}")]
     Internal(String),
+
+    /// Cluster not found
+    #[error("RivvenCluster not found: {0}")]
+    ClusterNotFound(String),
+
+    /// Topic operation failed
+    #[error("Topic operation failed: {0}")]
+    TopicError(String),
+
+    /// Connect operation failed
+    #[error("Connect operation failed: {0}")]
+    ConnectError(String),
 }
 
 /// Result type for operator operations

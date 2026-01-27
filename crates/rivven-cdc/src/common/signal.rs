@@ -1,6 +1,6 @@
 //! # CDC Signaling
 //!
-//! Control channel for CDC connectors - Debezium-compatible signaling system.
+//! Multi-channel control system for CDC connectors - Debezium-compatible signaling.
 //!
 //! ## Features
 //!
@@ -8,16 +8,43 @@
 //! - **Pause/Resume**: Control streaming without restarting
 //! - **Incremental Snapshots**: Chunk-based table re-snapshots
 //! - **Custom Signals**: Application-defined signal handlers
+//! - **Multi-Channel**: Source table, Kafka/Topic, File, API channels
 //!
-//! ## Debezium Compatibility
+//! ## Signal Channels (Debezium Compatible)
 //!
-//! Compatible with Debezium signaling table format:
+//! Rivven supports multiple signal channels, matching Debezium's architecture:
+//!
+//! | Channel | Description | Use Case |
+//! |---------|-------------|----------|
+//! | `source` | Signal table captured via CDC stream | Default, required for incremental snapshots |
+//! | `topic` | Signals from a Rivven/Kafka topic | Avoids database writes |
+//! | `file` | Signals from a JSON file | Simple deployments |
+//! | `api` | HTTP/gRPC API calls | Programmatic control |
+//!
+//! The **source channel is enabled by default** because it implements the watermarking
+//! mechanism for incremental snapshot deduplication. Signals flow through the CDC stream,
+//! so no separate database connection is required.
+//!
+//! ## Debezium-Compatible Signal Table
+//!
 //! ```sql
 //! CREATE TABLE debezium_signal (
 //!     id VARCHAR(42) PRIMARY KEY,
 //!     type VARCHAR(32) NOT NULL,
 //!     data VARCHAR(2048) NULL
 //! );
+//! ```
+//!
+//! ## Configuration
+//!
+//! ```rust,ignore
+//! use rivven_cdc::common::signal::{SignalConfig, SignalChannel as ChannelType};
+//!
+//! let config = SignalConfig::builder()
+//!     .enabled_channels(vec![ChannelType::Source, ChannelType::Topic])
+//!     .signal_data_collection("public.debezium_signal")  // Source channel table
+//!     .signal_topic("cdc-signals")                        // Topic channel
+//!     .build();
 //! ```
 //!
 //! ## Usage
@@ -602,6 +629,641 @@ impl SignalChannel {
     }
 }
 
+// ============================================================================
+// Signal Channel Configuration
+// ============================================================================
+
+/// Signal channel types - Debezium compatible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
+#[serde(rename_all = "lowercase")]
+#[derive(Default)]
+pub enum SignalChannelType {
+    /// Source channel - signal table captured via CDC stream (default)
+    #[default]
+    Source,
+    /// Topic channel - signals from Rivven/Kafka topic
+    Topic,
+    /// File channel - signals from a JSON file
+    File,
+    /// API channel - signals from HTTP/gRPC
+    Api,
+    /// JMX channel (for compatibility, maps to API)
+    Jmx,
+}
+
+impl SignalChannelType {
+    /// Get the channel name as string (Debezium compatible).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SignalChannelType::Source => "source",
+            SignalChannelType::Topic => "kafka", // Debezium uses "kafka"
+            SignalChannelType::File => "file",
+            SignalChannelType::Api => "api",
+            SignalChannelType::Jmx => "jmx",
+        }
+    }
+
+    /// Parse from string.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "source" => Some(SignalChannelType::Source),
+            "kafka" | "topic" => Some(SignalChannelType::Topic),
+            "file" => Some(SignalChannelType::File),
+            "api" => Some(SignalChannelType::Api),
+            "jmx" => Some(SignalChannelType::Jmx),
+            _ => None,
+        }
+    }
+}
+
+/// Configuration for CDC signaling - Debezium compatible.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalConfig {
+    /// Enabled signal channels (default: source, kafka)
+    #[serde(default = "default_enabled_channels")]
+    pub enabled_channels: Vec<SignalChannelType>,
+
+    /// Fully-qualified name of signal data collection (for source channel)
+    /// Format: schema.table (PostgreSQL) or database.table (MySQL)
+    /// Default: None (disabled)
+    #[serde(default)]
+    pub signal_data_collection: Option<String>,
+
+    /// Topic for signal messages (for topic channel)
+    /// Default: None (disabled)
+    #[serde(default)]
+    pub signal_topic: Option<String>,
+
+    /// Path to signal file (for file channel)
+    /// Default: None (disabled)
+    #[serde(default)]
+    pub signal_file: Option<String>,
+
+    /// Poll interval for file channel
+    #[serde(default = "default_poll_interval_ms")]
+    pub signal_poll_interval_ms: u64,
+
+    /// Consumer properties for topic channel
+    #[serde(default)]
+    pub signal_consumer_properties: HashMap<String, String>,
+}
+
+fn default_enabled_channels() -> Vec<SignalChannelType> {
+    vec![SignalChannelType::Source, SignalChannelType::Topic]
+}
+
+fn default_poll_interval_ms() -> u64 {
+    1000 // 1 second
+}
+
+impl Default for SignalConfig {
+    fn default() -> Self {
+        Self {
+            enabled_channels: default_enabled_channels(),
+            signal_data_collection: None,
+            signal_topic: None,
+            signal_file: None,
+            signal_poll_interval_ms: default_poll_interval_ms(),
+            signal_consumer_properties: HashMap::new(),
+        }
+    }
+}
+
+impl SignalConfig {
+    /// Create a new builder.
+    pub fn builder() -> SignalConfigBuilder {
+        SignalConfigBuilder::default()
+    }
+
+    /// Check if a channel is enabled.
+    pub fn is_channel_enabled(&self, channel: SignalChannelType) -> bool {
+        self.enabled_channels.contains(&channel)
+    }
+
+    /// Get the signal table name (without schema).
+    pub fn signal_table_name(&self) -> Option<&str> {
+        self.signal_data_collection
+            .as_ref()
+            .and_then(|s| s.split('.').next_back())
+    }
+
+    /// Get the signal schema name.
+    pub fn signal_schema_name(&self) -> Option<&str> {
+        self.signal_data_collection.as_ref().and_then(|s| {
+            let parts: Vec<&str> = s.split('.').collect();
+            if parts.len() >= 2 {
+                Some(parts[0])
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Parse enabled channels from comma-separated string (Debezium format).
+    pub fn parse_enabled_channels(s: &str) -> Vec<SignalChannelType> {
+        s.split(',')
+            .filter_map(|c| SignalChannelType::parse(c.trim()))
+            .collect()
+    }
+}
+
+/// Builder for SignalConfig.
+#[derive(Debug, Default)]
+pub struct SignalConfigBuilder {
+    enabled_channels: Option<Vec<SignalChannelType>>,
+    signal_data_collection: Option<String>,
+    signal_topic: Option<String>,
+    signal_file: Option<String>,
+    signal_poll_interval_ms: Option<u64>,
+    signal_consumer_properties: HashMap<String, String>,
+}
+
+impl SignalConfigBuilder {
+    /// Set enabled channels.
+    pub fn enabled_channels(mut self, channels: Vec<SignalChannelType>) -> Self {
+        self.enabled_channels = Some(channels);
+        self
+    }
+
+    /// Enable specific channel.
+    pub fn enable_channel(mut self, channel: SignalChannelType) -> Self {
+        self.enabled_channels
+            .get_or_insert_with(Vec::new)
+            .push(channel);
+        self
+    }
+
+    /// Set signal data collection (table name).
+    pub fn signal_data_collection(mut self, collection: impl Into<String>) -> Self {
+        self.signal_data_collection = Some(collection.into());
+        self
+    }
+
+    /// Set signal topic.
+    pub fn signal_topic(mut self, topic: impl Into<String>) -> Self {
+        self.signal_topic = Some(topic.into());
+        self
+    }
+
+    /// Set signal file path.
+    pub fn signal_file(mut self, path: impl Into<String>) -> Self {
+        self.signal_file = Some(path.into());
+        self
+    }
+
+    /// Set poll interval for file channel.
+    pub fn signal_poll_interval_ms(mut self, ms: u64) -> Self {
+        self.signal_poll_interval_ms = Some(ms);
+        self
+    }
+
+    /// Add consumer property for topic channel.
+    pub fn consumer_property(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.signal_consumer_properties
+            .insert(key.into(), value.into());
+        self
+    }
+
+    /// Build the configuration.
+    pub fn build(self) -> SignalConfig {
+        SignalConfig {
+            enabled_channels: self
+                .enabled_channels
+                .unwrap_or_else(default_enabled_channels),
+            signal_data_collection: self.signal_data_collection,
+            signal_topic: self.signal_topic,
+            signal_file: self.signal_file,
+            signal_poll_interval_ms: self
+                .signal_poll_interval_ms
+                .unwrap_or_else(default_poll_interval_ms),
+            signal_consumer_properties: self.signal_consumer_properties,
+        }
+    }
+}
+
+// ============================================================================
+// Signal Channel Reader Trait (Debezium SPI Compatible)
+// ============================================================================
+
+/// Signal record from a channel - minimal data needed.
+#[derive(Debug, Clone)]
+pub struct SignalRecord {
+    /// Signal ID
+    pub id: String,
+    /// Signal type (action)
+    pub signal_type: String,
+    /// Signal data (JSON string)
+    pub data: Option<String>,
+    /// Source offset (for acknowledgment)
+    pub offset: Option<String>,
+}
+
+impl SignalRecord {
+    /// Create a new signal record.
+    pub fn new(id: impl Into<String>, signal_type: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            signal_type: signal_type.into(),
+            data: None,
+            offset: None,
+        }
+    }
+
+    /// Set data.
+    pub fn with_data(mut self, data: impl Into<String>) -> Self {
+        self.data = Some(data.into());
+        self
+    }
+
+    /// Set offset.
+    pub fn with_offset(mut self, offset: impl Into<String>) -> Self {
+        self.offset = Some(offset.into());
+        self
+    }
+
+    /// Convert to Signal.
+    pub fn to_signal(&self, source: SignalSource) -> Result<Signal, String> {
+        let action = SignalAction::parse(&self.signal_type);
+        let signal_data = if let Some(data_str) = &self.data {
+            serde_json::from_str(data_str)
+                .map_err(|e| format!("Failed to parse signal data: {}", e))?
+        } else {
+            SignalData::empty()
+        };
+        Ok(Signal::new(&self.id, action, signal_data).with_source(source))
+    }
+}
+
+/// Trait for reading signals from a channel.
+///
+/// This is the Rust equivalent of Debezium's `SignalChannelReader` SPI.
+/// Implementations provide different signal sources (database, topic, file, etc.).
+#[async_trait::async_trait]
+pub trait SignalChannelReader: Send + Sync {
+    /// Get the channel name.
+    fn name(&self) -> &str;
+
+    /// Initialize the channel reader.
+    async fn init(&mut self) -> Result<(), String>;
+
+    /// Read available signals. Returns empty vec if none available.
+    async fn read(&mut self) -> Result<Vec<SignalRecord>, String>;
+
+    /// Acknowledge a signal (optional - for channels that track consumption).
+    async fn acknowledge(&mut self, _signal_id: &str) -> Result<(), String> {
+        Ok(()) // Default: no-op
+    }
+
+    /// Close the channel reader.
+    async fn close(&mut self) -> Result<(), String>;
+}
+
+// ============================================================================
+// Source Signal Channel (CDC Stream)
+// ============================================================================
+
+/// Source signal channel - detects signals from CDC stream.
+///
+/// This channel watches for changes to the signal table through the normal
+/// CDC replication stream. No separate database connection is required.
+///
+/// When a row is inserted into the signal table:
+/// 1. The INSERT flows through logical replication like any other change
+/// 2. The CDC connector detects it's from the signal table
+/// 3. The signal is extracted and processed
+///
+/// This is the default and recommended channel because:
+/// - Signal ordering is guaranteed (part of the change stream)
+/// - Watermarking for incremental snapshots works correctly
+/// - No additional connections or polling required
+/// - Works with read replicas (signals replicate like other data)
+pub struct SourceSignalChannel {
+    /// Signal table name (fully qualified)
+    signal_table: String,
+    /// Pending signals detected from CDC stream
+    pending: Arc<RwLock<Vec<SignalRecord>>>,
+    /// Whether the channel is initialized
+    initialized: bool,
+}
+
+impl SourceSignalChannel {
+    /// Create a new source signal channel.
+    pub fn new(signal_table: impl Into<String>) -> Self {
+        Self {
+            signal_table: signal_table.into(),
+            pending: Arc::new(RwLock::new(Vec::new())),
+            initialized: false,
+        }
+    }
+
+    /// Get a reference to pending signals for CDC integration.
+    pub fn pending_signals(&self) -> Arc<RwLock<Vec<SignalRecord>>> {
+        Arc::clone(&self.pending)
+    }
+
+    /// Check if a CDC event is from the signal table.
+    pub fn is_signal_event(&self, schema: &str, table: &str) -> bool {
+        let expected = format!("{}.{}", schema, table);
+        self.signal_table == expected || self.signal_table == table
+    }
+
+    /// Extract signal from CDC event (called by CDC connector).
+    pub async fn handle_cdc_event(
+        &self,
+        id: &str,
+        signal_type: &str,
+        data: Option<&str>,
+    ) -> Result<(), String> {
+        let record = SignalRecord {
+            id: id.to_string(),
+            signal_type: signal_type.to_string(),
+            data: data.map(|s| s.to_string()),
+            offset: None,
+        };
+        self.pending.write().await.push(record);
+        debug!(
+            "Source channel: detected signal {} of type {}",
+            id, signal_type
+        );
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl SignalChannelReader for SourceSignalChannel {
+    fn name(&self) -> &str {
+        "source"
+    }
+
+    async fn init(&mut self) -> Result<(), String> {
+        info!(
+            "Source signal channel initialized for table: {}",
+            self.signal_table
+        );
+        self.initialized = true;
+        Ok(())
+    }
+
+    async fn read(&mut self) -> Result<Vec<SignalRecord>, String> {
+        // Drain pending signals detected from CDC stream
+        let mut pending = self.pending.write().await;
+        let signals = std::mem::take(&mut *pending);
+        if !signals.is_empty() {
+            debug!("Source channel: returning {} signals", signals.len());
+        }
+        Ok(signals)
+    }
+
+    async fn close(&mut self) -> Result<(), String> {
+        info!("Source signal channel closed");
+        self.initialized = false;
+        Ok(())
+    }
+}
+
+// ============================================================================
+// File Signal Channel
+// ============================================================================
+
+/// File signal channel - reads signals from a JSON file.
+///
+/// The file should contain JSON signal objects, one per line:
+/// ```json
+/// {"id":"sig-1","type":"execute-snapshot","data":{"data-collections":["public.users"]}}
+/// ```
+///
+/// Processed signals are tracked to avoid reprocessing.
+pub struct FileSignalChannel {
+    /// Path to signal file
+    path: std::path::PathBuf,
+    /// Processed signal IDs
+    processed: std::collections::HashSet<String>,
+    /// Last file modification time
+    last_modified: Option<std::time::SystemTime>,
+    /// Whether initialized
+    initialized: bool,
+}
+
+impl FileSignalChannel {
+    /// Create a new file signal channel.
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            processed: std::collections::HashSet::new(),
+            last_modified: None,
+            initialized: false,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl SignalChannelReader for FileSignalChannel {
+    fn name(&self) -> &str {
+        "file"
+    }
+
+    async fn init(&mut self) -> Result<(), String> {
+        if !self.path.exists() {
+            // Create empty file if it doesn't exist
+            tokio::fs::write(&self.path, "")
+                .await
+                .map_err(|e| format!("Failed to create signal file: {}", e))?;
+        }
+        info!("File signal channel initialized: {:?}", self.path);
+        self.initialized = true;
+        Ok(())
+    }
+
+    async fn read(&mut self) -> Result<Vec<SignalRecord>, String> {
+        // Check if file has been modified
+        let metadata = tokio::fs::metadata(&self.path)
+            .await
+            .map_err(|e| format!("Failed to read signal file metadata: {}", e))?;
+
+        let modified = metadata
+            .modified()
+            .map_err(|e| format!("Failed to get file modification time: {}", e))?;
+
+        if self.last_modified == Some(modified) {
+            return Ok(Vec::new()); // No changes
+        }
+        self.last_modified = Some(modified);
+
+        // Read and parse file
+        let content = tokio::fs::read_to_string(&self.path)
+            .await
+            .map_err(|e| format!("Failed to read signal file: {}", e))?;
+
+        let mut signals = Vec::new();
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            // Parse JSON line
+            #[derive(Deserialize)]
+            struct FileSignal {
+                id: String,
+                #[serde(rename = "type")]
+                signal_type: String,
+                data: Option<serde_json::Value>,
+            }
+
+            match serde_json::from_str::<FileSignal>(line) {
+                Ok(fs) => {
+                    if !self.processed.contains(&fs.id) {
+                        let record = SignalRecord {
+                            id: fs.id.clone(),
+                            signal_type: fs.signal_type,
+                            data: fs.data.map(|v| v.to_string()),
+                            offset: None,
+                        };
+                        signals.push(record);
+                        self.processed.insert(fs.id);
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to parse signal line: {} - {}", line, e);
+                }
+            }
+        }
+
+        if !signals.is_empty() {
+            debug!("File channel: read {} new signals", signals.len());
+        }
+
+        Ok(signals)
+    }
+
+    async fn close(&mut self) -> Result<(), String> {
+        info!("File signal channel closed");
+        self.initialized = false;
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Multi-Channel Signal Manager
+// ============================================================================
+
+/// Manages multiple signal channels.
+pub struct SignalManager {
+    /// Active channel readers
+    channels: Vec<Box<dyn SignalChannelReader>>,
+    /// Signal processor
+    processor: Arc<SignalProcessor>,
+    /// Configuration
+    config: SignalConfig,
+    /// Running flag
+    running: Arc<AtomicBool>,
+}
+
+impl SignalManager {
+    /// Create a new signal manager.
+    pub fn new(config: SignalConfig, processor: Arc<SignalProcessor>) -> Self {
+        Self {
+            channels: Vec::new(),
+            processor,
+            config,
+            running: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Add a channel reader.
+    pub fn add_channel(&mut self, channel: Box<dyn SignalChannelReader>) {
+        info!("Adding signal channel: {}", channel.name());
+        self.channels.push(channel);
+    }
+
+    /// Initialize all channels.
+    pub async fn init(&mut self) -> Result<(), String> {
+        for channel in &mut self.channels {
+            channel.init().await?;
+        }
+        self.running.store(true, Ordering::SeqCst);
+        info!(
+            "Signal manager initialized with {} channels",
+            self.channels.len()
+        );
+        Ok(())
+    }
+
+    /// Poll all channels and process signals.
+    pub async fn poll(&mut self) -> Result<usize, String> {
+        let mut total = 0;
+
+        for channel in &mut self.channels {
+            let records = channel.read().await?;
+            for record in records {
+                let source = match channel.name() {
+                    "source" => SignalSource::Source,
+                    "file" => SignalSource::File,
+                    "kafka" | "topic" => SignalSource::Kafka,
+                    _ => SignalSource::Api,
+                };
+
+                match record.to_signal(source) {
+                    Ok(signal) => {
+                        let result = self.processor.process(signal).await;
+                        if result.is_success() {
+                            // Acknowledge successful processing
+                            if let Err(e) = channel.acknowledge(&record.id).await {
+                                warn!("Failed to acknowledge signal {}: {}", record.id, e);
+                            }
+                        }
+                        total += 1;
+                    }
+                    Err(e) => {
+                        warn!("Failed to parse signal {}: {}", record.id, e);
+                    }
+                }
+            }
+        }
+
+        Ok(total)
+    }
+
+    /// Close all channels.
+    pub async fn close(&mut self) -> Result<(), String> {
+        self.running.store(false, Ordering::SeqCst);
+        for channel in &mut self.channels {
+            if let Err(e) = channel.close().await {
+                warn!("Failed to close channel {}: {}", channel.name(), e);
+            }
+        }
+        info!("Signal manager closed");
+        Ok(())
+    }
+
+    /// Check if running.
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    /// Get config reference.
+    pub fn config(&self) -> &SignalConfig {
+        &self.config
+    }
+
+    /// Get processor reference.
+    pub fn processor(&self) -> &Arc<SignalProcessor> {
+        &self.processor
+    }
+
+    /// Create a source channel for CDC integration.
+    pub fn create_source_channel(&self) -> Option<SourceSignalChannel> {
+        if self.config.is_channel_enabled(SignalChannelType::Source) {
+            self.config
+                .signal_data_collection
+                .as_ref()
+                .map(SourceSignalChannel::new)
+        } else {
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -941,5 +1603,239 @@ mod tests {
 
         let parsed: Signal = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.action, SignalAction::ExecuteSnapshot);
+    }
+
+    // ========================================================================
+    // Signal Channel Tests
+    // ========================================================================
+
+    #[test]
+    fn test_signal_channel_type_str() {
+        assert_eq!(SignalChannelType::Source.as_str(), "source");
+        assert_eq!(SignalChannelType::Topic.as_str(), "kafka");
+        assert_eq!(SignalChannelType::File.as_str(), "file");
+        assert_eq!(SignalChannelType::Api.as_str(), "api");
+        assert_eq!(SignalChannelType::Jmx.as_str(), "jmx");
+    }
+
+    #[test]
+    fn test_signal_channel_type_parse() {
+        assert_eq!(
+            SignalChannelType::parse("source"),
+            Some(SignalChannelType::Source)
+        );
+        assert_eq!(
+            SignalChannelType::parse("kafka"),
+            Some(SignalChannelType::Topic)
+        );
+        assert_eq!(
+            SignalChannelType::parse("topic"),
+            Some(SignalChannelType::Topic)
+        );
+        assert_eq!(
+            SignalChannelType::parse("file"),
+            Some(SignalChannelType::File)
+        );
+        assert_eq!(SignalChannelType::parse("unknown"), None);
+    }
+
+    #[test]
+    fn test_signal_config_default() {
+        let config = SignalConfig::default();
+
+        assert!(config.is_channel_enabled(SignalChannelType::Source));
+        assert!(config.is_channel_enabled(SignalChannelType::Topic));
+        assert!(!config.is_channel_enabled(SignalChannelType::File));
+        assert!(config.signal_data_collection.is_none());
+        assert!(config.signal_topic.is_none());
+    }
+
+    #[test]
+    fn test_signal_config_builder() {
+        let config = SignalConfig::builder()
+            .enabled_channels(vec![SignalChannelType::Source, SignalChannelType::File])
+            .signal_data_collection("public.debezium_signal")
+            .signal_file("/tmp/signals.json")
+            .signal_poll_interval_ms(500)
+            .consumer_property("bootstrap.servers", "localhost:9092")
+            .build();
+
+        assert!(config.is_channel_enabled(SignalChannelType::Source));
+        assert!(config.is_channel_enabled(SignalChannelType::File));
+        assert!(!config.is_channel_enabled(SignalChannelType::Topic));
+        assert_eq!(
+            config.signal_data_collection,
+            Some("public.debezium_signal".to_string())
+        );
+        assert_eq!(config.signal_file, Some("/tmp/signals.json".to_string()));
+        assert_eq!(config.signal_poll_interval_ms, 500);
+    }
+
+    #[test]
+    fn test_signal_config_table_name() {
+        let config = SignalConfig::builder()
+            .signal_data_collection("public.debezium_signal")
+            .build();
+
+        assert_eq!(config.signal_table_name(), Some("debezium_signal"));
+        assert_eq!(config.signal_schema_name(), Some("public"));
+    }
+
+    #[test]
+    fn test_signal_config_parse_channels() {
+        let channels = SignalConfig::parse_enabled_channels("source, kafka, file");
+
+        assert_eq!(channels.len(), 3);
+        assert!(channels.contains(&SignalChannelType::Source));
+        assert!(channels.contains(&SignalChannelType::Topic));
+        assert!(channels.contains(&SignalChannelType::File));
+    }
+
+    #[test]
+    fn test_signal_record_to_signal() {
+        let record = SignalRecord::new("sig-1", "execute-snapshot")
+            .with_data(r#"{"data-collections": ["public.users"]}"#);
+
+        let signal = record.to_signal(SignalSource::Source).unwrap();
+
+        assert_eq!(signal.id, "sig-1");
+        assert_eq!(signal.action, SignalAction::ExecuteSnapshot);
+        assert_eq!(signal.source, SignalSource::Source);
+        assert_eq!(signal.data.data_collections, vec!["public.users"]);
+    }
+
+    #[test]
+    fn test_signal_record_to_signal_no_data() {
+        let record = SignalRecord::new("sig-2", "pause-snapshot");
+
+        let signal = record.to_signal(SignalSource::File).unwrap();
+
+        assert_eq!(signal.id, "sig-2");
+        assert_eq!(signal.action, SignalAction::PauseSnapshot);
+        assert_eq!(signal.source, SignalSource::File);
+    }
+
+    #[test]
+    fn test_signal_record_invalid_json() {
+        let record = SignalRecord::new("sig-3", "log").with_data("not valid json");
+
+        assert!(record.to_signal(SignalSource::Api).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_source_signal_channel() {
+        let mut channel = SourceSignalChannel::new("public.debezium_signal");
+
+        // Initialize
+        channel.init().await.unwrap();
+        assert_eq!(channel.name(), "source");
+
+        // No signals initially
+        let signals = channel.read().await.unwrap();
+        assert!(signals.is_empty());
+
+        // Simulate CDC event
+        channel
+            .handle_cdc_event(
+                "sig-1",
+                "execute-snapshot",
+                Some(r#"{"data-collections": ["public.orders"]}"#),
+            )
+            .await
+            .unwrap();
+
+        // Read signal
+        let signals = channel.read().await.unwrap();
+        assert_eq!(signals.len(), 1);
+        assert_eq!(signals[0].id, "sig-1");
+        assert_eq!(signals[0].signal_type, "execute-snapshot");
+
+        // Should be empty after read
+        let signals = channel.read().await.unwrap();
+        assert!(signals.is_empty());
+
+        // Close
+        channel.close().await.unwrap();
+    }
+
+    #[test]
+    fn test_source_signal_channel_is_signal_event() {
+        let channel = SourceSignalChannel::new("public.debezium_signal");
+
+        assert!(channel.is_signal_event("public", "debezium_signal"));
+        assert!(!channel.is_signal_event("public", "users"));
+        assert!(!channel.is_signal_event("other", "debezium_signal"));
+    }
+
+    #[tokio::test]
+    async fn test_file_signal_channel() {
+        // Create a temporary file
+        let temp_dir = std::env::temp_dir();
+        let signal_file = temp_dir.join(format!("rivven_signals_{}.json", uuid::Uuid::new_v4()));
+
+        // Write test signals
+        let content = r#"{"id":"sig-1","type":"execute-snapshot","data":{"data-collections":["public.users"]}}
+{"id":"sig-2","type":"pause-snapshot"}
+# This is a comment
+{"id":"sig-3","type":"log","data":{"message":"Hello"}}"#;
+        tokio::fs::write(&signal_file, content).await.unwrap();
+
+        let mut channel = FileSignalChannel::new(&signal_file);
+
+        // Initialize
+        channel.init().await.unwrap();
+        assert_eq!(channel.name(), "file");
+
+        // Read signals
+        let signals = channel.read().await.unwrap();
+        assert_eq!(signals.len(), 3);
+        assert_eq!(signals[0].id, "sig-1");
+        assert_eq!(signals[1].id, "sig-2");
+        assert_eq!(signals[2].id, "sig-3");
+
+        // Second read should return empty (already processed)
+        let signals = channel.read().await.unwrap();
+        assert!(signals.is_empty());
+
+        // Close and cleanup
+        channel.close().await.unwrap();
+        let _ = tokio::fs::remove_file(&signal_file).await;
+    }
+
+    #[tokio::test]
+    async fn test_signal_manager() {
+        let config = SignalConfig::builder()
+            .enabled_channels(vec![SignalChannelType::Source])
+            .signal_data_collection("public.debezium_signal")
+            .build();
+
+        let processor = Arc::new(SignalProcessor::new());
+        let mut manager = SignalManager::new(config, processor.clone());
+
+        // Create and add source channel
+        let source_channel = manager.create_source_channel().unwrap();
+        let pending = source_channel.pending_signals();
+        manager.add_channel(Box::new(source_channel));
+
+        // Initialize
+        manager.init().await.unwrap();
+        assert!(manager.is_running());
+
+        // Simulate CDC signal
+        pending
+            .write()
+            .await
+            .push(SignalRecord::new("sig-1", "pause-snapshot"));
+
+        // Poll and process
+        let count = manager.poll().await.unwrap();
+        assert_eq!(count, 1);
+
+        // Processor should have received the signal
+        assert!(processor.is_paused());
+
+        // Close
+        manager.close().await.unwrap();
+        assert!(!manager.is_running());
     }
 }

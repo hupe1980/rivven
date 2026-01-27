@@ -431,6 +431,94 @@ impl AuthenticatedHandler {
                 ResourceType::ConsumerGroup(consumer_group.clone()),
                 Permission::Delete,
             ),
+            // Idempotent Producer (KIP-98)
+            Request::InitProducerId { .. } => {
+                // InitProducerId requires IdempotentWrite on Cluster
+                (ResourceType::Cluster, Permission::IdempotentWrite)
+            }
+            Request::IdempotentPublish { topic, .. } => {
+                // Idempotent publish requires both IdempotentWrite on Cluster and Write on Topic
+                if let Some(session) = session {
+                    // First check cluster-level IdempotentWrite permission
+                    if let Err(e) = self.auth_manager.authorize(
+                        session,
+                        &ResourceType::Cluster,
+                        Permission::IdempotentWrite,
+                        client_ip,
+                    ) {
+                        warn!(
+                            "IdempotentWrite denied for '{}' on cluster: {}",
+                            session.principal_name, e
+                        );
+                        return Response::Error {
+                            message: format!(
+                                "AUTHORIZATION_FAILED: IdempotentWrite permission denied: {}",
+                                e
+                            ),
+                        };
+                    }
+                }
+                // Then check topic Write permission
+                (ResourceType::Topic(topic.clone()), Permission::Write)
+            }
+            // Native Transactions (KIP-98 Transactions)
+            Request::BeginTransaction { .. }
+            | Request::AddPartitionsToTxn { .. }
+            | Request::AddOffsetsToTxn { .. }
+            | Request::CommitTransaction { .. }
+            | Request::AbortTransaction { .. } => {
+                // Transaction operations require IdempotentWrite on Cluster
+                (ResourceType::Cluster, Permission::IdempotentWrite)
+            }
+            Request::TransactionalPublish { topic, .. } => {
+                // Transactional publish requires IdempotentWrite on Cluster and Write on Topic
+                if let Some(session) = session {
+                    if let Err(e) = self.auth_manager.authorize(
+                        session,
+                        &ResourceType::Cluster,
+                        Permission::IdempotentWrite,
+                        client_ip,
+                    ) {
+                        warn!(
+                            "IdempotentWrite denied for '{}' on cluster: {}",
+                            session.principal_name, e
+                        );
+                        return Response::Error {
+                            message: format!(
+                                "AUTHORIZATION_FAILED: IdempotentWrite permission denied: {}",
+                                e
+                            ),
+                        };
+                    }
+                }
+                (ResourceType::Topic(topic.clone()), Permission::Write)
+            }
+            // Per-Principal Quotas (Kafka Parity)
+            Request::DescribeQuotas { .. } => {
+                // DescribeQuotas requires Describe on Cluster
+                (ResourceType::Cluster, Permission::Describe)
+            }
+            Request::AlterQuotas { .. } => {
+                // AlterQuotas requires Alter on Cluster (admin operation)
+                (ResourceType::Cluster, Permission::Alter)
+            }
+            // Admin API (Kafka Parity)
+            Request::AlterTopicConfig { topic, .. } => {
+                // AlterTopicConfig requires Alter on Topic
+                (ResourceType::Topic(topic.clone()), Permission::Alter)
+            }
+            Request::CreatePartitions { topic, .. } => {
+                // CreatePartitions requires Alter on Topic
+                (ResourceType::Topic(topic.clone()), Permission::Alter)
+            }
+            Request::DeleteRecords { topic, .. } => {
+                // DeleteRecords requires Delete on Topic
+                (ResourceType::Topic(topic.clone()), Permission::Delete)
+            }
+            Request::DescribeTopicConfigs { .. } => {
+                // DescribeTopicConfigs requires Describe on Cluster
+                (ResourceType::Cluster, Permission::Describe)
+            }
             // Auth requests handled earlier
             Request::Authenticate { .. }
             | Request::SaslAuthenticate { .. }
@@ -608,7 +696,7 @@ mod tests {
             .await;
 
         // Now try to publish (producer role should allow this)
-        let response = handler
+        let _response = handler
             .handle(
                 Request::CreateTopic {
                     name: "test-topic".to_string(),

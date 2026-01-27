@@ -84,7 +84,7 @@ impl EmbeddedSchemaRegistry {
                     for msg in messages {
                         offset = msg.offset + 1; // Advance offset
                                                  // Skip non-schema messages (or errors)
-                        if let Ok(event) = bincode::deserialize::<SchemaLogEvent>(&msg.value) {
+                        if let Ok(event) = postcard::from_bytes::<SchemaLogEvent>(&msg.value) {
                             match event {
                                 SchemaLogEvent::Register(reg) => {
                                     self.cache.inject_registration(
@@ -143,7 +143,7 @@ impl SchemaRegistry for EmbeddedSchemaRegistry {
             version,
         });
 
-        let payload = bincode::serialize(&event)
+        let payload = postcard::to_allocvec(&event)
             .map_err(|e| Error::Other(format!("Serialization error: {}", e)))?;
 
         use crate::Message;
@@ -302,8 +302,10 @@ mod tests {
     use std::fs;
 
     fn get_test_config() -> Config {
-        let mut config = Config::default();
-        config.data_dir = format!("/tmp/rivven-test-registry-{}", uuid::Uuid::new_v4());
+        let config = Config {
+            data_dir: format!("/tmp/rivven-test-registry-{}", uuid::Uuid::new_v4()),
+            ..Default::default()
+        };
         let _ = fs::remove_dir_all(&config.data_dir);
         config
     }

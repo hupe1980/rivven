@@ -24,16 +24,6 @@ Rivven brings **Kafka-class event streaming** to the modern era—without the JV
 {: .highlight }
 > **Single binary. Zero dependencies. Production ready.**
 
-### Key Differentiators
-
-| Feature | Kafka | Redpanda | **Rivven** |
-|:--------|:------|:---------|:-----------|
-| Language | Java | C++ | Rust |
-| Single binary | ❌ | ✅ | ✅ |
-| Embedded CDC | ❌ | ❌ | ✅ |
-| Zero-config CDC | ❌ | ❌ | ✅ |
-| Memory footprint | ~2GB | ~500MB | ~100MB |
-
 ---
 
 ## Features at a Glance
@@ -85,20 +75,20 @@ cargo build --release
 ### Start the Broker
 
 ```bash
-rivven server
+rivvend
 ```
 
 ### Publish & Consume
 
 ```bash
 # Create a topic
-rivven topic create events
+rivvenctl topic create events
 
 # Publish messages
-rivven produce events "Hello, Rivven!"
+rivvenctl produce events "Hello, Rivven!"
 
 # Consume messages
-rivven consume events
+rivvenctl consume events
 ```
 
 ### CDC Pipeline
@@ -177,6 +167,12 @@ rivven-connect -c rivven-connect.yaml
 | [Connectors](/rivven/docs/connectors) | Source and sink configuration |
 | [Security](/rivven/docs/security) | Authentication, TLS, and RBAC |
 | [Kubernetes](/rivven/docs/kubernetes) | Operator and Helm deployment |
+| [Tiered Storage](/rivven/docs/tiered-storage) | Hot/warm/cold storage tiers |
+| [Consumer Groups](/rivven/docs/consumer-groups) | Static membership & cooperative rebalancing |
+| [OIDC Authentication](/rivven/docs/oidc) | OpenID Connect integration |
+| [Cedar Authorization](/rivven/docs/cedar) | Policy-as-code with AWS Cedar |
+| [Log Compaction](/rivven/docs/log-compaction) | Kafka-compatible compaction |
+| [Compression](/rivven/docs/compression) | LZ4 and Zstd compression |
 
 </div>
 

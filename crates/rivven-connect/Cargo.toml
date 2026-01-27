@@ -67,11 +67,23 @@ secrecy = { version = "0.10", features = ["serde"] }
 zeroize = "1.8"
 parking_lot = "0.12"
 
+# Derive macros for connector development
+rivven-connect-derive = { path = "../rivven-connect-derive" }
+
 # Schema registry and plugin support
 base64 = "0.22"
 lru = "0.12"
 arc-swap = "1.7"
 wasmparser = "0.224"
+
+# Native Avro support
+apache-avro = { version = "0.17", features = ["derive"] }
+md5 = "0.7"
+
+# Native Protobuf support
+prost = "0.13"
+prost-types = "0.13"
+prost-reflect = "0.15"
 
 [dev-dependencies]
 tokio-test = "0.4"

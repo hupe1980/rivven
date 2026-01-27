@@ -8,6 +8,7 @@
 //!
 //! - Schema evolution with compatibility checking
 //! - Support for JSON Schema, Avro, and Protobuf
+//! - Native Avro serialization/deserialization
 //! - Automatic schema inference from data
 //! - Caching for performance
 //!
@@ -31,18 +32,24 @@
 //! let schema = registry.get_by_id(schema_id).await?;
 //! ```
 
+pub mod avro;
 mod client;
 mod compatibility;
 mod embedded;
 mod external;
 mod inference;
+pub mod protobuf;
 mod types;
 
+pub use avro::{AvroCodec, AvroCompatibility, AvroError, AvroField, AvroSchema};
 pub use client::{SchemaRegistry, SchemaRegistryClient};
 pub use compatibility::{CompatibilityChecker, CompatibilityResult};
 pub use embedded::{EmbeddedRegistry, EmbeddedRegistryConfig};
 pub use external::{ExternalRegistry, ExternalRegistryConfig};
 pub use inference::{infer_schema, infer_schema_from_samples, InferredSchema, SchemaInference};
+pub use protobuf::{
+    ProtobufCodec, ProtobufCompatibility, ProtobufError, ProtobufField, ProtobufSchema,
+};
 pub use types::{
     CompatibilityLevel, Schema, SchemaId, SchemaRegistryConfig, SchemaRegistryError,
     SchemaRegistryResult, SchemaType, SchemaVersion, Subject, SubjectVersion,

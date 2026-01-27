@@ -112,6 +112,8 @@ pub struct ConnectCoordinator {
     rebalance_pending: bool,
     /// Last rebalance time
     last_rebalance: Option<Instant>,
+    /// Pending actions per node (cleared on heartbeat response)
+    pending_actions: HashMap<NodeId, Vec<WorkerAction>>,
 }
 
 impl ConnectCoordinator {
@@ -125,6 +127,7 @@ impl ConnectCoordinator {
             epoch: Epoch::default(),
             rebalance_pending: false,
             last_rebalance: None,
+            pending_actions: HashMap::new(),
             config,
         }
     }
@@ -137,6 +140,51 @@ impl ConnectCoordinator {
     /// Increment epoch
     fn increment_epoch(&mut self) {
         self.epoch.increment();
+    }
+
+    // =========================================================================
+    // Pending Actions Management
+    // =========================================================================
+
+    /// Queue an action for a node (delivered on next heartbeat)
+    pub fn queue_action(&mut self, node_id: &NodeId, action: WorkerAction) {
+        self.pending_actions
+            .entry(node_id.clone())
+            .or_default()
+            .push(action);
+    }
+
+    /// Queue a start task action
+    pub fn queue_start_task(&mut self, node_id: &NodeId, task_id: TaskId) {
+        self.queue_action(node_id, WorkerAction::StartTask { task_id });
+    }
+
+    /// Queue a stop task action
+    pub fn queue_stop_task(&mut self, node_id: &NodeId, task_id: TaskId) {
+        self.queue_action(node_id, WorkerAction::StopTask { task_id });
+    }
+
+    /// Queue a pause task action (for singleton standby)
+    pub fn queue_pause_task(&mut self, node_id: &NodeId, task_id: TaskId) {
+        self.queue_action(node_id, WorkerAction::PauseTask { task_id });
+    }
+
+    /// Queue a resume task action
+    pub fn queue_resume_task(&mut self, node_id: &NodeId, task_id: TaskId) {
+        self.queue_action(node_id, WorkerAction::ResumeTask { task_id });
+    }
+
+    /// Get pending action count for a node
+    pub fn pending_action_count(&self, node_id: &NodeId) -> usize {
+        self.pending_actions
+            .get(node_id)
+            .map(|v| v.len())
+            .unwrap_or(0)
+    }
+
+    /// Get total pending actions across all nodes
+    pub fn total_pending_actions(&self) -> usize {
+        self.pending_actions.values().map(|v| v.len()).sum()
     }
 
     // =========================================================================
@@ -401,10 +449,11 @@ impl ConnectCoordinator {
         // Update membership
         self.membership.record_heartbeat(&heartbeat.node_id);
 
-        // Update node load
+        // Update node load - use stored max_tasks from join request
+        let max_tasks = self.assigner.node_max_tasks(&heartbeat.node_id);
         let load = NodeLoad {
             node: heartbeat.node_id.clone(),
-            max_tasks: 100, // TODO: track from join request
+            max_tasks,
             current_tasks: heartbeat.load.task_count,
             cpu_usage: heartbeat.load.cpu_usage,
             memory_usage: heartbeat.load.memory_usage,
@@ -436,9 +485,15 @@ impl ConnectCoordinator {
             }
         }
 
+        // Drain pending actions for this node
+        let actions = self
+            .pending_actions
+            .remove(&heartbeat.node_id)
+            .unwrap_or_default();
+
         HeartbeatResponse {
             epoch: self.epoch,
-            actions: Vec::new(), // TODO: populate with pending actions
+            actions,
             rebalance_pending: self.rebalance_pending,
         }
     }
@@ -770,5 +825,60 @@ mod tests {
             .collect();
 
         assert_eq!(tasks.len(), 4);
+    }
+
+    #[test]
+    fn test_pending_actions() {
+        let config = CoordinatorConfig::default();
+        let mut coordinator = ConnectCoordinator::new(config);
+
+        let node1 = NodeId::new("node1");
+        let node2 = NodeId::new("node2");
+        let task1 = TaskId::new("connector1", 0);
+        let task2 = TaskId::new("connector1", 1);
+
+        // Initially no pending actions
+        assert_eq!(coordinator.pending_action_count(&node1), 0);
+        assert_eq!(coordinator.total_pending_actions(), 0);
+
+        // Queue actions
+        coordinator.queue_start_task(&node1, task1.clone());
+        coordinator.queue_stop_task(&node2, task2.clone());
+
+        assert_eq!(coordinator.pending_action_count(&node1), 1);
+        assert_eq!(coordinator.pending_action_count(&node2), 1);
+        assert_eq!(coordinator.total_pending_actions(), 2);
+
+        // Queue more actions for node1
+        coordinator.queue_pause_task(&node1, task2.clone());
+        assert_eq!(coordinator.pending_action_count(&node1), 2);
+        assert_eq!(coordinator.total_pending_actions(), 3);
+
+        // Simulate heartbeat from node1 - actions should be drained
+        let heartbeat = HeartbeatMessage {
+            node_id: node1.clone(),
+            epoch: Epoch::default(),
+            timestamp: 123456,
+            load: NodeLoadInfo {
+                cpu_usage: 0.5,
+                memory_usage: 0.5,
+                task_count: 0,
+                events_per_second: 0.0,
+                bytes_per_second: 0.0,
+            },
+            task_statuses: vec![],
+        };
+
+        let response = coordinator.handle_heartbeat(heartbeat);
+
+        // Should have received 2 actions
+        assert_eq!(response.actions.len(), 2);
+
+        // Node1 should now have no pending actions
+        assert_eq!(coordinator.pending_action_count(&node1), 0);
+
+        // Node2 should still have its action
+        assert_eq!(coordinator.pending_action_count(&node2), 1);
+        assert_eq!(coordinator.total_pending_actions(), 1);
     }
 }

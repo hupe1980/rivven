@@ -9,6 +9,9 @@
 //! - Async-first design with proper cleanup
 //! - Test isolation with unique slot/publication names
 
+#![allow(dead_code)] // Test harness utilities may not all be used yet
+#![allow(unused_imports)] // Re-exports for test convenience
+
 pub mod assertions;
 pub mod data_generators;
 pub mod mysql;

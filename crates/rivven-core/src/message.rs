@@ -55,11 +55,11 @@ impl Message {
 
     /// Serialize to bytes
     pub fn to_bytes(&self) -> crate::Result<Vec<u8>> {
-        Ok(bincode::serialize(self)?)
+        Ok(postcard::to_allocvec(self)?)
     }
 
     /// Deserialize from bytes
     pub fn from_bytes(data: &[u8]) -> crate::Result<Self> {
-        Ok(bincode::deserialize(data)?)
+        Ok(postcard::from_bytes(data)?)
     }
 }

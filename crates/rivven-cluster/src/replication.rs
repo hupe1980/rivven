@@ -822,7 +822,7 @@ mod tests {
 
         // Now node-2 should be in ISR and HWM should advance
         let isr = replication.get_isr().await;
-        assert!(isr.contains(&"node-2".to_string()));
+        assert!(isr.contains("node-2"));
     }
 
     #[tokio::test]

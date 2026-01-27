@@ -146,7 +146,7 @@ pub fn generate_bulk_inserts(table: &str, count: usize, batch_size: usize) -> Ve
     for batch_start in (0..count).step_by(batch_size) {
         let batch_end = (batch_start + batch_size).min(count);
         let values: Vec<String> = (batch_start..batch_end)
-            .map(|i| {
+            .map(|_| {
                 let name: String = Name().fake();
                 let email: String = SafeEmail().fake();
                 let age: u8 = (18..80).fake();

@@ -106,10 +106,21 @@ pub enum CdcOp {
     Update,
     /// Row deleted
     Delete,
+    /// Tombstone marker (null payload for log compaction)
+    ///
+    /// A tombstone is emitted after a DELETE event with the same key
+    /// but null value. This signals to log compaction that the key
+    /// should be removed from the compacted log.
+    Tombstone,
     /// Table truncated
     Truncate,
     /// Snapshot read (initial sync)
     Snapshot,
+    /// Schema change (DDL event)
+    ///
+    /// Published to a dedicated schema_changes topic when table
+    /// structure changes (CREATE/ALTER/DROP TABLE, etc.)
+    Schema,
 }
 
 impl CdcEvent {
@@ -180,6 +191,82 @@ impl CdcEvent {
         }
     }
 
+    /// Create a tombstone event (null payload for log compaction).
+    ///
+    /// Tombstones are emitted after DELETE events with the same key but
+    /// null payload. Kafka log compaction uses tombstones to know when
+    /// a key should be completely removed from the compacted log.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use rivven_cdc::CdcEvent;
+    /// use serde_json::json;
+    ///
+    /// // After a DELETE, emit a tombstone with the same key
+    /// let delete = CdcEvent::delete("pg", "db", "public", "users", json!({"id": 1}), 1000);
+    /// let tombstone = CdcEvent::tombstone(&delete);
+    ///
+    /// // Tombstone has same coordinates but null payload
+    /// assert!(tombstone.before.is_none());
+    /// assert!(tombstone.after.is_none());
+    /// ```
+    pub fn tombstone(delete_event: &CdcEvent) -> Self {
+        Self {
+            source_type: delete_event.source_type.clone(),
+            database: delete_event.database.clone(),
+            schema: delete_event.schema.clone(),
+            table: delete_event.table.clone(),
+            op: CdcOp::Tombstone,
+            before: None,
+            after: None,
+            timestamp: delete_event.timestamp,
+            transaction: delete_event.transaction.clone(),
+        }
+    }
+
+    /// Create a tombstone with explicit key for log compaction.
+    ///
+    /// Use this when you need to specify the key explicitly rather than
+    /// deriving it from a delete event.
+    pub fn tombstone_with_key(
+        source_type: impl Into<String>,
+        database: impl Into<String>,
+        schema: impl Into<String>,
+        table: impl Into<String>,
+        key: serde_json::Value,
+        timestamp: i64,
+    ) -> Self {
+        Self {
+            source_type: source_type.into(),
+            database: database.into(),
+            schema: schema.into(),
+            table: table.into(),
+            op: CdcOp::Tombstone,
+            // Store key in `before` for key extraction during compaction
+            before: Some(key),
+            after: None,
+            timestamp,
+            transaction: None,
+        }
+    }
+
+    /// Convert a DELETE event to a tombstone.
+    ///
+    /// Returns None if this is not a DELETE event.
+    pub fn to_tombstone(&self) -> Option<Self> {
+        if self.op == CdcOp::Delete {
+            Some(CdcEvent::tombstone(self))
+        } else {
+            None
+        }
+    }
+
+    /// Check if this is a tombstone event.
+    pub fn is_tombstone(&self) -> bool {
+        self.op == CdcOp::Tombstone
+    }
+
     /// Attach transaction metadata to this event.
     pub fn with_transaction(mut self, txn: TransactionMetadata) -> Self {
         self.transaction = Some(txn);
@@ -235,7 +322,10 @@ impl CdcEvent {
 
     /// Check if this is a data modification event (INSERT/UPDATE/DELETE)
     pub fn is_dml(&self) -> bool {
-        matches!(self.op, CdcOp::Insert | CdcOp::Update | CdcOp::Delete)
+        matches!(
+            self.op,
+            CdcOp::Insert | CdcOp::Update | CdcOp::Delete | CdcOp::Tombstone
+        )
     }
 }
 
@@ -245,8 +335,10 @@ impl std::fmt::Display for CdcOp {
             CdcOp::Insert => write!(f, "INSERT"),
             CdcOp::Update => write!(f, "UPDATE"),
             CdcOp::Delete => write!(f, "DELETE"),
+            CdcOp::Tombstone => write!(f, "TOMBSTONE"),
             CdcOp::Truncate => write!(f, "TRUNCATE"),
             CdcOp::Snapshot => write!(f, "SNAPSHOT"),
+            CdcOp::Schema => write!(f, "SCHEMA"),
         }
     }
 }
@@ -326,6 +418,105 @@ mod tests {
         assert!(CdcEvent::insert("pg", "db", "s", "t", json!({}), 0).is_dml());
         assert!(CdcEvent::update("pg", "db", "s", "t", None, json!({}), 0).is_dml());
         assert!(CdcEvent::delete("pg", "db", "s", "t", json!({}), 0).is_dml());
+        // Tombstone is also DML (for log compaction)
+        let delete = CdcEvent::delete("pg", "db", "s", "t", json!({}), 0);
+        let tombstone = CdcEvent::tombstone(&delete);
+        assert!(tombstone.is_dml());
+    }
+
+    #[test]
+    fn test_tombstone_from_delete() {
+        let delete = CdcEvent::delete(
+            "postgres",
+            "mydb",
+            "public",
+            "users",
+            json!({"id": 42, "name": "Alice"}),
+            1705000000,
+        );
+
+        let tombstone = CdcEvent::tombstone(&delete);
+
+        assert_eq!(tombstone.op, CdcOp::Tombstone);
+        assert_eq!(tombstone.source_type, "postgres");
+        assert_eq!(tombstone.database, "mydb");
+        assert_eq!(tombstone.schema, "public");
+        assert_eq!(tombstone.table, "users");
+        assert!(tombstone.before.is_none());
+        assert!(tombstone.after.is_none());
+        assert_eq!(tombstone.timestamp, delete.timestamp);
+        assert!(tombstone.is_tombstone());
+    }
+
+    #[test]
+    fn test_tombstone_with_key() {
+        let tombstone = CdcEvent::tombstone_with_key(
+            "mysql",
+            "inventory",
+            "inventory",
+            "products",
+            json!({"product_id": 101}),
+            1705000000,
+        );
+
+        assert_eq!(tombstone.op, CdcOp::Tombstone);
+        assert!(tombstone.is_tombstone());
+        // Key stored in before for compaction key extraction
+        assert_eq!(tombstone.before, Some(json!({"product_id": 101})));
+        assert!(tombstone.after.is_none());
+    }
+
+    #[test]
+    fn test_to_tombstone_from_delete() {
+        let delete = CdcEvent::delete("pg", "db", "s", "t", json!({"id": 1}), 0);
+        let tombstone = delete.to_tombstone();
+
+        assert!(tombstone.is_some());
+        let t = tombstone.unwrap();
+        assert!(t.is_tombstone());
+    }
+
+    #[test]
+    fn test_to_tombstone_from_insert_returns_none() {
+        let insert = CdcEvent::insert("pg", "db", "s", "t", json!({"id": 1}), 0);
+        assert!(insert.to_tombstone().is_none());
+    }
+
+    #[test]
+    fn test_tombstone_preserves_transaction() {
+        let txn = TransactionMetadata::new("txn-del", "0/DEAD", 5)
+            .with_total(10)
+            .with_last();
+
+        let delete =
+            CdcEvent::delete("pg", "db", "s", "t", json!({"id": 1}), 1000).with_transaction(txn);
+
+        let tombstone = CdcEvent::tombstone(&delete);
+
+        assert!(tombstone.has_transaction());
+        assert_eq!(tombstone.txn_id(), Some("txn-del"));
+        assert!(tombstone.is_txn_end());
+    }
+
+    #[test]
+    fn test_tombstone_serialization() {
+        let delete = CdcEvent::delete("pg", "db", "s", "t", json!({"id": 99}), 0);
+        let tombstone = CdcEvent::tombstone(&delete);
+
+        let json = serde_json::to_string(&tombstone).unwrap();
+        assert!(json.contains("\"op\":\"Tombstone\""));
+        assert!(json.contains("\"before\":null"));
+        assert!(json.contains("\"after\":null"));
+
+        let parsed: CdcEvent = serde_json::from_str(&json).unwrap();
+        assert!(parsed.is_tombstone());
+        assert!(parsed.before.is_none());
+        assert!(parsed.after.is_none());
+    }
+
+    #[test]
+    fn test_cdcop_display_tombstone() {
+        assert_eq!(CdcOp::Tombstone.to_string(), "TOMBSTONE");
     }
 
     #[test]

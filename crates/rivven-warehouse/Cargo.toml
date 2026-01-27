@@ -12,8 +12,8 @@ categories = ["database", "asynchronous"]
 default = []
 # Individual warehouse providers
 snowflake = ["dep:reqwest", "dep:rsa", "dep:base64", "dep:jsonwebtoken"]
-bigquery = []  # Future: Google BigQuery
-redshift = []  # Future: AWS Redshift
+bigquery = ["dep:gcp-bigquery-client", "dep:google-cloud-auth"]
+redshift = ["dep:tokio-postgres", "dep:native-tls", "dep:postgres-native-tls", "dep:aws-config", "dep:aws-sdk-redshift", "dep:aws-credential-types"]
 # Enable all providers
 full = ["snowflake", "bigquery", "redshift"]
 
@@ -43,6 +43,18 @@ reqwest = { version = "0.11", features = ["json"], optional = true }
 rsa = { version = "0.9", optional = true }
 base64 = { version = "0.22", optional = true }
 jsonwebtoken = { version = "9", optional = true }
+
+# BigQuery dependencies (optional)
+gcp-bigquery-client = { version = "0.25", optional = true }
+google-cloud-auth = { version = "0.17", optional = true }
+
+# Redshift dependencies (optional)
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4"], optional = true }
+native-tls = { version = "0.2", optional = true }
+postgres-native-tls = { version = "0.5", optional = true }
+aws-config = { version = "1", optional = true }
+aws-sdk-redshift = { version = "1", optional = true }
+aws-credential-types = { version = "1", features = ["hardcoded-credentials"], optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

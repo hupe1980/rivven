@@ -8,7 +8,8 @@
 //! Run with: cargo bench -p rivven-cdc
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use rivven_cdc::{CdcEvent, CdcFilter, CdcFilterConfig, CdcOp, PostgresTypeMapper};
+use rivven_cdc::postgres::PostgresTypeMapper;
+use rivven_cdc::{CdcEvent, CdcFilter, CdcFilterConfig, CdcOp};
 use serde_json::json;
 
 fn benchmark_schema_inference(c: &mut Criterion) {
@@ -192,7 +193,7 @@ fn benchmark_filter_evaluation(c: &mut Criterion) {
     });
 
     // Event filtering
-    let mut event = CdcEvent {
+    let event = CdcEvent {
         source_type: "postgres".to_string(),
         database: "testdb".to_string(),
         schema: "public".to_string(),

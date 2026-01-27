@@ -190,9 +190,9 @@ impl From<tokio::sync::oneshot::error::RecvError> for ClusterError {
     }
 }
 
-// Conversion from bincode for serialization
-impl From<bincode::Error> for ClusterError {
-    fn from(e: bincode::Error) -> Self {
+// Conversion from postcard for serialization
+impl From<postcard::Error> for ClusterError {
+    fn from(e: postcard::Error) -> Self {
         ClusterError::Serialization(e.to_string())
     }
 }

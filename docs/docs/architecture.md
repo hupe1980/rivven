@@ -84,10 +84,93 @@ This separation provides **security isolation**—database credentials stay in t
 | `rivven-cluster` | Distributed | Raft consensus, SWIM gossip, partitioning |
 | `rivven-cdc` | CDC library | PostgreSQL and MySQL replication |
 | `rivven-connect` | Connector CLI & SDK | Configuration-driven connectors + traits |
+| `rivven-queue` | Message queues | Kafka and MQTT connectors |
 | `rivven-storage` | Object storage | S3, GCS, Azure Blob sinks |
 | `rivven-warehouse` | Data warehouses | Snowflake, BigQuery, Redshift sinks |
 | `rivven-operator` | Kubernetes | CRDs and controller |
 | `rivven-python` | Python bindings | PyO3-based Python SDK |
+
+---
+
+## Grouped Connector Crates
+
+Rivven organizes connectors into **domain-specific crates** to isolate heavy dependencies
+and allow users to include only the connectors they need. This follows a modular architecture
+where each crate focuses on a specific integration domain.
+
+### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    rivven-connect (SDK)                         │
+│  SourceFactory, SinkFactory, AnySource, AnySink, Registry       │
+└─────────────────────────────────────────────────────────────────┘
+        ↑ implement traits
+┌─────────────┬─────────────┬───────────────┬─────────────────────┐
+│ rivven-cdc  │ rivven-     │ rivven-       │ rivven-queue        │
+│ (sources:   │ storage     │ warehouse     │ (source/sink:       │
+│ pg, mysql)  │ (sink: s3,  │ (sink: bq,    │ kafka, mqtt)        │
+│             │ gcs, azure) │ snowflake)    │                     │
+└─────────────┴─────────────┴───────────────┴─────────────────────┘
+        ↑ compose
+┌─────────────────────────────────────────────────────────────────┐
+│                     rivven-connect (CLI)                         │
+│  Composes adapters, runs pipelines, no adapter code              │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Grouped Crates
+
+| Crate | Domain | Connectors | Feature Flags |
+|:------|:-------|:-----------|:--------------|
+| `rivven-cdc` | Databases | postgres-cdc, mysql-cdc | `postgres`, `mysql` |
+| `rivven-storage` | Object Storage | S3, GCS, Azure Blob | `s3`, `gcs`, `azure` |
+| `rivven-warehouse` | Data Warehouses | BigQuery, Redshift, Snowflake | `bigquery`, `redshift`, `snowflake` |
+| `rivven-queue` | Message Queues | Kafka, MQTT | `kafka`, `mqtt` |
+
+### Benefits of Grouped Crates
+
+1. **Dependency Isolation** - Heavy dependencies (Kafka, cloud SDKs) only included when needed
+2. **Build Time Reduction** - Compile only the connectors you use
+3. **Single Binary Option** - Enable all features for complete functionality
+4. **Pluggable Architecture** - Add new connector crates without modifying core
+
+### Usage Example
+
+```toml
+# Only include what you need
+[dependencies]
+rivven-connect = "0.0.1"
+rivven-cdc = { version = "0.0.1", features = ["postgres"] }
+rivven-queue = { version = "0.0.1", features = ["kafka"] }
+
+# Or include everything
+[dependencies]
+rivven-connect = { version = "0.0.1", features = ["full"] }
+rivven-queue = { version = "0.0.1", features = ["full"] }
+rivven-storage = { version = "0.0.1", features = ["full"] }
+rivven-warehouse = { version = "0.0.1", features = ["full"] }
+```
+
+### Registering Connectors
+
+Each crate provides registration functions to add connectors to the runtime:
+
+```rust
+use rivven_connect::connectors::{create_source_registry, create_sink_registry};
+
+let mut sources = create_source_registry();
+let mut sinks = create_sink_registry();
+
+// Add queue connectors
+rivven_queue::register_all_connectors(&mut sources, &mut sinks);
+
+// Add storage sinks
+rivven_storage::register_all_sinks(&mut sinks);
+
+// Add warehouse sinks
+rivven_warehouse::register_all_sinks(&mut sinks);
+```
 
 ---
 
@@ -188,6 +271,49 @@ Consumer groups track offsets per topic-partition:
 
 ---
 
+## Exactly-Once Semantics
+
+Rivven provides exactly-once semantics through two complementary features:
+
+### Idempotent Producer (KIP-98)
+
+Eliminates duplicates during retries without full transactions:
+
+```
+Producer                           Broker
+   │─── InitProducerId ──────────────>│
+   │<── PID=123, Epoch=0 ─────────────│
+   │─── Produce(PID,Seq=0) ──────────>│  First message
+   │<── Success(offset=0) ────────────│
+   │─── Produce(PID,Seq=0) ──────────>│  Retry (duplicate!)
+   │<── DuplicateSequence(offset=0) ──│  Returns cached offset
+```
+
+Key concepts:
+- **Producer ID (PID)**: Unique 64-bit identifier per producer
+- **Epoch**: Fences old producer instances on restart
+- **Sequence**: Per-partition counter for deduplication
+
+### Native Transactions
+
+Atomic writes across multiple topics with two-phase commit:
+
+```
+Producer                    Transaction Coordinator
+   │─── BeginTransaction ─────────────>│
+   │<── OK ────────────────────────────│
+   │─── AddPartitionsToTxn ───────────>│
+   │<── OK ────────────────────────────│
+   │─── TransactionalPublish(topic1) ─>│
+   │─── TransactionalPublish(topic2) ─>│
+   │─── CommitTransaction ────────────>│
+   │<── OK (all-or-nothing commit) ────│
+```
+
+For detailed usage, see the [Exactly-Once Guide](exactly-once).
+
+---
+
 ## Message Partitioning
 
 ### Sticky Partitioner (Kafka 2.4+ Style)
@@ -238,9 +364,9 @@ This ensures:
 Rivven uses a simple length-prefixed binary protocol:
 
 ```
-┌────────────┬─────────────────────────┐
-│ Length (4B)│ Bincode-encoded payload │
-└────────────┴─────────────────────────┘
+┌────────────┬──────────────────────────┐
+│ Length (4B)│ Postcard-encoded payload │
+└────────────┴──────────────────────────┘
 ```
 
 ### Request Types
@@ -321,12 +447,27 @@ rivven_cdc_events_total{connector="postgres"} 9999
 
 ### Web Dashboard
 
-The optional dashboard provides:
+The optional dashboard is built with **Leptos** (Rust → WebAssembly) and provides:
 
-- Topic overview
-- Consumer group status
-- Cluster health
+- Topic overview and message counts
+- Consumer group status with lag indicators
+- Cluster health and node membership
 - Raft state visualization
+- Prometheus metrics integration
+
+**Build the dashboard:**
+
+```bash
+# Install trunk (Leptos build tool)
+cargo install trunk
+rustup target add wasm32-unknown-unknown
+
+# Build and install dashboard assets
+just dashboard-install
+
+# Rebuild server with embedded dashboard
+cargo build -p rivven-server --release
+```
 
 ---
 

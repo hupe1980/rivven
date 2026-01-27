@@ -497,7 +497,7 @@ mod tests {
             .parse()
             .unwrap(),
         );
-        let mut info = if let Some(r) = rack {
+        let info = if let Some(r) = rack {
             info.with_rack(r)
         } else {
             info
@@ -528,8 +528,10 @@ mod tests {
 
     #[test]
     fn test_rack_awareness() {
-        let mut config = PlacementConfig::default();
-        config.rack_aware = true;
+        let config = PlacementConfig {
+            rack_aware: true,
+            ..Default::default()
+        };
         let mut placer = PartitionPlacer::new(config);
 
         // 6 nodes across 3 racks

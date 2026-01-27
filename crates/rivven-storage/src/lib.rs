@@ -3,9 +3,8 @@
 //! This crate provides sink connectors for object/blob storage systems:
 //!
 //! - **S3** - Amazon S3 and S3-compatible storage (MinIO, LocalStack, Cloudflare R2)
-//! - **GCS** - Google Cloud Storage (future)
-//! - **Azure Blob** - Azure Blob Storage (future)
-//! - **HDFS** - Hadoop Distributed File System (future)
+//! - **GCS** - Google Cloud Storage (ADC, service account key)
+//! - **Azure Blob** - Azure Blob Storage (connection string, SAS, account key)
 //!
 //! # Feature Flags
 //!
@@ -13,10 +12,16 @@
 //!
 //! ```toml
 //! # S3 only
-//! rivven-storage = { version = "0.2", features = ["s3"] }
+//! rivven-storage = { version = "0.0.1", features = ["s3"] }
+//!
+//! # GCS only
+//! rivven-storage = { version = "0.0.1", features = ["gcs"] }
+//!
+//! # Azure only
+//! rivven-storage = { version = "0.0.1", features = ["azure"] }
 //!
 //! # All providers
-//! rivven-storage = { version = "0.2", features = ["full"] }
+//! rivven-storage = { version = "0.0.1", features = ["full"] }
 //! ```
 //!
 //! # Example
@@ -39,9 +44,27 @@ pub mod gcs;
 #[cfg(feature = "azure")]
 pub mod azure;
 
+#[cfg(feature = "parquet")]
+pub mod parquet;
+
 // Re-exports for convenience
 #[cfg(feature = "s3")]
 pub use s3::{S3Compression, S3Format, S3Partitioning, S3Sink, S3SinkConfig, S3SinkFactory};
+
+#[cfg(feature = "gcs")]
+pub use gcs::{GcsCompression, GcsFormat, GcsPartitioning, GcsSink, GcsSinkConfig, GcsSinkFactory};
+
+#[cfg(feature = "azure")]
+pub use azure::{
+    AzureBlobCompression, AzureBlobFormat, AzureBlobPartitioning, AzureBlobSink,
+    AzureBlobSinkConfig, AzureBlobSinkFactory,
+};
+
+#[cfg(feature = "parquet")]
+pub use parquet::{
+    write_events_to_parquet, ParquetCompression, ParquetError, ParquetResult, ParquetWriter,
+    ParquetWriterConfig, SchemaInference,
+};
 
 /// Register all enabled storage connectors with the sink registry
 pub fn register_all(registry: &mut rivven_connect::SinkRegistry) {
@@ -49,14 +72,10 @@ pub fn register_all(registry: &mut rivven_connect::SinkRegistry) {
     s3::register(registry);
 
     #[cfg(feature = "gcs")]
-    {
-        // Future: GCS registration
-    }
+    gcs::register(registry);
 
     #[cfg(feature = "azure")]
-    {
-        // Future: Azure Blob registration
-    }
+    azure::register(registry);
 
     // Suppress unused warning when no features are enabled
     let _ = registry;

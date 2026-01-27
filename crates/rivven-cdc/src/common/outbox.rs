@@ -722,7 +722,7 @@ fn uuid_v4() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_nanos();
     let random: u64 = rand_u64();
     format!("{:016x}-{:016x}", now as u64, random)
@@ -740,7 +740,7 @@ fn rand_u64() -> u64 {
 fn unix_timestamp_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_millis() as u64
 }
 
@@ -916,7 +916,7 @@ mod tests {
             let event = OutboxEvent::new(
                 "Order",
                 "order-1",
-                &format!("Event{}", i),
+                format!("Event{}", i),
                 serde_json::json!({}),
             );
             store.store(event).await.unwrap();

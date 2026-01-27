@@ -3,8 +3,8 @@
 //! This crate provides sink connectors for data warehouses:
 //!
 //! - **Snowflake** - Snowpipe Streaming REST API
-//! - **BigQuery** - Google BigQuery (future)
-//! - **Redshift** - AWS Redshift (future)
+//! - **BigQuery** - Google BigQuery insertAll API
+//! - **Redshift** - Amazon Redshift via PostgreSQL protocol
 //!
 //! # Feature Flags
 //!
@@ -13,6 +13,12 @@
 //! ```toml
 //! # Snowflake only
 //! rivven-warehouse = { version = "0.2", features = ["snowflake"] }
+//!
+//! # BigQuery only
+//! rivven-warehouse = { version = "0.2", features = ["bigquery"] }
+//!
+//! # Redshift only
+//! rivven-warehouse = { version = "0.2", features = ["redshift"] }
 //!
 //! # All providers
 //! rivven-warehouse = { version = "0.2", features = ["full"] }
@@ -42,20 +48,22 @@ pub mod redshift;
 #[cfg(feature = "snowflake")]
 pub use snowflake::{SnowflakeSink, SnowflakeSinkConfig, SnowflakeSinkFactory};
 
+#[cfg(feature = "bigquery")]
+pub use bigquery::{BigQuerySink, BigQuerySinkConfig, BigQuerySinkFactory};
+
+#[cfg(feature = "redshift")]
+pub use redshift::{RedshiftSink, RedshiftSinkConfig, RedshiftSinkFactory};
+
 /// Register all enabled warehouse connectors with the sink registry
 pub fn register_all(registry: &mut rivven_connect::SinkRegistry) {
     #[cfg(feature = "snowflake")]
     snowflake::register(registry);
 
     #[cfg(feature = "bigquery")]
-    {
-        // Future: BigQuery registration
-    }
+    bigquery::register(registry);
 
     #[cfg(feature = "redshift")]
-    {
-        // Future: Redshift registration
-    }
+    redshift::register(registry);
 
     // Suppress unused warning when no features are enabled
     let _ = registry;

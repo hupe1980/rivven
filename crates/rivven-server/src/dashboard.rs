@@ -51,9 +51,10 @@ use crate::raft_api::RaftApiState;
 // ============================================================================
 
 /// Embedded static files for the dashboard
+/// Built automatically by build.rs from rivven-dashboard crate
 #[cfg(feature = "dashboard")]
 #[derive(RustEmbed)]
-#[folder = "static/"]
+#[folder = "../rivven-dashboard/dist/"]
 struct DashboardAssets;
 
 // ============================================================================
@@ -161,18 +162,20 @@ async fn security_headers_middleware(request: Request<Body>, next: Next) -> Resp
     // Prevent clickjacking
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
 
-    // Content Security Policy - allows htmx/alpine from CDN and Google Fonts
-    // Note: Alpine.js requires 'unsafe-eval' to evaluate x-text and other expressions
-    // Note: connect-src needs ws:/wss: for SSE and localhost for API calls on different ports
+    // Content Security Policy for air-gapped Leptos WASM dashboard
+    // - 'unsafe-inline' needed for trunk-generated WASM init script
+    // - 'wasm-unsafe-eval' allows WebAssembly compilation
+    // - connect-src allows fetch() to same-origin API endpoints
+    // - No external resources (fonts, CDNs) - fully self-contained
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
             "default-src 'self'; \
-             script-src 'self' 'unsafe-inline' 'unsafe-eval' https://unpkg.com; \
-             style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
+             script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; \
+             style-src 'self' 'unsafe-inline'; \
              img-src 'self' data:; \
-             connect-src 'self' http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:*; \
-             font-src 'self' https://fonts.gstatic.com; \
+             connect-src 'self'; \
+             font-src 'self'; \
              frame-ancestors 'none'",
         ),
     );

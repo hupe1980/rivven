@@ -1,0 +1,292 @@
+# RivvenTopic Custom Resource Definition
+# Enables declarative topic management for GitOps workflows
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: rivventopics.rivven.io
+  labels:
+    app.kubernetes.io/name: rivven-operator
+    app.kubernetes.io/component: crd
+spec:
+  group: rivven.io
+  names:
+    kind: RivvenTopic
+    plural: rivventopics
+    singular: rivventopic
+    shortNames:
+      - rt
+    categories:
+      - rivven
+      - streaming
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Cluster
+          type: string
+          jsonPath: .spec.clusterRef.name
+        - name: Partitions
+          type: integer
+          jsonPath: .spec.partitions
+        - name: Replication
+          type: integer
+          jsonPath: .spec.replicationFactor
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              required:
+                - clusterRef
+              properties:
+                clusterRef:
+                  type: object
+                  description: Reference to the RivvenCluster this topic belongs to
+                  required:
+                    - name
+                  properties:
+                    name:
+                      type: string
+                      minLength: 1
+                      maxLength: 63
+                      pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"
+                      description: Name of the RivvenCluster
+                    namespace:
+                      type: string
+                      maxLength: 63
+                      description: Namespace of the RivvenCluster (defaults to same namespace)
+                partitions:
+                  type: integer
+                  minimum: 1
+                  maximum: 10000
+                  default: 3
+                  description: Number of partitions for the topic (cannot be decreased after creation)
+                replicationFactor:
+                  type: integer
+                  minimum: 1
+                  maximum: 10
+                  default: 1
+                  description: Replication factor (must not exceed number of brokers)
+                config:
+                  type: object
+                  description: Topic configuration parameters
+                  properties:
+                    retentionMs:
+                      type: integer
+                      format: int64
+                      minimum: 3600000
+                      maximum: 315360000000
+                      default: 604800000
+                      description: "Retention time in milliseconds (default: 7 days)"
+                    retentionBytes:
+                      type: integer
+                      format: int64
+                      default: -1
+                      description: "Retention size in bytes per partition (-1 for unlimited)"
+                    segmentBytes:
+                      type: integer
+                      format: int64
+                      minimum: 1048576
+                      maximum: 10737418240
+                      default: 1073741824
+                      description: "Segment size in bytes (default: 1GB)"
+                    cleanupPolicy:
+                      type: string
+                      enum:
+                        - delete
+                        - compact
+                        - "delete,compact"
+                      default: delete
+                      description: "Cleanup policy for old segments"
+                    compressionType:
+                      type: string
+                      enum:
+                        - none
+                        - gzip
+                        - snappy
+                        - lz4
+                        - zstd
+                        - producer
+                      default: lz4
+                      description: "Compression type for messages"
+                    minInsyncReplicas:
+                      type: integer
+                      minimum: 1
+                      maximum: 10
+                      default: 1
+                      description: "Minimum number of in-sync replicas for writes"
+                    maxMessageBytes:
+                      type: integer
+                      format: int64
+                      minimum: 1024
+                      maximum: 104857600
+                      default: 1048576
+                      description: "Maximum message size in bytes"
+                    messageTimestampEnabled:
+                      type: boolean
+                      default: true
+                      description: "Enable message timestamps"
+                    messageTimestampType:
+                      type: string
+                      enum:
+                        - CreateTime
+                        - LogAppendTime
+                      default: CreateTime
+                      description: "Timestamp type for messages"
+                    idempotentWrites:
+                      type: boolean
+                      default: true
+                      description: "Enable idempotent writes"
+                    flushIntervalMs:
+                      type: integer
+                      format: int64
+                      minimum: 0
+                      maximum: 86400000
+                      default: 0
+                      description: "Flush interval in milliseconds (0 for no scheduled flush)"
+                    custom:
+                      type: object
+                      additionalProperties:
+                        type: string
+                      description: "Custom configuration key-value pairs"
+                acls:
+                  type: array
+                  maxItems: 100
+                  description: "Access control list entries for the topic"
+                  items:
+                    type: object
+                    required:
+                      - principal
+                      - operations
+                    properties:
+                      principal:
+                        type: string
+                        minLength: 1
+                        maxLength: 256
+                        description: "Principal (e.g., 'user:myuser', 'group:mygroup', '*')"
+                      operations:
+                        type: array
+                        minItems: 1
+                        maxItems: 7
+                        items:
+                          type: string
+                          enum:
+                            - Read
+                            - Write
+                            - Create
+                            - Delete
+                            - Alter
+                            - Describe
+                            - All
+                            - DescribeConfigs
+                            - AlterConfigs
+                        description: "Allowed operations"
+                      permissionType:
+                        type: string
+                        enum:
+                          - Allow
+                          - Deny
+                        default: Allow
+                        description: "Permission type"
+                      host:
+                        type: string
+                        maxLength: 256
+                        default: "*"
+                        description: "Host restriction ('*' for any host)"
+                deleteOnRemove:
+                  type: boolean
+                  default: true
+                  description: "Whether to delete the topic when the CRD is deleted"
+                topicLabels:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: "Labels to apply to the topic metadata"
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  description: "Current phase: Pending, Creating, Ready, Updating, Deleting, Failed"
+                message:
+                  type: string
+                  description: "Human-readable message about current state"
+                currentPartitions:
+                  type: integer
+                  description: "Actual number of partitions"
+                currentReplicationFactor:
+                  type: integer
+                  description: "Actual replication factor"
+                topicExists:
+                  type: boolean
+                  description: "Whether the topic exists in Rivven"
+                observedGeneration:
+                  type: integer
+                  format: int64
+                  description: "Observed generation for tracking spec changes"
+                lastSyncTime:
+                  type: string
+                  format: date-time
+                  description: "Last time the topic was successfully synced"
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                    properties:
+                      type:
+                        type: string
+                        description: "Type: Ready, Synced, ACLsApplied, ConfigApplied"
+                      status:
+                        type: string
+                        enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                      reason:
+                        type: string
+                        description: "Machine-readable reason"
+                      message:
+                        type: string
+                        description: "Human-readable message"
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                        description: "Last transition time"
+                partitionInfo:
+                  type: array
+                  description: "Information about topic partitions"
+                  items:
+                    type: object
+                    properties:
+                      partition:
+                        type: integer
+                        description: "Partition ID"
+                      leader:
+                        type: integer
+                        description: "Leader broker ID"
+                      replicas:
+                        type: array
+                        items:
+                          type: integer
+                        description: "Replica broker IDs"
+                      isr:
+                        type: array
+                        items:
+                          type: integer
+                        description: "In-sync replica broker IDs"

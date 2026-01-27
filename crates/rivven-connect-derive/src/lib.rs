@@ -1,0 +1,431 @@
+//! Derive macros for Rivven connector development
+//!
+//! This crate provides procedural macros that reduce boilerplate when implementing
+//! Rivven connectors.
+//!
+//! # Example
+//!
+//! ```rust,ignore
+//! use rivven_connect_derive::{Source, Sink, connector_spec};
+//!
+//! #[derive(Debug, Deserialize, Validate, JsonSchema, Source)]
+//! #[source(name = "my-source", version = "1.0.0")]
+//! pub struct MySourceConfig {
+//!     #[validate(url)]
+//!     pub endpoint: String,
+//!     #[validate(range(min = 1, max = 100))]
+//!     pub batch_size: usize,
+//! }
+//!
+//! #[derive(Debug, Deserialize, Validate, JsonSchema, Sink)]
+//! #[sink(name = "my-sink", version = "1.0.0")]
+//! pub struct MySinkConfig {
+//!     pub bucket: String,
+//! }
+//! ```
+
+// Allow unused fields in darling attribute structs - they're parsed but not all are used yet
+#![allow(dead_code)]
+
+use darling::{FromDeriveInput, FromMeta};
+use proc_macro::TokenStream;
+use quote::quote;
+use syn::{parse_macro_input, DeriveInput};
+
+/// Attributes for the Source derive macro
+#[derive(Debug, FromDeriveInput)]
+#[darling(attributes(source), supports(struct_named))]
+struct SourceAttrs {
+    ident: syn::Ident,
+    /// Connector name (e.g., "postgres-cdc")
+    #[darling(default)]
+    name: Option<String>,
+    /// Connector version (e.g., "1.0.0")
+    #[darling(default)]
+    version: Option<String>,
+    /// Description of the connector
+    #[darling(default)]
+    description: Option<String>,
+    /// Documentation URL
+    #[darling(default)]
+    documentation_url: Option<String>,
+    /// Whether the source supports incremental sync
+    #[darling(default)]
+    incremental: bool,
+    /// Supported source types (e.g., full_refresh, incremental)
+    #[darling(default)]
+    source_types: Option<SourceTypesAttr>,
+}
+
+#[derive(Debug, Default, FromMeta)]
+struct SourceTypesAttr {
+    full_refresh: bool,
+    incremental: bool,
+}
+
+/// Attributes for the Sink derive macro
+#[derive(Debug, FromDeriveInput)]
+#[darling(attributes(sink), supports(struct_named))]
+struct SinkAttrs {
+    ident: syn::Ident,
+    /// Connector name (e.g., "s3-sink")
+    #[darling(default)]
+    name: Option<String>,
+    /// Connector version (e.g., "1.0.0")
+    #[darling(default)]
+    version: Option<String>,
+    /// Description of the connector
+    #[darling(default)]
+    description: Option<String>,
+    /// Documentation URL
+    #[darling(default)]
+    documentation_url: Option<String>,
+    /// Whether the sink supports batching
+    #[darling(default)]
+    batching: bool,
+    /// Default batch size
+    #[darling(default)]
+    batch_size: Option<usize>,
+}
+
+/// Attributes for the Transform derive macro
+#[derive(Debug, FromDeriveInput)]
+#[darling(attributes(transform), supports(struct_named))]
+struct TransformAttrs {
+    ident: syn::Ident,
+    /// Transform name (e.g., "filter-transform")
+    #[darling(default)]
+    name: Option<String>,
+    /// Transform version (e.g., "1.0.0")
+    #[darling(default)]
+    version: Option<String>,
+    /// Description of the transform
+    #[darling(default)]
+    description: Option<String>,
+}
+
+/// Derive macro for implementing SourceConfig boilerplate
+///
+/// This macro generates the `spec()` method for a source connector configuration.
+///
+/// # Attributes
+///
+/// - `#[source(name = "...")]` - Connector name (required)
+/// - `#[source(version = "...")]` - Connector version (default: "0.1.0")
+/// - `#[source(description = "...")]` - Connector description
+/// - `#[source(documentation_url = "...")]` - Documentation URL
+/// - `#[source(incremental)]` - Enable incremental sync support
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[derive(Debug, Deserialize, Validate, JsonSchema, SourceConfig)]
+/// #[source(name = "postgres-cdc", version = "1.0.0", incremental)]
+/// pub struct PostgresCdcConfig {
+///     pub connection_string: String,
+///     pub slot_name: String,
+/// }
+/// ```
+#[proc_macro_derive(SourceConfig, attributes(source))]
+pub fn derive_source_config(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+
+    let attrs = match SourceAttrs::from_derive_input(&input) {
+        Ok(v) => v,
+        Err(e) => return TokenStream::from(e.write_errors()),
+    };
+
+    let struct_name = &attrs.ident;
+    let spec_struct_name = quote::format_ident!("{}Spec", struct_name);
+
+    let name = attrs
+        .name
+        .unwrap_or_else(|| struct_name.to_string().to_lowercase().replace("config", ""));
+    let version = attrs.version.unwrap_or_else(|| "0.1.0".to_string());
+
+    let description_code = match attrs.description {
+        Some(desc) => quote! { .with_description(#desc) },
+        None => quote! {},
+    };
+
+    let doc_url_code = match attrs.documentation_url {
+        Some(url) => quote! { .with_documentation_url(#url) },
+        None => quote! {},
+    };
+
+    let expanded = quote! {
+        /// Auto-generated spec holder for this source configuration
+        pub struct #spec_struct_name;
+
+        impl #spec_struct_name {
+            /// Returns the connector specification
+            pub fn spec() -> rivven_connect::ConnectorSpec {
+                rivven_connect::ConnectorSpec::new(#name, #version)
+                    #description_code
+                    #doc_url_code
+                    .build()
+            }
+
+            /// Returns the connector name
+            pub const fn name() -> &'static str {
+                #name
+            }
+
+            /// Returns the connector version
+            pub const fn version() -> &'static str {
+                #version
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// Derive macro for implementing SinkConfig boilerplate
+///
+/// This macro generates the `spec()` method for a sink connector configuration.
+///
+/// # Attributes
+///
+/// - `#[sink(name = "...")]` - Connector name (required)
+/// - `#[sink(version = "...")]` - Connector version (default: "0.1.0")
+/// - `#[sink(description = "...")]` - Connector description
+/// - `#[sink(documentation_url = "...")]` - Documentation URL
+/// - `#[sink(batching)]` - Enable batching support
+/// - `#[sink(batch_size = N)]` - Default batch size
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[derive(Debug, Deserialize, Validate, JsonSchema, SinkConfig)]
+/// #[sink(name = "s3-sink", version = "1.0.0", batching, batch_size = 1000)]
+/// pub struct S3SinkConfig {
+///     pub bucket: String,
+///     pub prefix: Option<String>,
+/// }
+/// ```
+#[proc_macro_derive(SinkConfig, attributes(sink))]
+pub fn derive_sink_config(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+
+    let attrs = match SinkAttrs::from_derive_input(&input) {
+        Ok(v) => v,
+        Err(e) => return TokenStream::from(e.write_errors()),
+    };
+
+    let struct_name = &attrs.ident;
+    let spec_struct_name = quote::format_ident!("{}Spec", struct_name);
+
+    let name = attrs
+        .name
+        .unwrap_or_else(|| struct_name.to_string().to_lowercase().replace("config", ""));
+    let version = attrs.version.unwrap_or_else(|| "0.1.0".to_string());
+
+    let description_code = match attrs.description {
+        Some(desc) => quote! { .with_description(#desc) },
+        None => quote! {},
+    };
+
+    let doc_url_code = match attrs.documentation_url {
+        Some(url) => quote! { .with_documentation_url(#url) },
+        None => quote! {},
+    };
+
+    let batch_config_code = if attrs.batching {
+        let batch_size = attrs.batch_size.unwrap_or(10_000);
+        quote! {
+            /// Returns the default batch configuration
+            pub fn batch_config() -> rivven_connect::BatchConfig {
+                rivven_connect::BatchConfig {
+                    max_records: #batch_size,
+                    ..Default::default()
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let expanded = quote! {
+        /// Auto-generated spec holder for this sink configuration
+        pub struct #spec_struct_name;
+
+        impl #spec_struct_name {
+            /// Returns the connector specification
+            pub fn spec() -> rivven_connect::ConnectorSpec {
+                rivven_connect::ConnectorSpec::new(#name, #version)
+                    #description_code
+                    #doc_url_code
+                    .build()
+            }
+
+            /// Returns the connector name
+            pub const fn name() -> &'static str {
+                #name
+            }
+
+            /// Returns the connector version
+            pub const fn version() -> &'static str {
+                #version
+            }
+
+            #batch_config_code
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// Derive macro for implementing TransformConfig boilerplate
+///
+/// # Attributes
+///
+/// - `#[transform(name = "...")]` - Transform name (required)
+/// - `#[transform(version = "...")]` - Transform version (default: "0.1.0")
+/// - `#[transform(description = "...")]` - Transform description
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[derive(Debug, Deserialize, Validate, JsonSchema, TransformConfig)]
+/// #[transform(name = "json-filter", version = "1.0.0")]
+/// pub struct JsonFilterConfig {
+///     pub field: String,
+///     pub pattern: String,
+/// }
+/// ```
+#[proc_macro_derive(TransformConfig, attributes(transform))]
+pub fn derive_transform_config(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+
+    let attrs = match TransformAttrs::from_derive_input(&input) {
+        Ok(v) => v,
+        Err(e) => return TokenStream::from(e.write_errors()),
+    };
+
+    let struct_name = &attrs.ident;
+    let spec_struct_name = quote::format_ident!("{}Spec", struct_name);
+
+    let name = attrs
+        .name
+        .unwrap_or_else(|| struct_name.to_string().to_lowercase().replace("config", ""));
+    let version = attrs.version.unwrap_or_else(|| "0.1.0".to_string());
+
+    let description_code = match attrs.description {
+        Some(desc) => quote! { .with_description(#desc) },
+        None => quote! {},
+    };
+
+    let expanded = quote! {
+        /// Auto-generated spec holder for this transform configuration
+        pub struct #spec_struct_name;
+
+        impl #spec_struct_name {
+            /// Returns the connector specification
+            pub fn spec() -> rivven_connect::ConnectorSpec {
+                rivven_connect::ConnectorSpec::new(#name, #version)
+                    #description_code
+                    .build()
+            }
+
+            /// Returns the transform name
+            pub const fn name() -> &'static str {
+                #name
+            }
+
+            /// Returns the transform version
+            pub const fn version() -> &'static str {
+                #version
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// Attributes for connector_spec macro
+#[derive(Debug, Default, FromMeta)]
+struct ConnectorSpecAttrs {
+    /// Connector name
+    #[darling(default)]
+    name: Option<String>,
+    /// Connector version
+    #[darling(default)]
+    version: Option<String>,
+    /// Description of the connector
+    #[darling(default)]
+    description: Option<String>,
+    /// Documentation URL
+    #[darling(default)]
+    documentation_url: Option<String>,
+}
+
+/// Attribute macro for defining connector specifications inline
+///
+/// This macro can be applied to a module or struct to generate
+/// a `ConnectorSpec` with the given attributes.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[connector_spec(
+///     name = "my-connector",
+///     version = "1.0.0",
+///     description = "A custom connector",
+///     documentation_url = "https://docs.example.com"
+/// )]
+/// pub mod my_connector {
+///     // Connector implementation
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn connector_spec(attr: TokenStream, item: TokenStream) -> TokenStream {
+    // Parse attributes using darling
+    let attr_args = match darling::ast::NestedMeta::parse_meta_list(attr.into()) {
+        Ok(v) => v,
+        Err(e) => return TokenStream::from(darling::Error::from(e).write_errors()),
+    };
+
+    let attrs = match ConnectorSpecAttrs::from_list(&attr_args) {
+        Ok(v) => v,
+        Err(e) => return TokenStream::from(e.write_errors()),
+    };
+
+    let name = attrs.name.unwrap_or_else(|| "unknown".to_string());
+    let version = attrs.version.unwrap_or_else(|| "0.1.0".to_string());
+
+    let description_code = match attrs.description {
+        Some(desc) => quote! { .with_description(#desc) },
+        None => quote! {},
+    };
+
+    let doc_url_code = match attrs.documentation_url {
+        Some(url) => quote! { .with_documentation_url(#url) },
+        None => quote! {},
+    };
+
+    let item: proc_macro2::TokenStream = item.into();
+
+    let expanded = quote! {
+        #item
+
+        /// Auto-generated connector specification
+        pub fn connector_spec() -> rivven_connect::ConnectorSpec {
+            rivven_connect::ConnectorSpec::new(#name, #version)
+                #description_code
+                #doc_url_code
+                .build()
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_derives_compile() {
+        // These tests just verify the macros compile
+        // Actual behavior is tested in integration tests
+    }
+}

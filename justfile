@@ -62,7 +62,7 @@ doc:
 doc-open:
     cargo doc --workspace --no-deps --all-features --open
 
-# Serve Jekyll docs locally (without baseurl)
+# Serve Jekyll docs locally
 docs-serve:
     cd docs && bundle install && bundle exec jekyll serve --baseurl ""
 
@@ -70,39 +70,55 @@ docs-serve:
 # Running
 # ============================================================================
 
-# Run the server
+# Run the broker (rivvend)
 server *ARGS:
-    cargo run --bin rivven-server -- {{ARGS}}
+    cargo run --bin rivvend -- {{ARGS}}
 
-# Run the server in release mode
+# Run the broker in release mode
 server-release *ARGS:
-    cargo run --release --bin rivven-server -- {{ARGS}}
+    cargo run --release --bin rivvend -- {{ARGS}}
 
-# Run the CLI
+# Run the CLI (rivvenctl)
 cli *ARGS:
-    cargo run --bin rivven -- {{ARGS}}
+    cargo run --bin rivvenctl -- {{ARGS}}
 
-# Run the CLI in release mode
-cli-release *ARGS:
-    cargo run --release --bin rivven -- {{ARGS}}
+# Run rivven-connect
+connect *ARGS:
+    cargo run --bin rivven-connect -- {{ARGS}}
 
-# Start server with default data directory
+# Run rivven-operator
+operator *ARGS:
+    cargo run --bin rivven-operator -- {{ARGS}}
+
+# Start broker with dashboard
 run:
-    cargo run --bin rivven-server -- --data-dir ./data
+    cargo run --bin rivvend -- --dashboard --data-dir ./data
 
 # ============================================================================
 # Docker
 # ============================================================================
 
-# Build Docker image
+# Build all Docker images
+docker-build-all: docker-build docker-build-connect docker-build-operator
+
+# Build broker image (default)
 docker-build:
-    docker build -t rivven:latest .
+    docker build -t ghcr.io/hupe1980/rivven:latest .
 
-# Run Docker container
+# Build connect image
+docker-build-connect:
+    docker build --build-arg BINARY=rivven-connect -t ghcr.io/hupe1980/rivven-connect:latest .
+
+# Build operator image
+docker-build-operator:
+    docker build --build-arg BINARY=rivven-operator -t ghcr.io/hupe1980/rivven-operator:latest .
+
+# Run broker container
 docker-run:
-    docker run -d --name rivven -p 9292:9292 -v rivven-data:/data rivven:latest
+    docker run -d --name rivven -p 9092:9092 -p 9094:9094 -v rivven-data:/data \
+        ghcr.io/hupe1980/rivven:latest --dashboard --data-dir /data
 
-# Stop and remove Docker container
+# Stop and remove container
 docker-stop:
     docker stop rivven && docker rm rivven
 
@@ -156,7 +172,7 @@ clean-data:
     rm -rf ./data
 
 # ============================================================================
-# Database (for CDC testing)
+# Database (CDC testing)
 # ============================================================================
 
 # Start test PostgreSQL
@@ -171,28 +187,44 @@ postgres-stop:
 # Demo
 # ============================================================================
 
-# Run the full demo (server + producer + consumer)
-demo:
-    ./scripts/demo.sh
-
-# Quick demo: start server, create topic, produce, consume
-demo-quick: build-release
-    @echo "Starting Rivven server..."
+# Quick demo: broker + produce + consume
+demo: build-release
+    @echo "Starting Rivven broker..."
     @rm -rf ./demo-data && mkdir -p ./demo-data
-    ./target/release/rivven-server --data-dir ./demo-data &
+    ./target/release/rivvend --data-dir ./demo-data &
     @sleep 2
     @echo "\nCreating topic 'test'..."
-    ./target/release/rivven topic create test --partitions 3 --server 127.0.0.1:9092
+    ./target/release/rivvenctl topic create test --partitions 3
     @echo "\nProducing messages..."
-    @for i in 1 2 3 4 5; do ./target/release/rivven produce test "Message $$i" --server 127.0.0.1:9092; done
+    @for i in 1 2 3 4 5; do ./target/release/rivvenctl publish test "Message $$i"; done
     @echo "\nConsuming messages..."
-    ./target/release/rivven consume test --partition 0 --offset 0 --max 10 --server 127.0.0.1:9092
-    @echo "\nDemo complete! Server running on 127.0.0.1:9092. Press Ctrl+C to stop."
-    @wait
+    ./target/release/rivvenctl consume test --from-beginning --max 10
+    @echo "\nDemo complete! Broker running on 127.0.0.1:9092"
 
-# Run server with dashboard enabled (requires --features dashboard)
-demo-dashboard:
-    ./scripts/demo-dashboard.sh
+# Demo with dashboard
+demo-dashboard: build-release
+    @rm -rf ./demo-data && mkdir -p ./demo-data
+    ./target/release/rivvend --dashboard --data-dir ./demo-data
+
+# ============================================================================
+# Dashboard (Leptos/WASM)
+# ============================================================================
+
+# Build dashboard WASM bundle
+dashboard-build:
+    cd crates/rivven-dashboard && trunk build --release
+
+# Start dashboard dev server
+dashboard-dev:
+    cd crates/rivven-dashboard && trunk serve --port 8081
+
+# Build dashboard and embed in server
+dashboard-install: dashboard-build
+    rm -rf crates/rivven-server/static/*
+    cp -r crates/rivven-dashboard/dist/* crates/rivven-server/static/
+
+# Full release with embedded dashboard
+release-with-dashboard: dashboard-install build-release
 
 # ============================================================================
 # Utilities

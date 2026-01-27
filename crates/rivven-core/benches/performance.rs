@@ -241,28 +241,21 @@ fn bench_read_performance(c: &mut Criterion) {
 }
 
 fn bench_metrics_overhead(c: &mut Criterion) {
-    use rivven_core::metrics::{metrics, Counter, Timer};
+    use rivven_core::metrics::CoreMetrics;
 
     let mut group = c.benchmark_group("metrics_overhead");
 
     group.bench_function("counter_increment", |b| {
-        let counter = Counter::new();
         b.iter(|| {
-            black_box(counter.inc());
+            CoreMetrics::increment_messages_appended();
+            black_box(());
         });
     });
 
-    group.bench_function("timer_elapsed", |b| {
+    group.bench_function("batch_counter_increment", |b| {
         b.iter(|| {
-            let timer = Timer::new();
-            std::thread::sleep(std::time::Duration::from_micros(1));
-            let _ = black_box(timer.elapsed_us());
-        });
-    });
-
-    group.bench_function("histogram_observe", |b| {
-        b.iter(|| {
-            black_box(metrics().append_duration_seconds.observe(1000)); // 1ms
+            CoreMetrics::add_messages_appended(100);
+            black_box(());
         });
     });
 
@@ -271,9 +264,10 @@ fn bench_metrics_overhead(c: &mut Criterion) {
 
 // Helper functions
 fn get_test_config() -> Config {
-    let mut config = Config::default();
-    config.data_dir = format!("/tmp/rivven-bench-{}", uuid::Uuid::new_v4());
-    config
+    Config {
+        data_dir: format!("/tmp/rivven-bench-{}", uuid::Uuid::new_v4()),
+        ..Default::default()
+    }
 }
 
 fn create_test_message(payload_size: usize) -> Message {

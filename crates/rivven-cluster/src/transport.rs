@@ -420,7 +420,6 @@ impl ConnectionPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{RequestHeader, ResponseHeader};
 
     #[tokio::test]
     async fn test_transport_creation() {

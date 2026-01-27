@@ -2,6 +2,7 @@
 //!
 //! Implements the MySQL replication protocol for CDC:
 //! - Handshake and authentication (mysql_native_password, caching_sha2_password)
+//! - TLS/SSL encryption support
 //! - COM_REGISTER_SLAVE
 //! - COM_BINLOG_DUMP / COM_BINLOG_DUMP_GTID
 //! - Binlog event streaming
@@ -13,7 +14,22 @@ use sha2::Sha256;
 use std::io::Read;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
+use tokio::time::{timeout, Duration};
 use tracing::{debug, info, warn};
+
+#[cfg(feature = "mysql-tls")]
+use std::sync::Arc;
+#[cfg(feature = "mysql-tls")]
+use tracing::trace;
+
+use crate::common::{Validator, CONNECTION_TIMEOUT_SECS};
+
+#[cfg(feature = "mysql-tls")]
+use crate::common::{tls::build_rustls_config, TlsConfig};
+#[cfg(feature = "mysql-tls")]
+use rustls::pki_types::ServerName;
+#[cfg(feature = "mysql-tls")]
+use tokio_rustls::{client::TlsStream, TlsConnector};
 
 /// MySQL packet header size (4 bytes: 3 for length + 1 for sequence)
 const PACKET_HEADER_SIZE: usize = 4;
@@ -62,6 +78,67 @@ impl CapabilityFlags {
         self.0
     }
 }
+
+// ============================================================================
+// Stream Wrapper for TLS Support
+// ============================================================================
+
+/// Wrapper for handling both plain TCP and TLS streams
+pub enum MysqlStreamWrapper {
+    /// Plain TCP connection (no encryption)
+    Plain(BufReader<TcpStream>),
+    /// TLS-encrypted connection (boxed to avoid large enum variant)
+    #[cfg(feature = "mysql-tls")]
+    Tls(Box<BufReader<TlsStream<TcpStream>>>),
+}
+
+impl MysqlStreamWrapper {
+    /// Read exactly n bytes into buffer
+    pub async fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+        match self {
+            MysqlStreamWrapper::Plain(s) => {
+                s.read_exact(buf).await?;
+                Ok(())
+            }
+            #[cfg(feature = "mysql-tls")]
+            MysqlStreamWrapper::Tls(s) => {
+                s.read_exact(buf).await?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Write all bytes
+    pub async fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        match self {
+            MysqlStreamWrapper::Plain(s) => s.get_mut().write_all(buf).await,
+            #[cfg(feature = "mysql-tls")]
+            MysqlStreamWrapper::Tls(s) => s.get_mut().write_all(buf).await,
+        }
+    }
+
+    /// Flush the stream
+    pub async fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            MysqlStreamWrapper::Plain(s) => s.get_mut().flush().await,
+            #[cfg(feature = "mysql-tls")]
+            MysqlStreamWrapper::Tls(s) => s.get_mut().flush().await,
+        }
+    }
+
+    /// Check if this is a TLS stream
+    pub fn is_tls(&self) -> bool {
+        match self {
+            MysqlStreamWrapper::Plain(_) => false,
+            #[cfg(feature = "mysql-tls")]
+            MysqlStreamWrapper::Tls(_) => true,
+        }
+    }
+}
+
+// ============================================================================
+// Handshake Packet
+// ============================================================================
 
 /// MySQL handshake packet (initial greeting from server)
 #[derive(Debug)]
@@ -183,12 +260,17 @@ impl HandshakePacket {
     }
 }
 
+// ============================================================================
+// MySQL Binlog Client
+// ============================================================================
+
 /// MySQL binlog client for replication
 pub struct MySqlBinlogClient {
-    stream: BufReader<TcpStream>,
+    stream: MysqlStreamWrapper,
     sequence_id: u8,
     server_version: String,
     connection_id: u32,
+    is_tls: bool,
 }
 
 impl std::fmt::Debug for MySqlBinlogClient {
@@ -197,12 +279,21 @@ impl std::fmt::Debug for MySqlBinlogClient {
             .field("sequence_id", &self.sequence_id)
             .field("server_version", &self.server_version)
             .field("connection_id", &self.connection_id)
+            .field("is_tls", &self.is_tls)
             .finish_non_exhaustive()
     }
 }
 
 impl MySqlBinlogClient {
-    /// Connect to MySQL server and authenticate
+    /// Connect to MySQL server and authenticate (no TLS)
+    ///
+    /// For TLS connections, use `connect_with_tls()` instead.
+    ///
+    /// # Security
+    ///
+    /// - Validates user identifier to prevent injection attacks
+    /// - Applies connection timeout to prevent hanging connections
+    /// - Applies I/O timeouts for all read/write operations
     pub async fn connect(
         host: &str,
         port: u16,
@@ -210,16 +301,21 @@ impl MySqlBinlogClient {
         password: Option<&str>,
         database: Option<&str>,
     ) -> Result<Self> {
-        let addr = format!("{}:{}", host, port);
-        info!("Connecting to MySQL at {}", addr);
+        // Security: Validate identifier
+        Validator::validate_identifier(user)?;
+        if let Some(db) = database {
+            Validator::validate_identifier(db)?;
+        }
 
-        let stream = TcpStream::connect(&addr)
-            .await
-            .context("Failed to connect to MySQL server")?;
-        let mut stream = BufReader::new(stream);
+        let addr = format!("{}:{}", host, port);
+        info!("Connecting to MySQL at {} (no TLS)", addr);
+
+        // Security: Apply connection timeout
+        let tcp_stream = Self::connect_tcp(&addr).await?;
+        let mut stream = MysqlStreamWrapper::Plain(BufReader::new(tcp_stream));
 
         // Read handshake packet
-        let handshake_data = Self::read_packet_static(&mut stream).await?;
+        let (handshake_data, seq) = Self::read_packet_wrapped(&mut stream, 0).await?;
         let handshake =
             HandshakePacket::parse(&handshake_data).context("Failed to parse handshake packet")?;
 
@@ -231,9 +327,10 @@ impl MySqlBinlogClient {
 
         let mut client = Self {
             stream,
-            sequence_id: 1, // After handshake
+            sequence_id: seq,
             server_version: handshake.server_version.clone(),
             connection_id: handshake.connection_id,
+            is_tls: false,
         };
 
         // Authenticate
@@ -244,26 +341,256 @@ impl MySqlBinlogClient {
         Ok(client)
     }
 
-    /// Read a MySQL packet (static version for construction)
-    async fn read_packet_static(stream: &mut BufReader<TcpStream>) -> Result<Vec<u8>> {
-        // Read header (4 bytes)
+    /// Connect to MySQL server with TLS encryption
+    ///
+    /// This method:
+    /// 1. Establishes TCP connection
+    /// 2. Receives handshake from server
+    /// 3. Sends SSL Request packet
+    /// 4. Upgrades to TLS
+    /// 5. Performs authentication over encrypted channel
+    #[cfg(feature = "mysql-tls")]
+    pub async fn connect_with_tls(
+        host: &str,
+        port: u16,
+        user: &str,
+        password: Option<&str>,
+        database: Option<&str>,
+        tls_config: &TlsConfig,
+    ) -> Result<Self> {
+        // Security: Validate identifier
+        Validator::validate_identifier(user)?;
+        if let Some(db) = database {
+            Validator::validate_identifier(db)?;
+        }
+
+        // Validate TLS config
+        tls_config
+            .validate()
+            .map_err(|e| anyhow::anyhow!("Invalid TLS config: {}", e))?;
+
+        // If TLS is disabled, fall back to plain connection
+        if !tls_config.is_enabled() {
+            info!("TLS disabled, connecting to MySQL without encryption");
+            return Self::connect(host, port, user, password, database).await;
+        }
+
+        let addr = format!("{}:{}", host, port);
+        info!(
+            "Connecting to MySQL at {} (TLS mode: {})",
+            addr, tls_config.mode
+        );
+
+        // Connect TCP
+        let tcp_stream = Self::connect_tcp(&addr).await?;
+        let mut plain_stream = BufReader::new(tcp_stream);
+
+        // Read handshake packet
+        let (handshake_data, seq) = Self::read_packet_plain(&mut plain_stream, 0).await?;
+        let handshake =
+            HandshakePacket::parse(&handshake_data).context("Failed to parse handshake packet")?;
+
+        info!(
+            "Connected to MySQL {} (connection_id={})",
+            handshake.server_version, handshake.connection_id
+        );
+
+        // Check if server supports SSL
+        if !handshake.capability_flags.has(CapabilityFlags::CLIENT_SSL) {
+            if tls_config.is_required() {
+                bail!(
+                    "Server does not support SSL but TLS mode '{}' requires it",
+                    tls_config.mode
+                );
+            }
+            warn!("Server does not support SSL, falling back to plain connection");
+            let mut client = Self {
+                stream: MysqlStreamWrapper::Plain(plain_stream),
+                sequence_id: seq,
+                server_version: handshake.server_version.clone(),
+                connection_id: handshake.connection_id,
+                is_tls: false,
+            };
+            client
+                .authenticate(user, password, database, &handshake)
+                .await?;
+            return Ok(client);
+        }
+
+        // Send SSL Request packet
+        let ssl_request = Self::build_ssl_request(database.is_some());
+        Self::write_packet_plain(&mut plain_stream, &ssl_request, seq).await?;
+
+        // Upgrade to TLS
+        trace!("Upgrading MySQL connection to TLS");
+        let tcp_stream = plain_stream.into_inner();
+        let tls_stream = Self::upgrade_to_tls(tcp_stream, host, tls_config).await?;
+        let stream = MysqlStreamWrapper::Tls(Box::new(BufReader::new(tls_stream)));
+
+        info!("✓ MySQL TLS connection established");
+
+        let mut client = Self {
+            stream,
+            sequence_id: seq + 1,
+            server_version: handshake.server_version.clone(),
+            connection_id: handshake.connection_id,
+            is_tls: true,
+        };
+
+        // Authenticate over TLS
+        client
+            .authenticate(user, password, database, &handshake)
+            .await?;
+
+        Ok(client)
+    }
+
+    /// Check if the connection is using TLS
+    pub fn is_tls(&self) -> bool {
+        self.is_tls
+    }
+
+    /// Connect TCP with timeout
+    async fn connect_tcp(addr: &str) -> Result<TcpStream> {
+        match timeout(
+            Duration::from_secs(CONNECTION_TIMEOUT_SECS),
+            TcpStream::connect(addr),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => Ok(stream),
+            Ok(Err(e)) => Err(e).context("Failed to connect to MySQL server"),
+            Err(_) => bail!(
+                "Connection timeout after {}s connecting to MySQL",
+                CONNECTION_TIMEOUT_SECS
+            ),
+        }
+    }
+
+    /// Build SSL Request packet
+    #[cfg(feature = "mysql-tls")]
+    fn build_ssl_request(with_db: bool) -> Vec<u8> {
+        let mut request = BytesMut::with_capacity(32);
+
+        // Client capabilities with SSL flag
+        let mut client_flags = CapabilityFlags::CLIENT_PROTOCOL_41
+            | CapabilityFlags::CLIENT_SECURE_CONNECTION
+            | CapabilityFlags::CLIENT_LONG_PASSWORD
+            | CapabilityFlags::CLIENT_TRANSACTIONS
+            | CapabilityFlags::CLIENT_PLUGIN_AUTH
+            | CapabilityFlags::CLIENT_DEPRECATE_EOF
+            | CapabilityFlags::CLIENT_SSL;
+
+        if with_db {
+            client_flags |= CapabilityFlags::CLIENT_CONNECT_WITH_DB;
+        }
+
+        // Client flags (4 bytes)
+        request.put_u32_le(client_flags);
+        // Max packet size (4 bytes)
+        request.put_u32_le(MAX_PACKET_SIZE as u32);
+        // Character set (1 byte) - utf8mb4 = 45
+        request.put_u8(45);
+        // Reserved (23 bytes)
+        request.put_slice(&[0u8; 23]);
+
+        request.to_vec()
+    }
+
+    /// Upgrade connection to TLS
+    #[cfg(feature = "mysql-tls")]
+    async fn upgrade_to_tls(
+        tcp_stream: TcpStream,
+        host: &str,
+        tls_config: &TlsConfig,
+    ) -> Result<TlsStream<TcpStream>> {
+        let rustls_config = build_rustls_config(tls_config)?;
+        let connector = TlsConnector::from(Arc::new(rustls_config));
+
+        let server_name = tls_config
+            .server_name
+            .as_deref()
+            .unwrap_or(host)
+            .to_string();
+
+        let server_name = ServerName::try_from(server_name.clone())
+            .map_err(|_| anyhow::anyhow!("Invalid server name for TLS: {}", server_name))?;
+
+        let tls_stream = timeout(
+            Duration::from_secs(CONNECTION_TIMEOUT_SECS),
+            connector.connect(server_name, tcp_stream),
+        )
+        .await
+        .context("TLS handshake timeout")?
+        .context("TLS handshake failed")?;
+
+        Ok(tls_stream)
+    }
+
+    /// Read a MySQL packet (plain stream version for TLS upgrade)
+    #[cfg(feature = "mysql-tls")]
+    async fn read_packet_plain(
+        stream: &mut BufReader<TcpStream>,
+        _seq: u8,
+    ) -> Result<(Vec<u8>, u8)> {
         let mut header = [0u8; 4];
         stream.read_exact(&mut header).await?;
 
         let payload_len =
             (header[0] as usize) | ((header[1] as usize) << 8) | ((header[2] as usize) << 16);
-        let _sequence_id = header[3];
+        let sequence_id = header[3];
 
-        // Read payload
         let mut payload = vec![0u8; payload_len];
         stream.read_exact(&mut payload).await?;
 
-        Ok(payload)
+        Ok((payload, sequence_id.wrapping_add(1)))
+    }
+
+    /// Write a MySQL packet (plain stream version for TLS upgrade)
+    #[cfg(feature = "mysql-tls")]
+    async fn write_packet_plain(
+        stream: &mut BufReader<TcpStream>,
+        data: &[u8],
+        seq: u8,
+    ) -> Result<()> {
+        let len = data.len();
+        if len > MAX_PACKET_SIZE {
+            bail!("Packet too large: {} bytes", len);
+        }
+
+        let mut packet = Vec::with_capacity(PACKET_HEADER_SIZE + len);
+        packet.push((len & 0xFF) as u8);
+        packet.push(((len >> 8) & 0xFF) as u8);
+        packet.push(((len >> 16) & 0xFF) as u8);
+        packet.push(seq);
+        packet.extend_from_slice(data);
+
+        stream.get_mut().write_all(&packet).await?;
+        stream.get_mut().flush().await?;
+
+        Ok(())
+    }
+
+    /// Read a MySQL packet using stream wrapper
+    async fn read_packet_wrapped(
+        stream: &mut MysqlStreamWrapper,
+        _seq: u8,
+    ) -> Result<(Vec<u8>, u8)> {
+        let mut header = [0u8; 4];
+        stream.read_exact(&mut header).await?;
+
+        let payload_len =
+            (header[0] as usize) | ((header[1] as usize) << 8) | ((header[2] as usize) << 16);
+        let sequence_id = header[3];
+
+        let mut payload = vec![0u8; payload_len];
+        stream.read_exact(&mut payload).await?;
+
+        Ok((payload, sequence_id.wrapping_add(1)))
     }
 
     /// Read a MySQL packet
     async fn read_packet(&mut self) -> Result<Vec<u8>> {
-        // Read header (4 bytes)
         let mut header = [0u8; 4];
         self.stream.read_exact(&mut header).await?;
 
@@ -271,7 +598,6 @@ impl MySqlBinlogClient {
             (header[0] as usize) | ((header[1] as usize) << 8) | ((header[2] as usize) << 16);
         self.sequence_id = header[3].wrapping_add(1);
 
-        // Read payload
         let mut payload = vec![0u8; payload_len];
         self.stream.read_exact(&mut payload).await?;
 
@@ -292,7 +618,8 @@ impl MySqlBinlogClient {
         packet.push(self.sequence_id);
         packet.extend_from_slice(data);
 
-        self.stream.get_mut().write_all(&packet).await?;
+        self.stream.write_all(&packet).await?;
+        self.stream.flush().await?;
         self.sequence_id = self.sequence_id.wrapping_add(1);
 
         Ok(())

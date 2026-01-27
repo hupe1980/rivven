@@ -8,7 +8,7 @@ repository.workspace = true
 description = "Command-line interface for Rivven event streaming platform"
 
 [[bin]]
-name = "rivven"
+name = "rivvenctl"
 path = "src/main.rs"
 
 [dependencies]

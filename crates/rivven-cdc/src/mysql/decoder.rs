@@ -1468,8 +1468,8 @@ mod tests {
         let _ = ColumnValue::Null;
         let _ = ColumnValue::SignedInt(-42);
         let _ = ColumnValue::UnsignedInt(42);
-        let _ = ColumnValue::Float(3.14);
-        let _ = ColumnValue::Double(3.14159);
+        let _ = ColumnValue::Float(1.23);
+        let _ = ColumnValue::Double(4.56789);
         let _ = ColumnValue::Decimal("123.45".to_string());
         let _ = ColumnValue::String("hello".to_string());
         let _ = ColumnValue::Bytes(vec![1, 2, 3]);

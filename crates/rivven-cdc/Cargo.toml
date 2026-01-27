@@ -16,6 +16,12 @@ postgres = [
     "dep:postgres-protocol",
     "dep:postgres-types",
     "dep:md-5",
+    "dep:sha2",
+    "dep:hmac",
+    "dep:pbkdf2",
+    "dep:base64",
+    "dep:rand",
+    "dep:fallible-iterator",
 ]
 # PostgreSQL with TLS support (rustls-based)
 postgres-tls = [
@@ -32,10 +38,18 @@ mysql = [
     "dep:sha2",
     "dep:base64",
 ]
+# MySQL with TLS support (rustls-based)
+mysql-tls = [
+    "mysql",
+    "dep:rustls",
+    "dep:rustls-pemfile",
+    "dep:webpki-roots",
+    "dep:tokio-rustls",
+]
 # MariaDB CDC (uses MySQL binlog protocol with MariaDB extensions)
 mariadb = ["mysql"]
 # All CDC sources
-full = ["postgres", "postgres-tls", "mysql", "mariadb"]
+full = ["postgres", "postgres-tls", "mysql", "mysql-tls", "mariadb"]
 
 [dependencies]
 rivven-core = { workspace = true }
@@ -64,6 +78,7 @@ tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"], optional = t
 postgres-protocol = { version = "0.6", optional = true }
 postgres-types = { version = "0.2", features = ["derive"], optional = true }
 md-5 = { version = "0.10", optional = true }
+fallible-iterator = { version = "0.2", optional = true }
 
 # TLS support for PostgreSQL
 tokio-postgres-rustls = { version = "0.13", optional = true }
@@ -76,6 +91,11 @@ tokio-rustls = { version = "0.26", optional = true }
 sha1 = { version = "0.10", optional = true }
 sha2 = { version = "0.10", optional = true }
 base64 = { version = "0.22", optional = true }
+
+# SCRAM authentication (PostgreSQL SCRAM-SHA-256)
+hmac = { version = "0.12", optional = true }
+pbkdf2 = { version = "0.12", optional = true }
+rand = { version = "0.8", optional = true }
 
 # Encryption
 ring = "0.17"

@@ -225,6 +225,9 @@ pub struct WalConfig {
     pub sync_mode: SyncMode,
     /// Maximum WAL file size before rotation
     pub max_file_size: u64,
+    /// Optional encryption for data at rest
+    #[cfg(feature = "encryption")]
+    pub encryptor: Option<std::sync::Arc<dyn crate::encryption::Encryptor>>,
 }
 
 impl Default for WalConfig {
@@ -238,6 +241,8 @@ impl Default for WalConfig {
             direct_io: false,                   // Requires O_DIRECT support
             sync_mode: SyncMode::Fsync,
             max_file_size: 1024 * 1024 * 1024, // 1 GB
+            #[cfg(feature = "encryption")]
+            encryptor: None,
         }
     }
 }
@@ -624,11 +629,38 @@ impl GroupCommitWal {
             let lsn = self.current_lsn.fetch_add(1, Ordering::AcqRel) + 1;
             lsns.push(lsn);
 
+            // Optionally encrypt the data
+            #[cfg(feature = "encryption")]
+            let (data, is_encrypted) = if let Some(ref encryptor) = self.config.encryptor {
+                if encryptor.is_enabled() {
+                    match encryptor.encrypt(&request.data, lsn) {
+                        Ok(encrypted) => (Bytes::from(encrypted), true),
+                        Err(e) => {
+                            tracing::error!("Encryption failed for LSN {}: {:?}", lsn, e);
+                            (request.data.clone(), false)
+                        }
+                    }
+                } else {
+                    (request.data.clone(), false)
+                }
+            } else {
+                (request.data.clone(), false)
+            };
+
+            #[cfg(not(feature = "encryption"))]
+            let (data, is_encrypted) = (request.data.clone(), false);
+
+            let flags = if is_encrypted {
+                RecordFlags(RecordFlags::HAS_CHECKSUM.0 | RecordFlags::ENCRYPTED.0)
+            } else {
+                RecordFlags::HAS_CHECKSUM
+            };
+
             let record = WalRecord {
                 lsn,
                 record_type: request.record_type,
-                flags: RecordFlags::HAS_CHECKSUM,
-                data: request.data.clone(),
+                flags,
+                data,
             };
 
             let record_bytes = record.to_bytes();
@@ -829,12 +861,51 @@ pub struct WalStatsSnapshot {
 pub struct WalReader {
     path: PathBuf,
     position: u64,
+    #[cfg(feature = "encryption")]
+    encryptor: Option<std::sync::Arc<dyn crate::encryption::Encryptor>>,
 }
 
 impl WalReader {
     /// Open a WAL file for reading
     pub fn open(path: PathBuf) -> io::Result<Self> {
-        Ok(Self { path, position: 0 })
+        Ok(Self {
+            path,
+            position: 0,
+            #[cfg(feature = "encryption")]
+            encryptor: None,
+        })
+    }
+
+    /// Open a WAL file for reading with optional encryption
+    #[cfg(feature = "encryption")]
+    pub fn open_with_encryption(
+        path: PathBuf,
+        encryptor: Option<std::sync::Arc<dyn crate::encryption::Encryptor>>,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            path,
+            position: 0,
+            encryptor,
+        })
+    }
+
+    /// Decrypt record data if needed
+    #[cfg(feature = "encryption")]
+    fn decrypt_record_data(&self, record: &mut WalRecord) -> io::Result<()> {
+        if record.flags.is_encrypted() {
+            if let Some(ref encryptor) = self.encryptor {
+                let decrypted = encryptor
+                    .decrypt(&record.data, record.lsn)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+                record.data = Bytes::from(decrypted);
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Record is encrypted but no encryptor provided",
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Read all records from current position
@@ -874,6 +945,15 @@ impl WalReader {
             lsn += 1;
 
             match WalRecord::from_bytes(&data[offset..offset + record_size], lsn) {
+                #[cfg(feature = "encryption")]
+                Ok(mut record) => {
+                    // Decrypt if needed
+                    self.decrypt_record_data(&mut record)?;
+
+                    records.push(record);
+                    self.position += record_size as u64;
+                }
+                #[cfg(not(feature = "encryption"))]
                 Ok(record) => {
                     records.push(record);
                     self.position += record_size as u64;
@@ -1079,7 +1159,7 @@ mod tests {
         let entries: Vec<_> = std::fs::read_dir(&config.dir)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().map_or(false, |ext| ext == "wal"))
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "wal"))
             .collect();
 
         assert!(!entries.is_empty(), "No WAL files found");

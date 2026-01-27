@@ -11,10 +11,12 @@
 //! │  SourceFactory, SinkFactory, AnySource, AnySink, Registry       │
 //! └─────────────────────────────────────────────────────────────────┘
 //!         ↑ implement
-//! ┌─────────────────┬─────────────────┬─────────────────────────────┐
-//! │ rivven-cdc      │ rivven-storage  │ rivven-warehouse            │
-//! │ (sources)       │ (sink: s3/gcs)  │ (sink: snowflake/bq)        │
-//! └─────────────────┴─────────────────┴─────────────────────────────┘
+//! ┌─────────────┬─────────────┬───────────────┬─────────────────────┐
+//! │ rivven-cdc  │ rivven-     │ rivven-       │ rivven-queue        │
+//! │ (sources:   │ storage     │ warehouse     │ (source/sink:       │
+//! │ pg, mysql)  │ (sink: s3,  │ (sink: bq,    │ kafka, mqtt)        │
+//! │             │ gcs, azure) │ snowflake)    │                     │
+//! └─────────────┴─────────────┴───────────────┴─────────────────────┘
 //!         ↑ compose
 //! ┌─────────────────────────────────────────────────────────────────┐
 //! │                     rivven-connect (CLI)                         │
@@ -61,6 +63,11 @@ pub fn create_source_registry() -> SourceRegistry {
     #[cfg(feature = "mysql")]
     registry.register("mysql-cdc", Arc::new(mysql_cdc::MySqlCdcSourceFactory));
 
+    // Note: Kafka/MQTT sources are registered via:
+    // - rivven_queue::register_kafka_connectors(&mut registry)
+    // - rivven_queue::register_mqtt_connectors(&mut registry)
+    // These should be called in the final binary that composes all connectors.
+
     registry
 }
 
@@ -75,9 +82,10 @@ pub fn create_sink_registry() -> SinkRegistry {
     #[cfg(feature = "http")]
     registry.register("http-webhook", Arc::new(http::HttpWebhookSinkFactory));
 
-    // Note: External sinks (snowflake, s3) are registered via:
+    // Note: External sinks are registered via:
     // - rivven_warehouse::register_all(&mut registry)
     // - rivven_storage::register_all(&mut registry)
+    // - rivven_queue::register_kafka_connectors(&mut registry)
     // These should be called in the final binary that composes all connectors.
 
     registry

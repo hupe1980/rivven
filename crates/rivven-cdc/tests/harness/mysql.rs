@@ -14,6 +14,7 @@ pub struct MySqlTestContainer {
     port: u16,
 }
 
+#[allow(dead_code)]
 impl MySqlTestContainer {
     /// Start a MySQL container configured for CDC/binlog replication
     pub async fn start() -> Result<Self> {
@@ -185,6 +186,7 @@ pub struct MariaDbTestContainer {
     port: u16,
 }
 
+#[allow(dead_code)]
 impl MariaDbTestContainer {
     /// Start a MariaDB container configured for CDC/binlog replication
     pub async fn start() -> Result<Self> {

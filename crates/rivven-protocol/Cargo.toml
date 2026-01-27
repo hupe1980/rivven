@@ -1,0 +1,19 @@
+[package]
+name = "rivven-protocol"
+version = "0.0.1"
+edition = "2021"
+description = "Wire protocol types for Rivven distributed event streaming"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/hupe1980/rivven"
+keywords = ["streaming", "protocol", "event-driven"]
+categories = ["network-programming"]
+
+[dependencies]
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["alloc"] }
+thiserror = "1"
+rivven-core = { path = "../rivven-core" }
+
+[features]
+default = []

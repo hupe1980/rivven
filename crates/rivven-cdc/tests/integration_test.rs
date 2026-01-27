@@ -23,9 +23,11 @@ async fn test_postgres_cdc_insert() -> anyhow::Result<()> {
     let test_dir = format!("/tmp/rivven_test_{}", uuid::Uuid::new_v4());
     tokio::fs::create_dir_all(&test_dir).await?;
 
-    let mut config = Config::default();
-    config.data_dir = test_dir.clone();
-    let topic_manager = TopicManager::new(config);
+    let rivven_config = Config {
+        data_dir: test_dir.clone(),
+        ..Default::default()
+    };
+    let topic_manager = TopicManager::new(rivven_config);
     let topic = topic_manager
         .create_topic("cdc.testdb.public.users".to_string(), None)
         .await?;
@@ -112,9 +114,11 @@ async fn test_postgres_cdc_update() -> anyhow::Result<()> {
     let test_dir = format!("/tmp/rivven_test_{}", uuid::Uuid::new_v4());
     tokio::fs::create_dir_all(&test_dir).await?;
 
-    let mut config = Config::default();
-    config.data_dir = test_dir.clone();
-    let topic_manager = TopicManager::new(config);
+    let rivven_config = Config {
+        data_dir: test_dir.clone(),
+        ..Default::default()
+    };
+    let topic_manager = TopicManager::new(rivven_config);
     let topic = topic_manager
         .create_topic("cdc.testdb.public.users".to_string(), None)
         .await?;
@@ -194,9 +198,11 @@ async fn test_postgres_cdc_delete() -> anyhow::Result<()> {
     let test_dir = format!("/tmp/rivven_test_{}", uuid::Uuid::new_v4());
     tokio::fs::create_dir_all(&test_dir).await?;
 
-    let mut config = Config::default();
-    config.data_dir = test_dir.clone();
-    let topic_manager = TopicManager::new(config);
+    let rivven_config = Config {
+        data_dir: test_dir.clone(),
+        ..Default::default()
+    };
+    let topic_manager = TopicManager::new(rivven_config);
     let topic = topic_manager
         .create_topic("cdc.testdb.public.users".to_string(), None)
         .await?;

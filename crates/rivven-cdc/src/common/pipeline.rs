@@ -502,7 +502,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pipeline_basic() {
-        let pipeline = Pipeline::builder("test").transform(|e| Some(e)).build();
+        let pipeline = Pipeline::builder("test").transform(Some).build();
 
         let event = make_event("users", CdcOp::Insert);
         let result = pipeline.process_one(event.clone()).await;
@@ -650,7 +650,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_pipeline_parallel() {
-        let pipeline = Pipeline::builder("test").transform(|e| Some(e)).build();
+        let pipeline = Pipeline::builder("test").transform(Some).build();
 
         let events: Vec<_> = (0..100)
             .map(|i| make_event(&format!("table_{}", i), CdcOp::Insert))

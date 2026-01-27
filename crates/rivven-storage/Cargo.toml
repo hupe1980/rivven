@@ -12,10 +12,12 @@ categories = ["database", "asynchronous"]
 default = []
 # Individual cloud providers
 s3 = ["dep:aws-sdk-s3", "dep:aws-config"]
-gcs = []  # Future: Google Cloud Storage
-azure = [] # Future: Azure Blob Storage
+gcs = ["dep:google-cloud-storage"]
+azure = ["dep:azure_storage", "dep:azure_storage_blobs"]
+# Output formats
+parquet = ["dep:parquet", "dep:arrow-array", "dep:arrow-schema"]
 # Enable all providers
-full = ["s3", "gcs", "azure"]
+full = ["s3", "gcs", "azure", "parquet"]
 
 [dependencies]
 rivven-connect = { path = "../rivven-connect" }
@@ -44,6 +46,18 @@ flate2 = "1"
 # AWS S3 (optional)
 aws-sdk-s3 = { version = "1.65", optional = true }
 aws-config = { version = "1.5", features = ["behavior-version-latest"], optional = true }
+
+# Google Cloud Storage (optional)
+google-cloud-storage = { version = "0.22", optional = true }
+
+# Azure Blob Storage (optional)
+azure_storage = { version = "0.21", optional = true }
+azure_storage_blobs = { version = "0.21", optional = true }
+
+# Apache Parquet (optional)
+parquet = { version = "54", optional = true }
+arrow-array = { version = "54", optional = true }
+arrow-schema = { version = "54", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

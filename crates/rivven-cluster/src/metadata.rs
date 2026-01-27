@@ -524,12 +524,12 @@ impl ClusterMetadata {
 
     /// Serialize for snapshot
     pub fn serialize(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(|e| ClusterError::Serialization(e.to_string()))
+        postcard::to_allocvec(self).map_err(|e| ClusterError::Serialization(e.to_string()))
     }
 
     /// Deserialize from snapshot
     pub fn deserialize(data: &[u8]) -> Result<Self> {
-        bincode::deserialize(data).map_err(|e| ClusterError::Deserialization(e.to_string()))
+        postcard::from_bytes(data).map_err(|e| ClusterError::Deserialization(e.to_string()))
     }
 }
 

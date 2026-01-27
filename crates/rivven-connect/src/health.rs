@@ -225,8 +225,10 @@ mod tests {
 
     #[test]
     fn test_health_state_healthy() {
-        let mut state = HealthState::default();
-        state.broker_connected = true;
+        let mut state = HealthState {
+            broker_connected: true,
+            ..Default::default()
+        };
         state.sources.insert(
             "test".to_string(),
             ConnectorHealth {
@@ -243,8 +245,10 @@ mod tests {
 
     #[test]
     fn test_health_state_unhealthy() {
-        let mut state = HealthState::default();
-        state.broker_connected = true;
+        let mut state = HealthState {
+            broker_connected: true,
+            ..Default::default()
+        };
         state.sources.insert(
             "test".to_string(),
             ConnectorHealth {
@@ -261,8 +265,10 @@ mod tests {
 
     #[test]
     fn test_health_state_no_broker() {
-        let mut state = HealthState::default();
-        state.broker_connected = false;
+        let state = HealthState {
+            broker_connected: false,
+            ..Default::default()
+        };
 
         assert!(!state.is_healthy());
         assert!(!state.is_ready());

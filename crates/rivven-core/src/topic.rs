@@ -185,9 +185,10 @@ mod tests {
     use bytes::Bytes;
 
     fn get_test_config() -> Config {
-        let mut config = Config::default();
-        config.data_dir = format!("/tmp/rivven-test-{}", uuid::Uuid::new_v4());
-        config
+        Config {
+            data_dir: format!("/tmp/rivven-test-{}", uuid::Uuid::new_v4()),
+            ..Default::default()
+        }
     }
 
     #[tokio::test]

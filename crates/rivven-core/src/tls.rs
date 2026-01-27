@@ -996,6 +996,17 @@ where
         self.inner.get_ref().1.protocol_version()
     }
 
+    /// Get negotiated cipher suite
+    pub fn negotiated_cipher_suite(&self) -> Option<rustls::SupportedCipherSuite> {
+        self.inner.get_ref().1.negotiated_cipher_suite()
+    }
+
+    /// Get cipher suite name as string
+    pub fn cipher_suite_name(&self) -> Option<String> {
+        self.negotiated_cipher_suite()
+            .map(|cs| format!("{:?}", cs.suite()))
+    }
+
     /// Check if the connection uses TLS 1.3
     pub fn is_tls_13(&self) -> bool {
         self.protocol_version() == Some(rustls::ProtocolVersion::TLSv1_3)

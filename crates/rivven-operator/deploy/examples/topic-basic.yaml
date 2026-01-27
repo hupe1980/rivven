@@ -1,0 +1,12 @@
+# Basic RivvenTopic example
+# Creates a topic with default settings
+apiVersion: rivven.io/v1alpha1
+kind: RivvenTopic
+metadata:
+  name: orders-events
+  namespace: default
+spec:
+  clusterRef:
+    name: my-rivven-cluster
+  partitions: 6
+  replicationFactor: 3

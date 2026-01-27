@@ -180,7 +180,7 @@ impl Membership {
         let join_msg = SwimMessage::Join {
             info: self.local_node.clone(),
         };
-        let data = bincode::serialize(&join_msg)?;
+        let data = postcard::to_allocvec(&join_msg)?;
 
         let mut joined = false;
         for seed in seeds {
@@ -226,7 +226,7 @@ impl Membership {
         };
 
         // Broadcast to all known members
-        let data = bincode::serialize(&leave_msg)?;
+        let data = postcard::to_allocvec(&leave_msg)?;
         for member in self.members.iter() {
             if member.key() != &self.local_node.id {
                 let _ = self
@@ -286,7 +286,7 @@ impl Membership {
                 }
             };
 
-            let msg: SwimMessage = match bincode::deserialize(&buf[..len]) {
+            let msg: SwimMessage = match postcard::from_bytes(&buf[..len]) {
                 Ok(m) => m,
                 Err(e) => {
                     warn!("Failed to deserialize message from {}: {}", from, e);
@@ -373,7 +373,7 @@ impl Membership {
             source: self.local_node.id.clone(),
             incarnation: our_incarnation,
         };
-        let data = bincode::serialize(&ack)?;
+        let data = postcard::to_allocvec(&ack)?;
         self.socket.send_to(&data, from).await?;
 
         // Update member last seen
@@ -418,7 +418,7 @@ impl Membership {
                 source: source.clone(),
                 incarnation,
             };
-            let data = bincode::serialize(&ping)?;
+            let data = postcard::to_allocvec(&ping)?;
             self.socket
                 .send_to(&data, target_node.cluster_addr())
                 .await?;
@@ -466,7 +466,7 @@ impl Membership {
             source: self.local_node.id.clone(),
             states,
         };
-        let data = bincode::serialize(&sync)?;
+        let data = postcard::to_allocvec(&sync)?;
         self.socket.send_to(&data, info.cluster_addr).await?;
 
         // Broadcast join event
@@ -626,7 +626,7 @@ impl Membership {
                     source: self.local_node.id.clone(),
                     incarnation: *self.incarnation.read().await,
                 };
-                let data = bincode::serialize(&ping)?;
+                let data = postcard::to_allocvec(&ping)?;
                 self.socket.send_to(&data, target_addr).await?;
 
                 // Track pending ping
@@ -684,7 +684,7 @@ impl Membership {
             target: target.clone(),
             incarnation,
         };
-        let data = bincode::serialize(&ping_req)?;
+        let data = postcard::to_allocvec(&ping_req)?;
 
         for intermediate in intermediaries {
             let _ = self
@@ -717,7 +717,6 @@ impl Membership {
         }
         Ok(())
     }
-
     /// Check for suspects that have timed out
     async fn check_suspect_timeouts(&self) -> Result<()> {
         let timeout = self.config.ping_interval * self.config.suspicion_multiplier;
@@ -769,7 +768,7 @@ impl Membership {
                     source: self.local_node.id.clone(),
                     states,
                 };
-                let data = bincode::serialize(&sync)?;
+                let data = postcard::to_allocvec(&sync)?;
                 let _ = self.socket.send_to(&data, target.cluster_addr()).await;
             }
         }
@@ -777,7 +776,7 @@ impl Membership {
 
     /// Broadcast a message to all members
     async fn broadcast(&self, msg: &SwimMessage) -> Result<()> {
-        let data = bincode::serialize(msg)?;
+        let data = postcard::to_allocvec(msg)?;
 
         for member in self.members.iter() {
             if member.key() != &self.local_node.id {

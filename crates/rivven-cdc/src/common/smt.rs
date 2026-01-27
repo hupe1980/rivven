@@ -53,11 +53,13 @@ use tracing::warn;
 /// Convert CdcOp to Debezium-style operation code.
 fn op_to_code(op: &CdcOp) -> &'static str {
     match op {
-        CdcOp::Insert => "c",   // create
-        CdcOp::Update => "u",   // update
-        CdcOp::Delete => "d",   // delete
-        CdcOp::Truncate => "t", // truncate
-        CdcOp::Snapshot => "r", // read (snapshot)
+        CdcOp::Insert => "c",    // create
+        CdcOp::Update => "u",    // update
+        CdcOp::Delete => "d",    // delete
+        CdcOp::Tombstone => "d", // tombstone (Debezium treats as delete)
+        CdcOp::Truncate => "t",  // truncate
+        CdcOp::Snapshot => "r",  // read (snapshot)
+        CdcOp::Schema => "s",    // schema change (DDL)
     }
 }
 

@@ -1,0 +1,58 @@
+[package]
+name = "rivven-queue"
+version = "0.0.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Message queue connectors for Rivven Connect (Kafka, MQTT, SQS, Pub/Sub, RabbitMQ, NATS)"
+repository = "https://github.com/hupe1980/rivven"
+keywords = ["rivven", "streaming", "kafka", "mqtt", "message-queue"]
+categories = ["database", "asynchronous"]
+
+[features]
+default = []
+# Individual queue systems
+kafka = []   # Kafka source/sink (pure Rust simulation for now)
+mqtt = []    # MQTT source (pure Rust simulation for now)
+sqs = []     # AWS SQS source (pure Rust simulation for now)
+pubsub = []  # Google Cloud Pub/Sub source (pure Rust simulation for now)
+# Future connectors
+# rabbitmq = []
+# nats = []
+# Enable all providers
+full = ["kafka", "mqtt", "sqs", "pubsub"]
+
+[dependencies]
+rivven-connect = { path = "../rivven-connect" }
+
+# Core
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tracing = "0.1"
+thiserror = "1"
+chrono = { version = "0.4", features = ["serde"] }
+async-stream = "0.3"
+bytes = "1"
+
+# Validation (must match rivven-connect)
+validator = { version = "0.20", features = ["derive"] }
+schemars = "0.8"
+
+# Secrets
+secrecy = { version = "0.10", features = ["serde"] }
+zeroize = "1.8"
+
+# UUID generation
+uuid = { version = "1", features = ["v4"] }
+
+# Hashing
+md5 = "0.7"
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[package.metadata.docs.rs]
+all-features = true

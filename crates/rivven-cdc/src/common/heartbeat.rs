@@ -48,6 +48,18 @@ pub struct HeartbeatConfig {
     pub emit_events: bool,
     /// Action prefix for heartbeat events
     pub action_prefix: String,
+    /// Optional SQL query to execute on each heartbeat (PostgreSQL feature)
+    ///
+    /// This is useful for multi-database deployments where you want to keep
+    /// replication slots active across databases that may have low traffic.
+    ///
+    /// Example: `INSERT INTO heartbeat_table (ts) VALUES (now()) ON CONFLICT (id) DO UPDATE SET ts = now()`
+    pub action_query: Option<String>,
+    /// Databases to execute the action query against (empty = current database only)
+    ///
+    /// For multi-database PostgreSQL, specify additional databases:
+    /// `["other_db1", "other_db2"]`
+    pub action_query_databases: Vec<String>,
 }
 
 impl Default for HeartbeatConfig {
@@ -58,6 +70,8 @@ impl Default for HeartbeatConfig {
             max_lag: Duration::from_secs(300), // 5 minutes
             emit_events: false,
             action_prefix: "__debezium-heartbeat".to_string(),
+            action_query: None,
+            action_query_databases: Vec::new(),
         }
     }
 }
@@ -103,6 +117,45 @@ impl HeartbeatConfigBuilder {
     /// Set action prefix.
     pub fn action_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.config.action_prefix = prefix.into();
+        self
+    }
+
+    /// Set SQL query to execute on each heartbeat.
+    ///
+    /// This is useful for keeping replication slots active in multi-database
+    /// PostgreSQL deployments with low-traffic databases.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let config = HeartbeatConfig::builder()
+    ///     .action_query("INSERT INTO heartbeat (ts) VALUES (now()) ON CONFLICT (id) DO UPDATE SET ts = now()")
+    ///     .build();
+    /// ```
+    pub fn action_query(mut self, query: impl Into<String>) -> Self {
+        self.config.action_query = Some(query.into());
+        self
+    }
+
+    /// Set additional databases to execute the action query against.
+    ///
+    /// By default, the action query only runs against the main CDC database.
+    /// Use this to keep replication slots active in other databases.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let config = HeartbeatConfig::builder()
+    ///     .action_query("SELECT 1")
+    ///     .action_query_databases(["inventory", "analytics"])
+    ///     .build();
+    /// ```
+    pub fn action_query_databases<I, S>(mut self, databases: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.config.action_query_databases = databases.into_iter().map(|s| s.into()).collect();
         self
     }
 
@@ -155,6 +208,12 @@ pub struct HeartbeatStats {
     missed_heartbeats: AtomicU64,
     /// Is currently healthy
     is_healthy: AtomicBool,
+    /// Action queries executed successfully
+    action_queries_success: AtomicU64,
+    /// Action queries that failed
+    action_queries_failed: AtomicU64,
+    /// Last action query execution time in milliseconds
+    last_action_query_ms: AtomicU64,
 }
 
 impl HeartbeatStats {
@@ -206,6 +265,33 @@ impl HeartbeatStats {
     pub fn is_healthy(&self) -> bool {
         self.is_healthy.load(Ordering::Relaxed)
     }
+
+    /// Record successful action query execution.
+    pub fn record_action_query_success(&self, execution_time_ms: u64) {
+        self.action_queries_success.fetch_add(1, Ordering::Relaxed);
+        self.last_action_query_ms
+            .store(execution_time_ms, Ordering::Relaxed);
+    }
+
+    /// Record failed action query execution.
+    pub fn record_action_query_failure(&self) {
+        self.action_queries_failed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Get successful action query count.
+    pub fn action_queries_success(&self) -> u64 {
+        self.action_queries_success.load(Ordering::Relaxed)
+    }
+
+    /// Get failed action query count.
+    pub fn action_queries_failed(&self) -> u64 {
+        self.action_queries_failed.load(Ordering::Relaxed)
+    }
+
+    /// Get last action query execution time in milliseconds.
+    pub fn last_action_query_ms(&self) -> u64 {
+        self.last_action_query_ms.load(Ordering::Relaxed)
+    }
 }
 
 /// Position tracker for the heartbeat.
@@ -219,6 +305,109 @@ pub struct PositionInfo {
     pub timestamp: i64,
 }
 
+// ============================================================================
+// Action Query Executor
+// ============================================================================
+
+/// Result of an action query execution.
+#[derive(Debug, Clone)]
+pub struct ActionQueryResult {
+    /// Database the query was executed against
+    pub database: String,
+    /// Whether execution succeeded
+    pub success: bool,
+    /// Execution time in milliseconds
+    pub execution_time_ms: u64,
+    /// Error message if failed
+    pub error: Option<String>,
+}
+
+/// Trait for executing heartbeat action queries.
+///
+/// Implement this trait to provide database-specific query execution.
+/// The heartbeat manager will call `execute_action_query` on each heartbeat
+/// when `action_query` is configured.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use rivven_cdc::common::heartbeat::{ActionQueryExecutor, ActionQueryResult};
+/// use async_trait::async_trait;
+///
+/// struct PostgresActionExecutor {
+///     pool: deadpool_postgres::Pool,
+/// }
+///
+/// #[async_trait]
+/// impl ActionQueryExecutor for PostgresActionExecutor {
+///     async fn execute_action_query(
+///         &self,
+///         query: &str,
+///         database: &str,
+///     ) -> ActionQueryResult {
+///         let start = std::time::Instant::now();
+///         match self.pool.get().await {
+///             Ok(client) => {
+///                 match client.execute(query, &[]).await {
+///                     Ok(_) => ActionQueryResult {
+///                         database: database.to_string(),
+///                         success: true,
+///                         execution_time_ms: start.elapsed().as_millis() as u64,
+///                         error: None,
+///                     },
+///                     Err(e) => ActionQueryResult {
+///                         database: database.to_string(),
+///                         success: false,
+///                         execution_time_ms: start.elapsed().as_millis() as u64,
+///                         error: Some(e.to_string()),
+///                     },
+///                 }
+///             }
+///             Err(e) => ActionQueryResult {
+///                 database: database.to_string(),
+///                 success: false,
+///                 execution_time_ms: start.elapsed().as_millis() as u64,
+///                 error: Some(e.to_string()),
+///             },
+///         }
+///     }
+/// }
+/// ```
+#[async_trait::async_trait]
+pub trait ActionQueryExecutor: Send + Sync {
+    /// Execute an action query against the specified database.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - SQL query to execute
+    /// * `database` - Database name to execute against
+    ///
+    /// # Returns
+    ///
+    /// Result containing execution details and any error information.
+    async fn execute_action_query(&self, query: &str, database: &str) -> ActionQueryResult;
+}
+
+/// No-op action query executor (default when no executor is configured).
+#[derive(Debug, Default, Clone)]
+pub struct NoOpActionExecutor;
+
+#[async_trait::async_trait]
+impl ActionQueryExecutor for NoOpActionExecutor {
+    async fn execute_action_query(&self, _query: &str, database: &str) -> ActionQueryResult {
+        ActionQueryResult {
+            database: database.to_string(),
+            success: true,
+            execution_time_ms: 0,
+            error: None,
+        }
+    }
+}
+
+// ============================================================================
+// Heartbeat Manager
+// ============================================================================
+
 /// Heartbeat manager for CDC connectors.
 pub struct Heartbeat {
     config: HeartbeatConfig,
@@ -228,6 +417,8 @@ pub struct Heartbeat {
     running: AtomicBool,
     sequence: AtomicU64,
     started_at: RwLock<Option<Instant>>,
+    /// Optional action query executor for database queries on heartbeat
+    action_executor: Option<Arc<dyn ActionQueryExecutor>>,
 }
 
 impl Heartbeat {
@@ -241,7 +432,117 @@ impl Heartbeat {
             running: AtomicBool::new(false),
             sequence: AtomicU64::new(0),
             started_at: RwLock::new(None),
+            action_executor: None,
         }
+    }
+
+    /// Create a new heartbeat manager with an action query executor.
+    ///
+    /// The executor will be used to run the configured `action_query` on each heartbeat.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let executor = MyPostgresExecutor::new(pool);
+    /// let heartbeat = Heartbeat::with_executor(config, "my-connector", executor);
+    /// ```
+    pub fn with_executor<E>(
+        config: HeartbeatConfig,
+        connector_name: impl Into<String>,
+        executor: E,
+    ) -> Self
+    where
+        E: ActionQueryExecutor + 'static,
+    {
+        Self {
+            config,
+            stats: Arc::new(HeartbeatStats::default()),
+            position: RwLock::new(PositionInfo::default()),
+            connector_name: connector_name.into(),
+            running: AtomicBool::new(false),
+            sequence: AtomicU64::new(0),
+            started_at: RwLock::new(None),
+            action_executor: Some(Arc::new(executor)),
+        }
+    }
+
+    /// Set the action query executor.
+    pub fn set_action_executor<E>(&mut self, executor: E)
+    where
+        E: ActionQueryExecutor + 'static,
+    {
+        self.action_executor = Some(Arc::new(executor));
+    }
+
+    /// Get the configured action query.
+    pub fn action_query(&self) -> Option<&str> {
+        self.config.action_query.as_deref()
+    }
+
+    /// Get the configured action query databases.
+    pub fn action_query_databases(&self) -> &[String] {
+        &self.config.action_query_databases
+    }
+
+    /// Execute the action query if configured.
+    ///
+    /// Returns the results for each database (main + additional databases).
+    pub async fn execute_action_query(&self) -> Vec<ActionQueryResult> {
+        let query = match &self.config.action_query {
+            Some(q) => q,
+            None => return Vec::new(),
+        };
+
+        let executor = match &self.action_executor {
+            Some(e) => e,
+            None => {
+                debug!("Action query configured but no executor set, skipping");
+                return Vec::new();
+            }
+        };
+
+        let mut results = Vec::new();
+
+        // Execute against main database (empty string = current connection)
+        let result = executor.execute_action_query(query, "").await;
+        if result.success {
+            self.stats
+                .record_action_query_success(result.execution_time_ms);
+            debug!(
+                "Action query executed successfully in {}ms",
+                result.execution_time_ms
+            );
+        } else {
+            self.stats.record_action_query_failure();
+            warn!(
+                "Action query failed: {}",
+                result.error.as_deref().unwrap_or("unknown error")
+            );
+        }
+        results.push(result);
+
+        // Execute against additional databases
+        for db in &self.config.action_query_databases {
+            let result = executor.execute_action_query(query, db).await;
+            if result.success {
+                self.stats
+                    .record_action_query_success(result.execution_time_ms);
+                debug!(
+                    "Action query executed on '{}' in {}ms",
+                    db, result.execution_time_ms
+                );
+            } else {
+                self.stats.record_action_query_failure();
+                warn!(
+                    "Action query failed on '{}': {}",
+                    db,
+                    result.error.as_deref().unwrap_or("unknown error")
+                );
+            }
+            results.push(result);
+        }
+
+        results
     }
 
     /// Get statistics.
@@ -629,5 +930,199 @@ mod tests {
         assert!(pos.position.is_empty());
         assert!(pos.server_id.is_empty());
         assert_eq!(pos.timestamp, 0);
+    }
+
+    // =========================================================================
+    // Action Query Tests
+    // =========================================================================
+
+    #[test]
+    fn test_action_query_config() {
+        let config = HeartbeatConfig::builder()
+            .action_query("INSERT INTO heartbeat (ts) VALUES (now())")
+            .action_query_databases(["db1", "db2"])
+            .build();
+
+        assert_eq!(
+            config.action_query,
+            Some("INSERT INTO heartbeat (ts) VALUES (now())".to_string())
+        );
+        assert_eq!(config.action_query_databases, vec!["db1", "db2"]);
+    }
+
+    #[test]
+    fn test_action_query_stats() {
+        let stats = HeartbeatStats::default();
+
+        assert_eq!(stats.action_queries_success(), 0);
+        assert_eq!(stats.action_queries_failed(), 0);
+        assert_eq!(stats.last_action_query_ms(), 0);
+
+        stats.record_action_query_success(50);
+        assert_eq!(stats.action_queries_success(), 1);
+        assert_eq!(stats.last_action_query_ms(), 50);
+
+        stats.record_action_query_failure();
+        assert_eq!(stats.action_queries_failed(), 1);
+
+        // Success count unchanged by failure
+        assert_eq!(stats.action_queries_success(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_action_query_no_executor() {
+        let config = HeartbeatConfig::builder().action_query("SELECT 1").build();
+        let heartbeat = Heartbeat::new(config, "test-connector");
+
+        // Without executor, should return empty results
+        let results = heartbeat.execute_action_query().await;
+        assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_action_query_no_query_configured() {
+        let config = HeartbeatConfig::default(); // No action_query
+        let heartbeat = Heartbeat::new(config, "test-connector");
+
+        let results = heartbeat.execute_action_query().await;
+        assert!(results.is_empty());
+    }
+
+    /// Mock executor that tracks execution
+    struct MockActionExecutor {
+        execution_count: AtomicU64,
+        should_fail: bool,
+    }
+
+    impl MockActionExecutor {
+        fn new(should_fail: bool) -> Self {
+            Self {
+                execution_count: AtomicU64::new(0),
+                should_fail,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ActionQueryExecutor for MockActionExecutor {
+        async fn execute_action_query(&self, _query: &str, database: &str) -> ActionQueryResult {
+            self.execution_count.fetch_add(1, Ordering::Relaxed);
+
+            if self.should_fail {
+                ActionQueryResult {
+                    database: database.to_string(),
+                    success: false,
+                    execution_time_ms: 5,
+                    error: Some("Mock failure".to_string()),
+                }
+            } else {
+                ActionQueryResult {
+                    database: database.to_string(),
+                    success: true,
+                    execution_time_ms: 10,
+                    error: None,
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_action_query_with_executor() {
+        let config = HeartbeatConfig::builder().action_query("SELECT 1").build();
+        let executor = MockActionExecutor::new(false);
+        let heartbeat = Heartbeat::with_executor(config, "test-connector", executor);
+
+        let results = heartbeat.execute_action_query().await;
+
+        assert_eq!(results.len(), 1); // Main database only
+        assert!(results[0].success);
+        assert_eq!(results[0].execution_time_ms, 10);
+        assert!(results[0].error.is_none());
+
+        // Stats should be updated
+        assert_eq!(heartbeat.stats().action_queries_success(), 1);
+        assert_eq!(heartbeat.stats().action_queries_failed(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_action_query_multiple_databases() {
+        let config = HeartbeatConfig::builder()
+            .action_query("SELECT 1")
+            .action_query_databases(["inventory", "analytics"])
+            .build();
+        let executor = MockActionExecutor::new(false);
+        let heartbeat = Heartbeat::with_executor(config, "test-connector", executor);
+
+        let results = heartbeat.execute_action_query().await;
+
+        // Main + 2 additional databases = 3 results
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().all(|r| r.success));
+
+        assert_eq!(results[0].database, ""); // Main database
+        assert_eq!(results[1].database, "inventory");
+        assert_eq!(results[2].database, "analytics");
+
+        // 3 successful queries
+        assert_eq!(heartbeat.stats().action_queries_success(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_action_query_failure_tracking() {
+        let config = HeartbeatConfig::builder().action_query("SELECT 1").build();
+        let executor = MockActionExecutor::new(true); // Will fail
+        let heartbeat = Heartbeat::with_executor(config, "test-connector", executor);
+
+        let results = heartbeat.execute_action_query().await;
+
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].success);
+        assert_eq!(results[0].error, Some("Mock failure".to_string()));
+
+        assert_eq!(heartbeat.stats().action_queries_success(), 0);
+        assert_eq!(heartbeat.stats().action_queries_failed(), 1);
+    }
+
+    #[test]
+    fn test_action_query_result_debug() {
+        let result = ActionQueryResult {
+            database: "mydb".to_string(),
+            success: true,
+            execution_time_ms: 42,
+            error: None,
+        };
+
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("mydb"));
+        assert!(debug.contains("42"));
+    }
+
+    #[tokio::test]
+    async fn test_noop_action_executor() {
+        let executor = NoOpActionExecutor;
+        let result = executor.execute_action_query("SELECT 1", "test_db").await;
+
+        assert!(result.success);
+        assert_eq!(result.database, "test_db");
+        assert_eq!(result.execution_time_ms, 0);
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn test_heartbeat_action_query_accessors() {
+        let config = HeartbeatConfig::builder()
+            .action_query("SELECT 1")
+            .action_query_databases(["db1", "db2"])
+            .build();
+        let heartbeat = Heartbeat::new(config, "test");
+
+        assert_eq!(heartbeat.action_query(), Some("SELECT 1"));
+        assert_eq!(heartbeat.action_query_databases(), &["db1", "db2"]);
+
+        // Without action query
+        let config2 = HeartbeatConfig::default();
+        let heartbeat2 = Heartbeat::new(config2, "test2");
+        assert!(heartbeat2.action_query().is_none());
+        assert!(heartbeat2.action_query_databases().is_empty());
     }
 }

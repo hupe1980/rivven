@@ -790,7 +790,10 @@ impl Source for PostgresCdcSource {
                         &stream_name,
                         cdc_event.before.clone().unwrap_or_default(),
                     ),
-                    CdcOp::Truncate => return std::future::ready(None),
+                    // Tombstone events have null payload - emit as delete with empty data
+                    CdcOp::Tombstone => SourceEvent::delete(&stream_name, serde_json::Value::Null),
+                    // Schema and Truncate events are not row-level data events
+                    CdcOp::Truncate | CdcOp::Schema => return std::future::ready(None),
                 };
 
                 // Add position for checkpointing (using timestamp as fallback)

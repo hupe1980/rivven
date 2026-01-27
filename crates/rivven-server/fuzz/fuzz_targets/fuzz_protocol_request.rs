@@ -3,7 +3,7 @@
 //! 
 //! This fuzzer tests that arbitrary bytes cannot crash the request parser.
 //! It covers:
-//! - Bincode deserialization edge cases
+//! - Postcard deserialization edge cases
 //! - Invalid enum variants
 //! - Truncated data
 //! - Malformed strings

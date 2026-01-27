@@ -2,19 +2,23 @@
 resolver = "2"
 members = [
     "crates/rivven-core",
+    "crates/rivven-protocol",
     "crates/rivven-server",
     "crates/rivven-client",
     "crates/rivven-cli",
     "crates/rivven-cdc",
     "crates/rivven-connect",
+    "crates/rivven-connect-derive",
     "crates/rivven-cluster",
     "crates/rivven-python",
     "crates/rivven-storage",
     "crates/rivven-warehouse",
+    "crates/rivven-queue",
     "crates/rivven-operator",
 ]
 exclude = [
     "crates/rivven-server/fuzz",
+    "crates/rivven-dashboard",  # WASM crate - build with trunk
 ]
 
 [workspace.package]
@@ -36,7 +40,7 @@ tokio-util = { version = "0.7", features = ["codec"] }
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-bincode = "1.3"
+postcard = { version = "1", features = ["alloc"] }
 
 # Networking
 bytes = "1.5"

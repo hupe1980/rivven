@@ -123,6 +123,14 @@ impl TaskAssigner {
         }
     }
 
+    /// Get the configured max_tasks for a node (from join request)
+    pub fn node_max_tasks(&self, node: &NodeId) -> u32 {
+        self.node_loads
+            .get(node)
+            .map(|load| load.max_tasks)
+            .unwrap_or(100) // Default fallback
+    }
+
     /// Get healthy nodes
     pub fn healthy_nodes(&self) -> Vec<&NodeLoad> {
         self.node_loads.values().filter(|n| n.is_healthy).collect()

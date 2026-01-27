@@ -1320,8 +1320,8 @@ impl SaslScramAuth {
 
     /// Process client-first-message and return server-first-message
     ///
-    /// Client-first-message format: n,,n=<username>,r=<client-nonce>
-    /// Server-first-message format: r=<combined-nonce>,s=<salt>,i=<iterations>
+    /// Client-first-message format: `n,,n=<username>,r=<client-nonce>`
+    /// Server-first-message format: `r=<combined-nonce>,s=<salt>,i=<iterations>`
     pub fn process_client_first(
         &self,
         client_first: &[u8],
@@ -1416,8 +1416,8 @@ impl SaslScramAuth {
 
     /// Process client-final-message and return server-final-message
     ///
-    /// Client-final-message format: c=<channel-binding>,r=<nonce>,p=<proof>
-    /// Server-final-message format: v=<verifier> (on success) or e=<error>
+    /// Client-final-message format: `c=<channel-binding>,r=<nonce>,p=<proof>`
+    /// Server-final-message format: `v=<verifier>` (on success) or `e=<error>`
     pub fn process_client_final(
         &self,
         state: &ScramState,

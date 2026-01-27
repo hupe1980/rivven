@@ -192,7 +192,7 @@ async fn test_multiple_topics_concurrent_creation() {
     for i in 0..10 {
         let node = Arc::clone(&nodes[i % 3]);
         let handle = tokio::spawn(async move {
-            let config = TopicConfig::new(&format!("concurrent-topic-{}", i), 2, 1);
+            let config = TopicConfig::new(format!("concurrent-topic-{}", i), 2, 1);
             let cmd = MetadataCommand::CreateTopic {
                 config,
                 partition_assignments: vec![vec!["node-1".to_string()], vec!["node-2".to_string()]],
@@ -362,7 +362,7 @@ async fn test_batch_topic_creation() {
     // Create batch of commands
     let commands: Vec<MetadataCommand> = (0..5)
         .map(|i| {
-            let config = TopicConfig::new(&format!("batch-topic-{}", i), 2, 1);
+            let config = TopicConfig::new(format!("batch-topic-{}", i), 2, 1);
             MetadataCommand::CreateTopic {
                 config,
                 partition_assignments: vec![vec!["node-1".to_string()], vec!["node-2".to_string()]],
@@ -470,7 +470,7 @@ async fn test_raft_state_persistence() {
 
         // Create multiple topics to trigger snapshot
         for i in 0..10 {
-            let topic_config = TopicConfig::new(&format!("persist-topic-{}", i), 1, 1);
+            let topic_config = TopicConfig::new(format!("persist-topic-{}", i), 1, 1);
             let cmd = MetadataCommand::CreateTopic {
                 config: topic_config,
                 partition_assignments: vec![vec!["persist-recovery-test".to_string()]],
@@ -537,7 +537,7 @@ async fn test_high_throughput_operations() {
     for i in 0..100 {
         let node_clone = Arc::clone(&node);
         let handle = tokio::spawn(async move {
-            let config = TopicConfig::new(&format!("throughput-topic-{}", i), 1, 1);
+            let config = TopicConfig::new(format!("throughput-topic-{}", i), 1, 1);
             let cmd = MetadataCommand::CreateTopic {
                 config,
                 partition_assignments: vec![vec!["node-1".to_string()]],
@@ -700,7 +700,7 @@ async fn test_standalone_stress() {
 
     // Rapid-fire topic creation
     for i in 0..total_ops {
-        let topic_config = TopicConfig::new(&format!("stress-topic-{}", i), 1, 1);
+        let topic_config = TopicConfig::new(format!("stress-topic-{}", i), 1, 1);
         let cmd = MetadataCommand::CreateTopic {
             config: topic_config,
             partition_assignments: vec![vec!["stress-test-node".to_string()]],
@@ -765,7 +765,7 @@ async fn test_standalone_snapshot_recovery() {
 
         // Create topics
         for i in 0..topic_count {
-            let topic_config = TopicConfig::new(&format!("snapshot-topic-{}", i), 1, 1);
+            let topic_config = TopicConfig::new(format!("snapshot-topic-{}", i), 1, 1);
             let cmd = MetadataCommand::CreateTopic {
                 config: topic_config,
                 partition_assignments: vec![vec!["snapshot-test-node".to_string()]],

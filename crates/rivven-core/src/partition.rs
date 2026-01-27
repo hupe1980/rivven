@@ -171,8 +171,10 @@ mod tests {
     use std::fs;
 
     fn get_test_config() -> Config {
-        let mut config = Config::default();
-        config.data_dir = format!("/tmp/rivven-test-partition-{}", uuid::Uuid::new_v4());
+        let config = Config {
+            data_dir: format!("/tmp/rivven-test-partition-{}", uuid::Uuid::new_v4()),
+            ..Default::default()
+        };
         let _ = fs::remove_dir_all(&config.data_dir);
         config
     }

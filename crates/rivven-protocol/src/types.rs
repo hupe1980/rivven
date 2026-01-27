@@ -1,0 +1,77 @@
+//! Message data types for protocol transport
+
+use bytes::Bytes;
+use serde::{Deserialize, Serialize};
+
+/// Serialized message data for transport
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MessageData {
+    /// Message offset in the partition
+    pub offset: u64,
+    /// Optional message key
+    #[serde(with = "rivven_core::serde_utils::option_bytes_serde")]
+    pub key: Option<Bytes>,
+    /// Message value/payload
+    #[serde(with = "rivven_core::serde_utils::bytes_serde")]
+    pub value: Bytes,
+    /// Timestamp in milliseconds since epoch
+    pub timestamp: i64,
+}
+
+impl MessageData {
+    /// Create a new message
+    pub fn new(offset: u64, value: impl Into<Bytes>, timestamp: i64) -> Self {
+        Self {
+            offset,
+            key: None,
+            value: value.into(),
+            timestamp,
+        }
+    }
+
+    /// Set the key
+    pub fn with_key(mut self, key: impl Into<Bytes>) -> Self {
+        self.key = Some(key.into());
+        self
+    }
+
+    /// Get the value as bytes
+    pub fn value_bytes(&self) -> &[u8] {
+        &self.value
+    }
+
+    /// Get the key as bytes if present
+    pub fn key_bytes(&self) -> Option<&[u8]> {
+        self.key.as_ref().map(|k| k.as_ref())
+    }
+
+    /// Get the size of this message (key + value)
+    pub fn size(&self) -> usize {
+        let key_size = self.key.as_ref().map(|k| k.len()).unwrap_or(0);
+        key_size + self.value.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_message_data() {
+        let msg = MessageData::new(42, b"hello".to_vec(), 1234567890).with_key(b"key1".to_vec());
+
+        assert_eq!(msg.offset, 42);
+        assert_eq!(msg.value_bytes(), b"hello");
+        assert_eq!(msg.key_bytes(), Some(b"key1".as_slice()));
+        assert_eq!(msg.size(), 4 + 5); // key + value
+    }
+
+    #[test]
+    fn test_message_data_no_key() {
+        let msg = MessageData::new(0, b"data".to_vec(), 0);
+
+        assert!(msg.key.is_none());
+        assert_eq!(msg.key_bytes(), None);
+        assert_eq!(msg.size(), 4);
+    }
+}

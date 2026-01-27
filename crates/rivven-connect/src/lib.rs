@@ -189,6 +189,12 @@ pub use futures::stream::BoxStream;
 pub use serde::{Deserialize, Serialize};
 pub use serde_json::Value as JsonValue;
 
+// Re-export derive macros for connector development
+pub use rivven_connect_derive::{
+    connector_spec, SinkConfig as SinkConfigDerive, SourceConfig as SourceConfigDerive,
+    TransformConfig as TransformConfigDerive,
+};
+
 /// Prelude module for convenient imports
 pub mod prelude {
     pub use crate::{

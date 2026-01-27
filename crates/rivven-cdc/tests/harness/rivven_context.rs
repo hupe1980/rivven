@@ -22,13 +22,16 @@ pub struct RivvenTestContext {
     event_routing_task: Option<JoinHandle<()>>,
 }
 
+#[allow(dead_code)]
 impl RivvenTestContext {
     pub async fn new() -> Result<Self> {
         let data_dir = PathBuf::from(format!("/tmp/rivven_cdc_test_{}", uuid::Uuid::new_v4()));
         tokio::fs::create_dir_all(&data_dir).await?;
 
-        let mut config = Config::default();
-        config.data_dir = data_dir.to_string_lossy().to_string();
+        let config = Config {
+            data_dir: data_dir.to_string_lossy().to_string(),
+            ..Default::default()
+        };
 
         let topic_manager = TopicManager::new(config);
         let connector = Arc::new(CdcConnector::new());

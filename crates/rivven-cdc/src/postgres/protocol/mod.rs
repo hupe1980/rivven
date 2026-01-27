@@ -5,7 +5,9 @@
 pub mod client;
 pub mod decoder;
 pub mod message;
+pub mod scram;
 
 pub use client::*;
 pub use decoder::*;
 pub use message::*;
+pub use scram::{ScramError, ScramSha256};

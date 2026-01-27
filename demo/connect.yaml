@@ -1,0 +1,34 @@
+# Rivven Demo Configuration
+# 
+# Quick test setup:
+#   1. Terminal 1: cd demo && ./demo.sh broker
+#   2. Terminal 2: cd demo && ./demo.sh connect
+#   3. Browser: http://localhost:9094
+#
+# Architecture: Datagen → Broker (demo-events topic) → Stdout
+
+version: "1.0"
+
+broker:
+  bootstrap_servers:
+    - localhost:9092
+
+# Source: Generate synthetic e-commerce orders
+sources:
+  demo-orders:
+    connector: datagen
+    topic: demo-events
+    config:
+      pattern: orders
+      events_per_second: 2
+      max_events: 50
+      seed: 42
+
+# Sink: Print events to console with pretty formatting
+sinks:
+  console:
+    connector: stdout
+    topics: [demo-events]
+    consumer_group: demo-consumer
+    config:
+      format: pretty

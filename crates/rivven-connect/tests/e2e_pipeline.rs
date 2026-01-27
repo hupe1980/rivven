@@ -272,7 +272,7 @@ impl TestBroker {
         self,
     ) -> (String, tokio::task::JoinHandle<Result<(), anyhow::Error>>) {
         let addr = self.addr.clone();
-        let handle = tokio::spawn(async move { self.server.start().await.map_err(Into::into) });
+        let handle = tokio::spawn(async move { self.server.start().await });
         // Give server time to bind
         sleep(Duration::from_millis(100)).await;
         (addr, handle)

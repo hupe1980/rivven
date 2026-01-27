@@ -18,7 +18,7 @@ impl PostgresContainer {
 
         // Start container with pg11 (uses md5 auth by default)
         let output = Command::new("docker")
-            .args(&[
+            .args([
                 "run",
                 "-d",
                 "--name",
@@ -53,7 +53,7 @@ impl PostgresContainer {
         // Wait for Postgres to be ready
         for _ in 0..30 {
             let ready = Command::new("docker")
-                .args(&["exec", &container_name, "pg_isready", "-U", "postgres"])
+                .args(["exec", &container_name, "pg_isready", "-U", "postgres"])
                 .output()
                 .map(|o| o.status.success())
                 .unwrap_or(false);
@@ -95,7 +95,7 @@ impl PostgresContainer {
         "#;
 
         let output = Command::new("docker")
-            .args(&[
+            .args([
                 "exec",
                 "-i",
                 &self.container_name,
@@ -119,7 +119,7 @@ impl PostgresContainer {
         // Step 2: Create publication (must be separate)
         let pub_sql = "CREATE PUBLICATION rivven_pub FOR ALL TABLES;";
         let output = Command::new("docker")
-            .args(&[
+            .args([
                 "exec",
                 "-i",
                 &self.container_name,
@@ -143,7 +143,7 @@ impl PostgresContainer {
         // Step 3: Create replication slot (must be in its own transaction with no writes)
         let slot_sql = "SELECT pg_create_logical_replication_slot('rivven_slot', 'pgoutput');";
         let output = Command::new("docker")
-            .args(&[
+            .args([
                 "exec",
                 "-i",
                 &self.container_name,
@@ -169,7 +169,7 @@ impl PostgresContainer {
 
     pub async fn execute_sql(&self, sql: &str) -> anyhow::Result<String> {
         let output = Command::new("docker")
-            .args(&[
+            .args([
                 "exec",
                 "-i",
                 &self.container_name,
@@ -191,7 +191,7 @@ impl Drop for PostgresContainer {
     fn drop(&mut self) {
         println!("🧹 Cleaning up Postgres container: {}", self.container_name);
         let _ = Command::new("docker")
-            .args(&["rm", "-f", &self.container_name])
+            .args(["rm", "-f", &self.container_name])
             .output();
     }
 }
