@@ -1,10 +1,11 @@
 [package]
 name = "rivven-warehouse"
-version = "0.0.1"
-edition = "2021"
-license = "MIT OR Apache-2.0"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Data warehouse connectors for Rivven Connect (Snowflake, BigQuery, Redshift)"
-repository = "https://github.com/hupe1980/rivven"
 keywords = ["rivven", "streaming", "snowflake", "bigquery", "redshift"]
 categories = ["database", "asynchronous"]
 

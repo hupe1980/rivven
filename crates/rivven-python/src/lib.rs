@@ -134,7 +134,7 @@ fn version() -> &'static str {
 
 /// Python module definition
 #[pymodule]
-fn rivven(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _rivven(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Module metadata
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add(

@@ -1,10 +1,11 @@
 [package]
 name = "rivven-connect-derive"
-version = "0.0.1"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Derive macros for Rivven connector development"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/rivven/rivven"
 keywords = ["event-streaming", "connector", "derive", "macro"]
 
 [lib]

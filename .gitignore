@@ -24,6 +24,16 @@ target
 crates/rivven-dashboard/dist/
 crates/rivven-server/static/
 
+# Python native modules
+python/rivven/*.so
+python/rivven/*.pyd
+python/rivven/*.dylib
+
+# Python bytecode
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+
 # custom
 _prompts/
 .venv/

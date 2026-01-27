@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Core library for Rivven distributed event streaming platform"
 
 [features]
 default = ["compression", "cedar", "tls", "metrics", "encryption"]

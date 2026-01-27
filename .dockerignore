@@ -30,7 +30,7 @@ data/
 # Tests
 tests/
 **/tests/
-**/benches/
+# Note: benches/ must NOT be excluded - Cargo.toml references them
 
 # Python venv
 .venv/

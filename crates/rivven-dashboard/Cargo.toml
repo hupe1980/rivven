@@ -4,6 +4,7 @@ version = "0.0.1"
 edition = "2021"
 authors = ["hupe1980"]
 license = "Apache-2.0"
+publish = false  # WASM-only, not crates.io
 repository = "https://github.com/hupe1980/rivven"
 description = "Leptos-based WebAssembly dashboard for Rivven"
 

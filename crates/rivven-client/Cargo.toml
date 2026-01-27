@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "High-performance async client for Rivven event streaming platform"
 
 [features]
 default = []

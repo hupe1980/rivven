@@ -29,8 +29,11 @@ WORKDIR /build
 # Install build dependencies for cross-compilation
 RUN apt-get update && apt-get install -y --no-install-recommends \
     musl-tools \
+    musl-dev \
     gcc-aarch64-linux-gnu \
     libc6-dev-arm64-cross \
+    perl \
+    make \
     && rm -rf /var/lib/apt/lists/*
 
 # Add musl targets for static linking and wasm32 for dashboard
@@ -43,7 +46,11 @@ RUN cargo install trunk --locked
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 
-# Determine target based on platform
+# Build dashboard first (runs on build platform, targets wasm32)
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    cd crates/rivven-dashboard && trunk build --release
+
+# Determine target based on platform and build binaries
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
     case "$TARGETPLATFORM" in \

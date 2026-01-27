@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Rivven broker server with Raft consensus and SWIM membership"
 
 [features]
 default = ["dashboard"]

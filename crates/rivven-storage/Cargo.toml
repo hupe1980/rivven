@@ -1,10 +1,11 @@
 [package]
 name = "rivven-storage"
-version = "0.0.1"
-edition = "2021"
-license = "MIT OR Apache-2.0"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Object storage connectors for Rivven Connect (S3, GCS, Azure Blob, MinIO, HDFS)"
-repository = "https://github.com/hupe1980/rivven"
 keywords = ["rivven", "streaming", "s3", "gcs", "azure", "minio", "object-storage"]
 categories = ["database", "asynchronous"]
 

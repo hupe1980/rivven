@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/rivven",
     "crates/rivven-core",
     "crates/rivven-protocol",
     "crates/rivven-server",
@@ -24,7 +25,7 @@ exclude = [
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
-rust-version = "1.89"
+rust-version = "1.83"
 authors = ["hupe1980"]
 license = "Apache-2.0"
 repository = "https://github.com/hupe1980/rivven"

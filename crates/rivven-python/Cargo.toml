@@ -4,13 +4,15 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+publish = false  # PyPI-only, not crates.io
 description = "Python bindings for Rivven event streaming platform"
 readme = "README.md"
 keywords = ["kafka", "streaming", "event-driven", "python", "pyo3"]
 categories = ["asynchronous", "network-programming", "api-bindings"]
 
 [lib]
-name = "rivven"
+name = "_rivven"
 crate-type = ["cdylib"]
 
 [dependencies]
@@ -30,6 +32,10 @@ bytes = { workspace = true }
 
 # Error handling
 thiserror = { workspace = true }
+
+# For cross-compilation - use vendored OpenSSL
+[target.'cfg(all(target_arch = "aarch64", target_os = "linux"))'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
 
 [dev-dependencies]
 # Python testing support

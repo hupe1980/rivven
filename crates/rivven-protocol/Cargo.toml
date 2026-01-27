@@ -1,10 +1,11 @@
 [package]
 name = "rivven-protocol"
-version = "0.0.1"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Wire protocol types for Rivven distributed event streaming"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/hupe1980/rivven"
 keywords = ["streaming", "protocol", "event-driven"]
 categories = ["network-programming"]
 

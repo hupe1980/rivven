@@ -1,13 +1,11 @@
 [package]
 name = "rivven-operator"
-version = "0.1.0"
-edition = "2021"
-authors = ["Rivven Contributors"]
-description = "Kubernetes operator for Rivven distributed event streaming platform"
-license = "Apache-2.0"
-repository = "https://github.com/hupe1980/rivven"
-keywords = ["kubernetes", "operator", "streaming", "kafka", "rivven"]
-categories = ["development-tools", "command-line-utilities"]
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Kubernetes operator for deploying and managing Rivven clusters"
 
 [[bin]]
 name = "rivven-operator"

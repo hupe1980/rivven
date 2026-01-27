@@ -7,7 +7,6 @@ from rivven._rivven import (
     Producer,
     RivvenError,
     connect,
-    connect_tls,
     version,
 )
 
@@ -18,8 +17,15 @@ __all__ = [
     "Producer",
     "RivvenError",
     "connect",
-    "connect_tls",
     "version",
 ]
+
+# TLS support is optional (requires tls feature in Rust build)
+try:
+    from rivven._rivven import connect_tls
+
+    __all__.append("connect_tls")
+except ImportError:
+    connect_tls = None  # type: ignore
 
 __version__ = version()
