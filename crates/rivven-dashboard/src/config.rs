@@ -6,21 +6,12 @@
 use wasm_bindgen::JsCast;
 
 /// Dashboard configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DashboardConfig {
     /// API base URL (e.g., "http://localhost:8080" or "/api")
     pub api_url: String,
     /// Server version (injected by server)
     pub version: Option<String>,
-}
-
-impl Default for DashboardConfig {
-    fn default() -> Self {
-        Self {
-            api_url: String::new(), // Empty means use current origin
-            version: None,
-        }
-    }
 }
 
 impl DashboardConfig {
