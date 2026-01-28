@@ -17,7 +17,7 @@ jobs:
   validate:
     name: Validate Release
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       
@@ -161,7 +161,7 @@ jobs:
     name: Publish to PyPI (${{ matrix.target }})
     needs: validate
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -213,7 +213,7 @@ jobs:
     name: Publish to PyPI
     needs: pypi
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     environment:
       name: pypi
       url: https://pypi.org/p/rivven
@@ -236,7 +236,7 @@ jobs:
     name: Create GitHub Release
     needs: [publish, pypi-publish, docker, binaries]
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       contents: write
     steps:
