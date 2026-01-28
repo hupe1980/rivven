@@ -24,6 +24,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          components: rustfmt, clippy
           targets: wasm32-unknown-unknown
       
       - name: Install trunk
@@ -91,6 +92,13 @@ jobs:
       
       - name: Publish rivven-client
         run: cargo publish -p rivven-client --token ${{ secrets.CRATES_IO_TOKEN }}
+        continue-on-error: true
+      
+      - name: Wait for crates.io index
+        run: sleep 30
+      
+      - name: Publish rivven (facade)
+        run: cargo publish -p rivven --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
       
       - name: Wait for crates.io index
@@ -263,13 +271,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Static Linux binaries (musl) - portable across all distros
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             suffix: linux-amd64
           - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
             suffix: linux-arm64
-            cross: true
+          # macOS (dynamic - macOS doesn't support fully static binaries)
           - os: macos-latest
             target: aarch64-apple-darwin
             suffix: darwin-arm64
@@ -284,21 +293,22 @@ jobs:
       - name: Install trunk
         uses: taiki-e/install-action@trunk
       
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@cargo-zigbuild
+      
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+      
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
       
-      - name: Install cross-compilation tools (Linux aarch64)
-        if: matrix.cross
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu perl make
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-      
       - name: Build binaries
         run: |
-          cargo build --release --target ${{ matrix.target }} \
+          cargo zigbuild --release --target ${{ matrix.target }} \
             --package rivven-server \
             --package rivven-cli \
             --package rivven-connect \

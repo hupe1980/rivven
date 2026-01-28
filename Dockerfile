@@ -17,7 +17,7 @@
 ARG BINARY=rivvend
 
 # ============================================================================
-# Stage 1: Build all binaries
+# Stage 1: Build all binaries (static musl with cargo-zigbuild)
 # ============================================================================
 FROM --platform=$BUILDPLATFORM rust:1.89-bookworm AS builder
 
@@ -26,21 +26,20 @@ ARG BUILDPLATFORM
 
 WORKDIR /build
 
-# Install build dependencies for cross-compilation
+# Install zig (for cargo-zigbuild) and other build dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    musl-tools \
-    musl-dev \
-    gcc-aarch64-linux-gnu \
-    libc6-dev-arm64-cross \
+    xz-utils \
     perl \
     make \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -sSfL https://ziglang.org/download/0.13.0/zig-linux-$(uname -m)-0.13.0.tar.xz | tar -xJ -C /usr/local \
+    && ln -s /usr/local/zig-linux-$(uname -m)-0.13.0/zig /usr/local/bin/zig
 
 # Add musl targets for static linking and wasm32 for dashboard
 RUN rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl wasm32-unknown-unknown
 
-# Install trunk for building the dashboard
-RUN cargo install trunk --locked
+# Install cargo-zigbuild and trunk
+RUN cargo install cargo-zigbuild trunk --locked
 
 # Copy workspace files
 COPY Cargo.toml Cargo.lock ./
@@ -50,20 +49,18 @@ COPY crates ./crates
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cd crates/rivven-dashboard && trunk build --release
 
-# Determine target based on platform and build binaries
+# Determine target based on platform and build static binaries with zigbuild
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
     case "$TARGETPLATFORM" in \
       "linux/arm64") \
         export TARGET="aarch64-unknown-linux-musl" \
-        && export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="aarch64-linux-gnu-gcc" \
-        && export CC_aarch64_unknown_linux_musl="aarch64-linux-gnu-gcc" \
         ;; \
       *) \
         export TARGET="x86_64-unknown-linux-musl" \
         ;; \
     esac \
-    && cargo build --release --target $TARGET \
+    && cargo zigbuild --release --target $TARGET \
        --package rivven-server \
        --package rivven-cli \
        --package rivven-connect \
@@ -75,7 +72,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp target/$TARGET/release/rivven-operator /out/
 
 # ============================================================================
-# Stage 2: Runtime (distroless static - no libc, no shell)
+# Stage 2: Runtime (distroless static - no libc needed for musl binaries)
 # ============================================================================
 FROM gcr.io/distroless/static-debian12:nonroot
 
