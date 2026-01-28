@@ -70,7 +70,7 @@ impl RetriableErrorType {
 /// # Example
 ///
 /// ```rust
-/// use rivven_cdc::common::resilience::{RetryConfig, RetriableErrorType};
+/// use rivven_cdc::{RetryConfig, RetriableErrorType};
 /// use std::time::Duration;
 ///
 /// let config = RetryConfig::builder()
@@ -292,7 +292,7 @@ pub enum GuardrailAction {
 /// # Example
 ///
 /// ```rust
-/// use rivven_cdc::common::resilience::{GuardrailsConfig, GuardrailAction};
+/// use rivven_cdc::{GuardrailsConfig, GuardrailAction};
 /// use std::time::Duration;
 ///
 /// let config = GuardrailsConfig::builder()
