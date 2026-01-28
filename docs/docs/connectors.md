@@ -712,6 +712,6 @@ sources:
 
 ## Next Steps
 
-- [CDC Guide](/rivven/docs/cdc) - Database replication details
-- [Security](/rivven/docs/security) - TLS and authentication
-- [Kubernetes](/rivven/docs/kubernetes) - Production deployment
+- [CDC Guide](cdc) — Database replication details
+- [Security](security) — TLS and authentication
+- [Kubernetes](kubernetes) — Production deployment

@@ -1,9 +1,31 @@
+---
+layout: default
+title: Exactly-Once Semantics
+nav_order: 10
+---
+
 # Exactly-Once Semantics
+{: .no_toc }
+
+Guaranteed delivery without duplicates.
+{: .fs-6 .fw-300 }
+
+## Table of contents
+{: .no_toc .text-delta }
+
+1. TOC
+{:toc}
+
+---
+
+## Overview
 
 Rivven provides exactly-once semantics through two complementary features:
 
-1. **Idempotent Producer** (KIP-98) - Exactly-once delivery within a single topic
-2. **Native Transactions** - Atomic writes across multiple topics
+1. **Idempotent Producer** (KIP-98) — Exactly-once delivery within a single topic
+2. **Native Transactions** — Atomic writes across multiple topics
+
+---
 
 ## Idempotent Producer
 

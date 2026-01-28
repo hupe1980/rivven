@@ -1,8 +1,26 @@
-# Admin API
+---
+layout: default
+title: Admin API
+nav_order: 8
+---
 
-Rivven provides a comprehensive Admin API for programmatic cluster management, matching Kafka's administrative capabilities. These operations enable DevOps automation, infrastructure-as-code workflows, and dynamic cluster reconfiguration.
+# Admin API
+{: .no_toc }
+
+Programmatic cluster management API.
+{: .fs-6 .fw-300 }
+
+## Table of contents
+{: .no_toc .text-delta }
+
+1. TOC
+{:toc}
+
+---
 
 ## Overview
+
+Rivven provides a comprehensive Admin API for programmatic cluster management, matching Kafka's administrative capabilities. These operations enable DevOps automation, infrastructure-as-code workflows, and dynamic cluster reconfiguration.
 
 | Operation | Description | Authorization |
 |-----------|-------------|---------------|

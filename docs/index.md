@@ -91,11 +91,15 @@ rivven produce events "Hello, Rivven!"
 rivven consume events
 ```
 
-### CDC Pipeline
+### Stream CDC to Broker
 
 ```yaml
 # rivven-connect.yaml
 version: "1.0"
+
+broker:
+  bootstrap_servers:
+    - localhost:9092
 
 sources:
   orders:
@@ -128,18 +132,13 @@ rivven-connect -c rivven-connect.yaml
 │                                                                 │
 │  ┌──────────────────┐       ┌────────────────────────────────┐ │
 │  │     rivvend      │       │       rivven-connect           │ │
-│  │    (broker)      │◄─────►│  (connectors CLI)              │ │
+│  │    (broker)      │◄─────►│  (SDK + CLI)                   │ │
 │  │                  │native │                                 │ │
-│  │  • Storage       │proto  │  Sources: postgres-cdc, mysql  │ │
-│  │  • Replication   │       │  Sinks:   stdout, s3, http     │ │
-│  │  • Consumer Grps │       │  Transforms: field-mask, etc   │ │
-│  │  • Auth/RBAC     │       │                                 │ │
+│  │  • Storage       │proto  │  SDK:   Source, Sink, Transform │ │
+│  │  • Replication   │       │  CLI:   Config-driven pipelines │ │
+│  │  • Consumer Grps │       │  Sources: postgres-cdc, mysql   │ │
+│  │  • Auth/RBAC     │       │  Sinks:   stdout, s3, http      │ │
 │  └──────────────────┘       └────────────────────────────────┘ │
-│                                                                 │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │               rivven-connect-sdk (library)                │  │
-│  │  • Source trait   • Sink trait   • Transform trait        │  │
-│  └──────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 

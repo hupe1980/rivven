@@ -143,3 +143,8 @@ required-features = ["mysql"]
 name = "cdc_throughput"
 harness = false
 required-features = ["postgres"]
+
+[[bench]]
+name = "cdc_latency"
+harness = false
+required-features = ["postgres"]

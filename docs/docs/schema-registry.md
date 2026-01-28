@@ -1,8 +1,26 @@
-# Schema Registry
+---
+layout: default
+title: Schema Registry
+nav_order: 16
+---
 
-Rivven Connect includes a built-in schema registry with comprehensive support for JSON Schema, Apache Avro, and Protocol Buffers.
+# Schema Registry
+{: .no_toc }
+
+Schema management with JSON Schema, Avro, and Protobuf support.
+{: .fs-6 .fw-300 }
+
+## Table of contents
+{: .no_toc .text-delta }
+
+1. TOC
+{:toc}
+
+---
 
 ## Overview
+
+Rivven Connect includes a built-in schema registry with comprehensive support for JSON Schema, Apache Avro, and Protocol Buffers.
 
 The schema registry provides:
 

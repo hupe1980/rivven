@@ -78,18 +78,19 @@ openssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key \
 ### Client Connection with TLS
 
 ```rust
-use rivven_client::RivvenClient;
+use rivven_client::{ResilientClient, ResilientClientConfig};
 
-let client = RivvenClient::builder()
-    .addresses(["rivven.example.com:9292"])
-    .tls(TlsConfig {
+let config = ResilientClientConfig::builder()
+    .servers(vec!["rivven.example.com:9292".into()])
+    .tls_config(TlsConfig {
         ca_cert: include_bytes!("../ca.crt").to_vec(),
         // For mTLS:
         client_cert: Some(include_bytes!("../client.crt").to_vec()),
         client_key: Some(include_bytes!("../client.key").to_vec()),
     })
-    .build()
-    .await?;
+    .build()?;
+
+let client = ResilientClient::new(config).await?;
 ```
 
 ### QUIC Transport
@@ -150,11 +151,14 @@ rivven auth token revoke service-a
 Use tokens in client:
 
 ```rust
-let client = RivvenClient::builder()
-    .addresses(["rivven.example.com:9292"])
+use rivven_client::{ResilientClient, ResilientClientConfig};
+
+let config = ResilientClientConfig::builder()
+    .servers(vec!["rivven.example.com:9292".into()])
     .auth_token("rvn_a1b2c3d4e5f6...")
-    .build()
-    .await?;
+    .build()?;
+
+let client = ResilientClient::new(config).await?;
 ```
 
 ### SCRAM-SHA-256
@@ -609,6 +613,6 @@ spec:
 
 ## Next Steps
 
-- [Architecture](/rivven/docs/architecture) - Security design details
-- [Kubernetes](/rivven/docs/kubernetes) - Secure deployment
-- [CDC](/rivven/docs/cdc) - Database security configuration
+- [Architecture](architecture) — Security design details
+- [Kubernetes](kubernetes) — Secure deployment
+- [CDC](cdc) — Database security configuration

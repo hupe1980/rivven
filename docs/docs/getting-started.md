@@ -300,7 +300,7 @@ for msg in messages:
 
 ## Next Steps
 
-- [Architecture](/rivven/docs/architecture) - Understand system design
-- [CDC Guide](/rivven/docs/cdc) - Set up Change Data Capture
-- [Connectors](/rivven/docs/connectors) - Configure sources and sinks
-- [Security](/rivven/docs/security) - Enable TLS and authentication
+- [Architecture](architecture) — Understand system design
+- [CDC Guide](cdc) — Set up Change Data Capture
+- [Connectors](connectors) — Configure sources and sinks
+- [Security](security) — Enable TLS and authentication

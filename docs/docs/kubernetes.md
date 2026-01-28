@@ -782,6 +782,6 @@ kubectl exec -n rivven rivven-0 -- \
 
 ## Next Steps
 
-- [Security](/rivven/docs/security) - Kubernetes security hardening
-- [Architecture](/rivven/docs/architecture) - Distributed design
-- [Getting Started](/rivven/docs/getting-started) - Basic operations
+- [Security](security) — Kubernetes security hardening
+- [Architecture](architecture) — Distributed design
+- [Getting Started](getting-started) — Basic operations

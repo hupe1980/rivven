@@ -56,19 +56,13 @@ This separation provides **security isolation**—database credentials stay in t
 │                                                                 │
 │  ┌──────────────────┐       ┌────────────────────────────────┐ │
 │  │     rivvend      │       │       rivven-connect           │ │
-│  │    (broker)      │◄─────►│  (connectors CLI)              │ │
+│  │    (broker)      │◄─────►│  (SDK + CLI)                   │ │
 │  │                  │native │                                 │ │
-│  │  • Storage       │proto  │  Sources: postgres-cdc, mysql  │ │
-│  │  • Replication   │       │  Sinks:   stdout, s3, http     │ │
-│  │  • Consumer Grps │       │  Transforms: field-mask, etc   │ │
-│  │  • Auth/RBAC     │       │                                 │ │
+│  │  • Storage       │proto  │  SDK:   Source, Sink, Transform │ │
+│  │  • Replication   │       │  CLI:   Config-driven pipelines │ │
+│  │  • Consumer Grps │       │  Sources: postgres-cdc, mysql   │ │
+│  │  • Auth/RBAC     │       │  Sinks:   stdout, s3, http      │ │
 │  └──────────────────┘       └────────────────────────────────┘ │
-│                                                                 │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │               rivven-connect-sdk (library)                │  │
-│  │  • Source trait   • Sink trait   • Transform trait        │  │
-│  │  • Airbyte-style: spec/check/discover/read/write          │  │
-│  └──────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -474,6 +468,6 @@ cargo build -p rivvend --release
 
 ## Next Steps
 
-- [CDC Guide](/rivven/docs/cdc) - Set up database replication
-- [Security](/rivven/docs/security) - Configure authentication and TLS
-- [Kubernetes](/rivven/docs/kubernetes) - Deploy to Kubernetes
+- [CDC Guide](cdc) — Set up database replication
+- [Security](security) — Configure authentication and TLS
+- [Kubernetes](kubernetes) — Deploy to Kubernetes

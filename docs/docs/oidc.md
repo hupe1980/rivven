@@ -277,14 +277,14 @@ sasl.jaas.config=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginMo
 ### Rust Client Example
 
 ```rust
-use rivven_client::{ClientConfig, RivvenClient};
+use rivven_client::{ResilientClient, ResilientClientConfig};
 
-let config = ClientConfig::builder()
-    .bootstrap_servers(vec!["rivven:9092".into()])
+let config = ResilientClientConfig::builder()
+    .servers(vec!["rivven:9092".into()])
     .auth_token(token)  // JWT from IdP
     .build()?;
 
-let client = RivvenClient::connect(config).await?;
+let client = ResilientClient::new(config).await?;
 ```
 
 ---

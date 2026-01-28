@@ -1,8 +1,26 @@
-# Per-Principal Quotas
+---
+layout: default
+title: Per-Principal Quotas
+nav_order: 11
+---
 
-Rivven supports **per-principal quotas** to limit throughput on a per-user, per-client-id, or per-consumer-group basis. This prevents noisy neighbors in multi-tenant deployments and ensures fair resource allocation.
+# Per-Principal Quotas
+{: .no_toc }
+
+Rate limiting for multi-tenant deployments.
+{: .fs-6 .fw-300 }
+
+## Table of contents
+{: .no_toc .text-delta }
+
+1. TOC
+{:toc}
+
+---
 
 ## Overview
+
+Rivven supports **per-principal quotas** to limit throughput on a per-user, per-client-id, or per-consumer-group basis. This prevents noisy neighbors in multi-tenant deployments and ensures fair resource allocation.
 
 Quotas can be configured at different granularities:
 

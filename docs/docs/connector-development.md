@@ -1,6 +1,22 @@
-# Connector Development
+---
+layout: default
+title: Connector Development
+nav_order: 9
+---
 
-This guide covers building custom connectors for Rivven using the SDK and derive macros.
+# Connector Development
+{: .no_toc }
+
+Build custom connectors with the Rivven SDK.
+{: .fs-6 .fw-300 }
+
+## Table of contents
+{: .no_toc .text-delta }
+
+1. TOC
+{:toc}
+
+---
 
 ## Overview
 
