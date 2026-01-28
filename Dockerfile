@@ -5,12 +5,12 @@
 # ============================================================================
 #
 # Build different images with:
-#   docker build -t ghcr.io/hupe1980/rivven:latest .
+#   docker build -t ghcr.io/hupe1980/rivvend:latest .
 #   docker build --build-arg BINARY=rivven-connect -t ghcr.io/hupe1980/rivven-connect:latest .
 #   docker build --build-arg BINARY=rivven-operator -t ghcr.io/hupe1980/rivven-operator:latest .
 #
 # Multi-arch build:
-#   docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/hupe1980/rivven:latest .
+#   docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/hupe1980/rivvend:latest .
 #
 # ============================================================================
 
@@ -61,13 +61,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
         ;; \
     esac \
     && cargo zigbuild --release --target $TARGET \
-       --package rivven-server \
-       --package rivven-cli \
+       --package rivvend \
+       --package rivven \
        --package rivven-connect \
        --package rivven-operator \
     && mkdir -p /out \
     && cp target/$TARGET/release/rivvend /out/ \
-    && cp target/$TARGET/release/rivvenctl /out/ \
+    && cp target/$TARGET/release/rivven /out/ \
     && cp target/$TARGET/release/rivven-connect /out/ \
     && cp target/$TARGET/release/rivven-operator /out/
 
@@ -85,7 +85,7 @@ LABEL org.opencontainers.image.licenses="Apache-2.0"
 
 # Copy selected binary and CLI tools
 COPY --from=builder /out/${BINARY} /usr/local/bin/app
-COPY --from=builder /out/rivvenctl /usr/local/bin/rivvenctl
+COPY --from=builder /out/rivven /usr/local/bin/rivven
 
 # Data/config directory
 VOLUME ["/data"]

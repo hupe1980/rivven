@@ -1,4 +1,4 @@
-//! REST API client for communicating with rivven-server
+//! REST API client for communicating with rivvend
 //!
 //! Provides typed HTTP requests using gloo-net.
 
@@ -6,7 +6,7 @@ use crate::config::DashboardConfig;
 use gloo_net::http::Request;
 use serde::{Deserialize, Serialize};
 
-/// API client for rivven-server
+/// API client for rivvend
 pub struct ApiClient {
     base_url: String,
 }

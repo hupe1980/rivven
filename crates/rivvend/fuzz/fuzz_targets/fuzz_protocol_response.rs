@@ -4,7 +4,7 @@
 //! Tests that the response parser handles malformed data gracefully.
 
 use libfuzzer_sys::fuzz_target;
-use rivven_server::protocol::Response;
+use rivvend::protocol::Response;
 
 fuzz_target!(|data: &[u8]| {
     // Try to deserialize arbitrary bytes as a Response

@@ -33,7 +33,7 @@ Rivven is designed as a **single binary** that contains everything needed to run
 
 | Binary | Purpose |
 |:-------|:--------|
-| `rivven-server` | Message broker with storage, replication, and auth |
+| `rivvend` | Message broker with storage, replication, and auth |
 | `rivven-connect` | Connector framework for sources and sinks |
 
 This separation provides **security isolation**—database credentials stay in the connector process, never reaching the broker.
@@ -55,7 +55,7 @@ This separation provides **security isolation**—database credentials stay in t
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ┌──────────────────┐       ┌────────────────────────────────┐ │
-│  │  rivven-server   │       │       rivven-connect           │ │
+│  │     rivvend      │       │       rivven-connect           │ │
 │  │    (broker)      │◄─────►│  (connectors CLI)              │ │
 │  │                  │native │                                 │ │
 │  │  • Storage       │proto  │  Sources: postgres-cdc, mysql  │ │
@@ -79,8 +79,9 @@ This separation provides **security isolation**—database credentials stay in t
 | Crate | Purpose | Description |
 |:------|:--------|:------------|
 | `rivven-core` | Storage engine | Topics, partitions, consumer groups, compression |
-| `rivven-server` | Broker binary | TCP server, protocol handling, auth |
+| `rivvend` | Broker binary | TCP server, protocol handling, auth |
 | `rivven-client` | Rust client | Native async client library |
+| `rivven` | CLI | Command-line interface |
 | `rivven-cluster` | Distributed | Raft consensus, SWIM gossip, partitioning |
 | `rivven-cdc` | CDC library | PostgreSQL and MySQL replication |
 | `rivven-connect` | Connector CLI & SDK | Configuration-driven connectors + traits |
@@ -466,7 +467,7 @@ rustup target add wasm32-unknown-unknown
 just dashboard-install
 
 # Rebuild server with embedded dashboard
-cargo build -p rivven-server --release
+cargo build -p rivvend --release
 ```
 
 ---

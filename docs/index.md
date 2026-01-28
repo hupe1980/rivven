@@ -82,13 +82,13 @@ rivvend
 
 ```bash
 # Create a topic
-rivvenctl topic create events
+rivven topic create events
 
 # Publish messages
-rivvenctl produce events "Hello, Rivven!"
+rivven produce events "Hello, Rivven!"
 
 # Consume messages
-rivvenctl consume events
+rivven consume events
 ```
 
 ### CDC Pipeline
@@ -127,7 +127,7 @@ rivven-connect -c rivven-connect.yaml
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │  ┌──────────────────┐       ┌────────────────────────────────┐ │
-│  │  rivven-server   │       │       rivven-connect           │ │
+│  │     rivvend      │       │       rivven-connect           │ │
 │  │    (broker)      │◄─────►│  (connectors CLI)              │ │
 │  │                  │native │                                 │ │
 │  │  • Storage       │proto  │  Sources: postgres-cdc, mysql  │ │

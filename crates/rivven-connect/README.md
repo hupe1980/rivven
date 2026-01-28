@@ -20,7 +20,7 @@ Config-driven connector runtime for Rivven - a unified binary for data ingestion
 
 ```
 ┌─────────────────┐      ┌─────────────────┐      ┌─────────────────┐
-│   PostgreSQL    │─────▶│  rivven-connect │─────▶│  rivven-server  │
+│   PostgreSQL    │─────▶│  rivven-connect │─────▶│     rivvend     │
 │   MySQL         │      │  (config-driven)│      │    (broker)     │
 │   HTTP API      │      │                 │      │                 │
 └─────────────────┘      └─────────────────┘      └─────────────────┘

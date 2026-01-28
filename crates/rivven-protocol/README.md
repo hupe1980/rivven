@@ -4,7 +4,7 @@ Wire protocol types for Rivven, the distributed event streaming platform.
 
 ## Overview
 
-This crate provides the canonical definitions for all wire protocol types used in client-server communication. Both `rivven-client` and `rivven-server` depend on this crate to ensure wire compatibility.
+This crate provides the canonical definitions for all wire protocol types used in client-server communication. Both `rivven-client` and `rivvend` depend on this crate to ensure wire compatibility.
 
 ## Features
 

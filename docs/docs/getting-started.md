@@ -34,6 +34,7 @@ cd rivven
 cargo build --release
 
 # Binaries are in target/release/
+./target/release/rivvend --help
 ./target/release/rivven --help
 ./target/release/rivven-connect --help
 ```
@@ -164,55 +165,55 @@ Sinks (1 enabled):
 
 ```bash
 # Create a topic
-rivvenctl topic create events
+rivven topic create events
 
 # Create with partitions
-rivvenctl topic create orders --partitions 3
+rivven topic create orders --partitions 3
 
 # List topics
-rivvenctl topic list
+rivven topic list
 
 # Delete a topic
-rivvenctl topic delete events
+rivven topic delete events
 ```
 
 ### Publishing Messages
 
 ```bash
 # Simple message
-rivvenctl produce events "Hello, World!"
+rivven produce events "Hello, World!"
 
 # From stdin
-echo '{"user": "alice", "action": "login"}' | rivvenctl produce events
+echo '{"user": "alice", "action": "login"}' | rivven produce events
 
 # Multiple messages
-cat events.jsonl | rivvenctl produce events
+cat events.jsonl | rivven produce events
 ```
 
 ### Consuming Messages
 
 ```bash
 # Consume from beginning
-rivvenctl consume events
+rivven consume events
 
 # Consume from a specific offset
-rivvenctl consume events --offset 100
+rivven consume events --offset 100
 
 # Consume with consumer group
-rivvenctl consume events --group my-app
+rivven consume events --group my-app
 ```
 
 ### Consumer Groups
 
 ```bash
 # List consumer groups
-rivvenctl group list
+rivven group list
 
 # Describe a group
-rivvenctl group describe my-app
+rivven group describe my-app
 
 # Delete a group
-rivvenctl group delete my-app
+rivven group delete my-app
 ```
 
 ---

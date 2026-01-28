@@ -609,33 +609,33 @@ async fn test_concurrent_multi_node_operations() {
 // Network-Based Chaos Tests
 // ============================================================================
 
-// NOTE: True network-based cluster tests require running full rivven-server
+// NOTE: True network-based cluster tests require running full rivvend
 // processes with HTTP endpoints for Raft RPCs. The create_three_node_cluster()
 // function creates RaftNodes without HTTP servers, so they cannot communicate.
 //
 // For production chaos testing, use:
-// 1. Docker Compose with 3 rivven-server instances
+// 1. Docker Compose with 3 rivvend instances
 // 2. Chaos engineering tools (chaos-mesh, litmus)
 // 3. scripts/chaos-test.sh (when available)
 //
 // The tests below are marked #[ignore] as they require this infrastructure.
 
 /// Test leader election in a real 3-node networked cluster
-/// Requires: 3 rivven-server processes running with HTTP Raft API
+/// Requires: 3 rivvend processes running with HTTP Raft API
 #[tokio::test]
-#[ignore = "Requires 3 running rivven-server processes; see scripts/chaos-test.sh"]
+#[ignore = "Requires 3 running rivvend processes; see scripts/chaos-test.sh"]
 async fn test_network_leader_election() {
     // This test would connect to 3 running servers and verify leader election
     // For now, this serves as documentation of the expected behavior
     println!("To run this test:");
-    println!("1. Start 3 rivven-server instances on ports 9101, 9102, 9103");
+    println!("1. Start 3 rivvend instances on ports 9101, 9102, 9103");
     println!("2. Wait for cluster formation");
     println!("3. Verify exactly one leader via /raft/metrics endpoints");
 }
 
 /// Test cluster continues to work after leader dies
 #[tokio::test]
-#[ignore = "Requires 3 running rivven-server processes; see scripts/chaos-test.sh"]
+#[ignore = "Requires 3 running rivvend processes; see scripts/chaos-test.sh"]
 async fn test_leader_failover() {
     println!("To run this test:");
     println!("1. Start 3-node cluster");
@@ -646,7 +646,7 @@ async fn test_leader_failover() {
 
 /// Test cluster recovery when minority of nodes fail  
 #[tokio::test]
-#[ignore = "Requires 3 running rivven-server processes; see scripts/chaos-test.sh"]
+#[ignore = "Requires 3 running rivvend processes; see scripts/chaos-test.sh"]
 async fn test_minority_failure_recovery() {
     println!("To run this test:");
     println!("1. Start 3-node cluster");
@@ -658,7 +658,7 @@ async fn test_minority_failure_recovery() {
 
 /// Test that writes fail when majority fails (safety property)
 #[tokio::test]
-#[ignore = "Requires 3 running rivven-server processes; see scripts/chaos-test.sh"]
+#[ignore = "Requires 3 running rivvend processes; see scripts/chaos-test.sh"]
 async fn test_majority_failure_blocks_writes() {
     println!("To run this test:");
     println!("1. Start 3-node cluster");

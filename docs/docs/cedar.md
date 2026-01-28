@@ -105,7 +105,7 @@ namespace Rivven {
 ### Enable Cedar Authorization
 
 ```yaml
-# rivven-server.yaml
+# rivvend.yaml
 authorization:
   method: cedar
   
@@ -137,7 +137,7 @@ Policies can be reloaded without restart:
 kill -HUP $(pidof rivvend)
 
 # Or via admin API
-rivvenctl admin reload-policies
+rivven admin reload-policies
 ```
 
 ---
@@ -312,13 +312,13 @@ Update entities via admin API:
 
 ```bash
 # Add user to group
-rivvenctl admin cedar add-entity \
+rivven admin cedar add-entity \
   --type User \
   --id bob \
   --parent Group::developers
 
 # Update topic attributes
-rivvenctl admin cedar update-entity \
+rivven admin cedar update-entity \
   --type Topic \
   --id orders \
   --attr partitions=24
@@ -528,7 +528,7 @@ authorization:
 export RUST_LOG=rivven::cedar=debug
 
 # Check why a request was denied
-rivvenctl admin cedar explain \
+rivven admin cedar explain \
   --principal alice \
   --action produce \
   --resource orders
@@ -541,7 +541,7 @@ rivvenctl admin cedar explain \
 **Solution**: Check entity hierarchy and group memberships:
 
 ```bash
-rivvenctl admin cedar show-entity --type User --id alice
+rivven admin cedar show-entity --type User --id alice
 ```
 
 ---

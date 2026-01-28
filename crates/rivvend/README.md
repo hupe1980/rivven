@@ -1,6 +1,6 @@
-# rivven-server
+# rivvend
 
-The Rivven broker server binary.
+The Rivven broker server daemon.
 
 ## Features
 
@@ -16,20 +16,20 @@ The Rivven broker server binary.
 
 ```bash
 # Build from source (without dashboard)
-cargo build -p rivven-server --release
+cargo build -p rivvend --release
 
 # Build with embedded dashboard
 # First, build the dashboard assets:
 cd crates/rivven-dashboard
 trunk build --release
-cp -r dist/* ../rivven-server/static/
+cp -r dist/* ../rivvend/static/
 cd ../..
 
 # Then build the server with dashboard feature:
-cargo build -p rivven-server --release --features dashboard
+cargo build -p rivvend --release --features dashboard
 
 # Run the server
-./target/release/rivven-server --data-dir ./data
+./target/release/rivvend --data-dir ./data
 # Dashboard available at http://localhost:8080/
 ```
 
@@ -47,7 +47,7 @@ Rivven uses **sticky partitioning** (Kafka 2.4+ compatible):
 
 Configure via CLI:
 ```bash
-rivven-server --partitioner-batch-size 16384 --partitioner-linger-ms 100
+rivvend --partitioner-batch-size 16384 --partitioner-linger-ms 100
 ```
 
 Or environment variables:
@@ -87,10 +87,10 @@ tls:
 ## CLI Options
 
 ```bash
-rivven-server --help
+rivvend --help
 
 USAGE:
-    rivven-server [OPTIONS]
+    rivvend [OPTIONS]
 
 OPTIONS:
     -c, --config <FILE>    Configuration file path

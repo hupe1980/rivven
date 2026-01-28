@@ -60,18 +60,18 @@ Consumer groups enable **multiple consumers** to share the load of processing me
 
 ```bash
 # Consume with consumer group
-rivvenctl consume orders \
+rivven consume orders \
   --group order-processors \
   --from-beginning
 
 # List consumer groups
-rivvenctl group list
+rivven group list
 
 # Describe group
-rivvenctl group describe order-processors
+rivven group describe order-processors
 
 # Reset offsets
-rivvenctl group reset-offsets order-processors \
+rivven group reset-offsets order-processors \
   --topic orders \
   --to-earliest
 ```
@@ -375,7 +375,7 @@ Each consumer group has a **coordinator** broker responsible for:
 ### Finding the Coordinator
 
 ```bash
-rivvenctl group describe order-processors
+rivven group describe order-processors
 
 # Output:
 # Group: order-processors
@@ -465,7 +465,7 @@ If `poll()` not called within this interval, consumer is considered failed.
 
 ```bash
 # Watch consumer lag
-rivvenctl group lag order-processors --watch
+rivven group lag order-processors --watch
 
 # Output:
 # TOPIC    PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG

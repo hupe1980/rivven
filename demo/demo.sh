@@ -24,9 +24,9 @@ case "${1:-help}" in
     # Use pre-built binary if available, otherwise build
     BINARY="${PROJECT_ROOT}/target/release/rivvend"
     if [[ ! -x "$BINARY" ]]; then
-      echo "Building rivven-server..."
+      echo "Building rivvend..."
       cd "${PROJECT_ROOT}"
-      cargo build -p rivven-server --release --features dashboard
+      cargo build -p rivvend --release --features dashboard
     fi
     
     "$BINARY" \

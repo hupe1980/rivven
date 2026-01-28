@@ -1,7 +1,7 @@
 //! Service-to-Service Authentication for Rivven
 //!
 //! This module provides authentication mechanisms for service accounts,
-//! specifically designed for `rivven-connect` authenticating to `rivven-server`.
+//! specifically designed for `rivven-connect` authenticating to `rivvend`.
 //!
 //! ## Supported Methods
 //!
@@ -18,7 +18,7 @@
 //! ├─────────────────────────────────────────────────────────────────────────┤
 //! │                                                                         │
 //! │  ┌──────────────┐                      ┌──────────────────┐             │
-//! │  │rivven-connect│                      │  rivven-server   │             │
+//! │  │rivven-connect│                      │     rivvend      │             │
 //! │  └──────┬───────┘                      └────────┬─────────┘             │
 //! │         │                                       │                       │
 //! │         │  1. TLS Handshake (optional mTLS)     │                       │

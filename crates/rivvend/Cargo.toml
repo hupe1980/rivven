@@ -1,5 +1,5 @@
 [package]
-name = "rivven-server"
+name = "rivvend"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

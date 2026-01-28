@@ -4,7 +4,7 @@
 # Run with: rivven-connect run -c examples/connect-minimal.yaml
 #
 # Prerequisites:
-# 1. Start a Rivven broker: rivven-server
+# 1. Start a Rivven broker: rivvend
 # 2. Run this connect instance: rivven-connect run -c examples/connect-minimal.yaml
 
 version: "1.0"

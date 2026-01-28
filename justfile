@@ -78,9 +78,9 @@ server *ARGS:
 server-release *ARGS:
     cargo run --release --bin rivvend -- {{ARGS}}
 
-# Run the CLI (rivvenctl)
+# Run the CLI (rivven)
 cli *ARGS:
-    cargo run --bin rivvenctl -- {{ARGS}}
+    cargo run --bin rivven -- {{ARGS}}
 
 # Run rivven-connect
 connect *ARGS:
@@ -194,11 +194,11 @@ demo: build-release
     ./target/release/rivvend --data-dir ./demo-data &
     @sleep 2
     @echo "\nCreating topic 'test'..."
-    ./target/release/rivvenctl topic create test --partitions 3
+    ./target/release/rivven topic create test --partitions 3
     @echo "\nProducing messages..."
-    @for i in 1 2 3 4 5; do ./target/release/rivvenctl publish test "Message $$i"; done
+    @for i in 1 2 3 4 5; do ./target/release/rivven publish test "Message $$i"; done
     @echo "\nConsuming messages..."
-    ./target/release/rivvenctl consume test --from-beginning --max 10
+    ./target/release/rivven consume test --from-beginning --max 10
     @echo "\nDemo complete! Broker running on 127.0.0.1:9092"
 
 # Demo with dashboard
@@ -220,8 +220,8 @@ dashboard-dev:
 
 # Build dashboard and embed in server
 dashboard-install: dashboard-build
-    rm -rf crates/rivven-server/static/*
-    cp -r crates/rivven-dashboard/dist/* crates/rivven-server/static/
+    rm -rf crates/rivvend/static/*
+    cp -r crates/rivven-dashboard/dist/* crates/rivvend/static/
 
 # Full release with embedded dashboard
 release-with-dashboard: dashboard-install build-release

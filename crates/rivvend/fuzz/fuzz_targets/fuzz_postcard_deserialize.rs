@@ -7,7 +7,7 @@
 use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
 use bytes::Bytes;
-use rivven_server::protocol::{Request, Response, MessageData, BrokerInfo, TopicMetadata, PartitionMetadata};
+use rivvend::protocol::{Request, Response, MessageData, BrokerInfo, TopicMetadata, PartitionMetadata};
 
 /// Arbitrary-generated request for structured fuzzing
 #[derive(Debug, Arbitrary)]

@@ -1,4 +1,4 @@
-//! Rivven Server
+//! Rivven Server Daemon (rivvend)
 //!
 //! High-performance distributed event streaming server with support
 //! for both standalone and clustered deployment modes.
@@ -13,10 +13,10 @@
 //!
 //! ```bash
 //! # Standalone mode
-//! rivven-server
+//! rivvend
 //!
 //! # Cluster mode
-//! rivven-server --mode cluster --node-id node-1 --seeds node-2:9093
+//! rivvend --mode cluster --node-id node-1 --seeds node-2:9093
 //! ```
 
 pub mod auth_handler;

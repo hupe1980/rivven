@@ -68,7 +68,7 @@ This approach optimizes for both **performance** (hot data in memory) and **cost
 ### Basic Configuration
 
 ```yaml
-# rivven-server.yaml
+# rivvend.yaml
 storage:
   tiered:
     enabled: true

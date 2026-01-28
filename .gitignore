@@ -22,7 +22,7 @@ target
 
 # Trunk WASM build artifacts
 crates/rivven-dashboard/dist/
-crates/rivven-server/static/
+crates/rivvend/static/
 
 # Python native modules
 python/rivven/*.so

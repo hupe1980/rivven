@@ -2,7 +2,7 @@
 //!
 //! These tests verify the complete data flow:
 //! 1. PostgreSQL with logical replication
-//! 2. rivven-server broker
+//! 2. rivvend broker
 //! 3. Source connector (postgres-cdc)
 //! 4. Sink connector (captures events)
 //!
@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use rivven_client::Client;
 use rivven_core::Config;
-use rivven_server::Server;
+use rivvend::Server;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;

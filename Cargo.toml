@@ -4,9 +4,8 @@ members = [
     "crates/rivven",
     "crates/rivven-core",
     "crates/rivven-protocol",
-    "crates/rivven-server",
+    "crates/rivvend",
     "crates/rivven-client",
-    "crates/rivven-cli",
     "crates/rivven-cdc",
     "crates/rivven-connect",
     "crates/rivven-connect-derive",
@@ -18,7 +17,7 @@ members = [
     "crates/rivven-operator",
 ]
 exclude = [
-    "crates/rivven-server/fuzz",
+    "crates/rivvend/fuzz",
     "crates/rivven-dashboard",  # WASM crate - build with trunk
 ]
 
@@ -78,7 +77,7 @@ jsonwebtoken = "9"
 
 # Internal crates
 rivven-core = { path = "crates/rivven-core" }
-rivven-server = { path = "crates/rivven-server" }
+rivvend = { path = "crates/rivvend" }
 rivven-client = { path = "crates/rivven-client" }
 rivven-cdc = { path = "crates/rivven-cdc" }
 rivven-connect = { path = "crates/rivven-connect" }

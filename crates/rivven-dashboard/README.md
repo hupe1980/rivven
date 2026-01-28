@@ -17,7 +17,7 @@ A modern, reactive dashboard for monitoring and managing Rivven clusters, built 
 The dashboard is designed for air-gapped environments:
 
 - ✅ **System fonts** — Uses OS font stack (no Google Fonts)
-- ✅ **No CDN** — All assets served from rivven-server
+- ✅ **No CDN** — All assets served from rivvend
 - ✅ **Same-origin API** — No CORS or external calls
 - ✅ **Embedded WASM** — Bundled in server binary
 
@@ -57,7 +57,7 @@ Or via JavaScript for reverse proxy setups:
 └──────────────────────────┬──────────────────────────────────┘
                            │ HTTP
 ┌──────────────────────────▼──────────────────────────────────┐
-│                  rivven-server                              │
+│                      rivvend                                │
 │             (serves WASM + REST API)                        │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -80,7 +80,7 @@ rustup target add wasm32-unknown-unknown
 cd crates/rivven-dashboard
 trunk serve --port 8081
 
-# Make sure rivven-server is running on port 8080
+# Make sure rivvend is running on port 8080
 rivvend --data-dir ./data
 ```
 
@@ -95,9 +95,9 @@ ls dist/
 # index.html  rivven_dashboard_bg.wasm  rivven_dashboard.js  styles.css
 ```
 
-### Embed in rivven-server
+### Embed in rivvend
 
-After building, copy the `dist/` contents to `rivven-server/static/`:
+After building, copy the `dist/` contents to `rivvend/static/`:
 
 ```bash
 # Build dashboard
@@ -105,13 +105,13 @@ cd crates/rivven-dashboard
 trunk build --release
 
 # Copy to server static files
-cp -r dist/* ../rivven-server/static/
+cp -r dist/* ../rivvend/static/
 ```
 
-Then rebuild rivven-server to embed the new assets:
+Then rebuild rivvend to embed the new assets:
 
 ```bash
-cargo build -p rivven-server --release
+cargo build -p rivvend --release
 ```
 
 ## Views

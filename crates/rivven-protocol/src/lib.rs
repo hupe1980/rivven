@@ -1,6 +1,6 @@
 //! Rivven Wire Protocol
 //!
-//! This crate defines the wire protocol types shared between rivven-client and rivven-server.
+//! This crate defines the wire protocol types shared between rivven-client and rivvend.
 //! It provides serialization/deserialization for all protocol messages.
 //!
 //! # Protocol Stability

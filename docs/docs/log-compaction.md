@@ -65,12 +65,12 @@ Log compaction is a **retention mechanism** that keeps the latest record for eac
 
 ```bash
 # Create compacted topic
-rivvenctl topic create user-profiles \
+rivven topic create user-profiles \
   --partitions 12 \
   --config cleanup.policy=compact
 
 # Or update existing topic
-rivvenctl topic alter user-profiles \
+rivven topic alter user-profiles \
   --config cleanup.policy=compact
 ```
 
@@ -88,7 +88,7 @@ rivvenctl topic alter user-profiles \
 ### Example: User Profiles Topic
 
 ```bash
-rivvenctl topic create user-profiles \
+rivven topic create user-profiles \
   --partitions 24 \
   --config cleanup.policy=compact \
   --config min.cleanable.dirty.ratio=0.3 \
@@ -257,7 +257,7 @@ Compaction process:
 Use both compaction and time-based retention:
 
 ```bash
-rivvenctl topic create orders \
+rivven topic create orders \
   --config cleanup.policy=compact,delete \
   --config retention.ms=2592000000 \  # 30 days
   --config min.cleanable.dirty.ratio=0.5
@@ -285,7 +285,7 @@ rivvenctl topic create orders \
 
 ```bash
 # Check topic compaction status
-rivvenctl topic describe user-profiles
+rivven topic describe user-profiles
 
 # Output:
 # Topic: user-profiles

@@ -432,7 +432,7 @@ Then send signals via Rivven CLI:
 
 ```bash
 # Trigger snapshot via topic
-rivvenctl produce cdc-signals \
+rivven produce cdc-signals \
   --key mydb-connector \
   --value '{"type": "execute-snapshot", "data": {"data-collections": ["public.orders"]}}'
 ```
@@ -716,7 +716,7 @@ Send signals via Rivven CLI instead of SQL:
 
 ```bash
 # Trigger snapshot via topic channel
-rivvenctl produce cdc-signals \
+rivven produce cdc-signals \
   --key mydb-connector \
   --value '{"type": "execute-snapshot", "data": {"data-collections": ["public.orders"]}}'
 ```

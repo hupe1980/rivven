@@ -2,16 +2,16 @@
 //!
 //! Usage:
 //!   # Standalone mode (default)
-//!   rivven-server
+//!   rivvend
 //!
 //!   # Cluster mode - first node (bootstrap)
-//!   rivven-server --mode cluster --node-id node-1
+//!   rivvend --mode cluster --node-id node-1
 //!
 //!   # Cluster mode - joining nodes
-//!   rivven-server --mode cluster --node-id node-2 --seeds node-1:9093
+//!   rivvend --mode cluster --node-id node-2 --seeds node-1:9093
 //!
 //!   # With custom configuration
-//!   rivven-server --mode cluster \
+//!   rivvend --mode cluster \
 //!     --node-id node-1 \
 //!     --bind 0.0.0.0:9092 \
 //!     --cluster-bind 0.0.0.0:9093 \
@@ -21,7 +21,7 @@
 //!     --replication-factor 3
 
 use clap::Parser;
-use rivven_server::{Cli, ClusterServer};
+use rivvend::{Cli, ClusterServer};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};

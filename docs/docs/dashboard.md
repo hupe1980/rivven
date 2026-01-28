@@ -26,7 +26,7 @@ The Rivven Dashboard provides a **modern, reactive web interface** for monitorin
 The dashboard is designed for **air-gapped environments**:
 
 - ✅ **System fonts** — Uses OS font stack (no Google Fonts)
-- ✅ **No CDN** — All assets served from rivven-server
+- ✅ **No CDN** — All assets served from rivvend
 - ✅ **Same-origin API** — No CORS or external calls
 - ✅ **Embedded WASM** — Bundled in server binary
 
@@ -57,7 +57,7 @@ Or via JavaScript for reverse proxy setups:
 
 ## Accessing the Dashboard
 
-When running rivven-server with the embedded dashboard:
+When running rivvend with the embedded dashboard:
 
 ```bash
 # Start server
@@ -196,8 +196,8 @@ rustup target add wasm32-unknown-unknown
 cd crates/rivven-dashboard
 trunk serve --port 8081
 
-# In another terminal, start rivven-server
-cargo run -p rivven-server -- --data-dir ./data
+# In another terminal, start rivvend
+cargo run -p rivvend -- --data-dir ./data
 ```
 
 ### Production Build
@@ -217,7 +217,7 @@ ls dist/
 
 ### Embedding in Server
 
-The dashboard assets must be copied to `rivven-server/static/` before building the server:
+The dashboard assets must be copied to `rivvend/static/` before building the server:
 
 ```bash
 # Step 1: Build dashboard
@@ -225,14 +225,14 @@ cd crates/rivven-dashboard
 trunk build --release
 
 # Step 2: Copy assets to server
-cp -r dist/* ../rivven-server/static/
+cp -r dist/* ../rivvend/static/
 
 # Step 3: Build server with embedded dashboard
 cd ../..
-cargo build -p rivven-server --release --features dashboard
+cargo build -p rivvend --release --features dashboard
 
 # Dashboard is now embedded in the binary
-./target/release/rivven-server
+./target/release/rivvend
 ```
 
 The server uses `rust-embed` to compile static files into the binary at build time. This creates a single, self-contained executable with no external dependencies.
@@ -240,7 +240,7 @@ The server uses `rust-embed` to compile static files into the binary at build ti
 **Production deployment:**
 ```bash
 # Just run the binary - dashboard is embedded
-./rivven-server --data-dir /var/lib/rivven
+./rivvend --data-dir /var/lib/rivven
 # Dashboard available at http://localhost:8080/
 ```
 
@@ -370,7 +370,7 @@ Browser
 └── HTTP Requests
     │
     ▼
-rivven-server
+rivvend
 ├── Static file serving (WASM, CSS, HTML)
 ├── Dashboard REST API (/dashboard/*)
 └── Prometheus metrics (/metrics)

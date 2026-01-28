@@ -12,13 +12,13 @@
 //!
 //! Enable TLS with CLI flags:
 //! ```bash
-//! rivven-server --tls-enabled --tls-cert server.crt --tls-key server.key
+//! rivvend --tls-enabled --tls-cert server.crt --tls-key server.key
 //! ```
 //!
 //! For mTLS (require client certificates):
 //! ```bash
-//! rivven-server --tls-enabled --tls-cert server.crt --tls-key server.key \
-//!               --tls-ca ca.crt --tls-verify-client
+//! rivvend --tls-enabled --tls-cert server.crt --tls-key server.key \
+//!         --tls-ca ca.crt --tls-verify-client
 //! ```
 
 use crate::cli::Cli;
@@ -1176,7 +1176,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_standalone_server_creation() {
-        let cli = Cli::parse_from(["rivven-server"]);
+        let cli = Cli::parse_from(["rivvend"]);
         // Just verify we can create the CLI - full server needs more setup
         assert!(!cli.is_cluster_mode());
     }

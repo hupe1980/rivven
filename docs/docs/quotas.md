@@ -108,24 +108,24 @@ The client should wait `throttle_time_ms` before retrying.
 
 ```bash
 # List all quotas
-rivvenctl quota list
+rivven quota list
 
 # Set user quota
-rivvenctl quota set --user alice \
+rivven quota set --user alice \
   --produce-bytes-rate 10000000 \
   --consume-bytes-rate 20000000
 
 # Set client-id quota  
-rivvenctl quota set --client-id batch-processor \
+rivven quota set --client-id batch-processor \
   --request-rate 100
 
 # Set default quotas
-rivvenctl quota set --default \
+rivven quota set --default \
   --produce-bytes-rate 50000000 \
   --consume-bytes-rate 100000000
 
 # Remove a quota (revert to defaults)
-rivvenctl quota delete --user alice --quota produce_bytes_rate
+rivven quota delete --user alice --quota produce_bytes_rate
 ```
 
 ## Configuration
@@ -214,11 +214,11 @@ Identify applications that need higher or lower limits:
 
 ```bash
 # Batch processor needs higher throughput
-rivvenctl quota set --client-id batch-etl \
+rivven quota set --client-id batch-etl \
   --produce-bytes-rate 500000000
 
 # Rate-limit the test environment
-rivvenctl quota set --user test-service \
+rivven quota set --user test-service \
   --produce-bytes-rate 1000000 \
   --request-rate 50
 ```
@@ -227,7 +227,7 @@ rivvenctl quota set --user test-service \
 
 ```bash
 # Admin tools should not be throttled
-rivvenctl quota set --user admin \
+rivven quota set --user admin \
   --produce-bytes-rate unlimited \
   --consume-bytes-rate unlimited
 ```

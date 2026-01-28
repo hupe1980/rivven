@@ -87,7 +87,7 @@ prost-reflect = "0.15"
 
 [dev-dependencies]
 tokio-test = "0.4"
-rivven-server = { workspace = true }
+rivvend = { workspace = true }
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 tokio-postgres = "0.7"

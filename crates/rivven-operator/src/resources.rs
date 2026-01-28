@@ -382,7 +382,7 @@ impl<'a> ResourceBuilder<'a> {
             name: "rivven".to_string(),
             image: Some(spec.get_image()),
             image_pull_policy: Some(spec.image_pull_policy.clone()),
-            command: Some(vec!["rivven-server".to_string()]),
+            command: Some(vec!["rivvend".to_string()]),
             args: Some(vec![
                 "--config".to_string(),
                 "/etc/rivven/config.yaml".to_string(),

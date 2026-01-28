@@ -54,15 +54,15 @@
 
 ```bash
 # Install
-cargo install rivven-cli rivven-server rivven-connect
+cargo install rivven rivvend rivven-connect
 
 # Start broker with dashboard
 rivvend --dashboard --data-dir ./data
 
 # Create topic, publish, consume
-rivvenctl topic create events --partitions 3
-rivvenctl publish events "Hello, Rivven!"
-rivvenctl consume events --from-beginning
+rivven topic create events --partitions 3
+rivven publish events "Hello, Rivven!"
+rivven consume events --from-beginning
 ```
 
 ### Docker
@@ -122,8 +122,8 @@ rivven-connect run --config connect.yaml
 
 | Crate | Binary | Description |
 |:------|:-------|:------------|
-| `rivven-server` | `rivvend` | Broker with TCP server, protocol handling |
-| `rivven-cli` | `rivvenctl` | Command-line interface |
+| `rivven` | `rivven` | Command-line interface |
+| `rivvend` | `rivvend` | Broker with TCP server, protocol handling |
 | `rivven-connect` | `rivven-connect` | Connector framework for CDC & ETL |
 | `rivven-core` | — | Storage engine, partitions, consumers |
 | `rivven-client` | — | Rust client library |

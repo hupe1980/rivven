@@ -7,7 +7,7 @@ use bytes::Bytes;
 use clap::{Parser, Subcommand};
 use rivven_client::Client;
 use rivven_core::Config;
-use rivven_server::Server;
+use rivvend::Server;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};

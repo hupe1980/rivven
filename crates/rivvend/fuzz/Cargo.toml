@@ -1,5 +1,5 @@
 [package]
-name = "rivven-server-fuzz"
+name = "rivvend-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
@@ -17,7 +17,7 @@ bytes = "1"
 postcard = { version = "1", features = ["alloc"] }
 serde = { version = "1.0", features = ["derive"] }
 
-[dependencies.rivven-server]
+[dependencies.rivvend]
 path = ".."
 
 [dependencies.rivven-core]

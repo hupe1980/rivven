@@ -1,62 +1,100 @@
 # rivven
 
-[![Crates.io](https://img.shields.io/crates/v/rivven.svg)](https://crates.io/crates/rivven)
-[![Documentation](https://docs.rs/rivven/badge.svg)](https://docs.rs/rivven)
-[![License](https://img.shields.io/crates/l/rivven.svg)](LICENSE)
-
-High-performance distributed event streaming platform.
+Command-line interface for Rivven event streaming platform.
 
 ## Installation
 
-```toml
-[dependencies]
-rivven = "0.0.1"
+```bash
+cargo install rivven
 ```
 
-## Quick Start
+## Commands
 
-```rust,no_run
-use rivven::prelude::*;
+### Topic Management
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    // Create a client
-    let client = Client::builder()
-        .bootstrap_servers(["localhost:9092"])
-        .build()
-        .await?;
+```bash
+# List topics
+rivven topic list --server localhost:9092
 
-    // Produce messages
-    let producer = client.producer("my-topic").await?;
-    producer.send(b"Hello, Rivven!").await?;
+# Create topic
+rivven topic create my-topic --partitions 3 --server localhost:9092
 
-    // Consume messages
-    let consumer = client.consumer("my-topic", "my-group").await?;
-    while let Some(record) = consumer.recv().await? {
-        println!("Received: {:?}", record);
-    }
+# Delete topic
+rivven topic delete my-topic --server localhost:9092
 
-    Ok(())
-}
+# Describe topic
+rivven topic describe my-topic --server localhost:9092
 ```
 
-## Feature Flags
+### Produce Messages
 
-| Feature | Default | Description |
-|---------|---------|-------------|
-| `client` | ✓ | Async client for connecting to Rivven brokers |
-| `full` | | Enable all features |
+```bash
+# Produce from stdin
+echo '{"event": "test"}' | rivven produce my-topic --server localhost:9092
 
-## Crate Structure
+# Produce with key
+rivven produce my-topic --key user-123 --value '{"action": "login"}' --server localhost:9092
 
-The Rivven ecosystem consists of several crates:
+# Produce from file
+rivven produce my-topic --file events.jsonl --server localhost:9092
+```
 
-- [`rivven`](https://crates.io/crates/rivven) - This crate, the main entry point
-- [`rivven-core`](https://crates.io/crates/rivven-core) - Core types and traits
-- [`rivven-client`](https://crates.io/crates/rivven-client) - Async client library
-- [`rivven-server`](https://crates.io/crates/rivven-server) - Broker server
+### Consume Messages
+
+```bash
+# Consume from beginning
+rivven consume my-topic --from-beginning --server localhost:9092
+
+# Consume with group
+rivven consume my-topic --group my-group --server localhost:9092
+
+# Consume specific partition
+rivven consume my-topic --partition 0 --offset 100 --server localhost:9092
+
+# Consume with limit
+rivven consume my-topic --max-messages 10 --server localhost:9092
+```
+
+### Cluster Operations
+
+```bash
+# Cluster status
+rivven cluster status --server localhost:9092
+
+# List brokers
+rivven cluster brokers --server localhost:9092
+
+# Consumer groups
+rivven group list --server localhost:9092
+rivven group describe my-group --server localhost:9092
+```
+
+## Configuration
+
+Environment variables:
+- `RIVVEN_BOOTSTRAP_SERVERS` - Default bootstrap servers
+- `RIVVEN_TLS_ENABLED` - Enable TLS
+- `RIVVEN_TLS_CA_FILE` - CA certificate file
+
+## Output Formats
+
+```bash
+# JSON output
+rivven topic list --output json
+
+# Table output (default)
+rivven topic list --output table
+
+# Compact output
+rivven topic list --output compact
+```
+
+## Related Crates
+
+- [`rivvend`](https://crates.io/crates/rivvend) - Broker server daemon
+- [`rivven-client`](https://crates.io/crates/rivven-client) - Rust client library
 - [`rivven-connect`](https://crates.io/crates/rivven-connect) - Connector framework
 
 ## License
 
-Licensed under Apache License, Version 2.0 ([LICENSE](LICENSE) or <http://www.apache.org/licenses/LICENSE-2.0>)
+See root [LICENSE](../../LICENSE) file.

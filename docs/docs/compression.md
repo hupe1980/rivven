@@ -52,7 +52,7 @@ producer.send(Record::new()
 Force compression at the broker:
 
 ```bash
-rivvenctl topic create events \
+rivven topic create events \
   --config compression.type=zstd
 ```
 
@@ -66,7 +66,7 @@ rivvenctl topic create events \
 ### Server Defaults
 
 ```yaml
-# rivven-server.yaml
+# rivvend.yaml
 defaults:
   compression:
     # Compression for internal replication
@@ -234,7 +234,7 @@ producer.send(Record::new()
 
 ```bash
 # Topic statistics
-rivvenctl topic stats events
+rivven topic stats events
 
 # Output:
 # Topic: events

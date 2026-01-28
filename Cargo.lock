@@ -6178,8 +6178,16 @@ dependencies = [
 name = "rivven"
 version = "0.0.1"
 dependencies = [
+ "anyhow",
+ "bytes",
+ "clap",
+ "ctrlc",
  "rivven-client",
  "rivven-core",
+ "rivvend",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -6235,22 +6243,6 @@ dependencies = [
  "url",
  "uuid",
  "webpki-roots 0.26.11",
-]
-
-[[package]]
-name = "rivven-cli"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "bytes",
- "clap",
- "ctrlc",
- "rivven-client",
- "rivven-core",
- "rivven-server",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -6338,7 +6330,7 @@ dependencies = [
  "rivven-client",
  "rivven-connect-derive",
  "rivven-core",
- "rivven-server",
+ "rivvend",
  "schemars 0.8.22",
  "secrecy 0.10.3",
  "serde",
@@ -6500,42 +6492,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rivven-server"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "axum",
- "axum-server",
- "bytes",
- "clap",
- "futures",
- "gethostname",
- "mime_guess",
- "openraft",
- "postcard",
- "proptest",
- "reqwest 0.12.28",
- "rivven-cluster",
- "rivven-core",
- "rivven-protocol",
- "rust-embed",
- "rustls 0.23.36",
- "rustls-pemfile 2.2.0",
- "serde",
- "serde_bytes",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-rustls 0.26.4",
- "tokio-util",
- "tower 0.4.13",
- "tower-http 0.5.2",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "rivven-storage"
 version = "0.0.1"
 dependencies = [
@@ -6594,6 +6550,42 @@ dependencies = [
  "tokio-test",
  "tracing",
  "validator",
+]
+
+[[package]]
+name = "rivvend"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "axum",
+ "axum-server",
+ "bytes",
+ "clap",
+ "futures",
+ "gethostname",
+ "mime_guess",
+ "openraft",
+ "postcard",
+ "proptest",
+ "reqwest 0.12.28",
+ "rivven-cluster",
+ "rivven-core",
+ "rivven-protocol",
+ "rust-embed",
+ "rustls 0.23.36",
+ "rustls-pemfile 2.2.0",
+ "serde",
+ "serde_bytes",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tokio-util",
+ "tower 0.4.13",
+ "tower-http 0.5.2",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

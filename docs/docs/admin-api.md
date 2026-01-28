@@ -166,18 +166,18 @@ Response::RecordsDeleted {
 
 ```bash
 # Alter topic configuration
-rivvenctl topic config set events \
+rivven topic config set events \
   --config retention.ms=86400000 \
   --config cleanup.policy=compact
 
 # Describe topic configuration
-rivvenctl topic config describe events
+rivven topic config describe events
 
 # Create partitions
-rivvenctl topic partitions create events --count 12
+rivven topic partitions create events --count 12
 
 # Delete records
-rivvenctl topic records delete events \
+rivven topic records delete events \
   --partition 0 --before-offset 1000 \
   --partition 1 --before-offset 500
 ```
@@ -190,12 +190,12 @@ Adjust retention for high-volume topics:
 
 ```bash
 # Short retention for transient data
-rivvenctl topic config set clickstream \
+rivven topic config set clickstream \
   --config retention.ms=3600000 \
   --config retention.bytes=10737418240
 
 # Long retention for audit logs
-rivvenctl topic config set audit-logs \
+rivven topic config set audit-logs \
   --config retention.ms=31536000000 \
   --config cleanup.policy=delete
 ```
@@ -205,7 +205,7 @@ rivvenctl topic config set audit-logs \
 Enable compaction for changelog topics:
 
 ```bash
-rivvenctl topic config set users-changelog \
+rivven topic config set users-changelog \
   --config cleanup.policy=compact \
   --config min.insync.replicas=2
 ```
@@ -216,10 +216,10 @@ Increase partitions for higher throughput:
 
 ```bash
 # Check current partition count
-rivvenctl topic describe events
+rivven topic describe events
 
 # Increase partitions
-rivvenctl topic partitions create events --count 24
+rivven topic partitions create events --count 24
 ```
 
 ### 4. GDPR Compliance
@@ -229,7 +229,7 @@ Delete user data on request:
 ```bash
 # Find offsets containing user data (application-specific)
 # Then delete records up to and including those offsets
-rivvenctl topic records delete user-events \
+rivven topic records delete user-events \
   --partition 0 --before-offset 5000
 ```
 

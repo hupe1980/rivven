@@ -10,7 +10,7 @@
 //! - Integer overflow
 
 use libfuzzer_sys::fuzz_target;
-use rivven_server::protocol::Request;
+use rivvend::protocol::Request;
 
 fuzz_target!(|data: &[u8]| {
     // Try to deserialize arbitrary bytes as a Request

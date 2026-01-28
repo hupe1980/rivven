@@ -46,7 +46,7 @@ fn build_dashboard() {
                 ║    cargo install trunk                                           ║\n\
                 ║                                                                  ║\n\
                 ║  Or disable the dashboard feature:                               ║\n\
-                ║    cargo build -p rivven-server --no-default-features            ║\n\
+                ║    cargo build -p rivvend --no-default-features                  ║\n\
                 ╚══════════════════════════════════════════════════════════════════╝\n"
             );
         }
@@ -68,7 +68,7 @@ fn build_dashboard() {
                     ║    rustup target add wasm32-unknown-unknown                      ║\n\
                     ║                                                                  ║\n\
                     ║  Or disable the dashboard feature:                               ║\n\
-                    ║    cargo build -p rivven-server --no-default-features            ║\n\
+                    ║    cargo build -p rivvend --no-default-features                  ║\n\
                     ╚══════════════════════════════════════════════════════════════════╝\n"
                 );
             }
@@ -91,7 +91,7 @@ fn build_dashboard() {
                 ║    cd crates/rivven-dashboard && trunk build --release           ║\n\
                 ║                                                                  ║\n\
                 ║  Or disable the dashboard feature:                               ║\n\
-                ║    cargo build -p rivven-server --no-default-features            ║\n\
+                ║    cargo build -p rivvend --no-default-features                  ║\n\
                 ╚══════════════════════════════════════════════════════════════════╝\n"
             );
         }

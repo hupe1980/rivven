@@ -97,13 +97,6 @@ jobs:
       - name: Wait for crates.io index
         run: sleep 30
       
-      - name: Publish rivven (facade)
-        run: cargo publish -p rivven --token ${{ secrets.CRATES_IO_TOKEN }}
-        continue-on-error: true
-      
-      - name: Wait for crates.io index
-        run: sleep 30
-      
       - name: Publish rivven-connect-derive
         run: cargo publish -p rivven-connect-derive --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
@@ -139,15 +132,15 @@ jobs:
       - name: Wait for crates.io index
         run: sleep 30
       
-      - name: Publish rivven-server
-        run: cargo publish -p rivven-server --token ${{ secrets.CRATES_IO_TOKEN }}
+      - name: Publish rivvend
+        run: cargo publish -p rivvend --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
       
       - name: Wait for crates.io index
         run: sleep 30
       
-      - name: Publish rivven-cli
-        run: cargo publish -p rivven-cli --token ${{ secrets.CRATES_IO_TOKEN }}
+      - name: Publish rivven (CLI)
+        run: cargo publish -p rivven --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
       
       - name: Wait for crates.io index
@@ -309,8 +302,8 @@ jobs:
       - name: Build binaries
         run: |
           cargo zigbuild --release --target ${{ matrix.target }} \
-            --package rivven-server \
-            --package rivven-cli \
+            --package rivvend \
+            --package rivven \
             --package rivven-connect \
             --package rivven-operator
       
@@ -324,7 +317,7 @@ jobs:
           cd target/${{ matrix.target }}/release
           
           # Package each binary
-          for bin in rivvend rivvenctl rivven-connect rivven-operator; do
+          for bin in rivvend rivven rivven-connect rivven-operator; do
             if [ -f "$bin" ]; then
               tar -czvf ../../../dist/${bin}-${{ steps.version.outputs.VERSION }}-${{ matrix.suffix }}.tar.gz $bin
             fi
@@ -365,7 +358,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       
-      - name: Build and push rivven (broker)
+      - name: Build and push rivvend (broker)
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -373,8 +366,8 @@ jobs:
           push: true
           build-args: BINARY=rivvend
           tags: |
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ steps.version.outputs.VERSION }}
+            ghcr.io/${{ github.repository_owner }}/rivvend:latest
+            ghcr.io/${{ github.repository_owner }}/rivvend:${{ steps.version.outputs.VERSION }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       
@@ -386,8 +379,8 @@ jobs:
           push: true
           build-args: BINARY=rivven-connect
           tags: |
-            ghcr.io/${{ github.repository }}-connect:latest
-            ghcr.io/${{ github.repository }}-connect:${{ steps.version.outputs.VERSION }}
+            ghcr.io/${{ github.repository_owner }}/rivven-connect:latest
+            ghcr.io/${{ github.repository_owner }}/rivven-connect:${{ steps.version.outputs.VERSION }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       
@@ -399,7 +392,7 @@ jobs:
           push: true
           build-args: BINARY=rivven-operator
           tags: |
-            ghcr.io/${{ github.repository }}-operator:latest
-            ghcr.io/${{ github.repository }}-operator:${{ steps.version.outputs.VERSION }}
+            ghcr.io/${{ github.repository_owner }}/rivven-operator:latest
+            ghcr.io/${{ github.repository_owner }}/rivven-operator:${{ steps.version.outputs.VERSION }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

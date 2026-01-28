@@ -17,7 +17,7 @@ use std::time::Duration;
 /// A lightweight, single-binary event streaming platform designed for
 /// production workloads. Supports both standalone and clustered deployment.
 #[derive(Parser, Debug)]
-#[command(name = "rivven-server")]
+#[command(name = "rivvend")]
 #[command(author, version, about, long_about = None)]
 #[command(propagate_version = true)]
 pub struct Cli {
@@ -343,7 +343,7 @@ mod tests {
 
     #[test]
     fn test_default_cli() {
-        let cli = Cli::parse_from(["rivven-server"]);
+        let cli = Cli::parse_from(["rivvend"]);
         assert_eq!(cli.mode, DeploymentMode::Standalone);
         assert_eq!(cli.bind.port(), 9092);
         assert!(cli.validate().is_ok());
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn test_cluster_mode() {
         let cli = Cli::parse_from([
-            "rivven-server",
+            "rivvend",
             "--mode",
             "cluster",
             "--node-id",
@@ -367,20 +367,14 @@ mod tests {
 
     #[test]
     fn test_validation_min_isr_exceeds_replication() {
-        let cli = Cli::parse_from([
-            "rivven-server",
-            "--replication-factor",
-            "2",
-            "--min-isr",
-            "3",
-        ]);
+        let cli = Cli::parse_from(["rivvend", "--replication-factor", "2", "--min-isr", "3"]);
         assert!(cli.validate().is_err());
     }
 
     #[test]
     fn test_cluster_config_generation() {
         let cli = Cli::parse_from([
-            "rivven-server",
+            "rivvend",
             "--mode",
             "cluster",
             "--node-id",

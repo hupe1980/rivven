@@ -67,7 +67,7 @@ Rivven supports **OpenID Connect (OIDC)** authentication, allowing seamless inte
 ### Basic Setup
 
 ```yaml
-# rivven-server.yaml
+# rivvend.yaml
 authentication:
   method: oidc
   
@@ -254,7 +254,7 @@ TOKEN=$(curl -s -X POST \
   -d "client_secret=my-secret" | jq -r '.access_token')
 
 # Use with Rivven CLI
-rivvenctl --auth-token "$TOKEN" topic list
+rivven --auth-token \"$TOKEN\" topic list
 
 # Use with Rivven client library
 rivven-client --bootstrap-servers rivven:9092 --auth-token "$TOKEN"

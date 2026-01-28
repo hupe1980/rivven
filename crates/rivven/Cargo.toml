@@ -5,16 +5,20 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "High-performance distributed event streaming platform"
-readme = "README.md"
-keywords = ["streaming", "kafka", "event-driven", "distributed", "messaging"]
-categories = ["asynchronous", "network-programming"]
+description = "Command-line interface for Rivven event streaming platform"
 
-[features]
-default = ["client"]
-client = ["dep:rivven-client"]
-full = ["client", "rivven-core/default"]
+[[bin]]
+name = "rivven"
+path = "src/main.rs"
 
 [dependencies]
-rivven-core = { path = "../rivven-core", default-features = false }
-rivven-client = { path = "../rivven-client", optional = true }
+rivven-core = { workspace = true }
+rivven-client = { workspace = true }
+rivvend = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+bytes = { workspace = true }
+ctrlc = "3.4"
