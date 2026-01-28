@@ -46,12 +46,12 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 
 # Build dashboard first (runs on build platform, targets wasm32)
-# Use platform-specific cache ID to prevent corruption between parallel builds
-RUN --mount=type=cache,id=cargo-registry-${BUILDPLATFORM},target=/usr/local/cargo/registry \
+# Use target-specific cache ID to prevent corruption between parallel builds
+RUN --mount=type=cache,id=cargo-registry-${TARGETPLATFORM},target=/usr/local/cargo/registry \
     cd crates/rivven-dashboard && trunk build --release
 
 # Determine target based on platform and build static binaries with zigbuild
-RUN --mount=type=cache,id=cargo-registry-${BUILDPLATFORM},target=/usr/local/cargo/registry \
+RUN --mount=type=cache,id=cargo-registry-${TARGETPLATFORM},target=/usr/local/cargo/registry \
     --mount=type=cache,id=cargo-target-${TARGETPLATFORM},target=/build/target \
     case "$TARGETPLATFORM" in \
       "linux/arm64") \

@@ -4,18 +4,32 @@
 //!
 //! ## Features
 //!
+//! - Multiple snapshot modes (Debezium-compatible)
 //! - Chunked reads with configurable batch size
 //! - Progress tracking and resumability
 //! - Watermark-based consistency
 //! - Parallel table snapshots
 //! - Memory-efficient streaming
 //!
+//! ## Snapshot Modes
+//!
+//! | Mode | Description |
+//! |------|-------------|
+//! | `Initial` | Snapshot on first start, then stream (default) |
+//! | `Always` | Snapshot on every start |
+//! | `InitialOnly` | Snapshot and stop (no streaming) |
+//! | `SchemaOnly` | Capture schema, skip data |
+//! | `WhenNeeded` | Snapshot if offsets unavailable |
+//! | `Recovery` | Rebuild schema from source |
+//! | `Custom` | User-defined snapshot logic |
+//!
 //! ## Example
 //!
 //! ```rust,ignore
-//! use rivven_cdc::common::snapshot::{SnapshotConfig, SnapshotCoordinator};
+//! use rivven_cdc::common::snapshot::{SnapshotConfig, SnapshotCoordinator, SnapshotMode};
 //!
 //! let config = SnapshotConfig::builder()
+//!     .mode(SnapshotMode::Initial)
 //!     .batch_size(10_000)
 //!     .parallel_tables(4)
 //!     .build();
@@ -35,6 +49,162 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
+
+/// Snapshot mode determines when and how snapshots are taken.
+///
+/// These modes align with Debezium's snapshot.mode configuration for
+/// compatibility and familiar behavior.
+///
+/// # Examples
+///
+/// ```rust
+/// use rivven_cdc::common::SnapshotMode;
+///
+/// // Default mode: snapshot on first start
+/// let mode = SnapshotMode::Initial;
+///
+/// // Always snapshot on start (useful for debugging)
+/// let mode = SnapshotMode::Always;
+///
+/// // Custom snapshot logic with user-defined function
+/// let mode = SnapshotMode::Custom("my_snapshotter".to_string());
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotMode {
+    /// Perform a snapshot every time the connector starts.
+    ///
+    /// After the snapshot completes, the connector begins streaming changes.
+    /// Useful when WAL segments may have been deleted.
+    Always,
+
+    /// Perform a snapshot only on first start (when no offsets exist).
+    ///
+    /// This is the default and most common mode. After the initial snapshot
+    /// completes, the connector streams changes and never snapshots again
+    /// unless offsets are lost.
+    #[default]
+    Initial,
+
+    /// Perform a snapshot and then stop (no streaming).
+    ///
+    /// Useful for one-time data migration or backfill scenarios.
+    InitialOnly,
+
+    /// Capture schema only, skip data snapshot.
+    ///
+    /// The connector captures table structures but does not snapshot data.
+    /// Only changes occurring after connector start are captured.
+    /// Alias: `no_data` (Debezium naming)
+    SchemaOnly,
+
+    /// Perform a snapshot only if offsets are unavailable.
+    ///
+    /// The connector checks for existing offsets:
+    /// - If offsets exist: resume streaming from stored position
+    /// - If no offsets: perform a full snapshot first
+    WhenNeeded,
+
+    /// Recovery mode for corrupted schema history.
+    ///
+    /// Rebuilds the schema from source tables. Use after schema history
+    /// topic corruption or when adding new tables to capture.
+    ///
+    /// **Warning**: Do not use if schema changes occurred after last shutdown.
+    Recovery,
+
+    /// Configuration-based snapshot control.
+    ///
+    /// Fine-grained control via additional parameters:
+    /// - `snapshot_data`: include table data
+    /// - `snapshot_schema`: include table schema  
+    /// - `start_stream`: begin streaming after snapshot
+    ConfigurationBased {
+        /// Include table data in snapshot
+        snapshot_data: bool,
+        /// Include table schema in snapshot
+        snapshot_schema: bool,
+        /// Start streaming after snapshot completes
+        start_stream: bool,
+        /// Snapshot if schema history unavailable
+        snapshot_on_schema_error: bool,
+        /// Snapshot if offsets not found in log
+        snapshot_on_data_error: bool,
+    },
+
+    /// Custom snapshot implementation.
+    ///
+    /// Provide a custom snapshotter name that implements the
+    /// snapshot logic. The name is used to look up the implementation.
+    Custom(String),
+
+    /// Never perform a snapshot.
+    ///
+    /// The connector only streams changes. If no offsets exist,
+    /// streaming begins from the current position.
+    ///
+    /// **Warning**: May miss historical data. Use only when certain
+    /// all needed data is still in the transaction log.
+    #[serde(alias = "never")]
+    NoSnapshot,
+}
+
+impl SnapshotMode {
+    /// Check if this mode includes a data snapshot.
+    pub fn includes_data(&self) -> bool {
+        match self {
+            Self::Always | Self::Initial | Self::InitialOnly | Self::WhenNeeded => true,
+            Self::SchemaOnly | Self::Recovery | Self::NoSnapshot => false,
+            Self::ConfigurationBased { snapshot_data, .. } => *snapshot_data,
+            Self::Custom(_) => true, // Assume custom may include data
+        }
+    }
+
+    /// Check if streaming should occur after snapshot.
+    pub fn should_stream(&self) -> bool {
+        match self {
+            Self::Always | Self::Initial | Self::WhenNeeded | Self::SchemaOnly | Self::Recovery => {
+                true
+            }
+            Self::InitialOnly | Self::NoSnapshot => false,
+            Self::ConfigurationBased { start_stream, .. } => *start_stream,
+            Self::Custom(_) => true, // Assume custom may stream
+        }
+    }
+
+    /// Check if schema should be captured.
+    pub fn includes_schema(&self) -> bool {
+        match self {
+            Self::NoSnapshot => false,
+            Self::ConfigurationBased {
+                snapshot_schema, ..
+            } => *snapshot_schema,
+            _ => true,
+        }
+    }
+
+    /// Parse from Debezium-compatible string.
+    pub fn from_str_debezium(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "always" => Some(Self::Always),
+            "initial" => Some(Self::Initial),
+            "initial_only" => Some(Self::InitialOnly),
+            "schema_only" | "no_data" => Some(Self::SchemaOnly),
+            "when_needed" => Some(Self::WhenNeeded),
+            "recovery" | "schema_only_recovery" => Some(Self::Recovery),
+            "never" => Some(Self::NoSnapshot),
+            "configuration_based" => Some(Self::ConfigurationBased {
+                snapshot_data: false,
+                snapshot_schema: false,
+                start_stream: false,
+                snapshot_on_schema_error: false,
+                snapshot_on_data_error: false,
+            }),
+            _ if s.starts_with("custom:") => Some(Self::Custom(s[7..].to_string())),
+            _ => None,
+        }
+    }
+}
 
 /// Snapshot state for a table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -148,9 +318,11 @@ impl SnapshotProgress {
 /// Configuration for snapshots.
 #[derive(Debug, Clone)]
 pub struct SnapshotConfig {
-    /// Rows per batch
+    /// Snapshot mode (when to snapshot)
+    pub mode: SnapshotMode,
+    /// Rows per batch (Debezium: snapshot.fetch.size)
     pub batch_size: usize,
-    /// Number of tables to snapshot in parallel
+    /// Number of tables to snapshot in parallel (Debezium: snapshot.max.threads)
     pub parallel_tables: usize,
     /// Query timeout
     pub query_timeout: Duration,
@@ -164,11 +336,18 @@ pub struct SnapshotConfig {
     pub max_retries: u32,
     /// Throttle delay between batches
     pub throttle_delay: Option<Duration>,
+    /// Delay before starting snapshot (Debezium: snapshot.delay.ms)
+    pub snapshot_delay: Option<Duration>,
+    /// Delay before streaming after snapshot (Debezium: streaming.delay.ms)
+    pub streaming_delay: Option<Duration>,
+    /// Lock timeout for acquiring table locks (Debezium: snapshot.lock.timeout.ms)
+    pub lock_timeout: Option<Duration>,
 }
 
 impl Default for SnapshotConfig {
     fn default() -> Self {
         Self {
+            mode: SnapshotMode::Initial,
             batch_size: 10_000,
             parallel_tables: 4,
             query_timeout: Duration::from_secs(300),
@@ -177,6 +356,9 @@ impl Default for SnapshotConfig {
             estimate_rows: true,
             max_retries: 3,
             throttle_delay: None,
+            snapshot_delay: None,
+            streaming_delay: None,
+            lock_timeout: Some(Duration::from_secs(10)),
         }
     }
 }
@@ -189,6 +371,7 @@ impl SnapshotConfig {
     /// High-throughput preset.
     pub fn high_throughput() -> Self {
         Self {
+            mode: SnapshotMode::Initial,
             batch_size: 50_000,
             parallel_tables: 8,
             query_timeout: Duration::from_secs(600),
@@ -197,12 +380,16 @@ impl SnapshotConfig {
             estimate_rows: false,
             max_retries: 5,
             throttle_delay: None,
+            snapshot_delay: None,
+            streaming_delay: None,
+            lock_timeout: None,
         }
     }
 
     /// Memory-efficient preset.
     pub fn low_memory() -> Self {
         Self {
+            mode: SnapshotMode::Initial,
             batch_size: 1_000,
             parallel_tables: 2,
             query_timeout: Duration::from_secs(120),
@@ -211,6 +398,24 @@ impl SnapshotConfig {
             estimate_rows: true,
             max_retries: 3,
             throttle_delay: Some(Duration::from_millis(100)),
+            snapshot_delay: None,
+            streaming_delay: None,
+            lock_timeout: Some(Duration::from_secs(10)),
+        }
+    }
+
+    /// Check if a snapshot should be performed.
+    pub fn should_snapshot(&self, has_offsets: bool) -> bool {
+        match self.mode {
+            SnapshotMode::Always => true,
+            SnapshotMode::Initial => !has_offsets,
+            SnapshotMode::InitialOnly => !has_offsets,
+            SnapshotMode::SchemaOnly => !has_offsets,
+            SnapshotMode::WhenNeeded => !has_offsets,
+            SnapshotMode::Recovery => true,
+            SnapshotMode::ConfigurationBased { snapshot_data, .. } => snapshot_data && !has_offsets,
+            SnapshotMode::Custom(_) => true, // Custom decides
+            SnapshotMode::NoSnapshot => false,
         }
     }
 }
@@ -222,6 +427,11 @@ pub struct SnapshotConfigBuilder {
 }
 
 impl SnapshotConfigBuilder {
+    /// Set snapshot mode.
+    pub fn mode(mut self, mode: SnapshotMode) -> Self {
+        self.config.mode = mode;
+        self
+    }
     pub fn batch_size(mut self, size: usize) -> Self {
         self.config.batch_size = size.max(1);
         self

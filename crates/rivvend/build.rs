@@ -12,6 +12,17 @@ fn main() {
 fn build_dashboard() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let dashboard_dir = Path::new(&manifest_dir).join("../rivven-dashboard");
+
+    // During `cargo publish` verification, the package is extracted to a temp directory
+    // where ../rivven-dashboard doesn't exist. Skip the build in this case.
+    if !dashboard_dir.exists() {
+        println!(
+            "cargo:warning=Dashboard source directory not found (expected during cargo publish). \
+             Skipping dashboard build."
+        );
+        return;
+    }
+
     let dist_dir = dashboard_dir.join("dist");
 
     // Check if we need to rebuild

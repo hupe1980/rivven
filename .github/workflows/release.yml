@@ -132,6 +132,11 @@ jobs:
       - name: Wait for crates.io index
         run: sleep 30
       
+      - name: Build dashboard (required for rivvend)
+        run: |
+          cd crates/rivven-dashboard
+          trunk build --release
+      
       - name: Publish rivvend
         run: cargo publish -p rivvend --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
@@ -298,6 +303,11 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+      
+      - name: Build dashboard (required for rivvend)
+        run: |
+          cd crates/rivven-dashboard
+          trunk build --release
       
       - name: Build binaries
         run: |
