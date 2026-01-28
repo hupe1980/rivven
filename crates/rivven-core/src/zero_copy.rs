@@ -580,7 +580,7 @@ impl ZeroCopyProducer {
         let topic = self.intern_topic(topic);
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis() as i64;
 
         ZeroCopyMessage {
@@ -609,7 +609,7 @@ impl ZeroCopyProducer {
         let topic = self.intern_topic(topic);
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis() as i64;
 
         ZeroCopyMessage {

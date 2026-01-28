@@ -178,7 +178,10 @@ impl SchemaInference {
             .collect();
 
         for field in &root_fields {
-            let types = self.field_types.get(field).unwrap();
+            let Some(types) = self.field_types.get(field) else {
+                // Should never happen since we iterate over keys from the same map
+                continue;
+            };
             let is_nullable = self.nullable_fields.contains(field);
             let is_always_present = self
                 .field_presence

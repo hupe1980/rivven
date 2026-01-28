@@ -226,7 +226,7 @@ impl SegmentMetadata {
     pub fn record_access(&self) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs();
         self.last_accessed.store(now, Ordering::Relaxed);
         self.access_count.fetch_add(1, Ordering::Relaxed);
@@ -236,7 +236,7 @@ impl SegmentMetadata {
     pub fn age_secs(&self) -> u64 {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs();
         now.saturating_sub(self.created_at)
     }
@@ -245,7 +245,7 @@ impl SegmentMetadata {
     pub fn idle_secs(&self) -> u64 {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_secs();
         now.saturating_sub(self.last_accessed.load(Ordering::Relaxed))
     }
