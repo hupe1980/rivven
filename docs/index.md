@@ -41,9 +41,14 @@ Rivven brings **Kafka-class event streaming** to the modern era—without the JV
 - **17 built-in transforms** (SMTs) for data transformation
 
 ### 🔌 Connectors
-- **Sources**: PostgreSQL, MySQL
-- **Sinks**: S3, HTTP Webhook, Snowflake, stdout
+- **Sources**: PostgreSQL, MySQL, Kafka, MQTT, SQS, Pub/Sub
+- **Sinks**: S3, GCS, Azure, Snowflake, BigQuery, Redshift, HTTP
 - **SDK** for building custom connectors
+
+### 📊 Schema Registry
+- **Avro**, **Protobuf**, and **JSON Schema** support
+- **Confluent-compatible** wire format
+- **Embedded or external** deployment modes
 
 ### 🔒 Security
 - **TLS/mTLS** for transport encryption
@@ -164,6 +169,7 @@ rivven-connect -c rivven-connect.yaml
 | [Architecture](/rivven/docs/architecture) | System design and components |
 | [CDC Guide](/rivven/docs/cdc) | Change Data Capture setup |
 | [Connectors](/rivven/docs/connectors) | Source and sink configuration |
+| [Schema Registry](/rivven/docs/schema-registry) | Avro, Protobuf, and JSON Schema |
 | [Security](/rivven/docs/security) | Authentication, TLS, and RBAC |
 | [Kubernetes](/rivven/docs/kubernetes) | Operator and Helm deployment |
 | [Tiered Storage](/rivven/docs/tiered-storage) | Hot/warm/cold storage tiers |

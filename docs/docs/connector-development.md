@@ -26,7 +26,7 @@ Rivven connectors are Rust types that implement the `Source`, `Sink`, or `Transf
 
 ```toml
 [dependencies]
-rivven-connect = "0.0.1"
+rivven-connect = "0.0.2"
 serde = { version = "1.0", features = ["derive"] }
 schemars = "0.8"
 validator = { version = "0.20", features = ["derive"] }

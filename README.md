@@ -43,6 +43,11 @@
 - MySQL CDC with binlog streaming
 - 17 built-in transforms (SMTs)
 
+### 📊 Schema Registry
+- Avro, Protobuf, and JSON Schema support
+- Confluent-compatible wire format
+- Embedded or external deployment modes
+
 ### ☁️ Cloud Native
 - Kubernetes operator with CRDs
 - Prometheus metrics built-in
@@ -59,9 +64,9 @@ cargo install rivven rivvend rivven-connect
 # Start broker with dashboard
 rivvend --dashboard --data-dir ./data
 
-# Create topic, publish, consume
+# Create topic, produce, consume
 rivven topic create events --partitions 3
-rivven publish events "Hello, Rivven!"
+rivven produce events "Hello, Rivven!"
 rivven consume events --from-beginning
 ```
 
@@ -100,7 +105,7 @@ sinks:
 rivven-connect run --config connect.yaml
 ```
 
-**Built-in connectors**: PostgreSQL CDC, MySQL CDC, S3, GCS, HTTP, Snowflake, stdout
+**Built-in connectors**: PostgreSQL CDC, MySQL CDC, Kafka, MQTT, SQS, Pub/Sub, S3, GCS, Azure, Snowflake, BigQuery, Redshift, HTTP
 
 ---
 
@@ -112,6 +117,7 @@ rivven-connect run --config connect.yaml
 | [Architecture](https://hupe1980.github.io/rivven/docs/architecture) | System design and internals |
 | [CDC Guide](https://hupe1980.github.io/rivven/docs/cdc) | Database change data capture |
 | [Connectors](https://hupe1980.github.io/rivven/docs/connectors) | Sources, sinks, and transforms |
+| [Schema Registry](https://hupe1980.github.io/rivven/docs/schema-registry) | Avro, Protobuf, and JSON Schema |
 | [Security](https://hupe1980.github.io/rivven/docs/security) | TLS, authentication, and RBAC |
 | [Tiered Storage](https://hupe1980.github.io/rivven/docs/tiered-storage) | Hot/warm/cold storage tiers |
 | [Kubernetes](https://hupe1980.github.io/rivven/docs/kubernetes) | Production deployment |

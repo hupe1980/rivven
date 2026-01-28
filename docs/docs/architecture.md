@@ -135,16 +135,16 @@ where each crate focuses on a specific integration domain.
 ```toml
 # Only include what you need
 [dependencies]
-rivven-connect = "0.0.1"
-rivven-cdc = { version = "0.0.1", features = ["postgres"] }
-rivven-queue = { version = "0.0.1", features = ["kafka"] }
+rivven-connect = "0.0.2"
+rivven-cdc = { version = "0.0.2", features = ["postgres"] }
+rivven-queue = { version = "0.0.2", features = ["kafka"] }
 
 # Or include everything
 [dependencies]
-rivven-connect = { version = "0.0.1", features = ["full"] }
-rivven-queue = { version = "0.0.1", features = ["full"] }
-rivven-storage = { version = "0.0.1", features = ["full"] }
-rivven-warehouse = { version = "0.0.1", features = ["full"] }
+rivven-connect = { version = "0.0.2", features = ["full"] }
+rivven-queue = { version = "0.0.2", features = ["full"] }
+rivven-storage = { version = "0.0.2", features = ["full"] }
+rivven-warehouse = { version = "0.0.2", features = ["full"] }
 ```
 
 ### Registering Connectors

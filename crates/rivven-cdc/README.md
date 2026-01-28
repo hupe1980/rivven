@@ -395,9 +395,11 @@ let cdc = MySqlCdc::new(config);
 
 ## Documentation
 
-- [CDC Architecture](../../docs/CDC_ARCHITECTURE.md) - Protocol deep-dive and internals
-- [CDC Quickstart](../../docs/CDC_QUICKSTART.md) - Setup guides for each database
-- [CDC Production](../../docs/CDC_PRODUCTION.md) - Performance tuning and monitoring
+- [CDC Overview](../../docs/docs/cdc.md) - Feature overview and concepts
+- [PostgreSQL CDC Guide](../../docs/docs/cdc-postgres.md) - PostgreSQL setup and configuration
+- [MySQL/MariaDB CDC Guide](../../docs/docs/cdc-mysql.md) - MySQL and MariaDB setup
+- [Configuration Reference](../../docs/docs/cdc-configuration.md) - All configuration options
+- [Troubleshooting Guide](../../docs/docs/cdc-troubleshooting.md) - Diagnose and resolve issues
 
 ## Benchmarks
 
