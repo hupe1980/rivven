@@ -24,8 +24,8 @@ pyo3-async-runtimes = { version = "0.27", features = ["tokio-runtime"] }
 tokio = { workspace = true }
 
 # Internal crates
-rivven-client = { path = "../rivven-client" }
-rivven-core = { path = "../rivven-core" }
+rivven-client = { workspace = true }
+rivven-core = { workspace = true }
 
 # Serialization for message conversion
 bytes = { workspace = true }
@@ -33,8 +33,11 @@ bytes = { workspace = true }
 # Error handling
 thiserror = { workspace = true }
 
-# For cross-compilation - use vendored OpenSSL
+# For cross-compilation - use vendored OpenSSL on Linux (glibc and musl)
 [target.'cfg(all(target_arch = "aarch64", target_os = "linux"))'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
+
+[target.'cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "musl"))'.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }
 
 [dev-dependencies]

@@ -786,7 +786,7 @@ fn default_replicas() -> i32 {
 }
 
 fn default_version() -> String {
-    "0.1.0".to_string()
+    "0.0.1".to_string()
 }
 
 fn default_image_pull_policy() -> String {
@@ -3043,7 +3043,7 @@ mod tests {
     fn test_default_spec() {
         let spec = RivvenClusterSpec {
             replicas: 3,
-            version: "0.1.0".to_string(),
+            version: "0.0.1".to_string(),
             image: None,
             image_pull_policy: "IfNotPresent".to_string(),
             image_pull_secrets: vec![],
@@ -3067,14 +3067,14 @@ mod tests {
         };
 
         assert_eq!(spec.replicas, 3);
-        assert_eq!(spec.get_image(), "ghcr.io/hupe1980/rivven:0.1.0");
+        assert_eq!(spec.get_image(), "ghcr.io/hupe1980/rivven:0.0.1");
     }
 
     #[test]
     fn test_get_labels() {
         let spec = RivvenClusterSpec {
             replicas: 3,
-            version: "0.1.0".to_string(),
+            version: "0.0.1".to_string(),
             image: None,
             image_pull_policy: "IfNotPresent".to_string(),
             image_pull_secrets: vec![],
@@ -3112,7 +3112,7 @@ mod tests {
     fn test_custom_image() {
         let spec = RivvenClusterSpec {
             replicas: 1,
-            version: "0.1.0".to_string(),
+            version: "0.0.1".to_string(),
             image: Some("my-registry/rivven:custom".to_string()),
             image_pull_policy: "Always".to_string(),
             image_pull_secrets: vec![],
@@ -3263,7 +3263,7 @@ mod tests {
                 namespace: None,
             },
             replicas: 1,
-            version: "0.1.0".to_string(),
+            version: "0.0.1".to_string(),
             image: None,
             image_pull_policy: "IfNotPresent".to_string(),
             image_pull_secrets: vec![],
@@ -3315,7 +3315,7 @@ mod tests {
     fn test_validate_image_valid() {
         assert!(validate_image("nginx").is_ok());
         assert!(validate_image("nginx:latest").is_ok());
-        assert!(validate_image("ghcr.io/hupe1980/rivven:0.1.0").is_ok());
+        assert!(validate_image("ghcr.io/hupe1980/rivven:0.0.1").is_ok());
         assert!(validate_image("my-registry.io:5000/image:tag").is_ok());
         assert!(validate_image("localhost:5000/myimage").is_ok());
         assert!(validate_image("").is_ok()); // Empty allowed, uses default

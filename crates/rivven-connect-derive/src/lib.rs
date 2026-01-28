@@ -111,7 +111,7 @@ struct TransformAttrs {
 /// # Attributes
 ///
 /// - `#[source(name = "...")]` - Connector name (required)
-/// - `#[source(version = "...")]` - Connector version (default: "0.1.0")
+/// - `#[source(version = "...")]` - Connector version (default: "0.0.1")
 /// - `#[source(description = "...")]` - Connector description
 /// - `#[source(documentation_url = "...")]` - Documentation URL
 /// - `#[source(incremental)]` - Enable incremental sync support
@@ -141,7 +141,7 @@ pub fn derive_source_config(input: TokenStream) -> TokenStream {
     let name = attrs
         .name
         .unwrap_or_else(|| struct_name.to_string().to_lowercase().replace("config", ""));
-    let version = attrs.version.unwrap_or_else(|| "0.1.0".to_string());
+    let version = attrs.version.unwrap_or_else(|| "0.0.1".to_string());
 
     let description_code = match attrs.description {
         Some(desc) => quote! { .with_description(#desc) },
@@ -188,7 +188,7 @@ pub fn derive_source_config(input: TokenStream) -> TokenStream {
 /// # Attributes
 ///
 /// - `#[sink(name = "...")]` - Connector name (required)
-/// - `#[sink(version = "...")]` - Connector version (default: "0.1.0")
+/// - `#[sink(version = "...")]` - Connector version (default: "0.0.1")
 /// - `#[sink(description = "...")]` - Connector description
 /// - `#[sink(documentation_url = "...")]` - Documentation URL
 /// - `#[sink(batching)]` - Enable batching support
@@ -219,7 +219,7 @@ pub fn derive_sink_config(input: TokenStream) -> TokenStream {
     let name = attrs
         .name
         .unwrap_or_else(|| struct_name.to_string().to_lowercase().replace("config", ""));
-    let version = attrs.version.unwrap_or_else(|| "0.1.0".to_string());
+    let version = attrs.version.unwrap_or_else(|| "0.0.1".to_string());
 
     let description_code = match attrs.description {
         Some(desc) => quote! { .with_description(#desc) },
@@ -281,7 +281,7 @@ pub fn derive_sink_config(input: TokenStream) -> TokenStream {
 /// # Attributes
 ///
 /// - `#[transform(name = "...")]` - Transform name (required)
-/// - `#[transform(version = "...")]` - Transform version (default: "0.1.0")
+/// - `#[transform(version = "...")]` - Transform version (default: "0.0.1")
 /// - `#[transform(description = "...")]` - Transform description
 ///
 /// # Example
@@ -309,7 +309,7 @@ pub fn derive_transform_config(input: TokenStream) -> TokenStream {
     let name = attrs
         .name
         .unwrap_or_else(|| struct_name.to_string().to_lowercase().replace("config", ""));
-    let version = attrs.version.unwrap_or_else(|| "0.1.0".to_string());
+    let version = attrs.version.unwrap_or_else(|| "0.0.1".to_string());
 
     let description_code = match attrs.description {
         Some(desc) => quote! { .with_description(#desc) },
@@ -392,7 +392,7 @@ pub fn connector_spec(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     let name = attrs.name.unwrap_or_else(|| "unknown".to_string());
-    let version = attrs.version.unwrap_or_else(|| "0.1.0".to_string());
+    let version = attrs.version.unwrap_or_else(|| "0.0.1".to_string());
 
     let description_code = match attrs.description {
         Some(desc) => quote! { .with_description(#desc) },

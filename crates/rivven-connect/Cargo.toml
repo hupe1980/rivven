@@ -68,7 +68,7 @@ zeroize = "1.8"
 parking_lot = "0.12"
 
 # Derive macros for connector development
-rivven-connect-derive = { path = "../rivven-connect-derive" }
+rivven-connect-derive = { workspace = true }
 
 # Schema registry and plugin support
 base64 = "0.22"

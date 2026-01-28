@@ -22,7 +22,7 @@ metrics-prometheus = ["dep:metrics", "dep:metrics-exporter-prometheus"]
 
 [dependencies]
 # Core Rivven
-rivven-core = { path = "../rivven-core", default-features = false }
+rivven-core = { workspace = true, default-features = false }
 
 # Core
 tokio = { version = "1", features = ["full", "sync", "time", "net", "io-util"] }

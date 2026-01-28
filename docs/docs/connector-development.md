@@ -229,7 +229,7 @@ impl Transform for FilterTransform {
 | Attribute | Type | Description |
 |-----------|------|-------------|
 | `name` | string | Connector name (default: struct name in lowercase) |
-| `version` | string | Connector version (default: "0.1.0") |
+| `version` | string | Connector version (default: "0.0.1") |
 | `description` | string | Human-readable description |
 | `documentation_url` | string | Link to documentation |
 

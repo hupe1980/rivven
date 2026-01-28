@@ -13,7 +13,7 @@ tls = ["rivven-core/tls"]
 
 [dependencies]
 rivven-core = { workspace = true }
-rivven-protocol = { path = "../rivven-protocol" }
+rivven-protocol = { workspace = true }
 tokio = { workspace = true }
 bytes = { workspace = true }
 serde = { workspace = true }

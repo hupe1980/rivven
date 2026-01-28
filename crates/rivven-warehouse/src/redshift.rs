@@ -32,15 +32,16 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::StreamExt;
-use native_tls::TlsConnector;
-use postgres_native_tls::MakeTlsConnector;
 use rivven_connect::error::ConnectorError;
 use rivven_connect::prelude::*;
 use rivven_connect::{AnySink, SinkFactory};
+use rustls::ClientConfig;
 use schemars::JsonSchema;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio_postgres::{Client, NoTls};
+use tokio_postgres_rustls::MakeRustlsConnect;
 use tracing::{debug, error, info, warn};
 use validator::Validate;
 
@@ -245,25 +246,32 @@ impl RedshiftSink {
             }
             _ => {
                 // Use TLS for Prefer, Require, VerifyCa, VerifyFull
-                let mut builder = TlsConnector::builder();
+                // Build rustls config with webpki roots
+                let mut root_store = rustls::RootCertStore::empty();
+                root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
-                match config.ssl_mode {
+                let tls_config = match config.ssl_mode {
                     SslMode::Prefer | SslMode::Require => {
-                        // Accept any certificate
-                        builder.danger_accept_invalid_certs(true);
+                        // Accept any certificate (dangerous but matches native-tls behavior)
+                        ClientConfig::builder()
+                            .dangerous()
+                            .with_custom_certificate_verifier(Arc::new(
+                                danger::NoCertificateVerification::new(
+                                    rustls::crypto::ring::default_provider(),
+                                ),
+                            ))
+                            .with_no_client_auth()
                     }
                     SslMode::VerifyCa | SslMode::VerifyFull => {
-                        // Verify certificates
-                        builder.danger_accept_invalid_certs(false);
+                        // Verify certificates with webpki roots
+                        ClientConfig::builder()
+                            .with_root_certificates(root_store)
+                            .with_no_client_auth()
                     }
                     SslMode::Disable => unreachable!(),
-                }
+                };
 
-                let connector = builder.build().map_err(|e| {
-                    ConnectorError::Connection(format!("Failed to build TLS connector: {}", e))
-                })?;
-
-                let tls = MakeTlsConnector::new(connector);
+                let tls = MakeRustlsConnect::new(tls_config);
 
                 let (client, connection) = tokio_postgres::connect(&connection_string, tls)
                     .await
@@ -662,5 +670,69 @@ mod tests {
             serde_json::to_string(&SslMode::VerifyFull).unwrap(),
             "\"verifyfull\""
         );
+    }
+}
+
+/// Dangerous TLS verifier that accepts any certificate
+///
+/// This is required for SSL modes like "prefer" and "require" that don't
+/// verify certificates. Use VerifyCa or VerifyFull for production.
+mod danger {
+    use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use rustls::{DigitallySignedStruct, Error, SignatureScheme};
+
+    #[derive(Debug)]
+    pub struct NoCertificateVerification(rustls::crypto::CryptoProvider);
+
+    impl NoCertificateVerification {
+        pub fn new(provider: rustls::crypto::CryptoProvider) -> Self {
+            Self(provider)
+        }
+    }
+
+    impl ServerCertVerifier for NoCertificateVerification {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: UnixTime,
+        ) -> Result<ServerCertVerified, Error> {
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            rustls::crypto::verify_tls12_signature(
+                message,
+                cert,
+                dss,
+                &self.0.signature_verification_algorithms,
+            )
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            rustls::crypto::verify_tls13_signature(
+                message,
+                cert,
+                dss,
+                &self.0.signature_verification_algorithms,
+            )
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            self.0.signature_verification_algorithms.supported_schemes()
+        }
     }
 }

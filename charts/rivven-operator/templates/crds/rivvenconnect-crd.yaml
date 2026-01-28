@@ -80,7 +80,7 @@ spec:
                   description: Number of connect worker replicas
                 version:
                   type: string
-                  default: "{{ .Values.defaultConnect.version | default "0.1.0" }}"
+                  default: "{{ .Values.defaultConnect.version | default "0.0.1" }}"
                 image:
                   type: string
                   description: Custom container image (overrides version-based default)

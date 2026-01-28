@@ -14,7 +14,7 @@ bytes = "1"
 serde = { version = "1", features = ["derive"] }
 postcard = { version = "1", features = ["alloc"] }
 thiserror = "1"
-rivven-core = { path = "../rivven-core" }
+rivven-core = { workspace = true }
 
 [features]
 default = []

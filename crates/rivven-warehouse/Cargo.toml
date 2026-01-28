@@ -14,12 +14,12 @@ default = []
 # Individual warehouse providers
 snowflake = ["dep:reqwest", "dep:rsa", "dep:base64", "dep:jsonwebtoken"]
 bigquery = ["dep:gcp-bigquery-client", "dep:google-cloud-auth"]
-redshift = ["dep:tokio-postgres", "dep:native-tls", "dep:postgres-native-tls", "dep:aws-config", "dep:aws-sdk-redshift", "dep:aws-credential-types"]
+redshift = ["dep:tokio-postgres", "dep:tokio-postgres-rustls", "dep:rustls", "dep:webpki-roots", "dep:aws-config", "dep:aws-sdk-redshift", "dep:aws-credential-types"]
 # Enable all providers
 full = ["snowflake", "bigquery", "redshift"]
 
 [dependencies]
-rivven-connect = { path = "../rivven-connect" }
+rivven-connect = { workspace = true }
 
 # Core
 async-trait = "0.1"
@@ -49,10 +49,11 @@ jsonwebtoken = { version = "9", optional = true }
 gcp-bigquery-client = { version = "0.25", optional = true }
 google-cloud-auth = { version = "0.17", optional = true }
 
-# Redshift dependencies (optional)
+# Redshift dependencies (optional) - uses rustls for musl cross-compilation
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4"], optional = true }
-native-tls = { version = "0.2", optional = true }
-postgres-native-tls = { version = "0.5", optional = true }
+tokio-postgres-rustls = { version = "0.12", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
+webpki-roots = { version = "0.26", optional = true }
 aws-config = { version = "1", optional = true }
 aws-sdk-redshift = { version = "1", optional = true }
 aws-credential-types = { version = "1", features = ["hardcoded-credentials"], optional = true }

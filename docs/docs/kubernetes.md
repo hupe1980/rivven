@@ -186,7 +186,7 @@ metadata:
   name: production
 spec:
   replicas: 3
-  version: "0.1.0"
+  version: "0.0.1"
   storage:
     size: 100Gi
     storageClassName: fast-ssd

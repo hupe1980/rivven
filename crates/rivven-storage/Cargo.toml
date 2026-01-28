@@ -21,7 +21,7 @@ parquet = ["dep:parquet", "dep:arrow-array", "dep:arrow-schema"]
 full = ["s3", "gcs", "azure", "parquet"]
 
 [dependencies]
-rivven-connect = { path = "../rivven-connect" }
+rivven-connect = { workspace = true }
 
 # Core
 async-trait = "0.1"

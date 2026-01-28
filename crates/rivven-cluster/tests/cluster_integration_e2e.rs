@@ -199,7 +199,7 @@ async fn test_node_registration() -> Result<(), Box<dyn std::error::Error>> {
             client_addr: format!("127.0.0.1:{}", 9090 + i).parse().unwrap(),
             cluster_addr: format!("127.0.0.1:{}", 9190 + i).parse().unwrap(),
             capabilities: rivven_cluster::node::NodeCapabilities::default(),
-            version: "0.1.0".to_string(),
+            version: "0.0.1".to_string(),
             tags: std::collections::HashMap::new(),
         };
 

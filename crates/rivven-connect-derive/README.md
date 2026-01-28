@@ -99,7 +99,7 @@ pub mod my_connector {
 | Attribute | Type | Description |
 |-----------|------|-------------|
 | `name` | string | Connector name (default: struct name in lowercase) |
-| `version` | string | Connector version (default: "0.1.0") |
+| `version` | string | Connector version (default: "0.0.1") |
 | `description` | string | Connector description |
 | `documentation_url` | string | Documentation URL |
 
@@ -108,7 +108,7 @@ pub mod my_connector {
 | Attribute | Type | Description |
 |-----------|------|-------------|
 | `name` | string | Connector name (default: struct name in lowercase) |
-| `version` | string | Connector version (default: "0.1.0") |
+| `version` | string | Connector version (default: "0.0.1") |
 | `description` | string | Connector description |
 | `documentation_url` | string | Documentation URL |
 | `batching` | flag | Enable batch configuration |

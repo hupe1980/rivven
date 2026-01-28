@@ -23,7 +23,7 @@ pubsub = []  # Google Cloud Pub/Sub source (pure Rust simulation for now)
 full = ["kafka", "mqtt", "sqs", "pubsub"]
 
 [dependencies]
-rivven-connect = { path = "../rivven-connect" }
+rivven-connect = { workspace = true }
 
 # Core
 async-trait = "0.1"

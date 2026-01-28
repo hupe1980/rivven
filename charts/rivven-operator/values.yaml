@@ -179,7 +179,7 @@ defaultCluster:
 
 # Default values for RivvenConnect instances
 defaultConnect:
-  version: "0.1.0"
+  version: "0.0.1"
   image: ghcr.io/hupe1980/rivven-connect:latest
   replicas: 1
   stateDir: "/data/connect-state"

@@ -944,7 +944,7 @@ mod tests {
                     namespace: None,
                 },
                 replicas: 2,
-                version: "0.1.0".to_string(),
+                version: "0.0.1".to_string(),
                 image: None,
                 image_pull_policy: "IfNotPresent".to_string(),
                 image_pull_secrets: vec![],

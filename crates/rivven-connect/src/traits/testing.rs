@@ -119,7 +119,7 @@ impl Source for MockSource {
     type Config = MockSourceConfig;
 
     fn spec() -> ConnectorSpec {
-        ConnectorSpec::new("mock-source", "0.1.0").build()
+        ConnectorSpec::new("mock-source", "0.0.1").build()
     }
 
     async fn check(&self, _config: &Self::Config) -> Result<CheckResult> {
@@ -251,7 +251,7 @@ impl Sink for MockSink {
     type Config = MockSinkConfig;
 
     fn spec() -> ConnectorSpec {
-        ConnectorSpec::new("mock-sink", "0.1.0").build()
+        ConnectorSpec::new("mock-sink", "0.0.1").build()
     }
 
     async fn check(&self, _config: &Self::Config) -> Result<CheckResult> {

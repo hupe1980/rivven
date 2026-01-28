@@ -50,7 +50,7 @@ metadata:
   namespace: default
 spec:
   replicas: 3
-  version: "0.1.0"
+  version: "0.0.1"
   
   storage:
     size: 100Gi
@@ -95,7 +95,7 @@ spec:
     name: production
   
   replicas: 2
-  version: "0.1.0"
+  version: "0.0.1"
   
   # PostgreSQL CDC source with TYPED config
   sources:
