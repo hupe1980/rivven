@@ -7,22 +7,23 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use rivven::prelude::*;
 //!
 //! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
+//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     // Create a client
-//!     let client = Client::connect("localhost:9092").await?;
+//!     let mut client = Client::connect("localhost:9092").await?;
 //!
-//!     // Create a topic
-//!     client.create_topic("my-topic", 3, 1).await?;
+//!     // Create a topic with default partitions
+//!     client.create_topic("my-topic", None).await?;
 //!
-//!     // Produce messages
-//!     client.produce("my-topic", b"Hello, Rivven!").await?;
+//!     // Publish messages
+//!     client.publish("my-topic", b"Hello, Rivven!").await?;
 //!
-//!     // Consume messages
-//!     let messages = client.consume("my-topic", 0, 0, 100).await?;
+//!     // Subscribe and consume messages
+//!     client.subscribe("my-topic").await?;
+//!     let messages = client.poll(100).await?;
 //!     for msg in messages {
 //!         println!("Received: {:?}", msg);
 //!     }

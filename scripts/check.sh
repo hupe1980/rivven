@@ -3,9 +3,10 @@
 # Run this locally before pushing to catch CI failures early
 #
 # Usage:
-#   ./scripts/check.sh          # Run all checks
-#   ./scripts/check.sh --quick  # Run only fast checks (fmt, clippy, check)
-#   ./scripts/check.sh --test   # Run checks + tests
+#   ./scripts/check.sh              # Run all checks
+#   ./scripts/check.sh --quick      # Run only fast checks (fmt, clippy, check)
+#   ./scripts/check.sh --test       # Run checks + unit tests
+#   ./scripts/check.sh --integration # Run checks + all tests including integration
 #
 # To install as pre-commit hook:
 #   ln -sf ../../scripts/check.sh .git/hooks/pre-commit
@@ -25,10 +26,12 @@ NC='\033[0m' # No Color
 # Parse arguments
 QUICK=false
 TEST=false
+INTEGRATION=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         --quick|-q) QUICK=true; shift ;;
         --test|-t) TEST=true; shift ;;
+        --integration|-i) INTEGRATION=true; shift ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -87,16 +90,24 @@ fi
 if $TEST; then
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  Running Tests"
+    echo "  Running Unit Tests"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     
     run_check "Unit Tests" cargo test --all-features --workspace --lib --bins
+fi
+
+if $INTEGRATION; then
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  Running Integration Tests"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     
-    # Only run integration tests if Docker is available
+    # Integration tests require Docker for testcontainers
     if command -v docker &> /dev/null && docker info &> /dev/null; then
         run_check "Integration Tests" cargo test --all-features --workspace -- --test-threads=1
     else
-        echo -e "${YELLOW}⚠ Docker not available, skipping integration tests${NC}"
+        print_err "Docker not available - integration tests require Docker"
+        exit 1
     fi
 fi
 
