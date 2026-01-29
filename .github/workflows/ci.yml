@@ -91,8 +91,17 @@ jobs:
       - name: Install trunk
         uses: taiki-e/install-action@trunk
       
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      # Cache only registry/index, NOT target directory (avoids incremental bloat)
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
       
       # Pre-pull Docker images with retry to handle rate limits/transient failures
       - name: Pre-pull test container images
@@ -117,10 +126,10 @@ jobs:
           pull_with_retry "mysql:8.0"
           pull_with_retry "mariadb:11.3"
       
-      # Run all tests including integration tests with testcontainers
+      # Run tests in release mode (smaller artifacts, faster linking)
       # Use --test-threads=1 for CDC tests that share database state
       - name: Run integration tests
-        run: cargo test --all-features --workspace -- --test-threads=1
+        run: cargo test --release --workspace -- --test-threads=1
 
   doc:
     name: Documentation
