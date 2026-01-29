@@ -30,11 +30,21 @@ jobs:
       - name: Install trunk
         uses: taiki-e/install-action@trunk
       
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      # Cache only registry, not target (avoids incremental bloat)
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
       
+      # Run unit tests only (integration tests already passed in CI)
       - name: Run tests
-        run: cargo test --all-features --workspace
+        run: cargo test --release --workspace --lib --bins
       
       - name: Check formatting
         run: cargo fmt --all -- --check
