@@ -178,12 +178,16 @@ jobs:
         with:
           python-version: '3.12'
       
+      # Clean any cached builds to ensure fresh version
+      - name: Clean previous builds
+        run: cargo clean -p rivven-python 2>/dev/null || true
+      
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
           args: --release --out dist -i python3.12 --manifest-path crates/rivven-python/Cargo.toml
-          sccache: 'true'
+          sccache: 'false'  # Disable sccache for releases to ensure fresh builds
           manylinux: ${{ matrix.manylinux }}
           container: ${{ matrix.container || '' }}
           before-script-linux: |
