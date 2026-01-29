@@ -224,7 +224,7 @@ rivven group delete my-app
 
 ```toml
 [dependencies]
-rivven-client = "0.0.3"
+rivven-client = "0.0.4"
 tokio = { version = "1", features = ["full"] }
 ```
 

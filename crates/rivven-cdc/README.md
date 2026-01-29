@@ -18,6 +18,7 @@ Native Change Data Capture for PostgreSQL, MySQL, and MariaDB.
 - 🐘 **PostgreSQL** - Logical replication via pgoutput plugin (v10+)
 - 🐬 **MySQL/MariaDB** - Binlog replication with GTID support (MySQL 5.7+, MariaDB 10.2+)
 - 🔒 **TLS/mTLS** - Secure connections with optional client certificate auth
+- 🔑 **Full Auth Support** - SCRAM-SHA-256 (PostgreSQL), caching_sha2_password + ed25519 (MySQL/MariaDB)
 - 📦 **Zero-Copy** - Efficient binary protocol parsing
 - ⚡ **Async** - Built on Tokio for high-performance streaming
 - 📡 **Signal Table** - Runtime control with Debezium-compatible signaling
@@ -31,6 +32,8 @@ Rivven-cdc provides ~100% feature parity with Debezium:
 |---------|------------|----------|-------|
 | Logical Replication | ✅ | ✅ | pgoutput plugin |
 | Binlog Streaming | ✅ | ✅ | MySQL/MariaDB GTID |
+| Binlog Checksum (CRC32) | ✅ | ✅ | Auto-negotiation, MySQL 8+/MariaDB 10+ |
+| Schema Metadata | ✅ | ✅ | Real column names from INFORMATION_SCHEMA |
 | Initial Snapshot | ✅ | ✅ | Parallel, resumable |
 | TLS/SSL | ✅ | ✅ | rustls-based |
 | Table/Column Filtering | ✅ | ✅ | Glob patterns |
@@ -43,6 +46,8 @@ Rivven-cdc provides ~100% feature parity with Debezium:
 | **REPLICA IDENTITY** | ✅ | ✅ | `ReplicaIdentityEnforcer` with warn/skip/fail |
 | **Schema Change Topic** | ✅ | ✅ | `SchemaChangeEmitter` for DDL tracking |
 | **SCRAM-SHA-256** | ✅ | ✅ | RFC 5802 PostgreSQL auth |
+| **caching_sha2_password** | ✅ | ✅ | MySQL 8.0+ default auth plugin |
+| **client_ed25519** | ✅ | ✅ | MariaDB Ed25519 auth |
 | **Signal Table** | ✅ | ✅ | Multi-channel (source/topic/file) |
 | **Transaction Metadata Topic** | ✅ | ✅ | `TransactionTopicEmitter` BEGIN/END events |
 | **Read-Only Replicas** | ✅ | ✅ | Heartbeat-based watermarking for standbys |

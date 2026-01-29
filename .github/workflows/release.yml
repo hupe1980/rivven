@@ -102,10 +102,9 @@ jobs:
         run: sleep 30
       
       # Layer 4: rivvend depends on core, protocol, cluster
-      - name: Build dashboard (required for rivvend)
-        run: |
-          cd crates/rivven-dashboard
-          trunk build --release
+      # build.rs will automatically build the dashboard from dashboard/ source
+      - name: Pre-build rivvend (builds dashboard via build.rs)
+        run: cargo build -p rivvend --release
       
       - name: Publish rivvend
         run: cargo publish -p rivvend --token ${{ secrets.CRATES_IO_TOKEN }}
@@ -273,10 +272,6 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             suffix: linux-arm64
-          # macOS Intel
-          - os: macos-13
-            target: x86_64-apple-darwin
-            suffix: darwin-amd64
           # macOS Apple Silicon
           - os: macos-14
             target: aarch64-apple-darwin
@@ -297,11 +292,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
       
-      - name: Build dashboard (required for rivvend)
-        run: |
-          cd crates/rivven-dashboard
-          trunk build --release
-      
+      # Dashboard is built automatically by rivvend's build.rs
       - name: Build binaries
         run: |
           cargo build --release --target ${{ matrix.target }} \

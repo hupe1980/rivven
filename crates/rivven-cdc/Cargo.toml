@@ -37,6 +37,8 @@ mysql = [
     "dep:sha1",
     "dep:sha2",
     "dep:base64",
+    "dep:mysql_async",
+    "dep:flate2",
 ]
 # MySQL with TLS support (rustls-based)
 mysql-tls = [
@@ -91,6 +93,8 @@ tokio-rustls = { version = "0.26", optional = true }
 sha1 = { version = "0.10", optional = true }
 sha2 = { version = "0.10", optional = true }
 base64 = { version = "0.22", optional = true }
+mysql_async = { version = "0.34", optional = true, default-features = false }
+flate2 = { version = "1.1", optional = true, default-features = false, features = ["rust_backend"] }
 
 # SCRAM authentication (PostgreSQL SCRAM-SHA-256)
 hmac = { version = "0.12", optional = true }

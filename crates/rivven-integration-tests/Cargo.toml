@@ -1,0 +1,98 @@
+[package]
+name = "rivven-integration-tests"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish = false  # NOT published to crates.io - internal testing only
+description = "Integration and end-to-end tests for Rivven distributed event streaming platform"
+
+[lib]
+name = "rivven_integration_tests"
+path = "src/lib.rs"
+
+# All internal crates as dependencies (can use workspace versions)
+[dependencies]
+# Core crates
+rivven-core = { workspace = true }
+rivven-protocol = { workspace = true }
+rivven-cluster = { workspace = true }
+rivven-cdc = { workspace = true, features = ["postgres", "mysql", "mariadb"] }
+rivven-client = { workspace = true }
+rivven-connect = { workspace = true }
+rivvend = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true, features = ["full", "test-util"] }
+tokio-stream = "0.1"
+futures = { workspace = true }
+async-trait = "0.1"
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Logging/tracing
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+# Testing utilities
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres", "mysql", "mariadb"] }
+tokio-postgres = "0.7"
+mysql_async = { version = "0.34", default-features = false }
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+# Note: rdkafka removed - requires cmake and librdkafka; add if needed for Kafka comparison tests
+
+# Utilities
+chrono = { workspace = true }
+uuid = { version = "1.0", features = ["v4"] }
+rand = "0.8"
+tempfile = "3.10"
+portpicker = "0.1"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+proptest = "1.4"
+quickcheck = "1.0"
+quickcheck_macros = "1.0"
+fake = { version = "2.9", features = ["derive"] }
+
+[[test]]
+name = "e2e_pipeline"
+path = "tests/e2e_pipeline.rs"
+
+[[test]]
+name = "cluster_consensus"
+path = "tests/cluster_consensus.rs"
+
+[[test]]
+name = "cdc_postgres"
+path = "tests/cdc_postgres.rs"
+
+[[test]]
+name = "client_protocol"
+path = "tests/client_protocol.rs"
+
+[[test]]
+name = "security"
+path = "tests/security.rs"
+
+[[test]]
+name = "chaos"
+path = "tests/chaos.rs"
+
+[[test]]
+name = "cdc_mysql"
+path = "tests/cdc_mysql.rs"
+
+[[test]]
+name = "cdc_mariadb"
+path = "tests/cdc_mariadb.rs"

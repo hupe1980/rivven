@@ -40,7 +40,7 @@
 
 ### 🔄 Change Data Capture
 - PostgreSQL CDC with logical replication
-- MySQL CDC with binlog streaming
+- MySQL CDC with binlog streaming (caching_sha2_password support)
 - 17 built-in transforms (SMTs)
 
 ### 📊 Schema Registry
@@ -121,6 +121,7 @@ rivven-connect run --config connect.yaml
 | [Security](https://hupe1980.github.io/rivven/docs/security) | TLS, authentication, and RBAC |
 | [Tiered Storage](https://hupe1980.github.io/rivven/docs/tiered-storage) | Hot/warm/cold storage tiers |
 | [Kubernetes](https://hupe1980.github.io/rivven/docs/kubernetes) | Production deployment |
+| [Testing](https://hupe1980.github.io/rivven/docs/testing) | Integration tests with testcontainers |
 
 ---
 

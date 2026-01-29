@@ -37,7 +37,7 @@ Pass the API URL at startup via meta tags:
 ```html
 <!-- Server injects these when serving index.html -->
 <meta name="rivven:api-url" content="http://rivven.internal:8080">
-<meta name="rivven:version" content="0.0.3">
+<meta name="rivven:version" content="0.0.4">
 ```
 
 Or via JavaScript for reverse proxy setups:
@@ -258,7 +258,7 @@ GET /dashboard/health
 {
   "status": "healthy",
   "uptime_secs": 3600,
-  "version": "0.0.3",
+  "version": "0.0.4",
   "node_id": "node-1",
   "role": "leader"
 }

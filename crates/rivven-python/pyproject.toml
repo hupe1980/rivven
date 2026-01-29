@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "rivven"
-version = "0.0.1"
+dynamic = ["version"]
 description = "High-performance Python client for Rivven distributed streaming platform"
 readme = "README.md"
 license = { text = "Apache-2.0" }

@@ -414,12 +414,38 @@ impl BinlogDecoder {
         }
 
         let header = EventHeader::parse(data)?;
-        let payload = &data[EventHeader::SIZE..];
+
+        // Determine if we need to strip the CRC32 checksum (4 bytes)
+        // checksum_type: 0 = NONE, 1 = CRC32
+        //
+        // For FDE: We assume checksums are enabled for MySQL 5.6.4+ and strip 4 bytes.
+        //          The FDE parsing will determine the actual checksum_type for future events.
+        // For other events: Use the checksum_type from the parsed FDE.
+        let has_checksum = if header.event_type == EventType::FormatDescriptionEvent {
+            // Assume MySQL 8 with checksums enabled - strip the CRC32
+            // The FDE is large enough that this is safe
+            data.len() > EventHeader::SIZE + 60
+        } else {
+            self.format
+                .as_ref()
+                .map(|f| f.checksum_type == 1)
+                .unwrap_or(false)
+        };
+
+        // Strip checksum from payload if present
+        let payload_end = if has_checksum && data.len() > EventHeader::SIZE + 4 {
+            data.len() - 4
+        } else {
+            data.len()
+        };
+        let payload = &data[EventHeader::SIZE..payload_end];
 
         trace!(
-            "Decoding {:?} event, {} bytes payload",
+            "Decoding {:?} event, {} bytes total, {} bytes payload (checksum={})",
             header.event_type,
-            payload.len()
+            data.len(),
+            payload.len(),
+            has_checksum
         );
 
         match header.event_type {
@@ -434,7 +460,13 @@ impl BinlogDecoder {
                 Ok(BinlogEvent::TableMap(event))
             }
             EventType::WriteRowsEventV1 | EventType::WriteRowsEventV2 => {
+                debug!("Decoding WriteRows event, payload {} bytes", payload.len());
                 let event = self.decode_rows_event(payload, false, header.event_type)?;
+                debug!(
+                    "WriteRows decoded: table_id={}, rows={}",
+                    event.table_id,
+                    event.rows.len()
+                );
                 Ok(BinlogEvent::WriteRows(event))
             }
             EventType::UpdateRowsEventV1 | EventType::UpdateRowsEventV2 => {
@@ -488,13 +520,43 @@ impl BinlogDecoder {
         let create_timestamp = cursor.get_u32_le();
         let header_length = cursor.get_u8();
 
-        // Skip event type header lengths
-        let remaining = data.len() - cursor.position() as usize;
-        if remaining > 0 {
-            cursor.advance(remaining - 1);
-        }
+        // The post-header lengths array follows (one byte per event type)
+        // MySQL 8 has ~40 event types, so the array is ~40 bytes
+        // The checksum_type is the last byte before the optional CRC32
+        //
+        // For MySQL 5.6.4+ with checksum:
+        // - data ends with: [post_header_lengths...][checksum_alg (1)][crc32 (4)]
+        // - checksum_alg: 0 = NONE, 1 = CRC32
+        //
+        // Total FDE size (without header):
+        // - 2 (version) + 50 (server) + 4 (timestamp) + 1 (header_len) + N (post_headers) + 1 (checksum_alg)
+        // - With CRC32: add 4 bytes
+        //
+        // We need to find the checksum_alg byte which is either:
+        // - The last byte if no checksum (checksum_alg = 0)
+        // - 5 bytes from the end if checksum enabled (checksum_alg = 1)
 
-        let checksum_type = if remaining > 0 { cursor.get_u8() } else { 0 };
+        // Try to detect checksum: if last byte is 0 or 1, check if it makes sense
+        let checksum_type = if data.len() >= 5 {
+            let potential_type = data[data.len() - 5];
+            if potential_type == 1 {
+                // CRC32 enabled, checksum_type is 5 bytes from end
+                1
+            } else if data[data.len() - 1] == 0 || data[data.len() - 1] == 1 {
+                // No CRC32 or checksum disabled
+                data[data.len() - 1]
+            } else {
+                // Default to CRC32 for MySQL 8.x
+                1
+            }
+        } else {
+            0
+        };
+
+        debug!(
+            "FDE: binlog_version={}, server={}, checksum_type={}",
+            binlog_version, server_version, checksum_type
+        );
 
         Ok(FormatDescriptionEvent {
             binlog_version,

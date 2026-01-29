@@ -1,0 +1,13 @@
+# Trunk configuration for WASM dashboard build
+# Built by rivvend's build.rs during compilation
+
+[build]
+target = "index.html"
+dist = "dist"
+
+[watch]
+ignore = ["dist"]
+
+# Optimize WASM binary size
+[tools]
+wasm-opt = "version_119"

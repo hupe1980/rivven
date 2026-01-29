@@ -429,6 +429,14 @@ if $RELEASE; then
     
     # Dry-run publish check
     print_step "Publish Dry Run"
+    
+    # Clean restored Cargo.toml files that interfere with packaging
+    # (build.rs restores these from .template files for local trunk builds)
+    if [[ -f "crates/rivvend/dashboard/Cargo.toml" ]]; then
+        rm -f "crates/rivvend/dashboard/Cargo.toml" "crates/rivvend/dashboard/Cargo.lock"
+        print_info "Cleaned dashboard/Cargo.toml for publish check"
+    fi
+    
     PUBLISH_FAILED=false
     for crate in rivven-core rivven-protocol rivven-cluster rivven-cdc rivven-client rivvend; do
         if [[ -f "crates/$crate/Cargo.toml" ]]; then

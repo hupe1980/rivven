@@ -51,10 +51,11 @@ use crate::raft_api::RaftApiState;
 // ============================================================================
 
 /// Embedded static files for the dashboard
-/// Built automatically by build.rs from rivven-dashboard crate
+/// Built automatically by build.rs from dashboard/ source directory
+/// Assets are in dashboard/dist/ after trunk build
 #[cfg(feature = "dashboard")]
 #[derive(RustEmbed)]
-#[folder = "../rivven-dashboard/dist/"]
+#[folder = "dashboard/dist/"]
 struct DashboardAssets;
 
 // ============================================================================

@@ -87,7 +87,8 @@ prost-reflect = "0.15"
 
 [dev-dependencies]
 tokio-test = "0.4"
-rivvend = { workspace = true }
+# Note: rivvend is NOT a dev-dependency to avoid circular publish issues
+# Integration tests that need rivvend should be in a separate workspace crate
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 tokio-postgres = "0.7"

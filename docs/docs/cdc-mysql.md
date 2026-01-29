@@ -188,6 +188,81 @@ sources:
 
 ---
 
+## Authentication
+
+Rivven CDC supports all common MySQL and MariaDB authentication plugins:
+
+### mysql_native_password (MySQL 5.x default)
+
+Traditional SHA1-based authentication. Works with all MySQL versions:
+
+```sql
+-- Create user with mysql_native_password
+CREATE USER 'rivven'@'%' IDENTIFIED WITH mysql_native_password BY 'password';
+```
+
+### caching_sha2_password (MySQL 8.0+ default)
+
+Modern SHA256-based authentication with caching for performance. Rivven fully supports this plugin including:
+
+- **Fast authentication**: When the server has cached the password hash
+- **Full authentication over TLS**: Password sent in cleartext over encrypted connection
+- **Full authentication with RSA**: Password encrypted with server's public key (non-TLS)
+
+```sql
+-- Create user with caching_sha2_password (MySQL 8.0+ default)
+CREATE USER 'rivven'@'%' IDENTIFIED BY 'password';
+
+-- Or explicitly specify the plugin
+CREATE USER 'rivven'@'%' IDENTIFIED WITH caching_sha2_password BY 'password';
+```
+
+{: .note }
+For `caching_sha2_password` without TLS, the server's RSA public key is automatically fetched and used to encrypt the password. This is secure but TLS is still recommended for production.
+
+### sha256_password
+
+Legacy SHA256 authentication (predecessor to caching_sha2_password):
+
+```sql
+CREATE USER 'rivven'@'%' IDENTIFIED WITH sha256_password BY 'password';
+```
+
+### client_ed25519 (MariaDB)
+
+MariaDB's Ed25519 authentication plugin uses modern elliptic curve cryptography:
+
+```sql
+-- MariaDB only
+INSTALL SONAME 'auth_ed25519';
+CREATE USER 'rivven'@'%' IDENTIFIED VIA ed25519 USING PASSWORD('password');
+```
+
+{: .note }
+Ed25519 provides strong security with shorter signatures. The client derives an Ed25519 keypair from SHA-512(password) and signs the server's challenge.
+
+### Checking User Authentication Plugin
+
+```sql
+-- MySQL
+SELECT user, host, plugin FROM mysql.user WHERE user = 'rivven';
+
+-- MariaDB
+SELECT user, host, plugin FROM mysql.user WHERE user = 'rivven';
+```
+
+### Changing Authentication Plugin
+
+```sql
+-- Switch to mysql_native_password (for legacy compatibility)
+ALTER USER 'rivven'@'%' IDENTIFIED WITH mysql_native_password BY 'password';
+
+-- Switch to caching_sha2_password (recommended for MySQL 8.0+)
+ALTER USER 'rivven'@'%' IDENTIFIED WITH caching_sha2_password BY 'password';
+```
+
+---
+
 ## GTID vs Position-Based Replication
 
 ### GTID Mode (Recommended)
@@ -253,6 +328,86 @@ server_id = 1
 | GTID Format | UUID:transaction_id | domain-server_id-sequence |
 | GTID Variable | `gtid_executed` | `gtid_current_pos` |
 | Binlog Events | MySQL-specific | MariaDB extensions |
+
+---
+
+## Binlog Checksum Handling
+
+MySQL 5.6.2+ and MariaDB 10.2+ support binlog checksums (CRC32) for data integrity. Rivven automatically handles checksum negotiation and verification.
+
+### How It Works
+
+1. **MySQL 8.0+**: Rivven sets `@source_binlog_checksum = @@global.binlog_checksum` to tell the server we understand checksums
+2. **MySQL 5.6-8.0**: Falls back to `@master_binlog_checksum` variable name
+3. **MariaDB 10+**: Uses explicit `SET @master_binlog_checksum = 'CRC32'` and `@mariadb_slave_capability=5`
+4. **CRC32 Stripping**: 4-byte checksums are automatically stripped from event payloads
+
+### Configuration
+
+Binlog checksums are handled automatically—no configuration needed. Ensure your server has checksums enabled (default for modern versions):
+
+```sql
+-- Check current checksum setting
+SHOW VARIABLES LIKE 'binlog_checksum';
+-- Should return: CRC32
+
+-- Enable checksums if disabled
+SET GLOBAL binlog_checksum = 'CRC32';
+```
+
+{: .note }
+Rivven gracefully handles servers with checksums disabled. No errors will occur if `binlog_checksum = NONE`.
+
+---
+
+## Schema Metadata
+
+Rivven automatically resolves column names from the database schema, providing human-readable field names in CDC events instead of generic `col0`, `col1` placeholders.
+
+### How It Works
+
+1. On each `TABLE_MAP` event, Rivven queries `INFORMATION_SCHEMA.COLUMNS` 
+2. Column names are cached in memory per (schema, table) pair
+3. Cached names are used for all subsequent row events
+
+### Event Output
+
+**With Schema Metadata (default):**
+```json
+{
+  "before": null,
+  "after": {
+    "id": 1,
+    "name": "John Doe",
+    "email": "john@example.com",
+    "created_at": "2024-01-15T10:30:00"
+  },
+  "op": "c"
+}
+```
+
+**Without Schema Metadata (fallback):**
+```json
+{
+  "before": null,
+  "after": {
+    "col0": 1,
+    "col1": "John Doe",
+    "col2": "john@example.com",
+    "col3": "2024-01-15T10:30:00"
+  },
+  "op": "c"
+}
+```
+
+### Required Permissions
+
+The replication user needs `SELECT` on `INFORMATION_SCHEMA`:
+
+```sql
+-- Already included in basic GRANT SELECT ON *.*
+GRANT SELECT ON INFORMATION_SCHEMA.* TO 'rivven'@'%';
+```
 
 ---
 

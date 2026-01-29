@@ -1,12 +1,20 @@
+# Dashboard WASM Package
+# This is an INDEPENDENT package (not a workspace member) that gets built by
+# rivvend's build.rs using trunk. It's included in rivvend's package for crates.io.
+#
+# DO NOT add this to the workspace members - it must be built separately for WASM.
+
+# Empty workspace table tells Cargo this is NOT part of the parent workspace
+[workspace]
+
 [package]
-name = "rivven-dashboard"
-version = "0.0.1"
+name = "rivvend-dashboard"
+version = "0.0.3"
 edition = "2021"
 authors = ["hupe1980"]
 license = "Apache-2.0"
-publish = false  # WASM-only, not crates.io
-repository = "https://github.com/hupe1980/rivven"
-description = "Leptos-based WebAssembly dashboard for Rivven"
+publish = false  # WASM-only, embedded in rivvend
+description = "Leptos-based WebAssembly dashboard for Rivven (embedded in rivvend)"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -34,3 +42,9 @@ console_error_panic_hook = "0.1"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
+
+[profile.release]
+opt-level = "z"     # Optimize for size
+lto = true          # Link-time optimization
+codegen-units = 1   # Better optimization
+panic = "abort"     # Smaller binary

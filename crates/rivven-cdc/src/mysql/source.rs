@@ -7,8 +7,10 @@ use crate::common::TlsConfig;
 use crate::common::{CdcEvent, CdcOp, CdcSource, Result};
 use anyhow::Context;
 use async_trait::async_trait;
+use mysql_async::prelude::*;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, trace, warn};
@@ -181,11 +183,49 @@ impl MySqlCdcConfig {
     }
 }
 
+/// Schema metadata cache for resolving column names
+///
+/// MySQL binlog events don't include column names, only types and values.
+/// This cache stores column names queried from INFORMATION_SCHEMA.
+#[derive(Default)]
+pub struct SchemaCache {
+    /// Map of (schema, table) -> column names in order
+    tables: HashMap<(String, String), Vec<String>>,
+}
+
+impl SchemaCache {
+    pub fn new() -> Self {
+        Self {
+            tables: HashMap::new(),
+        }
+    }
+
+    /// Get column names for a table, or None if not cached
+    pub fn get_columns(&self, schema: &str, table: &str) -> Option<Vec<String>> {
+        self.tables
+            .get(&(schema.to_string(), table.to_string()))
+            .cloned()
+    }
+
+    /// Cache column names for a table
+    pub fn set_columns(&mut self, schema: &str, table: &str, columns: Vec<String>) {
+        self.tables
+            .insert((schema.to_string(), table.to_string()), columns);
+    }
+
+    /// Check if a table is cached
+    pub fn has_table(&self, schema: &str, table: &str) -> bool {
+        self.tables
+            .contains_key(&(schema.to_string(), table.to_string()))
+    }
+}
+
 /// MySQL CDC source
 pub struct MySqlCdc {
     config: MySqlCdcConfig,
     running: Arc<AtomicBool>,
     event_sender: Option<mpsc::Sender<CdcEvent>>,
+    schema_cache: Arc<RwLock<SchemaCache>>,
 }
 
 impl MySqlCdc {
@@ -194,6 +234,7 @@ impl MySqlCdc {
             config,
             running: Arc::new(AtomicBool::new(false)),
             event_sender: None,
+            schema_cache: Arc::new(RwLock::new(SchemaCache::new())),
         }
     }
 
@@ -253,9 +294,12 @@ impl CdcSource for MySqlCdc {
         let config = self.config.clone();
         let running = self.running.clone();
         let event_sender = self.event_sender.clone();
+        let schema_cache = self.schema_cache.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = run_mysql_cdc_loop(config, running.clone(), event_sender).await {
+            if let Err(e) =
+                run_mysql_cdc_loop(config, running.clone(), event_sender, schema_cache).await
+            {
                 error!("MySQL CDC loop failed: {:?}", e);
                 running.store(false, Ordering::SeqCst);
             }
@@ -280,7 +324,19 @@ async fn run_mysql_cdc_loop(
     config: MySqlCdcConfig,
     running: Arc<AtomicBool>,
     event_sender: Option<mpsc::Sender<CdcEvent>>,
+    schema_cache: Arc<RwLock<SchemaCache>>,
 ) -> anyhow::Result<()> {
+    // Create metadata connection URL for schema queries
+    let metadata_url = format!(
+        "mysql://{}:{}@{}:{}/{}",
+        config.user,
+        config.password.as_deref().unwrap_or(""),
+        config.host,
+        config.port,
+        config.database.as_deref().unwrap_or("mysql")
+    );
+    let metadata_pool = mysql_async::Pool::new(metadata_url.as_str());
+
     // Connect to MySQL with TLS if configured
     #[cfg(feature = "mysql-tls")]
     let mut client = {
@@ -338,6 +394,46 @@ async fn run_mysql_cdc_loop(
         client.connection_id(),
         if client.is_tls() { ", TLS" } else { "" }
     );
+
+    // Detect if server is MariaDB
+    let is_mariadb = client.server_version().contains("MariaDB");
+
+    // Set binlog checksum acknowledgment for MySQL 5.6.5+ and MariaDB 10+
+    // This tells the master we can handle CRC32 checksums in binlog events
+    // For MariaDB, this MUST be set BEFORE @mariadb_slave_capability
+    if is_mariadb {
+        // MariaDB requires explicit CRC32 setting
+        if let Err(e) = client.query("SET @master_binlog_checksum = 'CRC32'").await {
+            debug!("MariaDB binlog checksum set failed: {}", e);
+        }
+    } else if let Err(e) = client
+        .query("SET @source_binlog_checksum = @@global.binlog_checksum")
+        .await
+    {
+        // Try the older variable name for MySQL < 8.0.26
+        if let Err(e2) = client
+            .query("SET @master_binlog_checksum = @@global.binlog_checksum")
+            .await
+        {
+            debug!(
+                "Binlog checksum negotiation failed (may be MySQL < 5.6.5): {} / {}",
+                e, e2
+            );
+        }
+    }
+
+    // Set MariaDB-specific slave capability flags
+    // This is required for MariaDB 10.x+ to support checksums and other features
+    if is_mariadb {
+        // MariaDB slave capability bits:
+        // Bit 0 (1) = Supports binlog checksums
+        // Bit 1 (2) = Supports semi-sync replication
+        // Bit 2 (4) = Start position is beyond the ignorable events
+        // We set 1 | 4 = 5 to indicate checksum support
+        if let Err(e) = client.query("SET @mariadb_slave_capability=5").await {
+            debug!("MariaDB slave capability set failed: {}", e);
+        }
+    }
 
     // Get binlog position if not specified
     let (binlog_file, binlog_pos) = if config.binlog_filename.is_empty() {
@@ -422,10 +518,60 @@ async fn run_mysql_cdc_loop(
                     "Table map: {}.{} (table_id={})",
                     table_map.schema_name, table_map.table_name, table_map.table_id
                 );
+
+                // Query column names from INFORMATION_SCHEMA if not already cached
+                let schema = table_map.schema_name.clone();
+                let table = table_map.table_name.clone();
+
+                if !schema_cache.read().unwrap().has_table(&schema, &table) {
+                    let query = r#"
+                        SELECT COLUMN_NAME 
+                        FROM INFORMATION_SCHEMA.COLUMNS 
+                        WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? 
+                        ORDER BY ORDINAL_POSITION
+                    "#;
+
+                    match metadata_pool.get_conn().await {
+                        Ok(mut conn) => {
+                            let result: std::result::Result<Vec<String>, _> =
+                                conn.exec(query, (&schema, &table)).await;
+
+                            match result {
+                                Ok(columns) => {
+                                    debug!(
+                                        "Cached {} column names for {}.{}: {:?}",
+                                        columns.len(),
+                                        schema,
+                                        table,
+                                        columns
+                                    );
+                                    schema_cache
+                                        .write()
+                                        .unwrap()
+                                        .set_columns(&schema, &table, columns);
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "Failed to query columns for {}.{}: {:?}",
+                                        schema, table, e
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to get metadata connection: {:?}", e);
+                        }
+                    }
+                }
             }
 
             BinlogEvent::WriteRows(rows) => {
+                debug!("Processing WriteRows for table_id={}", rows.table_id);
                 if let Some(table_map) = decoder.get_table(rows.table_id) {
+                    debug!(
+                        "Found table: {}.{}",
+                        table_map.schema_name, table_map.table_name
+                    );
                     process_row_event(
                         CdcOp::Insert,
                         &rows,
@@ -435,7 +581,11 @@ async fn run_mysql_cdc_loop(
                         &current_binlog_file,
                         current_binlog_pos,
                         &mut event_buffer,
+                        &schema_cache,
                     );
+                    debug!("Event buffer size after processing: {}", event_buffer.len());
+                } else {
+                    warn!("No table map found for table_id={}", rows.table_id);
                 }
             }
 
@@ -450,6 +600,7 @@ async fn run_mysql_cdc_loop(
                         &current_binlog_file,
                         current_binlog_pos,
                         &mut event_buffer,
+                        &schema_cache,
                     );
                 }
             }
@@ -465,17 +616,23 @@ async fn run_mysql_cdc_loop(
                         &current_binlog_file,
                         current_binlog_pos,
                         &mut event_buffer,
+                        &schema_cache,
                     );
                 }
             }
 
             BinlogEvent::Xid(xid) => {
-                debug!("Transaction commit: XID={}", xid.xid);
+                debug!(
+                    "Transaction commit: XID={}, buffer_len={}",
+                    xid.xid,
+                    event_buffer.len()
+                );
 
                 // Flush event buffer
                 if !event_buffer.is_empty() {
                     // Send to event channel
                     if let Some(sender) = &event_sender {
+                        debug!("Sending {} events to channel", event_buffer.len());
                         for event in event_buffer.drain(..) {
                             if sender.send(event).await.is_err() {
                                 warn!("Event channel closed");
@@ -483,6 +640,7 @@ async fn run_mysql_cdc_loop(
                             }
                         }
                     } else {
+                        debug!("No event sender, clearing buffer");
                         event_buffer.clear();
                     }
                 }
@@ -542,6 +700,7 @@ fn process_row_event(
     _binlog_file: &str,
     _binlog_pos: u32,
     buffer: &mut Vec<CdcEvent>,
+    schema_cache: &Arc<RwLock<SchemaCache>>,
 ) {
     // Filter check
     // Note: MySqlCdc methods aren't available here, so we inline the check
@@ -580,12 +739,18 @@ fn process_row_event(
         .unwrap_or_default()
         .as_secs() as i64;
 
+    // Get column names from cache
+    let column_names = schema_cache
+        .read()
+        .unwrap()
+        .get_columns(&table_map.schema_name, &table_map.table_name);
+
     for row in &rows.rows {
         let before = match op {
             CdcOp::Update | CdcOp::Delete => row
                 .before
                 .as_ref()
-                .map(|cols| columns_to_json(cols, table_map)),
+                .map(|cols| columns_to_json(cols, column_names.as_ref())),
             _ => None,
         };
 
@@ -593,7 +758,7 @@ fn process_row_event(
             CdcOp::Insert | CdcOp::Update => row
                 .after
                 .as_ref()
-                .map(|cols| columns_to_json(cols, table_map)),
+                .map(|cols| columns_to_json(cols, column_names.as_ref())),
             _ => None,
         };
 
@@ -613,14 +778,18 @@ fn process_row_event(
     }
 }
 
-/// Convert column values to JSON
-fn columns_to_json(columns: &[ColumnValue], _table_map: &TableMapEvent) -> serde_json::Value {
+/// Convert column values to JSON using actual column names
+fn columns_to_json(
+    columns: &[ColumnValue],
+    column_names: Option<&Vec<String>>,
+) -> serde_json::Value {
     let mut map = serde_json::Map::new();
 
     for (i, value) in columns.iter().enumerate() {
-        // Use column index as name since MySQL binlog doesn't include column names
-        // A full implementation would query INFORMATION_SCHEMA for column names
-        let col_name = format!("col{}", i);
+        // Use actual column name if available, otherwise fall back to generic name
+        let col_name = column_names
+            .and_then(|names| names.get(i).cloned())
+            .unwrap_or_else(|| format!("col{}", i));
 
         let json_value = column_value_to_json(value);
         map.insert(col_name, json_value);
