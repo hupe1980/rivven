@@ -9,7 +9,7 @@
 #   docker build --build-arg BINARY=rivven-connect -t ghcr.io/hupe1980/rivven-connect:latest .
 #   docker build --build-arg BINARY=rivven-operator -t ghcr.io/hupe1980/rivven-operator:latest .
 #
-# Multi-arch build:
+# Multi-arch build (uses native compilation on each platform via QEMU):
 #   docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/hupe1980/rivvend:latest .
 #
 # ============================================================================
@@ -17,63 +17,54 @@
 ARG BINARY=rivvend
 
 # ============================================================================
-# Stage 1: Build all binaries (static musl with cargo-zigbuild)
+# Stage 1: Build all binaries (static musl, native compilation per platform)
 # ============================================================================
-FROM --platform=$BUILDPLATFORM rust:1.89-bookworm AS builder
-
-ARG TARGETPLATFORM
-ARG BUILDPLATFORM
+FROM rust:1.89-alpine AS builder
 
 WORKDIR /build
 
-# Install zig (for cargo-zigbuild) and other build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    xz-utils \
+# Install build dependencies for musl static linking
+RUN apk add --no-cache \
+    musl-dev \
     perl \
     make \
-    && rm -rf /var/lib/apt/lists/* \
-    && curl -sSfL https://ziglang.org/download/0.13.0/zig-linux-$(uname -m)-0.13.0.tar.xz | tar -xJ -C /usr/local \
-    && ln -s /usr/local/zig-linux-$(uname -m)-0.13.0/zig /usr/local/bin/zig
+    cmake \
+    clang \
+    llvm \
+    openssl-dev \
+    openssl-libs-static
 
-# Add musl targets for static linking and wasm32 for dashboard
-RUN rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl wasm32-unknown-unknown
+# Add wasm32 target for dashboard
+RUN rustup target add wasm32-unknown-unknown
 
-# Install cargo-zigbuild and trunk
-RUN cargo install cargo-zigbuild trunk --locked
+# Install trunk for dashboard build
+RUN cargo install trunk --locked
 
 # Copy workspace files
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 
-# Build dashboard first (runs on build platform, targets wasm32)
-# Use target-specific cache ID to prevent corruption between parallel builds
-RUN --mount=type=cache,id=cargo-registry-${TARGETPLATFORM},target=/usr/local/cargo/registry \
+# Build dashboard first (targets wasm32)
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
     cd crates/rivven-dashboard && trunk build --release
 
-# Determine target based on platform and build static binaries with zigbuild
-RUN --mount=type=cache,id=cargo-registry-${TARGETPLATFORM},target=/usr/local/cargo/registry \
-    --mount=type=cache,id=cargo-target-${TARGETPLATFORM},target=/build/target \
-    case "$TARGETPLATFORM" in \
-      "linux/arm64") \
-        export TARGET="aarch64-unknown-linux-musl" \
-        ;; \
-      *) \
-        export TARGET="x86_64-unknown-linux-musl" \
-        ;; \
-    esac \
-    && cargo zigbuild --release --target $TARGET \
+# Build all binaries as static musl binaries (native compilation, no cross-compile)
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-target,target=/build/target \
+    RUSTFLAGS="-C target-feature=+crt-static" \
+    cargo build --release \
        --package rivvend \
        --package rivven \
        --package rivven-connect \
        --package rivven-operator \
     && mkdir -p /out \
-    && cp target/$TARGET/release/rivvend /out/ \
-    && cp target/$TARGET/release/rivven /out/ \
-    && cp target/$TARGET/release/rivven-connect /out/ \
-    && cp target/$TARGET/release/rivven-operator /out/
+    && cp target/release/rivvend /out/ \
+    && cp target/release/rivven /out/ \
+    && cp target/release/rivven-connect /out/ \
+    && cp target/release/rivven-operator /out/
 
 # ============================================================================
-# Stage 2: Runtime (distroless static - no libc needed for musl binaries)
+# Stage 2: Runtime (distroless static - no libc needed for static binaries)
 # ============================================================================
 FROM gcr.io/distroless/static-debian12:nonroot
 

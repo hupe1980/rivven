@@ -70,6 +70,10 @@ jobs:
         run: cargo publish -p rivven-core --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true  # Skip if already published
       
+      - name: Publish rivven-connect-derive
+        run: cargo publish -p rivven-connect-derive --token ${{ secrets.CRATES_IO_TOKEN }}
+        continue-on-error: true
+      
       - name: Wait for crates.io index
         run: sleep 30
       
@@ -86,10 +90,6 @@ jobs:
         run: cargo publish -p rivven-cdc --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
       
-      - name: Publish rivven-connect-derive
-        run: cargo publish -p rivven-connect-derive --token ${{ secrets.CRATES_IO_TOKEN }}
-        continue-on-error: true
-      
       - name: Wait for crates.io index
         run: sleep 30
       
@@ -101,7 +101,20 @@ jobs:
       - name: Wait for crates.io index
         run: sleep 30
       
-      # Layer 4: Depends on cdc, core, client
+      # Layer 4: rivvend depends on core, protocol, cluster
+      - name: Build dashboard (required for rivvend)
+        run: |
+          cd crates/rivven-dashboard
+          trunk build --release
+      
+      - name: Publish rivvend
+        run: cargo publish -p rivvend --token ${{ secrets.CRATES_IO_TOKEN }}
+        continue-on-error: true
+      
+      - name: Wait for crates.io index
+        run: sleep 30
+      
+      # Layer 5: rivven-connect depends on cdc, core, client, connect-derive, rivvend
       - name: Publish rivven-connect
         run: cargo publish -p rivven-connect --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
@@ -109,7 +122,7 @@ jobs:
       - name: Wait for crates.io index
         run: sleep 30
       
-      # Layer 5: Depends on rivven-connect
+      # Layer 6: Depends on rivven-connect
       - name: Publish rivven-queue
         run: cargo publish -p rivven-queue --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
@@ -125,22 +138,10 @@ jobs:
       - name: Wait for crates.io index
         run: sleep 30
       
-      # Layer 6: Final binaries/apps
-      - name: Build dashboard (required for rivvend)
-        run: |
-          cd crates/rivven-dashboard
-          trunk build --release
-      
-      - name: Publish rivvend
-        run: cargo publish -p rivvend --token ${{ secrets.CRATES_IO_TOKEN }}
-        continue-on-error: true
-      
+      # Layer 7: Final binaries (rivven CLI depends on rivvend)
       - name: Publish rivven (CLI)
         run: cargo publish -p rivven --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
-      
-      - name: Wait for crates.io index
-        run: sleep 30
       
       - name: Publish rivven-operator
         run: cargo publish -p rivven-operator --token ${{ secrets.CRATES_IO_TOKEN }}
@@ -264,15 +265,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Static Linux binaries (musl) - portable across all distros
+          # Linux x86_64 (glibc - compatible with most distros)
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
+            target: x86_64-unknown-linux-gnu
             suffix: linux-amd64
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-musl
+          # Linux arm64 (using native arm64 runner)
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
             suffix: linux-arm64
-          # macOS (dynamic - macOS doesn't support fully static binaries)
-          - os: macos-latest
+          # macOS Intel
+          - os: macos-13
+            target: x86_64-apple-darwin
+            suffix: darwin-amd64
+          # macOS Apple Silicon
+          - os: macos-14
             target: aarch64-apple-darwin
             suffix: darwin-arm64
     steps:
@@ -286,14 +292,6 @@ jobs:
       - name: Install trunk
         uses: taiki-e/install-action@trunk
       
-      - name: Install cargo-zigbuild
-        uses: taiki-e/install-action@cargo-zigbuild
-      
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.13.0
-      
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
@@ -306,7 +304,7 @@ jobs:
       
       - name: Build binaries
         run: |
-          cargo zigbuild --release --target ${{ matrix.target }} \
+          cargo build --release --target ${{ matrix.target }} \
             --package rivvend \
             --package rivven \
             --package rivven-connect \
