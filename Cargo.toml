@@ -22,7 +22,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.0.2"
+version = "0.0.3"
 edition = "2021"
 rust-version = "1.89"
 authors = ["hupe1980"]
@@ -76,18 +76,18 @@ oauth2 = "4"
 jsonwebtoken = "9"
 
 # Internal crates
-rivven-core = { version = "0.0.2", path = "crates/rivven-core", default-features = false }
-rivven-protocol = { version = "0.0.2", path = "crates/rivven-protocol" }
-rivvend = { version = "0.0.2", path = "crates/rivvend" }
-rivven-client = { version = "0.0.2", path = "crates/rivven-client" }
-rivven-cdc = { version = "0.0.2", path = "crates/rivven-cdc" }
-rivven-connect = { version = "0.0.2", path = "crates/rivven-connect" }
-rivven-connect-derive = { version = "0.0.2", path = "crates/rivven-connect-derive" }
-rivven-cluster = { version = "0.0.2", path = "crates/rivven-cluster" }
-rivven-storage = { version = "0.0.2", path = "crates/rivven-storage" }
-rivven-warehouse = { version = "0.0.2", path = "crates/rivven-warehouse" }
-rivven-queue = { version = "0.0.2", path = "crates/rivven-queue" }
-rivven-operator = { version = "0.0.2", path = "crates/rivven-operator" }
+rivven-core = { version = "0.0.3", path = "crates/rivven-core", default-features = false }
+rivven-protocol = { version = "0.0.3", path = "crates/rivven-protocol" }
+rivvend = { version = "0.0.3", path = "crates/rivvend" }
+rivven-client = { version = "0.0.3", path = "crates/rivven-client" }
+rivven-cdc = { version = "0.0.3", path = "crates/rivven-cdc" }
+rivven-connect = { version = "0.0.3", path = "crates/rivven-connect" }
+rivven-connect-derive = { version = "0.0.3", path = "crates/rivven-connect-derive" }
+rivven-cluster = { version = "0.0.3", path = "crates/rivven-cluster" }
+rivven-storage = { version = "0.0.3", path = "crates/rivven-storage" }
+rivven-warehouse = { version = "0.0.3", path = "crates/rivven-warehouse" }
+rivven-queue = { version = "0.0.3", path = "crates/rivven-queue" }
+rivven-operator = { version = "0.0.3", path = "crates/rivven-operator" }
 
 [profile.release]
 opt-level = 3

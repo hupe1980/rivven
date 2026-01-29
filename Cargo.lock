@@ -6171,7 +6171,7 @@ dependencies = [
 
 [[package]]
 name = "rivven"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "bytes",
@@ -6187,7 +6187,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-cdc"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "apache-avro 0.21.0",
@@ -6242,7 +6242,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-client"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -6262,7 +6262,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-cluster"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6301,7 +6301,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-connect"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "apache-avro 0.17.0",
@@ -6349,7 +6349,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-connect-derive"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "darling 0.20.11",
  "proc-macro2",
@@ -6359,7 +6359,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-core"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "apache-avro 0.16.0",
@@ -6411,7 +6411,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-operator"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "assert_matches",
@@ -6438,7 +6438,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-protocol"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "bytes",
  "postcard",
@@ -6449,7 +6449,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-python"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "bytes",
  "openssl",
@@ -6463,7 +6463,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-queue"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -6488,7 +6488,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-storage"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "arrow-array",
  "arrow-schema",
@@ -6517,7 +6517,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-warehouse"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -6550,7 +6550,7 @@ dependencies = [
 
 [[package]]
 name = "rivvend"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "axum",
