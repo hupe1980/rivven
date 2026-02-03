@@ -10,11 +10,11 @@ keywords = ["streaming", "protocol", "event-driven"]
 categories = ["network-programming"]
 
 [dependencies]
-bytes = "1"
-serde = { version = "1", features = ["derive"] }
-serde_bytes = "0.11"
-postcard = { version = "1", features = ["alloc"] }
-thiserror = "1"
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_bytes = { workspace = true }
+postcard = { workspace = true }
+thiserror = { workspace = true }
 
 [features]
 default = []

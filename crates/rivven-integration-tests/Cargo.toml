@@ -26,13 +26,13 @@ rivven-schema = { workspace = true, features = ["server", "avro", "auth"] }
 rivvend = { workspace = true, features = ["tls"] }
 
 # TLS crypto provider - needed for runtime initialization
-rustls = { version = "0.23", features = ["aws-lc-rs"] }
+rustls = { workspace = true, features = ["aws-lc-rs"] }
 
 # Async runtime
 tokio = { workspace = true, features = ["full", "test-util"] }
 tokio-stream = "0.1"
 futures = { workspace = true }
-async-trait = "0.1"
+async-trait = { workspace = true }
 
 # Serialization
 serde = { workspace = true }
@@ -56,12 +56,12 @@ flate2 = { version = "1.1", default-features = false, features = ["rust_backend"
 # Note: rdkafka removed - requires cmake and librdkafka; add if needed for Kafka comparison tests
 
 # HTTP client for API testing
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { workspace = true }
 
 # Utilities
 chrono = { workspace = true }
-uuid = { version = "1.0", features = ["v4"] }
-rand = "0.8"
+uuid = { workspace = true }
+rand = { workspace = true }
 tempfile = "3.10"
 portpicker = "0.1"
 schemars = "0.8"

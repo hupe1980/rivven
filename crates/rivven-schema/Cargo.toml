@@ -47,7 +47,7 @@ bytes = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
-async-trait = "0.1"
+async-trait = { workspace = true }
 parking_lot = "0.12"
 dashmap = "6.1"
 
@@ -56,11 +56,11 @@ rivven-protocol = { workspace = true }
 
 # CLI
 clap = { workspace = true }
-reqwest = { version = "0.12", features = ["json"], optional = true }
+reqwest = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 
 # Schema formats
-apache-avro = { version = "0.16", optional = true }
+apache-avro = { workspace = true, optional = true }
 jsonschema = { version = "0.18", optional = true }
 
 # HTTP Server
@@ -90,5 +90,5 @@ regex = "1"
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
 tempfile = "3"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { workspace = true }
 tracing-subscriber = { workspace = true }

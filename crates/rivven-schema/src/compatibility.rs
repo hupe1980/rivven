@@ -470,10 +470,10 @@ fn check_schema_resolution(
         (Schema::Bytes, Schema::String) => Ok(()),
 
         // Arrays: element types must be compatible
-        (Schema::Array(w), Schema::Array(r)) => check_schema_resolution(w, r),
+        (Schema::Array(w), Schema::Array(r)) => check_schema_resolution(&w.items, &r.items),
 
         // Maps: value types must be compatible
-        (Schema::Map(w), Schema::Map(r)) => check_schema_resolution(w, r),
+        (Schema::Map(w), Schema::Map(r)) => check_schema_resolution(&w.types, &r.types),
 
         // Enums: reader symbols must be superset of writer symbols
         (Schema::Enum(w), Schema::Enum(r)) => {

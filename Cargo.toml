@@ -42,14 +42,14 @@ serde_json = "1.0"
 postcard = { version = "1", features = ["alloc"] }
 
 # Networking
-bytes = "1.5"
+bytes = "1.11"  # Updated: security fix RUSTSEC-2026-0007
 futures = "0.3"
 axum = "0.7"
-tower = "0.4"
-tower-http = { version = "0.5", features = ["cors", "trace"] }
+tower = "0.5"   # Updated: align on latest
+tower-http = { version = "0.6", features = ["cors", "trace"] }  # Updated: align with axum 0.7
 
 # Error handling
-thiserror = "1.0"
+thiserror = "2.0"  # Updated: align on thiserror 2.x
 anyhow = "1.0"
 
 # Logging
@@ -74,8 +74,21 @@ openidconnect = "3"
 oauth2 = "4"
 jsonwebtoken = "9"
 
-# Metrics
-prometheus = "0.14"
+# Metrics - unified across workspace
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+prometheus = "0.13"  # For schema registry metrics
+
+# Common dependencies - unified versions
+apache-avro = "0.17"  # Unified: was 0.16/0.17 split
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }  # Unified: was 0.11/0.12 split
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
+rustls-pemfile = "2.2"
+rustls-native-certs = "0.8"  # Unified: was 0.7/0.8 split
+tokio-rustls = "0.26"
+async-trait = "0.1"
+rand = "0.8"
+uuid = { version = "1.6", features = ["v4"] }
 
 # Internal crates
 rivven-core = { version = "0.0.4", path = "crates/rivven-core", default-features = false }

@@ -1,5 +1,16 @@
 name: CI
 
+# CI Strategy:
+# 1. quick-check: Fast checks (fmt, clippy, compile) - catches most issues
+# 2. test: Unit tests on ubuntu + macOS (no Docker) - ~1500 tests in parallel  
+# 3. integration: Integration tests with Docker (Linux only) - ~330 tests serialized
+# 4. doc: Documentation build
+# 5. security: cargo audit
+#
+# Unit tests and integration tests are separated because:
+# - Unit tests can run in parallel on multiple OSes without Docker
+# - Integration tests require Docker (testcontainers) and single-threading for CDC
+
 on:
   push:
     branches: [main]
@@ -77,17 +88,12 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       
-      # Cache only registry/index, NOT target directory (avoids incremental bloat)
-      - name: Cache cargo registry
-        uses: actions/cache@v4
+      # Cache cargo registry and release build artifacts
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-registry-
+          cache-targets: true
+          shared-key: integration-release
       
       # Pre-pull Docker images with retry to handle rate limits/transient failures
       - name: Pre-pull test container images
@@ -112,10 +118,11 @@ jobs:
           pull_with_retry "mysql:8.0"
           pull_with_retry "mariadb:11.3"
       
-      # Run tests in release mode (smaller artifacts, faster linking)
+      # Run ONLY integration tests (not unit tests - those run in 'test' job)
       # Use --test-threads=1 for CDC tests that share database state
+      # Build in release mode for faster test execution (compilation cached)
       - name: Run integration tests
-        run: cargo test --release --workspace -- --test-threads=1
+        run: cargo test --release -p rivven-integration-tests -- --test-threads=1
 
   doc:
     name: Documentation

@@ -646,11 +646,10 @@ impl QuicTransport {
                 .map_err(|e| ClusterError::CryptoError(format!("Failed to add CA: {:?}", e)))?;
         }
 
-        // Add system roots as fallback
-        if let Ok(native_certs) = rustls_native_certs::load_native_certs() {
-            for cert in native_certs {
-                let _ = roots.add(cert);
-            }
+        // Add system roots as fallback (rustls-native-certs 0.8 returns CertificateResult)
+        let native_result = rustls_native_certs::load_native_certs();
+        for cert in native_result.certs {
+            let _ = roots.add(cert);
         }
 
         // Build client config with or without client certificate
