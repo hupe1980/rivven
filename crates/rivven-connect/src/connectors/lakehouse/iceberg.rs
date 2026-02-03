@@ -515,7 +515,7 @@ impl Default for IcebergSinkConfig {
 /// - Batched writes with configurable thresholds
 /// - Transaction-based commits for atomicity
 pub struct IcebergSink {
-    /// Cached catalog instance (wrapped in Arc<RwLock> for thread-safe access)
+    /// Cached catalog instance (wrapped in `Arc<RwLock>` for thread-safe access)
     catalog_cache: Arc<RwLock<Option<CatalogInstance>>>,
 }
 
