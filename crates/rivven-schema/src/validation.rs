@@ -456,21 +456,22 @@ impl ValidationEngine {
         rule: &ValidationRule,
         schema: &str,
     ) -> SchemaResult<ValidationResult> {
-        #[derive(Deserialize)]
-        struct Config {
-            schema: serde_json::Value,
-        }
-
-        let config: Config = serde_json::from_str(&rule.config)
-            .map_err(|e| SchemaError::Validation(format!("Invalid json_schema config: {}", e)))?;
-
-        // Parse the schema being validated
-        let instance: serde_json::Value = serde_json::from_str(schema)
-            .map_err(|e| SchemaError::Validation(format!("Invalid JSON in schema: {}", e)))?;
-
-        // Compile the validation schema
         #[cfg(feature = "json-schema")]
         {
+            #[derive(Deserialize)]
+            struct Config {
+                schema: serde_json::Value,
+            }
+
+            let config: Config = serde_json::from_str(&rule.config).map_err(|e| {
+                SchemaError::Validation(format!("Invalid json_schema config: {}", e))
+            })?;
+
+            // Parse the schema being validated
+            let instance: serde_json::Value = serde_json::from_str(schema)
+                .map_err(|e| SchemaError::Validation(format!("Invalid JSON in schema: {}", e)))?;
+
+            // Compile the validation schema
             let validator = jsonschema::JSONSchema::compile(&config.schema).map_err(|e| {
                 SchemaError::Validation(format!("Invalid JSON Schema validator: {}", e))
             })?;
@@ -497,6 +498,7 @@ impl ValidationEngine {
 
         #[cfg(not(feature = "json-schema"))]
         {
+            let _ = (rule, schema); // Suppress unused warnings
             warn!("JSON Schema validation requires the 'json-schema' feature");
             Ok(ValidationResult::pass(&rule.name))
         }
