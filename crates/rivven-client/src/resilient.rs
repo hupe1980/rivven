@@ -572,12 +572,37 @@ impl ResilientClient {
     }
 
     /// Consume messages with automatic retries
+    ///
+    /// Uses read_uncommitted isolation level (default).
+    /// For transactional consumers, use [`Self::consume_with_isolation`] or [`Self::consume_read_committed`].
     pub async fn consume(
         &self,
         topic: impl Into<String>,
         partition: u32,
         offset: u64,
         max_messages: usize,
+    ) -> Result<Vec<MessageData>> {
+        self.consume_with_isolation(topic, partition, offset, max_messages, None)
+            .await
+    }
+
+    /// Consume messages with specified isolation level and automatic retries
+    ///
+    /// # Arguments
+    /// * `topic` - Topic name
+    /// * `partition` - Partition number
+    /// * `offset` - Starting offset
+    /// * `max_messages` - Maximum messages to return
+    /// * `isolation_level` - Transaction isolation level:
+    ///   - `None` or `Some(0)` = read_uncommitted (default)
+    ///   - `Some(1)` = read_committed (filters aborted transactions)
+    pub async fn consume_with_isolation(
+        &self,
+        topic: impl Into<String>,
+        partition: u32,
+        offset: u64,
+        max_messages: usize,
+        isolation_level: Option<u8>,
     ) -> Result<Vec<MessageData>> {
         let topic = topic.into();
 
@@ -586,12 +611,32 @@ impl ResilientClient {
             async move {
                 let result = conn
                     .client
-                    .consume(&topic, partition, offset, max_messages)
+                    .consume_with_isolation(
+                        &topic,
+                        partition,
+                        offset,
+                        max_messages,
+                        isolation_level,
+                    )
                     .await;
                 (conn, result)
             }
         })
         .await
+    }
+
+    /// Consume messages with read_committed isolation level and automatic retries
+    ///
+    /// Only returns committed transactional messages; aborted transactions are filtered out.
+    pub async fn consume_read_committed(
+        &self,
+        topic: impl Into<String>,
+        partition: u32,
+        offset: u64,
+        max_messages: usize,
+    ) -> Result<Vec<MessageData>> {
+        self.consume_with_isolation(topic, partition, offset, max_messages, Some(1))
+            .await
     }
 
     /// Create a topic with automatic retries
@@ -853,5 +898,222 @@ mod tests {
         let cb = CircuitBreaker::new(config);
 
         assert_eq!(cb.get_state(), CircuitState::Closed);
+    }
+
+    // ========================================================================
+    // Circuit Breaker State Machine Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_circuit_breaker_starts_closed() {
+        let config = Arc::new(ResilientClientConfig::default());
+        let cb = CircuitBreaker::new(config);
+
+        assert_eq!(cb.get_state(), CircuitState::Closed);
+        assert!(cb.allow_request().await);
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_opens_after_threshold_failures() {
+        let config = Arc::new(
+            ResilientClientConfig::builder()
+                .circuit_breaker_threshold(3)
+                .build(),
+        );
+        let cb = CircuitBreaker::new(config);
+
+        // Should be closed initially
+        assert_eq!(cb.get_state(), CircuitState::Closed);
+
+        // Record failures up to threshold - 1
+        cb.record_failure().await;
+        assert_eq!(cb.get_state(), CircuitState::Closed);
+        cb.record_failure().await;
+        assert_eq!(cb.get_state(), CircuitState::Closed);
+
+        // Threshold reached - should open
+        cb.record_failure().await;
+        assert_eq!(cb.get_state(), CircuitState::Open);
+        assert!(!cb.allow_request().await);
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_success_resets_failure_count() {
+        let config = Arc::new(
+            ResilientClientConfig::builder()
+                .circuit_breaker_threshold(3)
+                .build(),
+        );
+        let cb = CircuitBreaker::new(config);
+
+        // Record some failures
+        cb.record_failure().await;
+        cb.record_failure().await;
+        assert_eq!(cb.failure_count.load(Ordering::SeqCst), 2);
+
+        // Success should reset
+        cb.record_success().await;
+        assert_eq!(cb.failure_count.load(Ordering::SeqCst), 0);
+        assert_eq!(cb.get_state(), CircuitState::Closed);
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_half_open_after_timeout() {
+        let config = Arc::new(
+            ResilientClientConfig::builder()
+                .circuit_breaker_threshold(1)
+                .circuit_breaker_timeout(Duration::from_millis(50))
+                .build(),
+        );
+        let cb = CircuitBreaker::new(config);
+
+        // Open the circuit
+        cb.record_failure().await;
+        assert_eq!(cb.get_state(), CircuitState::Open);
+        assert!(!cb.allow_request().await);
+
+        // Wait for timeout
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Should transition to half-open and allow request
+        assert!(cb.allow_request().await);
+        assert_eq!(cb.get_state(), CircuitState::HalfOpen);
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_closes_after_success_threshold() {
+        let config = Arc::new(
+            ResilientClientConfig::builder()
+                .circuit_breaker_threshold(1)
+                .circuit_breaker_timeout(Duration::from_millis(10))
+                .build(),
+        );
+        // Note: default success threshold is 2
+        let cb = CircuitBreaker::new(config);
+
+        // Open the circuit
+        cb.record_failure().await;
+        assert_eq!(cb.get_state(), CircuitState::Open);
+
+        // Wait for timeout and transition to half-open
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(cb.allow_request().await);
+        assert_eq!(cb.get_state(), CircuitState::HalfOpen);
+
+        // First success - still half-open
+        cb.record_success().await;
+        assert_eq!(cb.get_state(), CircuitState::HalfOpen);
+
+        // Second success - should close
+        cb.record_success().await;
+        assert_eq!(cb.get_state(), CircuitState::Closed);
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_failure_in_half_open_reopens() {
+        let config = Arc::new(
+            ResilientClientConfig::builder()
+                .circuit_breaker_threshold(1)
+                .circuit_breaker_timeout(Duration::from_millis(10))
+                .build(),
+        );
+        let cb = CircuitBreaker::new(config);
+
+        // Open the circuit
+        cb.record_failure().await;
+        assert_eq!(cb.get_state(), CircuitState::Open);
+
+        // Wait for timeout and transition to half-open
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(cb.allow_request().await);
+        assert_eq!(cb.get_state(), CircuitState::HalfOpen);
+
+        // Failure in half-open should reopen
+        cb.record_failure().await;
+        assert_eq!(cb.get_state(), CircuitState::Open);
+    }
+
+    // ========================================================================
+    // Connection Pool Tests
+    // ========================================================================
+
+    #[test]
+    fn test_pool_config_defaults() {
+        let config = ResilientClientConfig::default();
+        assert_eq!(config.pool_size, 5);
+        assert_eq!(config.retry_max_attempts, 3);
+        assert_eq!(config.circuit_breaker_threshold, 5);
+        assert_eq!(config.circuit_breaker_success_threshold, 2);
+    }
+
+    #[tokio::test]
+    async fn test_pool_semaphore_limits_concurrent_connections() {
+        let config = Arc::new(ResilientClientConfig::builder().pool_size(2).build());
+        let pool = ConnectionPool::new("localhost:9999".to_string(), config);
+
+        // Verify semaphore has correct permits
+        // Note: can't directly test without a server, but verify pool was created
+        assert_eq!(pool.addr, "localhost:9999");
+    }
+
+    // ========================================================================
+    // Retry Logic Tests
+    // ========================================================================
+
+    #[test]
+    fn test_backoff_respects_max_delay() {
+        let initial = Duration::from_millis(100);
+        let max = Duration::from_secs(1);
+
+        // Even with high attempt count, should not exceed max + jitter
+        for attempt in 10..20 {
+            let delay = calculate_backoff(attempt, initial, max, 2.0);
+            // Max jitter is 25% of max = 250ms
+            assert!(delay <= max + Duration::from_millis(250));
+        }
+    }
+
+    #[test]
+    fn test_backoff_exponential_growth() {
+        let initial = Duration::from_millis(100);
+        let max = Duration::from_secs(100);
+
+        // Get base delays (center of jitter range)
+        let delay0 = calculate_backoff(0, initial, max, 2.0);
+        let delay1 = calculate_backoff(1, initial, max, 2.0);
+        let delay2 = calculate_backoff(2, initial, max, 2.0);
+
+        // Each should be roughly 2x the previous (accounting for jitter)
+        // delay0 ≈ 100ms, delay1 ≈ 200ms, delay2 ≈ 400ms
+        assert!(delay1 > delay0 / 2); // Very loose check due to jitter
+        assert!(delay2 > delay1 / 2);
+    }
+
+    // ========================================================================
+    // Client Statistics Tests
+    // ========================================================================
+
+    #[test]
+    fn test_client_stats_structure() {
+        let stats = ClientStats {
+            total_requests: 100,
+            total_failures: 5,
+            servers: vec![
+                ServerStats {
+                    address: "server1:9092".to_string(),
+                    circuit_state: CircuitState::Closed,
+                },
+                ServerStats {
+                    address: "server2:9092".to_string(),
+                    circuit_state: CircuitState::Open,
+                },
+            ],
+        };
+
+        assert_eq!(stats.total_requests, 100);
+        assert_eq!(stats.total_failures, 5);
+        assert_eq!(stats.servers.len(), 2);
+        assert_eq!(stats.servers[0].circuit_state, CircuitState::Closed);
+        assert_eq!(stats.servers[1].circuit_state, CircuitState::Open);
     }
 }

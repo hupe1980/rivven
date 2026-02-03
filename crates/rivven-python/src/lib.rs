@@ -142,6 +142,9 @@ fn _rivven(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "Python bindings for Rivven event streaming platform",
     )?;
 
+    // Register exception types
+    error::register_exceptions(m)?;
+
     // Top-level functions
     m.add_function(wrap_pyfunction!(connect, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
@@ -154,7 +157,6 @@ fn _rivven(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Message>()?;
     m.add_class::<Consumer>()?;
     m.add_class::<Producer>()?;
-    m.add_class::<RivvenError>()?;
 
     Ok(())
 }

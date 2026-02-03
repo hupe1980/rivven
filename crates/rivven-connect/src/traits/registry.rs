@@ -1,42 +1,35 @@
 //! Connector registry for dynamic connector loading
 //!
 //! This module provides the registry pattern for runtime connector lookup.
-//! Adapter crates implement these traits, and the CLI binary composes them.
+//! Connectors are built into rivven-connect with feature flags for optional connectors.
 //!
 //! # Architecture
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────────┐
-//! │                    rivven-connect-sdk                           │
+//! │                    rivven-connect (SDK + Runtime)               │
 //! │  SourceFactory, SinkFactory, AnySource, AnySink, Registry       │
-//! └─────────────────────────────────────────────────────────────────┘
-//!         ↑ implement
-//! ┌─────────────────┬─────────────────┬─────────────────────────────┐
-//! │ rivven-cdc      │ rivven-storage  │ rivven-warehouse            │
-//! │ (sources)       │ (sink: s3/gcs)  │ (sink: snowflake/bq)        │
-//! └─────────────────┴─────────────────┴─────────────────────────────┘
-//!         ↑ compose
-//! ┌─────────────────────────────────────────────────────────────────┐
-//! │                     rivven-connect (CLI)                         │
-//! │  Composes adapters, runs pipelines, no adapter code              │
+//! ├─────────────────────────────────────────────────────────────────┤
+//! │  Built-in: postgres-cdc, mysql-cdc, kafka, s3, snowflake, ...   │
+//! │  External: rivven-cdc (optional CDC primitives)                 │
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! # Example: Creating a custom binary with specific adapters
+//! # Example: Creating a registry with specific connectors
 //!
 //! ```rust,ignore
 //! use rivven_connect::{SourceRegistry, SinkRegistry};
-//! use rivven_cdc::PostgresCdcSourceFactory;
-//! use rivven_storage::S3SinkFactory;
+//! use rivven_connect::connectors::{postgres_cdc, stdout};
+//! use std::sync::Arc;
 //!
 //! fn main() {
 //!     let mut sources = SourceRegistry::new();
-//!     sources.register("postgres-cdc", Arc::new(PostgresCdcSourceFactory));
+//!     sources.register("postgres-cdc", Arc::new(postgres_cdc::PostgresCdcSourceFactory));
 //!
 //!     let mut sinks = SinkRegistry::new();
-//!     sinks.register("s3", Arc::new(S3SinkFactory));
+//!     sinks.register("stdout", Arc::new(stdout::StdoutSinkFactory));
 //!
-//!     // Run your custom connect binary...
+//!     // Run your connect instance...
 //! }
 //! ```
 

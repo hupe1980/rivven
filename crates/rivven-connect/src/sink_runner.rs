@@ -321,6 +321,8 @@ impl SinkRunner {
             include_timestamp: legacy_config.include_timestamp,
             color: legacy_config.color,
             rate_limit: 0,
+            avro_schema: None,
+            confluent_wire_format: false,
         };
 
         *self.status.write().await = ConnectorStatus::Running;
@@ -398,8 +400,8 @@ impl SinkRunner {
                                 }
                             };
 
-                            // Use SDK formatter
-                            let output = format_event(&event, &sdk_config);
+                            // Use SDK formatter (no Avro codec for legacy runner)
+                            let output = format_event(&event, &sdk_config, None);
                             println!("{}", output);
 
                             self.events_written.fetch_add(1, Ordering::Relaxed);

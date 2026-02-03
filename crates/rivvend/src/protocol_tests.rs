@@ -43,7 +43,8 @@ proptest! {
                 topic: topic.clone(),
                 partition: partition.unwrap_or(0),
                 offset,
-                max_messages
+                max_messages,
+                isolation_level: None,
             },
             Request::GetOffset {
                 consumer_group: consumer_group.clone(),

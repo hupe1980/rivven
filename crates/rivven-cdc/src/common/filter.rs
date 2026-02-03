@@ -19,8 +19,8 @@
 //! };
 //! ```
 
+use crate::common::pattern::PatternSet;
 use crate::common::CdcEvent;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -79,26 +79,17 @@ impl Default for CdcFilterConfig {
 /// Compiled filter for efficient runtime evaluation
 pub struct CdcFilter {
     config: CdcFilterConfig,
-    include_patterns: Vec<Regex>,
-    exclude_patterns: Vec<Regex>,
+    include_patterns: PatternSet,
+    exclude_patterns: PatternSet,
     global_exclude_set: HashSet<String>,
     mask_set: HashSet<String>,
 }
 
 impl CdcFilter {
     /// Create a new filter from configuration
-    pub fn new(config: CdcFilterConfig) -> Result<Self, regex::Error> {
-        let include_patterns = config
-            .include_tables
-            .iter()
-            .map(|p| Self::glob_to_regex(p))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let exclude_patterns = config
-            .exclude_tables
-            .iter()
-            .map(|p| Self::glob_to_regex(p))
-            .collect::<Result<Vec<_>, _>>()?;
+    pub fn new(config: CdcFilterConfig) -> Result<Self, crate::common::pattern::PatternError> {
+        let include_patterns = PatternSet::from_patterns(&config.include_tables)?;
+        let exclude_patterns = PatternSet::from_patterns(&config.exclude_tables)?;
 
         let global_exclude_set: HashSet<String> = config
             .global_exclude_columns
@@ -121,32 +112,19 @@ impl CdcFilter {
         })
     }
 
-    /// Convert a glob pattern to regex
-    fn glob_to_regex(pattern: &str) -> Result<Regex, regex::Error> {
-        let escaped = regex::escape(pattern);
-        let regex_pattern = escaped.replace(r"\*", ".*").replace(r"\?", ".");
-        Regex::new(&format!("^{}$", regex_pattern))
-    }
-
     /// Check if a table should be included
     pub fn should_include_table(&self, schema: &str, table: &str) -> bool {
-        let full_name = format!("{}.{}", schema, table);
-
         // Check excludes first (higher priority)
-        for pattern in &self.exclude_patterns {
-            if pattern.is_match(&full_name) || pattern.is_match(table) {
-                return false;
-            }
+        if self.exclude_patterns.matches_qualified(schema, table) {
+            return false;
         }
 
         // Check includes
-        for pattern in &self.include_patterns {
-            if pattern.is_match(&full_name) || pattern.is_match(table) {
-                return true;
-            }
+        if self.include_patterns.matches_qualified(schema, table) {
+            return true;
         }
 
-        // Default: exclude if no patterns match
+        // Default: include if no include patterns specified
         self.include_patterns.is_empty()
     }
 

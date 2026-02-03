@@ -9,12 +9,18 @@ description = "Core library for Rivven distributed event streaming platform"
 
 [features]
 default = ["compression", "cedar", "tls", "metrics", "encryption"]
-compression = ["dep:lz4", "dep:zstd"]
+compression = ["dep:lz4", "dep:zstd", "dep:snap"]
 cedar = ["dep:cedar-policy"]
 encryption = ["dep:secrecy"]
 oidc = ["dep:openidconnect", "dep:oauth2", "dep:jsonwebtoken", "dep:reqwest"]
 tls = ["dep:rustls", "dep:rustls-pemfile", "dep:rustls-native-certs", "dep:tokio-rustls", "dep:rcgen", "dep:x509-parser", "dep:humantime-serde"]
 metrics = ["dep:metrics-exporter-prometheus"]
+# Cloud object storage backends for tiered storage
+cloud-storage = ["dep:object_store"]
+s3 = ["cloud-storage", "object_store/aws"]
+gcs = ["cloud-storage", "object_store/gcp"]
+azure = ["cloud-storage", "object_store/azure"]
+all-cloud = ["s3", "gcs", "azure"]
 
 [dependencies]
 tokio = { workspace = true }
@@ -63,17 +69,22 @@ jsonwebtoken = { workspace = true, optional = true }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false, optional = true }
 
 # TLS/mTLS support
-rustls = { version = "0.23", optional = true }
+rustls = { version = "0.23", optional = true, features = ["aws-lc-rs"] }
 rustls-pemfile = { version = "2.1", optional = true }
 rustls-native-certs = { version = "0.8", optional = true }
 tokio-rustls = { version = "0.26", optional = true }
-rcgen = { version = "0.13", optional = true }
+rcgen = { version = "0.13", optional = true, features = ["aws_lc_rs"] }
 x509-parser = { version = "0.16", optional = true }
 humantime-serde = { version = "1.1", optional = true }
 
 # Compression (high-performance)
 lz4 = { version = "1.24", optional = true }
 zstd = { version = "0.13", features = ["zstdmt"], optional = true }
+snap = { version = "1.1", optional = true }
+
+# Cloud object storage (S3, GCS, Azure, MinIO)
+object_store = { version = "0.11", optional = true }
+url = "2.5"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

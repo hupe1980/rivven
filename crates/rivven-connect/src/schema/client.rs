@@ -1,41 +1,60 @@
 //! Unified Schema Registry client
 //!
-//! Provides a unified interface that works with both embedded and external registries.
+//! Provides a unified interface that works with external (Confluent-compatible) and AWS Glue registries.
+//!
+//! # Architecture
+//!
+//! The broker (rivvend) is **schema-agnostic** — it only handles raw bytes.
+//! Schema management is handled externally via:
+//!
+//! - **rivven-schema**: Standalone Confluent-compatible Schema Registry
+//! - **Confluent Schema Registry**: External Kafka-compatible registry  
+//! - **AWS Glue Schema Registry**: AWS-native schema management
 
-use crate::broker_client::BrokerClient;
-use crate::schema::compatibility::CompatibilityResult;
-use crate::schema::embedded::EmbeddedRegistry;
 use crate::schema::external::ExternalRegistry;
+use crate::schema::glue::GlueRegistry;
 use crate::schema::types::*;
-use std::sync::Arc;
+use rivven_schema::CompatibilityResult;
 
 /// Unified Schema Registry client
 pub enum SchemaRegistryClient {
-    /// Embedded registry (backed by Rivven topics)
-    Embedded(EmbeddedRegistry),
-    /// External registry (Confluent-compatible)
+    /// External registry (Confluent-compatible, including rivven-schema)
     External(ExternalRegistry),
+    /// AWS Glue Schema Registry
+    Glue(GlueRegistry),
     /// Disabled (no-op)
     Disabled,
 }
 
 impl SchemaRegistryClient {
     /// Create from configuration
-    pub fn from_config(
-        config: &SchemaRegistryConfig,
-        broker: Option<Arc<BrokerClient>>,
-    ) -> SchemaRegistryResult<Self> {
+    pub fn from_config(config: &SchemaRegistryConfig) -> SchemaRegistryResult<Self> {
         match config {
-            SchemaRegistryConfig::Embedded(embedded_config) => {
-                let mut registry = EmbeddedRegistry::new(embedded_config);
-                if let Some(b) = broker {
-                    registry = registry.with_broker(b);
-                }
-                Ok(SchemaRegistryClient::Embedded(registry))
-            }
             SchemaRegistryConfig::External(external_config) => {
                 let registry = ExternalRegistry::new(external_config)?;
                 Ok(SchemaRegistryClient::External(registry))
+            }
+            SchemaRegistryConfig::Glue(_glue_config) => {
+                // Note: GlueRegistry::new is async, so we need a different approach
+                // For now, return an error suggesting async initialization
+                Err(SchemaRegistryError::ConfigError(
+                    "AWS Glue registry requires async initialization. Use SchemaRegistryClient::from_config_async instead.".into()
+                ))
+            }
+            SchemaRegistryConfig::Disabled => Ok(SchemaRegistryClient::Disabled),
+        }
+    }
+
+    /// Create from configuration (async version for Glue support)
+    pub async fn from_config_async(config: &SchemaRegistryConfig) -> SchemaRegistryResult<Self> {
+        match config {
+            SchemaRegistryConfig::External(external_config) => {
+                let registry = ExternalRegistry::new(external_config)?;
+                Ok(SchemaRegistryClient::External(registry))
+            }
+            SchemaRegistryConfig::Glue(glue_config) => {
+                let registry = GlueRegistry::new(glue_config).await?;
+                Ok(SchemaRegistryClient::Glue(registry))
             }
             SchemaRegistryConfig::Disabled => Ok(SchemaRegistryClient::Disabled),
         }
@@ -54,10 +73,10 @@ impl SchemaRegistryClient {
         schema: &str,
     ) -> SchemaRegistryResult<SchemaId> {
         match self {
-            SchemaRegistryClient::Embedded(registry) => {
+            SchemaRegistryClient::External(registry) => {
                 registry.register(subject, schema_type, schema).await
             }
-            SchemaRegistryClient::External(registry) => {
+            SchemaRegistryClient::Glue(registry) => {
                 registry.register(subject, schema_type, schema).await
             }
             SchemaRegistryClient::Disabled => Err(SchemaRegistryError::Disabled),
@@ -67,8 +86,8 @@ impl SchemaRegistryClient {
     /// Get schema by ID
     pub async fn get_by_id(&self, id: SchemaId) -> SchemaRegistryResult<Schema> {
         match self {
-            SchemaRegistryClient::Embedded(registry) => registry.get_by_id(id),
             SchemaRegistryClient::External(registry) => registry.get_by_id(id).await,
+            SchemaRegistryClient::Glue(registry) => registry.get_by_id(id).await,
             SchemaRegistryClient::Disabled => Err(SchemaRegistryError::Disabled),
         }
     }
@@ -80,10 +99,10 @@ impl SchemaRegistryClient {
         version: SchemaVersion,
     ) -> SchemaRegistryResult<SubjectVersion> {
         match self {
-            SchemaRegistryClient::Embedded(registry) => registry.get_by_version(subject, version),
             SchemaRegistryClient::External(registry) => {
                 registry.get_by_version(subject, version).await
             }
+            SchemaRegistryClient::Glue(registry) => registry.get_by_version(subject, version).await,
             SchemaRegistryClient::Disabled => Err(SchemaRegistryError::Disabled),
         }
     }
@@ -91,8 +110,8 @@ impl SchemaRegistryClient {
     /// List all subjects
     pub async fn list_subjects(&self) -> SchemaRegistryResult<Vec<Subject>> {
         match self {
-            SchemaRegistryClient::Embedded(registry) => Ok(registry.list_subjects()),
             SchemaRegistryClient::External(registry) => registry.list_subjects().await,
+            SchemaRegistryClient::Glue(registry) => registry.list_subjects().await,
             SchemaRegistryClient::Disabled => Err(SchemaRegistryError::Disabled),
         }
     }
@@ -100,8 +119,8 @@ impl SchemaRegistryClient {
     /// List versions for a subject
     pub async fn list_versions(&self, subject: &Subject) -> SchemaRegistryResult<Vec<u32>> {
         match self {
-            SchemaRegistryClient::Embedded(registry) => registry.list_versions(subject),
             SchemaRegistryClient::External(registry) => registry.list_versions(subject).await,
+            SchemaRegistryClient::Glue(registry) => registry.list_versions(subject).await,
             SchemaRegistryClient::Disabled => Err(SchemaRegistryError::Disabled),
         }
     }
@@ -109,8 +128,8 @@ impl SchemaRegistryClient {
     /// Delete a subject
     pub async fn delete_subject(&self, subject: &Subject) -> SchemaRegistryResult<Vec<u32>> {
         match self {
-            SchemaRegistryClient::Embedded(registry) => registry.delete_subject(subject).await,
             SchemaRegistryClient::External(registry) => registry.delete_subject(subject).await,
+            SchemaRegistryClient::Glue(registry) => registry.delete_subject(subject).await,
             SchemaRegistryClient::Disabled => Err(SchemaRegistryError::Disabled),
         }
     }
@@ -121,8 +140,8 @@ impl SchemaRegistryClient {
         subject: &Subject,
     ) -> SchemaRegistryResult<CompatibilityLevel> {
         match self {
-            SchemaRegistryClient::Embedded(registry) => registry.get_compatibility(subject),
             SchemaRegistryClient::External(registry) => registry.get_compatibility(subject).await,
+            SchemaRegistryClient::Glue(registry) => registry.get_compatibility(subject).await,
             SchemaRegistryClient::Disabled => Err(SchemaRegistryError::Disabled),
         }
     }
@@ -134,8 +153,10 @@ impl SchemaRegistryClient {
         level: CompatibilityLevel,
     ) -> SchemaRegistryResult<()> {
         match self {
-            SchemaRegistryClient::Embedded(registry) => registry.set_compatibility(subject, level),
             SchemaRegistryClient::External(registry) => {
+                registry.set_compatibility(subject, level).await
+            }
+            SchemaRegistryClient::Glue(registry) => {
                 registry.set_compatibility(subject, level).await
             }
             SchemaRegistryClient::Disabled => Err(SchemaRegistryError::Disabled),
@@ -150,12 +171,14 @@ impl SchemaRegistryClient {
         schema: &str,
     ) -> SchemaRegistryResult<CompatibilityResult> {
         match self {
-            SchemaRegistryClient::Embedded(registry) => {
-                registry.check_compatibility(subject, schema_type, schema)
-            }
             SchemaRegistryClient::External(registry) => {
                 registry
                     .check_compatibility(subject, schema_type, schema, None)
+                    .await
+            }
+            SchemaRegistryClient::Glue(registry) => {
+                registry
+                    .check_compatibility(subject, schema_type, schema)
                     .await
             }
             SchemaRegistryClient::Disabled => Err(SchemaRegistryError::Disabled),
@@ -171,16 +194,7 @@ pub struct SchemaRegistry {
 impl SchemaRegistry {
     /// Create a new schema registry
     pub fn new(config: SchemaRegistryConfig) -> SchemaRegistryResult<Self> {
-        let client = SchemaRegistryClient::from_config(&config, None)?;
-        Ok(Self { client })
-    }
-
-    /// Create with broker client for embedded mode
-    pub fn with_broker(
-        config: SchemaRegistryConfig,
-        broker: Arc<BrokerClient>,
-    ) -> SchemaRegistryResult<Self> {
-        let client = SchemaRegistryClient::from_config(&config, Some(broker))?;
+        let client = SchemaRegistryClient::from_config(&config)?;
         Ok(Self { client })
     }
 

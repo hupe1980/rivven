@@ -4,6 +4,7 @@
 
 use super::super::prelude::*;
 use crate::connectors::{AnySink, SinkFactory};
+use crate::schema::avro::{AvroCodec, AvroSchema};
 use async_trait::async_trait;
 use futures::StreamExt;
 use schemars::JsonSchema;
@@ -33,6 +34,14 @@ pub struct StdoutSinkConfig {
     #[serde(default)]
     #[validate(range(max = 100000))]
     pub rate_limit: u32,
+
+    /// Avro schema (required for Avro/AvroBinary/AvroHex formats)
+    #[serde(default)]
+    pub avro_schema: Option<String>,
+
+    /// Include schema ID in Confluent wire format (for Avro formats)
+    #[serde(default)]
+    pub confluent_wire_format: bool,
 }
 
 fn default_true() -> bool {
@@ -52,6 +61,12 @@ pub enum OutputFormat {
     Tsv,
     /// Simple text format
     Text,
+    /// Avro JSON (shows JSON representation of Avro-encoded data)
+    AvroJson,
+    /// Avro binary (base64-encoded)
+    AvroBinary,
+    /// Avro binary (hex-encoded)
+    AvroHex,
 }
 
 /// Stdout Sink implementation
@@ -96,6 +111,32 @@ impl Sink for StdoutSink {
     ) -> Result<WriteResult> {
         let mut result = WriteResult::new();
 
+        // Parse Avro schema if configured
+        let avro_codec = if let Some(ref schema_str) = config.avro_schema {
+            match AvroSchema::parse(schema_str) {
+                Ok(schema) => Some(AvroCodec::new(schema)),
+                Err(e) => {
+                    return Err(
+                        ConnectorError::Config(format!("Invalid Avro schema: {}", e)).into(),
+                    );
+                }
+            }
+        } else {
+            None
+        };
+
+        // Validate Avro schema is provided for Avro formats
+        if matches!(
+            config.format,
+            OutputFormat::AvroJson | OutputFormat::AvroBinary | OutputFormat::AvroHex
+        ) && avro_codec.is_none()
+        {
+            return Err(ConnectorError::Config(
+                "Avro schema required for Avro output formats".to_string(),
+            )
+            .into());
+        }
+
         // Rate limiting
         let rate_limit = if config.rate_limit > 0 {
             Some(std::time::Duration::from_secs_f64(
@@ -116,7 +157,7 @@ impl Sink for StdoutSink {
                 last_event = std::time::Instant::now();
             }
 
-            let output = format_event(&event, config);
+            let output = format_event(&event, config, avro_codec.as_ref());
             println!("{}", output);
 
             let bytes = output.len() as u64;
@@ -129,7 +170,11 @@ impl Sink for StdoutSink {
 
 /// Format an event for output
 /// Format an event for output
-pub fn format_event(event: &SourceEvent, config: &StdoutSinkConfig) -> String {
+pub fn format_event(
+    event: &SourceEvent,
+    config: &StdoutSinkConfig,
+    avro_codec: Option<&AvroCodec>,
+) -> String {
     match config.format {
         OutputFormat::Pretty => {
             let mut output = String::new();
@@ -193,6 +238,61 @@ pub fn format_event(event: &SourceEvent, config: &StdoutSinkConfig) -> String {
                 event.stream,
                 event.data
             )
+        }
+        OutputFormat::AvroJson => {
+            // For Avro JSON format, we just show the event data
+            // The codec validates it against the schema
+            if let Some(codec) = avro_codec {
+                match codec.encode(&event.data) {
+                    Ok(bytes) => {
+                        // Re-decode to show what Avro sees
+                        match codec.decode(&bytes) {
+                            Ok(decoded) => serde_json::to_string_pretty(&decoded)
+                                .unwrap_or_else(|_| decoded.to_string()),
+                            Err(e) => format!("{{\"error\": \"Avro decode error: {}\"}}", e),
+                        }
+                    }
+                    Err(e) => format!("{{\"error\": \"Avro encode error: {}\"}}", e),
+                }
+            } else {
+                "{\"error\": \"No Avro schema configured\"}".to_string()
+            }
+        }
+        OutputFormat::AvroBinary => {
+            // Output binary Avro as base64
+            if let Some(codec) = avro_codec {
+                let schema_id = event.metadata.schema_id;
+                let result = if config.confluent_wire_format {
+                    codec.encode_with_schema_id(&event.data, schema_id.unwrap_or(0))
+                } else {
+                    codec.encode(&event.data)
+                };
+                match result {
+                    Ok(bytes) => {
+                        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes)
+                    }
+                    Err(e) => format!("error:{}", e),
+                }
+            } else {
+                "error:no_avro_schema".to_string()
+            }
+        }
+        OutputFormat::AvroHex => {
+            // Output binary Avro as hex
+            if let Some(codec) = avro_codec {
+                let schema_id = event.metadata.schema_id;
+                let result = if config.confluent_wire_format {
+                    codec.encode_with_schema_id(&event.data, schema_id.unwrap_or(0))
+                } else {
+                    codec.encode(&event.data)
+                };
+                match result {
+                    Ok(bytes) => hex::encode(&bytes),
+                    Err(e) => format!("error:{}", e),
+                }
+            } else {
+                "error:no_avro_schema".to_string()
+            }
         }
     }
 }
@@ -267,7 +367,7 @@ mod tests {
         };
 
         let config = StdoutSinkConfig::default();
-        let output = format_event(&event, &config);
+        let output = format_event(&event, &config, None);
 
         assert!(output.contains("INSERT"));
         assert!(output.contains("public.users"));
@@ -290,11 +390,47 @@ mod tests {
             ..Default::default()
         };
 
-        let output = format_event(&event, &config);
+        let output = format_event(&event, &config, None);
 
         // Should be valid JSON
         let parsed: std::result::Result<serde_json::Value, _> = serde_json::from_str(&output);
         assert!(parsed.is_ok());
+    }
+
+    #[test]
+    fn test_format_event_avro() {
+        let schema_str = r#"
+        {
+            "type": "record",
+            "name": "User",
+            "fields": [
+                {"name": "id", "type": "long"},
+                {"name": "name", "type": "string"}
+            ]
+        }
+        "#;
+
+        let event = SourceEvent {
+            event_type: SourceEventType::Insert,
+            stream: "users".to_string(),
+            namespace: None,
+            timestamp: Utc::now(),
+            data: serde_json::json!({"id": 1, "name": "Alice"}),
+            metadata: Default::default(),
+        };
+
+        let schema = AvroSchema::parse(schema_str).unwrap();
+        let codec = AvroCodec::new(schema);
+
+        let config = StdoutSinkConfig {
+            format: OutputFormat::AvroBinary,
+            avro_schema: Some(schema_str.to_string()),
+            ..Default::default()
+        };
+
+        let output = format_event(&event, &config, Some(&codec));
+        // Should be valid base64
+        assert!(!output.starts_with("error:"));
     }
 
     #[tokio::test]

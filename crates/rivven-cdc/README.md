@@ -1,6 +1,57 @@
-# Rivven CDC
+# rivven-cdc
 
-Native Change Data Capture for PostgreSQL, MySQL, and MariaDB.
+> Native Change Data Capture for PostgreSQL, MySQL, and MariaDB.
+
+## Overview
+
+`rivven-cdc` captures database changes and outputs `CdcEvent` structs with JSON data. The serialization format (Avro, Protobuf, JSON Schema) is decided by the consumer (typically rivven-connect).
+
+## Design Philosophy
+
+**rivven-cdc is format-agnostic.** This separation of concerns allows:
+- Using CDC events without any schema registry
+- Choosing serialization format at the connector level, not CDC level
+- Simpler CDC library with fewer dependencies
+
+```text
+rivven-cdc                          rivven-connect
+┌──────────────────┐                ┌──────────────────────┐
+│ Database         │                │ CDC Source Connector │
+│    ↓             │                │    ↓                 │
+│ CdcSource        │ ──CdcEvent──►  │ Schema Inference     │
+│    ↓             │                │    ↓                 │
+│ CdcConnector     │                │ Schema Registry      │
+│    ↓             │                │    ↓                 │
+│ Topic Routing    │                │ Serialization        │
+└──────────────────┘                └──────────────────────┘
+```
+
+## Public API Organization
+
+The crate exports types in three tiers for clarity:
+
+### Tier 1: Core Types (crate root)
+Essential types for basic CDC operations:
+- `CdcEvent`, `CdcOp`, `CdcSource` - Core event types
+- `CdcError`, `Result`, `ErrorCategory` - Error handling
+- `CdcFilter`, `CdcFilterConfig`, `TableColumnConfig` - Filtering
+
+### Tier 2: Feature Types (crate root)
+Optional features for production use:
+- **SMT Transforms**: `SmtChain`, `MaskField`, `Filter`, `Cast`, etc.
+- **Deduplication**: `Deduplicator`, `DeduplicatorConfig`
+- **Encryption**: `FieldEncryptor`, `EncryptionConfig`, `MemoryKeyProvider`
+- **Tombstones**: `TombstoneEmitter`, `TombstoneConfig`
+- **Schema Changes**: `SchemaChangeEmitter`, `SchemaChangeEvent`
+- **Transactions**: `TransactionTopicEmitter`, `TransactionEvent`
+- **Signals**: `SignalProcessor`, `Signal`, `SignalResult`
+
+### Tier 3: Advanced Types (`common::` module)
+Internal/advanced types for custom implementations:
+- Resilience: `CircuitBreaker`, `RateLimiter`, `RetryConfig`
+- Routing: `EventRouter`, `RouteRule`
+- Snapshot: `SnapshotCoordinator`, `SnapshotConfig`
+- And many more via `use rivven_cdc::common::*`
 
 ## Documentation
 
@@ -15,45 +66,88 @@ Native Change Data Capture for PostgreSQL, MySQL, and MariaDB.
 ## Features
 
 - 🚀 **Native Implementation** - Direct TCP connections, no external dependencies
-- 🐘 **PostgreSQL** - Logical replication via pgoutput plugin (v10+)
-- 🐬 **MySQL/MariaDB** - Binlog replication with GTID support (MySQL 5.7+, MariaDB 10.2+)
+- 🐘 **PostgreSQL** - Logical replication via pgoutput plugin (v14+ recommended, v10+ supported)
+- 🐬 **MySQL/MariaDB** - Binlog replication with GTID support (MySQL 8.0+, MariaDB 10.5+)
 - 🔒 **TLS/mTLS** - Secure connections with optional client certificate auth
 - 🔑 **Full Auth Support** - SCRAM-SHA-256 (PostgreSQL), caching_sha2_password + ed25519 (MySQL/MariaDB)
 - 📦 **Zero-Copy** - Efficient binary protocol parsing
 - ⚡ **Async** - Built on Tokio for high-performance streaming
-- 📡 **Signal Table** - Runtime control with Debezium-compatible signaling
+- 📡 **Signal Table** - Runtime control with ad-hoc snapshots and pause/resume
 - 🔄 **Incremental Snapshots** - Re-snapshot tables while streaming continues
+- 🎯 **Format-Agnostic** - No schema registry coupling; serialization handled by consumers
 
-## Debezium Comparison
+## Supported Versions
 
-Rivven-cdc provides ~100% feature parity with Debezium:
+### PostgreSQL
 
-| Feature | Rivven-cdc | Debezium | Notes |
-|---------|------------|----------|-------|
-| Logical Replication | ✅ | ✅ | pgoutput plugin |
-| Binlog Streaming | ✅ | ✅ | MySQL/MariaDB GTID |
-| Binlog Checksum (CRC32) | ✅ | ✅ | Auto-negotiation, MySQL 8+/MariaDB 10+ |
-| Schema Metadata | ✅ | ✅ | Real column names from INFORMATION_SCHEMA |
-| Initial Snapshot | ✅ | ✅ | Parallel, resumable |
-| TLS/SSL | ✅ | ✅ | rustls-based |
-| Table/Column Filtering | ✅ | ✅ | Glob patterns |
-| Column Masking | ✅ | ✅ | Redacted |
-| Heartbeats | ✅ | ✅ | WAL acknowledgment |
-| Heartbeat Action Query | ✅ | ✅ | Multi-database support |
-| Checkpointing | ✅ | ✅ | LSN/binlog position |
-| Schema Inference | ✅ | ✅ | Avro schema generation |
-| **Tombstone Events** | ✅ | ✅ | `TombstoneEmitter` for log compaction |
-| **REPLICA IDENTITY** | ✅ | ✅ | `ReplicaIdentityEnforcer` with warn/skip/fail |
-| **Schema Change Topic** | ✅ | ✅ | `SchemaChangeEmitter` for DDL tracking |
-| **SCRAM-SHA-256** | ✅ | ✅ | RFC 5802 PostgreSQL auth |
-| **caching_sha2_password** | ✅ | ✅ | MySQL 8.0+ default auth plugin |
-| **client_ed25519** | ✅ | ✅ | MariaDB Ed25519 auth |
-| **Signal Table** | ✅ | ✅ | Multi-channel (source/topic/file) |
-| **Transaction Metadata Topic** | ✅ | ✅ | `TransactionTopicEmitter` BEGIN/END events |
-| **Read-Only Replicas** | ✅ | ✅ | Heartbeat-based watermarking for standbys |
-| **Incremental Snapshots** | ✅ | ✅ | DBLog watermarks, chunk-based |
-| Circuit Breaker | ✅ | - | Rivven advantage |
-| Rate Limiting | ✅ | - | Token bucket algorithm |
+| Version | Status | EOL | Notes |
+|---------|--------|-----|-------|
+| 14.x | ✅ Tested | Nov 2026 | Streaming large transactions |
+| 15.x | ✅ Tested | Nov 2027 | Row filters, column lists |
+| 16.x | ✅ **Recommended** | Nov 2028 | Parallel apply |
+| 17.x | ✅ Tested | Nov 2029 | Enhanced logical replication |
+
+### MySQL / MariaDB
+
+#### MySQL
+
+| Version | Status | EOL | Notes |
+|---------|--------|-----|-------|
+| 8.0.x | ✅ Tested | Apr 2026 | GTID, caching_sha2_password |
+| 8.4.x | ✅ **Recommended** | Apr 2032 | LTS, enhanced replication |
+| 9.0.x | ✅ Tested | TBD | Innovation release (latest) |
+
+#### MariaDB
+
+| Version | Status | EOL | Notes |
+|---------|--------|-----|-------|
+| 10.6.x | ✅ Tested | Jul 2026 | LTS, GTID improvements |
+| 10.11.x | ✅ **Recommended** | Feb 2028 | LTS, enhanced JSON, parallel replication |
+| 11.4.x | ✅ Tested | May 2029 | LTS, latest features |
+
+## Optional Features
+
+| Feature | Description |
+|---------|-------------|
+| `postgres` | PostgreSQL CDC (default) |
+| `mysql` | MySQL/MariaDB CDC (default) |
+| `postgres-tls` | PostgreSQL with TLS |
+| `mysql-tls` | MySQL/MariaDB with TLS |
+| `mariadb` | MariaDB CDC (alias for mysql with MariaDB extensions) |
+
+## Feature Matrix
+
+| Feature | Supported | Notes |
+|---------|-----------|-------|
+| Logical Replication | ✅ | pgoutput plugin |
+| Binlog Streaming | ✅ | MySQL/MariaDB GTID |
+| Binlog Checksum (CRC32) | ✅ | Auto-negotiation, MySQL 8+/MariaDB 10+ |
+| Schema Metadata | ✅ | Real column names from INFORMATION_SCHEMA |
+| Initial Snapshot | ✅ | Parallel, resumable |
+| TLS/SSL | ✅ | rustls-based |
+| Table/Column Filtering | ✅ | Glob patterns (regex-backed) |
+| Column Masking | ✅ | Redacted |
+| Heartbeats | ✅ | WAL acknowledgment |
+| Heartbeat Action Query | ✅ | Multi-database support |
+| Checkpointing | ✅ | LSN/binlog position |
+| Schema Inference | ✅ | Via rivven-connect |
+| **Tombstone Events** | ✅ | `TombstoneEmitter` for log compaction |
+| **REPLICA IDENTITY** | ✅ | `ReplicaIdentityEnforcer` with warn/skip/fail |
+| **Schema Change Topic** | ✅ | `SchemaChangeEmitter` for DDL tracking |
+| **SCRAM-SHA-256** | ✅ | RFC 5802 PostgreSQL auth |
+| **caching_sha2_password** | ✅ | MySQL 8.0+ default auth plugin |
+| **client_ed25519** | ✅ | MariaDB Ed25519 auth |
+| **Signal Table** | ✅ | Multi-channel (source/topic/file) |
+| **Transaction Metadata Topic** | ✅ | `TransactionTopicEmitter` BEGIN/END events |
+| **Read-Only Replicas** | ✅ | Heartbeat-based watermarking for standbys |
+| **Incremental Snapshots** | ✅ | DBLog watermarks, chunk-based |
+| **Event Routing** | ✅ | `EventRouter` with content-based routing, DLQ |
+| **Partitioning** | ✅ | `Partitioner` with KeyHash, TableHash, RoundRobin |
+| **Log Compaction** | ✅ | `Compactor` for key-based deduplication |
+| **Parallel CDC** | ✅ | `ParallelSource` for multi-table concurrency |
+| **Outbox Pattern** | ✅ | `OutboxProcessor` for transactional messaging |
+| **Health Monitoring** | ✅ | `HealthMonitor` with auto-recovery, lag monitoring |
+| **Notifications** | ✅ | `Notifier` for snapshot/streaming progress alerts |
 
 ### Signal Table (Runtime Control)
 
@@ -66,7 +160,7 @@ use rivven_cdc::postgres::{PostgresCdc, PostgresCdcConfig};
 // Configure signal table via CDC stream (default)
 let signal_config = SignalConfig::builder()
     .enabled_channels(vec![SignalChannelType::Source])
-    .signal_data_collection("public.debezium_signal")
+    .signal_data_collection("public.rivven_signal")
     .build();
 
 let config = PostgresCdcConfig::builder()
@@ -104,7 +198,7 @@ cdc.start().await?;
 | Channel | Description |
 |---------|-------------|
 | `source` | Signal table captured via CDC stream (default, recommended) |
-| `topic` | Signals from Rivven/Kafka topic |
+| `topic` | Signals from Rivven topic |
 | `file` | Signals from JSON file |
 
 ### Incremental Snapshots
@@ -114,15 +208,16 @@ Re-snapshot tables while streaming continues using DBLog-style watermark dedupli
 ```rust
 use rivven_cdc::common::{
     IncrementalSnapshotConfig, IncrementalSnapshotCoordinator,
-    IncrementalSnapshotRequest, WatermarkStrategy
+    IncrementalSnapshotRequest, WatermarkStrategy, SnapshotKey
 };
 
-// Configure incremental snapshots
+// Configure incremental snapshots with parallel processing
 let config = IncrementalSnapshotConfig::builder()
     .chunk_size(1024)  // Rows per chunk
+    .max_concurrent_chunks(4)  // Process 4 chunks in parallel
     .watermark_strategy(WatermarkStrategy::InsertInsert)
-    .max_buffer_memory(64 * 1024 * 1024)  // 64MB buffer
-    .signal_table("debezium_signal")
+    .max_buffer_memory(64 * 1024 * 1024)  // 64MB buffer per chunk
+    .signal_table("rivven_signal")
     .build();
 
 let coordinator = IncrementalSnapshotCoordinator::new(config);
@@ -139,21 +234,36 @@ let snapshot_id = coordinator.start(request).await?;
 
 // Process chunks with watermark-based deduplication
 while let Some(chunk) = coordinator.next_chunk().await? {
-    // Open deduplication window
-    let open_signal = coordinator.open_window_signal(&chunk);
-    // INSERT into signal table: open_signal.to_insert_sql("debezium_signal")
+    // Get DB timestamp for watermark (prevents race conditions)
+    let watermark_ts = get_db_timestamp().await?; // SELECT EXTRACT(EPOCH FROM NOW()) * 1000
     
-    coordinator.open_window(&chunk).await;
+    // Generate OPEN signal with watermark
+    let open_signal = coordinator.open_window_signal_with_watermark(&chunk, watermark_ts);
+    // Write signal using parameterized query:
+    // INSERT INTO rivven_signal (id, type, data) VALUES ($1, $2, $3)
+    
+    // Open deduplication window with watermark
+    coordinator.open_window_with_watermark(&chunk, watermark_ts).await?;
     
     // Execute chunk query and buffer results
-    // for row in execute_query(&chunk.to_sql(1024)) {
-    //     coordinator.buffer_row(cdc_event, primary_key).await;
+    // for row in execute_query(&chunk) {
+    //     let key = SnapshotKey::from_row(&row, &["id"])?;
+    //     coordinator.buffer_row_for_chunk_with_key(&chunk.chunk_id, event, key).await;
     // }
     
-    // Close window - returns events that weren't superseded by streaming
-    let events = coordinator.close_window().await?;
+    // Meanwhile, check streaming events for conflicts
+    // for event in streaming_events {
+    //     let key = SnapshotKey::from_row(&event.after, &["id"])?;
+    //     let is_delete = event.op == "d";
+    //     coordinator.check_streaming_conflict_with_timestamp(
+    //         "public.orders", &key, event.ts_ms, is_delete
+    //     ).await;
+    // }
+    
+    // Close window - returns events not superseded by streaming
+    let events = coordinator.close_window_for_chunk(&chunk.chunk_id).await?;
     let close_signal = coordinator.close_window_signal(&chunk);
-    // INSERT into signal table: close_signal.to_insert_sql("debezium_signal")
+    // Write close signal using parameterized query
     
     // Emit remaining snapshot events as READ operations
     for event in events {
@@ -165,6 +275,14 @@ while let Some(chunk) = coordinator.next_chunk().await? {
 let stats = coordinator.stats();
 println!("Rows: {}, Dropped: {}", stats.rows_snapshotted, stats.events_dropped);
 ```
+
+**Deduplication Logic:**
+
+| Scenario | Action |
+|----------|--------|
+| Streaming event with `ts >= watermark_ts` | Drop snapshot row (streaming wins) |
+| Streaming event with `ts < watermark_ts` | Keep snapshot row (snapshot is fresher) |
+| DELETE event | Always drop snapshot row (deletes win) |
 
 **Watermark Deduplication:**
 
@@ -180,7 +298,7 @@ if coordinator.check_streaming_conflict("public.orders", key).await {
 
 ### Tombstone Events
 
-Tombstones are emitted after DELETE events for Kafka log compaction:
+Tombstones are emitted after DELETE events for log compaction:
 
 ```rust
 use rivven_cdc::common::tombstone::{TombstoneConfig, TombstoneEmitter};
@@ -422,8 +540,6 @@ cargo bench -p rivven-cdc --bench cdc_latency
 
 | Benchmark | Description |
 |-----------|-------------|
-| `schema_inference` | Avro schema generation throughput |
-| `type_mapping` | PostgreSQL type → Avro conversion |
 | `event_serialization` | JSON encode/decode performance |
 | `filter_evaluation` | Table include/exclude matching |
 | `batch_processing` | End-to-end batch filter performance |
@@ -443,6 +559,12 @@ cargo bench -p rivven-cdc --bench cdc_latency
 | Metrics record_event | ~50M/sec | Atomic counter |
 | Metrics snapshot export | ~200K/sec | Full metrics dump |
 
+## Documentation
+
+- [CDC Guide](https://rivven.hupe1980.github.io/rivven/docs/cdc)
+- [PostgreSQL CDC](https://rivven.hupe1980.github.io/rivven/docs/cdc-postgres)
+- [MySQL CDC](https://rivven.hupe1980.github.io/rivven/docs/cdc-mysql)
+
 ## License
 
-See root [LICENSE](../../LICENSE) file.
+Apache-2.0. See [LICENSE](../../LICENSE).

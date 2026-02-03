@@ -1,0 +1,333 @@
+{{- if .Values.crds.install }}
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: rivvenschemaregistries.rivven.hupe1980.github.io
+  labels:
+    {{- include "rivven-operator.labels" . | nindent 4 }}
+  {{- if .Values.crds.keep }}
+  annotations:
+    "helm.sh/resource-policy": keep
+    {{- with .Values.crds.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- else if .Values.crds.annotations }}
+  annotations:
+    {{- toYaml .Values.crds.annotations | nindent 4 }}
+  {{- end }}
+spec:
+  group: rivven.hupe1980.github.io
+  names:
+    kind: RivvenSchemaRegistry
+    listKind: RivvenSchemaRegistryList
+    plural: rivvenschemaregistries
+    singular: rivvenschemaregistry
+    shortNames:
+      - rsr
+      - schema
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Cluster
+          type: string
+          jsonPath: .spec.clusterRef.name
+        - name: Replicas
+          type: integer
+          jsonPath: .spec.replicas
+        - name: Ready
+          type: integer
+          jsonPath: .status.readyReplicas
+        - name: Schemas
+          type: integer
+          jsonPath: .status.schemasRegistered
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              required:
+                - clusterRef
+              properties:
+                clusterRef:
+                  type: object
+                  required:
+                    - name
+                  properties:
+                    name:
+                      type: string
+                      description: Name of the RivvenCluster to connect to
+                    namespace:
+                      type: string
+                      description: Namespace of the RivvenCluster (defaults to same namespace)
+                replicas:
+                  type: integer
+                  minimum: 1
+                  maximum: 10
+                  default: 1
+                  description: Number of schema registry replicas
+                version:
+                  type: string
+                  default: "{{ .Values.defaultSchemaRegistry.version | default "0.0.1" }}"
+                image:
+                  type: string
+                  description: Custom container image (overrides version-based default)
+                imagePullPolicy:
+                  type: string
+                  enum: ["Always", "IfNotPresent", "Never"]
+                  default: "IfNotPresent"
+                imagePullSecrets:
+                  type: array
+                  items:
+                    type: string
+                resources:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                server:
+                  type: object
+                  properties:
+                    port:
+                      type: integer
+                      default: 8081
+                      description: HTTP API port
+                    metricsPort:
+                      type: integer
+                      default: 9090
+                      description: Prometheus metrics port
+                    healthPath:
+                      type: string
+                      default: "/health"
+                    readyPath:
+                      type: string
+                      default: "/health/ready"
+                    livePath:
+                      type: string
+                      default: "/health/live"
+                storage:
+                  type: object
+                  properties:
+                    mode:
+                      type: string
+                      enum: ["memory", "broker"]
+                      default: "broker"
+                      description: Storage backend (memory for dev, broker for production)
+                    topic:
+                      type: string
+                      default: "_schemas"
+                      description: Topic name for schema storage (broker mode)
+                    replicationFactor:
+                      type: integer
+                      default: 3
+                      description: Replication factor for schema topic
+                compatibility:
+                  type: object
+                  properties:
+                    default:
+                      type: string
+                      enum: ["NONE", "BACKWARD", "BACKWARD_TRANSITIVE", "FORWARD", "FORWARD_TRANSITIVE", "FULL", "FULL_TRANSITIVE"]
+                      default: "BACKWARD"
+                      description: Default compatibility level
+                    allowOverride:
+                      type: boolean
+                      default: true
+                      description: Allow per-subject compatibility overrides
+                schemas:
+                  type: object
+                  properties:
+                    avro:
+                      type: boolean
+                      default: true
+                      description: Enable Avro schema support
+                    jsonSchema:
+                      type: boolean
+                      default: true
+                      description: Enable JSON Schema support
+                    protobuf:
+                      type: boolean
+                      default: true
+                      description: Enable Protobuf schema support
+                contexts:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                      description: Enable schema contexts for multi-tenancy
+                    defaultContext:
+                      type: string
+                      default: "default"
+                      description: Default context name
+                validation:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: true
+                      description: Enable schema validation
+                    rules:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          name:
+                            type: string
+                          type:
+                            type: string
+                            enum: ["MaxSize", "NamingConvention", "FieldRequired", "FieldType", "Regex", "JsonSchema"]
+                          config:
+                            type: object
+                            x-kubernetes-preserve-unknown-fields: true
+                          level:
+                            type: string
+                            enum: ["Warning", "Error"]
+                            default: "Error"
+                auth:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                      description: Enable authentication
+                    mode:
+                      type: string
+                      enum: ["none", "basic", "jwt", "cedar"]
+                      default: "none"
+                    secretRef:
+                      type: string
+                      description: Secret containing auth credentials
+                    anonymousRead:
+                      type: boolean
+                      default: false
+                      description: Allow anonymous read access
+                tls:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    certSecretName:
+                      type: string
+                      description: Secret containing TLS certificate and key
+                    clientAuth:
+                      type: string
+                      enum: ["none", "want", "require"]
+                      default: "none"
+                metrics:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: true
+                    port:
+                      type: integer
+                      default: 9090
+                    path:
+                      type: string
+                      default: "/metrics"
+                external:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                      description: Enable external registry sync
+                    url:
+                      type: string
+                      description: External registry URL for mirroring
+                    syncMode:
+                      type: string
+                      enum: ["none", "import", "export", "bidirectional"]
+                      default: "none"
+                podAnnotations:
+                  type: object
+                  additionalProperties:
+                    type: string
+                podLabels:
+                  type: object
+                  additionalProperties:
+                    type: string
+                env:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                nodeSelector:
+                  type: object
+                  additionalProperties:
+                    type: string
+                tolerations:
+                  type: array
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                affinity:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                podDisruptionBudget:
+                  type: object
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    minAvailable:
+                      x-kubernetes-int-or-string: true
+                    maxUnavailable:
+                      x-kubernetes-int-or-string: true
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  description: Current phase (Pending, Running, Failed, Terminating)
+                readyReplicas:
+                  type: integer
+                  description: Number of ready replicas
+                schemasRegistered:
+                  type: integer
+                  description: Total number of registered schemas
+                subjectsCount:
+                  type: integer
+                  description: Number of subjects
+                lastUpdated:
+                  type: string
+                  format: date-time
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ["True", "False", "Unknown"]
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                observedGeneration:
+                  type: integer
+                  format: int64
+                endpoint:
+                  type: string
+                  description: Schema registry endpoint URL
+{{- end }}

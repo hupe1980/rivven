@@ -36,7 +36,7 @@ Rivven is designed for **cloud-native deployment** with:
 
 ```bash
 # Add Rivven Helm repository
-helm repo add rivven https://hupe1980.github.io/rivven/helm
+helm repo add rivven https://rivven.hupe1980.github.io/rivven/helm
 helm repo update
 
 # Install Rivven cluster
@@ -180,7 +180,7 @@ kubectl apply -f https://github.com/hupe1980/rivven/releases/latest/download/riv
 ### RivvenCluster CRD
 
 ```yaml
-apiVersion: rivven.io/v1alpha1
+apiVersion: rivven.hupe1980.github.io/v1alpha1
 kind: RivvenCluster
 metadata:
   name: production
@@ -199,10 +199,10 @@ spec:
 
 ### RivvenConnect CRD
 
-Manage CDC pipelines declaratively with **typed connector configs**:
+Manage CDC pipelines declaratively with **generic connector configs** (Kafka Connect style):
 
 ```yaml
-apiVersion: rivven.io/v1alpha1
+apiVersion: rivven.hupe1980.github.io/v1alpha1
 kind: RivvenConnect
 metadata:
   name: cdc-pipeline
@@ -216,13 +216,13 @@ spec:
       connector: postgres-cdc
       topic: cdc.events
       configSecretRef: postgres-credentials
-      # Typed PostgreSQL CDC config (validated)
-      postgresCdc:
+      # All connector config in generic 'config' field (Kafka Connect style)
+      config:
         slotName: rivven_slot
         publication: rivven_pub
         snapshotMode: initial
         decodingPlugin: pgoutput
-        # Tables are inside CDC config (type-safe)
+        # Tables are inside CDC config
         tables:
           - schema: public
             table: orders
@@ -238,12 +238,151 @@ spec:
       topics: ["cdc.*"]
       consumerGroup: s3-archiver
       configSecretRef: s3-credentials
-      # Typed S3 config (validated)
-      s3:
+      # All connector config in generic 'config' field
+      config:
         bucket: data-lake
         format: parquet
         compression: zstd
 ```
+
+### Advanced CDC Configuration
+
+For production CDC deployments, configure advanced features using the generic `config` field:
+
+```yaml
+apiVersion: rivven.hupe1980.github.io/v1alpha1
+kind: RivvenConnect
+metadata:
+  name: production-cdc
+spec:
+  clusterRef:
+    name: production
+  replicas: 3
+  
+  sources:
+    - name: postgres-cdc
+      connector: postgres-cdc
+      topic: cdc.events
+      configSecretRef: postgres-credentials
+      # All connector config in generic 'config' field (Kafka Connect style)
+      config:
+        slotName: rivven_slot
+        publication: rivven_pub
+        snapshotMode: initial
+        tables:
+          - schema: public
+            table: orders
+        
+        # Snapshot configuration
+        snapshot:
+          batchSize: 20000        # Rows per batch
+          parallelTables: 8       # Parallel table snapshots
+          queryTimeoutSecs: 600   # Query timeout
+          maxRetries: 5           # Retry failed batches
+        
+        # Incremental snapshots (non-blocking)
+        incrementalSnapshot:
+          enabled: true
+          chunkSize: 2048
+          watermarkStrategy: update_and_insert
+          maxConcurrentChunks: 4
+        
+        # Heartbeat monitoring
+        heartbeat:
+          enabled: true
+          intervalSecs: 5
+          maxLagSecs: 60
+          emitEvents: true
+        
+        # Deduplication (bloom filter + LRU)
+        deduplication:
+          enabled: true
+          bloomExpectedInsertions: 500000
+          bloomFpp: 0.001
+          lruSize: 50000
+          windowSecs: 7200
+        
+        # Transaction metadata
+        transactionTopic:
+          enabled: true
+          topicName: cdc.transactions
+          includeDataCollections: true
+        
+        # Schema change capture
+        schemaChangeTopic:
+          enabled: true
+          topicName: cdc.schema-changes
+          includeColumns: true
+        
+        # Parallel processing
+        parallel:
+          enabled: true
+          concurrency: 8
+          perTableBuffer: 2000
+          outputBuffer: 20000
+          workStealing: true
+        
+        # Health monitoring
+        health:
+          enabled: true
+          checkIntervalSecs: 5
+          maxLagMs: 10000
+          failureThreshold: 3
+          autoRecovery: true
+        
+        # Event routing
+        router:
+          enabled: true
+          defaultDestination: cdc.events.default
+          deadLetterQueue: cdc.dlq
+          rules:
+            - conditionType: table
+              conditionValue: orders
+              destination: cdc.orders
+              priority: 100
+            - conditionType: schema
+              conditionValue: audit
+              destination: cdc.audit
+              priority: 50
+        
+        # Custom partitioning
+        partitioner:
+          enabled: true
+          numPartitions: 32
+          strategy: key_hash
+          keyColumns: [id]
+        
+        # SMT (Single Message Transforms)
+        transforms:
+          - type: extract_new_record_state
+            config:
+              add_fields: table,op
+          - type: mask_field
+            config:
+              fields: ssn,credit_card
+              replacement: "***"
+```
+
+#### Advanced CDC Feature Reference
+
+| Feature | Description |
+|---------|-------------|
+| **Snapshot** | Batch size, parallelism, timeouts, retries for initial load |
+| **Incremental Snapshot** | Non-blocking re-snapshots without stopping CDC stream |
+| **Signal Table** | Ad-hoc snapshot control via database table or Rivven topic |
+| **Heartbeat** | Connection health monitoring with lag detection |
+| **Deduplication** | Bloom filter + LRU cache for duplicate prevention |
+| **Transaction Topic** | Transaction boundary metadata |
+| **Schema Change Topic** | DDL change capture |
+| **Tombstone** | Delete event handling configuration |
+| **Field Encryption** | Field-level encryption with AES-256-GCM |
+| **Read-Only Replica** | PostgreSQL replica support with lag tracking |
+| **Event Router** | Dynamic routing with rules, DLQ, priorities |
+| **Partitioner** | Custom partitioning strategies |
+| **SMT Transforms** | 17 transform types (mask, filter, flatten, etc.) |
+| **Parallel** | Multi-threaded processing with work stealing |
+| **Outbox** | Transactional outbox pattern support |
+| **Health Monitor** | Auto-recovery with exponential backoff |
 
 ### Custom Connectors
 
@@ -260,12 +399,13 @@ sources:
         option: true
 ```
 
+
 ### RivvenTopic CRD
 
 Manage topics declaratively for **GitOps workflows**:
 
 ```yaml
-apiVersion: rivven.io/v1alpha1
+apiVersion: rivven.hupe1980.github.io/v1alpha1
 kind: RivvenTopic
 metadata:
   name: orders-events
@@ -320,6 +460,152 @@ kubectl get rivventopics
 
 # Detailed status
 kubectl describe rivventopic orders-events
+```
+
+### RivvenSchemaRegistry CRD
+
+Deploy and manage a **high-performance Schema Registry** declaratively:
+
+```yaml
+apiVersion: rivven.hupe1980.github.io/v1alpha1
+kind: RivvenSchemaRegistry
+metadata:
+  name: schema-registry
+spec:
+  clusterRef:
+    name: production
+  
+  replicas: 2
+  version: "0.0.4"
+  
+  # Server configuration
+  server:
+    port: 8081
+    requestTimeoutMs: 30000
+    corsEnabled: true
+  
+  # Schema storage in broker
+  storage:
+    mode: broker
+    topic: _schemas
+    replicationFactor: 3
+  
+  # Compatibility settings
+  compatibility:
+    defaultLevel: BACKWARD
+    perSubject:
+      "order-events-value": FULL
+      "user-profile-value": FORWARD
+  
+  # Supported formats
+  formats:
+    avro: true
+    jsonSchema: true
+    protobuf: true
+  
+  # JWT authentication
+  auth:
+    enabled: true
+    method: jwt
+    jwt:
+      issuerUrl: "https://auth.example.com"
+      audience: "schema-registry"
+  
+  # TLS
+  tls:
+    enabled: true
+    certSecretName: schema-registry-tls
+  
+  # Prometheus metrics
+  metrics:
+    enabled: true
+    serviceMonitorEnabled: true
+  
+  resources:
+    requests:
+      cpu: "500m"
+      memory: 1Gi
+```
+
+#### Schema Compatibility Levels
+
+| Level | Description |
+|-------|-------------|
+| `NONE` | No compatibility checking |
+| `BACKWARD` | New schema can read data written with old schema |
+| `BACKWARD_TRANSITIVE` | New schema can read data from all previous versions |
+| `FORWARD` | Old schema can read data written with new schema |
+| `FORWARD_TRANSITIVE` | All previous schemas can read new data |
+| `FULL` | Both backward and forward compatible |
+| `FULL_TRANSITIVE` | Full compatibility with all versions |
+
+#### Authentication Options
+
+**Basic Auth:**
+```yaml
+auth:
+  enabled: true
+  method: basic
+  users:
+    - username: admin
+      passwordSecretKey: admin-password
+      role: admin
+    - username: reader
+      passwordSecretKey: reader-password
+      role: reader
+```
+
+**JWT/OIDC Auth:**
+```yaml
+auth:
+  enabled: true
+  method: jwt
+  jwt:
+    issuerUrl: "https://auth.example.com"
+    jwksUrl: "https://auth.example.com/.well-known/jwks.json"
+    audience: "schema-registry"
+```
+
+**Cedar Policy Auth:**
+```yaml
+auth:
+  enabled: true
+  method: cedar
+  cedar:
+    policySecretRef: cedar-policies
+```
+
+#### External Registry Sync
+
+Sync schemas with external schema registries or AWS Glue:
+
+```yaml
+externalRegistry:
+  enabled: true
+  registryType: compatible
+  registryUrl: "https://external-sr.example.com"
+  syncMode: mirror  # mirror, push, bidirectional
+  syncSubjects:
+    - "orders-*"
+  syncIntervalSeconds: 300
+  credentialsSecretRef: external-creds
+```
+
+#### Check Schema Registry Status
+
+```bash
+# List schema registries
+kubectl get rivvenschemaregistries
+
+# NAME              CLUSTER     REPLICAS   PHASE     AGE
+# schema-registry   production  2          Running   5m
+
+# Detailed status
+kubectl describe rivvenschemaregistry schema-registry
+
+# Test the API
+kubectl port-forward svc/rivven-schema-schema-registry 8081:8081
+curl http://localhost:8081/subjects
 ```
 
 ---

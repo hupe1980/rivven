@@ -35,10 +35,29 @@ Rivven CDC for MySQL/MariaDB uses **binary log replication** to stream row-level
 
 ### Version Requirements
 
-| Database | Minimum Version | Recommended | Notes |
-|:---------|:----------------|:------------|:------|
-| MySQL | 5.7 | 8.0+ | GTID available in 5.6+ |
-| MariaDB | 10.2 | 10.6+ | MariaDB GTID differs from MySQL |
+#### MySQL
+
+| Version | Status | EOL | Notes |
+|:--------|:-------|:----|:------|
+| 5.7.x | ⚠️ | Oct 2023 | End of life, not recommended |
+| 8.0.x | ✅ Tested | Apr 2026 | GTID, caching_sha2_password |
+| 8.4.x | ✅ **Recommended** | Apr 2032 | LTS, enhanced replication |
+| 9.0.x | ✅ Tested | TBD | Innovation release (latest) |
+
+{: .note }
+> We test against MySQL 8.0, 8.4, and 9.0 in CI. MySQL 8.4 LTS is our recommended version for production deployments.
+
+#### MariaDB
+
+| Version | Status | EOL | Notes |
+|:--------|:-------|:----|:------|
+| 10.5.x | ⚠️ | Jun 2025 | Approaching EOL |
+| 10.6.x | ✅ Tested | Jul 2026 | LTS, GTID improvements |
+| 10.11.x | ✅ **Recommended** | Feb 2028 | LTS, enhanced JSON |
+| 11.4.x | ✅ Tested | May 2029 | LTS, latest features |
+
+{: .note }
+> We test against MariaDB 10.6, 10.11, and 11.4 in CI. MariaDB 10.11 LTS is our recommended version for production deployments.
 
 ### Binary Log Configuration
 

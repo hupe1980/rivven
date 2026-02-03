@@ -318,6 +318,148 @@ pub enum TransactionMarker {
     Abort,
 }
 
+/// Consumer isolation level (KIP-98)
+///
+/// Controls whether consumers can see uncommitted transactional messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum IsolationLevel {
+    /// Read all messages, including those from aborted transactions.
+    /// This is the default for backward compatibility.
+    #[default]
+    ReadUncommitted,
+
+    /// Only read messages from committed transactions.
+    /// Messages from aborted transactions are filtered out.
+    ReadCommitted,
+}
+
+impl IsolationLevel {
+    /// Convert to string (Kafka-compatible)
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ReadUncommitted => "read_uncommitted",
+            Self::ReadCommitted => "read_committed",
+        }
+    }
+
+    /// Convert from u8 (wire protocol)
+    /// 0 = read_uncommitted (default)
+    /// 1 = read_committed
+    /// Other values default to read_uncommitted
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::ReadCommitted,
+            _ => Self::ReadUncommitted,
+        }
+    }
+
+    /// Convert to u8 (wire protocol)
+    pub fn as_u8(&self) -> u8 {
+        match self {
+            Self::ReadUncommitted => 0,
+            Self::ReadCommitted => 1,
+        }
+    }
+}
+
+impl std::str::FromStr for IsolationLevel {
+    type Err = String;
+
+    /// Parse from string (Kafka-compatible)
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "read_uncommitted" => Ok(Self::ReadUncommitted),
+            "read_committed" => Ok(Self::ReadCommitted),
+            _ => Err(format!("unknown isolation level: {}", s)),
+        }
+    }
+}
+
+impl std::fmt::Display for IsolationLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+/// Record of an aborted transaction for consumer filtering
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AbortedTransaction {
+    /// Producer ID that aborted
+    pub producer_id: ProducerId,
+    /// First offset of the aborted transaction in this partition
+    pub first_offset: u64,
+}
+
+/// Index of aborted transactions for a partition
+///
+/// Used for efficient filtering when `isolation.level=read_committed`
+#[derive(Debug, Default)]
+pub struct AbortedTransactionIndex {
+    /// Aborted transactions sorted by first_offset
+    aborted: RwLock<Vec<AbortedTransaction>>,
+}
+
+impl AbortedTransactionIndex {
+    /// Create a new empty index
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record an aborted transaction
+    pub fn record_abort(&self, producer_id: ProducerId, first_offset: u64) {
+        let mut aborted = self.aborted.write().expect("aborted index lock poisoned");
+        aborted.push(AbortedTransaction {
+            producer_id,
+            first_offset,
+        });
+        // Keep sorted by first_offset for efficient lookup
+        aborted.sort_by_key(|a| a.first_offset);
+    }
+
+    /// Get aborted transactions that overlap with a range of offsets
+    ///
+    /// Returns aborted transactions whose first_offset is within [start_offset, end_offset]
+    pub fn get_aborted_in_range(
+        &self,
+        start_offset: u64,
+        end_offset: u64,
+    ) -> Vec<AbortedTransaction> {
+        let aborted = self.aborted.read().expect("aborted index lock poisoned");
+        aborted
+            .iter()
+            .filter(|a| a.first_offset >= start_offset && a.first_offset <= end_offset)
+            .cloned()
+            .collect()
+    }
+
+    /// Check if a specific producer's message at an offset is from an aborted transaction
+    pub fn is_aborted(&self, producer_id: ProducerId, offset: u64) -> bool {
+        let aborted = self.aborted.read().expect("aborted index lock poisoned");
+        aborted
+            .iter()
+            .any(|a| a.producer_id == producer_id && a.first_offset <= offset)
+    }
+
+    /// Remove aborted transactions older than a given offset (for log truncation)
+    pub fn truncate_before(&self, offset: u64) {
+        let mut aborted = self.aborted.write().expect("aborted index lock poisoned");
+        aborted.retain(|a| a.first_offset >= offset);
+    }
+
+    /// Get count of tracked aborted transactions
+    pub fn len(&self) -> usize {
+        self.aborted
+            .read()
+            .expect("aborted index lock poisoned")
+            .len()
+    }
+
+    /// Check if index is empty
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 /// Statistics for transaction coordinator
 #[derive(Debug, Default)]
 pub struct TransactionStats {
@@ -421,6 +563,9 @@ pub struct TransactionCoordinator {
 
     /// Statistics
     stats: TransactionStats,
+
+    /// Index of aborted transactions for read_committed filtering
+    aborted_index: AbortedTransactionIndex,
 }
 
 impl Default for TransactionCoordinator {
@@ -437,6 +582,7 @@ impl TransactionCoordinator {
             producer_transactions: RwLock::new(HashMap::new()),
             default_timeout: DEFAULT_TRANSACTION_TIMEOUT,
             stats: TransactionStats::new(),
+            aborted_index: AbortedTransactionIndex::new(),
         }
     }
 
@@ -447,6 +593,7 @@ impl TransactionCoordinator {
             producer_transactions: RwLock::new(HashMap::new()),
             default_timeout: timeout,
             stats: TransactionStats::new(),
+            aborted_index: AbortedTransactionIndex::new(),
         }
     }
 
@@ -827,6 +974,12 @@ impl TransactionCoordinator {
 
         txn.state = TransactionState::CompleteAbort;
 
+        // Record aborted transaction for read_committed filtering
+        // Use the minimum offset from pending writes as the first_offset
+        if let Some(first_offset) = txn.pending_writes.iter().map(|w| w.offset).min() {
+            self.aborted_index.record_abort(producer_id, first_offset);
+        }
+
         // Clean up
         transactions.remove(&(producer_id, txn_id.clone()));
         producer_txns.remove(&producer_id);
@@ -907,6 +1060,30 @@ impl TransactionCoordinator {
             .filter(|t| !t.state.is_terminal())
             .count()
     }
+
+    /// Check if a producer's message at a given offset is from an aborted transaction
+    ///
+    /// Used for read_committed isolation level filtering
+    pub fn is_aborted(&self, producer_id: ProducerId, offset: u64) -> bool {
+        self.aborted_index.is_aborted(producer_id, offset)
+    }
+
+    /// Get aborted transactions in a range of offsets
+    ///
+    /// Used for FetchResponse to include aborted transaction metadata
+    pub fn get_aborted_in_range(
+        &self,
+        start_offset: u64,
+        end_offset: u64,
+    ) -> Vec<AbortedTransaction> {
+        self.aborted_index
+            .get_aborted_in_range(start_offset, end_offset)
+    }
+
+    /// Get access to the aborted transaction index
+    pub fn aborted_index(&self) -> &AbortedTransactionIndex {
+        &self.aborted_index
+    }
 }
 
 // ============================================================================
@@ -916,6 +1093,7 @@ impl TransactionCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     #[test]
     fn test_transaction_state_transitions() {
@@ -1288,5 +1466,178 @@ mod tests {
         assert_eq!(snapshot.transactions_started, 1);
         assert_eq!(snapshot.transactions_committed, 1);
         assert_eq!(snapshot.active_transactions, 0);
+    }
+
+    // =========================================================================
+    // Isolation Level Tests (KIP-98)
+    // =========================================================================
+
+    #[test]
+    fn test_isolation_level_from_u8() {
+        assert_eq!(IsolationLevel::from_u8(0), IsolationLevel::ReadUncommitted);
+        assert_eq!(IsolationLevel::from_u8(1), IsolationLevel::ReadCommitted);
+        assert_eq!(IsolationLevel::from_u8(2), IsolationLevel::ReadUncommitted); // Invalid defaults
+        assert_eq!(
+            IsolationLevel::from_u8(255),
+            IsolationLevel::ReadUncommitted
+        );
+    }
+
+    #[test]
+    fn test_isolation_level_as_u8() {
+        assert_eq!(IsolationLevel::ReadUncommitted.as_u8(), 0);
+        assert_eq!(IsolationLevel::ReadCommitted.as_u8(), 1);
+    }
+
+    #[test]
+    fn test_isolation_level_from_str() {
+        assert_eq!(
+            IsolationLevel::from_str("read_uncommitted").unwrap(),
+            IsolationLevel::ReadUncommitted
+        );
+        assert_eq!(
+            IsolationLevel::from_str("read_committed").unwrap(),
+            IsolationLevel::ReadCommitted
+        );
+        assert_eq!(
+            IsolationLevel::from_str("READ_UNCOMMITTED").unwrap(),
+            IsolationLevel::ReadUncommitted
+        );
+        assert_eq!(
+            IsolationLevel::from_str("READ_COMMITTED").unwrap(),
+            IsolationLevel::ReadCommitted
+        );
+        assert!(IsolationLevel::from_str("invalid").is_err());
+    }
+
+    #[test]
+    fn test_isolation_level_default() {
+        assert_eq!(IsolationLevel::default(), IsolationLevel::ReadUncommitted);
+    }
+
+    // =========================================================================
+    // Aborted Transaction Index Tests
+    // =========================================================================
+
+    #[test]
+    fn test_aborted_transaction_index_basic() {
+        let index = AbortedTransactionIndex::new();
+        assert!(index.is_empty());
+        assert_eq!(index.len(), 0);
+
+        // Record an aborted transaction
+        index.record_abort(1, 100);
+        assert!(!index.is_empty());
+        assert_eq!(index.len(), 1);
+
+        // Check if offset is from aborted transaction
+        assert!(index.is_aborted(1, 100)); // first_offset
+        assert!(index.is_aborted(1, 150)); // within transaction
+        assert!(!index.is_aborted(1, 50)); // before transaction
+        assert!(!index.is_aborted(2, 100)); // different producer
+    }
+
+    #[test]
+    fn test_aborted_transaction_index_multiple() {
+        let index = AbortedTransactionIndex::new();
+
+        // Multiple aborted transactions
+        index.record_abort(1, 100);
+        index.record_abort(1, 300);
+        index.record_abort(2, 200);
+
+        assert_eq!(index.len(), 3);
+
+        // Check filtering
+        assert!(index.is_aborted(1, 100));
+        assert!(index.is_aborted(1, 150)); // between 100 and 300 for producer 1
+        assert!(index.is_aborted(1, 300));
+        assert!(index.is_aborted(1, 400)); // after second abort
+        assert!(index.is_aborted(2, 200));
+        assert!(index.is_aborted(2, 250));
+        assert!(!index.is_aborted(2, 100)); // before producer 2's abort
+    }
+
+    #[test]
+    fn test_aborted_transaction_index_get_range() {
+        let index = AbortedTransactionIndex::new();
+
+        index.record_abort(1, 100);
+        index.record_abort(2, 200);
+        index.record_abort(1, 300);
+
+        // Get transactions in range
+        let in_range = index.get_aborted_in_range(150, 250);
+        assert_eq!(in_range.len(), 1);
+        assert_eq!(in_range[0].producer_id, 2);
+        assert_eq!(in_range[0].first_offset, 200);
+
+        // Wider range
+        let in_range = index.get_aborted_in_range(0, 500);
+        assert_eq!(in_range.len(), 3);
+
+        // No transactions in range
+        let in_range = index.get_aborted_in_range(400, 500);
+        assert_eq!(in_range.len(), 0);
+    }
+
+    #[test]
+    fn test_aborted_transaction_index_truncate() {
+        let index = AbortedTransactionIndex::new();
+
+        index.record_abort(1, 100);
+        index.record_abort(2, 200);
+        index.record_abort(1, 300);
+
+        assert_eq!(index.len(), 3);
+
+        // Truncate entries before offset 200
+        index.truncate_before(200);
+
+        assert_eq!(index.len(), 2);
+
+        // Only offsets >= 200 should remain
+        assert!(!index.is_aborted(1, 150)); // old entry removed
+        assert!(index.is_aborted(2, 200));
+        assert!(index.is_aborted(1, 300));
+    }
+
+    #[test]
+    fn test_coordinator_is_aborted() {
+        let coordinator = TransactionCoordinator::new();
+
+        // Start a transaction
+        coordinator.begin_transaction("txn-1".to_string(), 1, 0, None);
+
+        // Add partition and write
+        coordinator.add_partitions_to_transaction(
+            &"txn-1".to_string(),
+            1,
+            0,
+            vec![TransactionPartition::new("test-topic", 0)],
+        );
+        coordinator.add_write_to_transaction(
+            &"txn-1".to_string(),
+            1,
+            0,
+            TransactionPartition::new("test-topic", 0),
+            0,
+            100, // offset
+        );
+
+        // Not aborted yet
+        assert!(!coordinator.is_aborted(1, 100));
+
+        // Prepare and complete abort
+        coordinator
+            .prepare_abort(&"txn-1".to_string(), 1, 0)
+            .unwrap();
+        coordinator.complete_abort(&"txn-1".to_string(), 1);
+
+        // Now should be marked as aborted
+        assert!(coordinator.is_aborted(1, 100));
+        assert!(coordinator.is_aborted(1, 150)); // messages after first_offset too
+        assert!(!coordinator.is_aborted(1, 50)); // before first_offset
+        assert!(!coordinator.is_aborted(2, 100)); // different producer
     }
 }

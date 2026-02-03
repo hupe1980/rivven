@@ -418,10 +418,6 @@ impl AuthenticatedHandler {
                 }
                 (ResourceType::Topic(topic.clone()), Permission::Read)
             }
-            Request::RegisterSchema { subject, .. } => {
-                (ResourceType::Schema(subject.clone()), Permission::Write)
-            }
-            Request::GetSchema { .. } => (ResourceType::Cluster, Permission::Describe),
             Request::ListGroups => (ResourceType::Cluster, Permission::Describe),
             Request::DescribeGroup { consumer_group, .. } => (
                 ResourceType::ConsumerGroup(consumer_group.clone()),
@@ -566,8 +562,7 @@ impl AuthenticatedHandler {
 mod tests {
     use super::*;
     use rivven_core::{
-        schema_registry::EmbeddedSchemaRegistry, AuthConfig, AuthManager, Config, OffsetManager,
-        PrincipalType, TopicManager,
+        AuthConfig, AuthManager, Config, OffsetManager, PrincipalType, TopicManager,
     };
     use std::collections::HashSet;
     use std::time::Duration;
@@ -578,9 +573,8 @@ mod tests {
         let config = Config::new().with_data_dir(temp_dir.path().to_string_lossy().to_string());
         let topic_manager = TopicManager::new(config.clone());
         let offset_manager = OffsetManager::new();
-        let schema_registry = Arc::new(EmbeddedSchemaRegistry::new(&config).await.unwrap());
 
-        let base_handler = RequestHandler::new(topic_manager, offset_manager, schema_registry);
+        let base_handler = RequestHandler::new(topic_manager, offset_manager);
 
         let auth_config = AuthConfig {
             require_authentication: require_auth,

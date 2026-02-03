@@ -8,6 +8,7 @@
 #   ./scripts/check.sh --test       # Run checks + unit tests
 #   ./scripts/check.sh --integration # Run checks + all tests including integration
 #   ./scripts/check.sh --release    # Run full pre-release validation
+#   ./scripts/check.sh --clean       # Clean build artifacts to free disk space
 #   ./scripts/check.sh --help       # Show this help message
 #
 # To install as pre-commit hook:
@@ -47,6 +48,7 @@ ${CYAN}Options:${NC}
   --test, -t         Run checks + unit tests
   --integration, -i  Run checks + all tests including integration
   --release, -r      Run full pre-release validation
+  --clean, -c        Clean build artifacts to free disk space
   --verbose, -v      Show verbose output
   --no-color         Disable colored output
   --help, -h         Show this help message
@@ -56,6 +58,7 @@ ${CYAN}Examples:${NC}
   ./scripts/check.sh -q           # Quick pre-commit check
   ./scripts/check.sh -t           # Run with unit tests
   ./scripts/check.sh -r           # Full release validation
+  ./scripts/check.sh -c           # Clean target folder
 
 ${CYAN}Pre-commit Hook:${NC}
   ln -sf ../../scripts/check.sh .git/hooks/pre-commit
@@ -69,6 +72,7 @@ QUICK=false
 TEST=false
 INTEGRATION=false
 RELEASE=false
+CLEAN=false
 VERBOSE=false
 NO_COLOR=false
 while [[ $# -gt 0 ]]; do
@@ -77,6 +81,7 @@ while [[ $# -gt 0 ]]; do
         --test|-t) TEST=true; shift ;;
         --integration|-i) INTEGRATION=true; shift ;;
         --release|-r) RELEASE=true; TEST=true; INTEGRATION=true; shift ;;
+        --clean|-c) CLEAN=true; shift ;;
         --verbose|-v) VERBOSE=true; shift ;;
         --no-color) NO_COLOR=true; shift ;;
         --help|-h) show_help ;;
@@ -152,6 +157,44 @@ print_section() {
     echo -e "  ${BOLD}$1${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 }
+
+# Clean build artifacts
+do_clean() {
+    print_section "Cleaning Build Artifacts"
+    
+    local target_dir="$ROOT_DIR/target"
+    
+    if [[ -d "$target_dir" ]]; then
+        local size_before=$(du -sh "$target_dir" 2>/dev/null | cut -f1)
+        print_info "Current target folder size: $size_before"
+        
+        print_step "Running cargo clean"
+        if cargo clean; then
+            print_ok "Build artifacts cleaned successfully"
+            print_info "Freed approximately $size_before of disk space"
+        else
+            print_err "Failed to clean build artifacts"
+            exit 1
+        fi
+    else
+        print_info "Target directory does not exist - nothing to clean"
+    fi
+    
+    # Also clean any stale incremental compilation data
+    if [[ -d "$ROOT_DIR/.cargo" ]]; then
+        print_step "Cleaning .cargo cache (optional)"
+        print_info "Run 'cargo cache --autoclean' for more thorough cleanup (requires cargo-cache)"
+    fi
+    
+    echo ""
+    print_ok "Cleanup complete!"
+    exit 0
+}
+
+# Handle --clean flag early
+if $CLEAN; then
+    do_clean
+fi
 
 # Check for uncommitted changes
 check_git_status() {
@@ -430,13 +473,6 @@ if $RELEASE; then
     # Dry-run publish check
     print_step "Publish Dry Run"
     
-    # Clean restored Cargo.toml files that interfere with packaging
-    # (build.rs restores these from .template files for local trunk builds)
-    if [[ -f "crates/rivvend/dashboard/Cargo.toml" ]]; then
-        rm -f "crates/rivvend/dashboard/Cargo.toml" "crates/rivvend/dashboard/Cargo.lock"
-        print_info "Cleaned dashboard/Cargo.toml for publish check"
-    fi
-    
     PUBLISH_FAILED=false
     for crate in rivven-core rivven-protocol rivven-cluster rivven-cdc rivven-client rivvend; do
         if [[ -f "crates/$crate/Cargo.toml" ]]; then
@@ -523,20 +559,6 @@ if $RELEASE; then
             fi
         else
             print_skip "Python Bindings - maturin not installed"
-        fi
-    fi
-    
-    # WASM dashboard check
-    if [[ -f "crates/rivven-dashboard/Cargo.toml" ]]; then
-        print_step "WASM Dashboard Build"
-        if command -v trunk &> /dev/null; then
-            if (cd crates/rivven-dashboard && trunk build --release 2>&1 | tail -5); then
-                print_ok "Dashboard build successfully"
-            else
-                print_warn "Dashboard build failed"
-            fi
-        else
-            print_skip "WASM Dashboard - trunk not installed"
         fi
     fi
     

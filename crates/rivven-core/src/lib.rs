@@ -7,12 +7,12 @@ pub mod config;
 pub mod consumer_group;
 pub mod error;
 pub mod idempotent;
+pub mod io_uring;
 pub mod message;
 pub mod metrics;
 pub mod offset;
 pub mod partition;
 pub mod quota;
-pub mod schema_registry;
 pub mod serde_utils;
 pub mod service_auth;
 pub mod storage;
@@ -36,6 +36,11 @@ pub mod encryption;
 // Cedar authorization (optional)
 #[cfg(feature = "cedar")]
 pub mod cedar_authz;
+#[cfg(feature = "cedar")]
+pub use cedar_authz::{
+    AuthzContext, AuthzDecision, CedarAuthorizer, CedarError, CedarResult, RivvenAction,
+    RivvenResource,
+};
 
 // OIDC authentication (optional)
 #[cfg(feature = "oidc")]
@@ -74,7 +79,6 @@ pub use quota::{
     QuotaStats, QuotaStatsSnapshot, QuotaType, DEFAULT_CONSUME_BYTES_RATE,
     DEFAULT_PRODUCE_BYTES_RATE, DEFAULT_REQUEST_RATE, UNLIMITED,
 };
-pub use schema_registry::{MemorySchemaRegistry, SchemaRegistry};
 pub use storage::{
     ColdStorageBackend, ColdStorageConfig, HotTier, HotTierStats, LocalFsColdStorage,
     SegmentMetadata, StorageTier, TieredStorage, TieredStorageConfig, TieredStorageStats,
@@ -87,10 +91,10 @@ pub use topic_config::{
     DEFAULT_SEGMENT_BYTES, DEFAULT_SEGMENT_MS,
 };
 pub use transaction::{
-    PendingWrite, Transaction, TransactionCoordinator, TransactionId, TransactionMarker,
-    TransactionOffsetCommit, TransactionPartition, TransactionResult, TransactionState,
-    TransactionStats, TransactionStatsSnapshot, DEFAULT_TRANSACTION_TIMEOUT,
-    MAX_PENDING_TRANSACTIONS,
+    AbortedTransaction, AbortedTransactionIndex, IsolationLevel, PendingWrite, Transaction,
+    TransactionCoordinator, TransactionId, TransactionMarker, TransactionOffsetCommit,
+    TransactionPartition, TransactionResult, TransactionState, TransactionStats,
+    TransactionStatsSnapshot, DEFAULT_TRANSACTION_TIMEOUT, MAX_PENDING_TRANSACTIONS,
 };
 pub use vectorized::{
     BatchDecoder, BatchEncoder, BatchMessage, BatchProcessor, RecordBatch, RecordBatchIter,
@@ -108,6 +112,11 @@ pub use auth::{
     AclEntry, AuthConfig, AuthError, AuthManager, AuthResult, AuthSession, PasswordHash,
     Permission, Principal, PrincipalType, ResourceType, Role, SaslPlainAuth, SaslScramAuth,
     ScramState,
+};
+pub use io_uring::{
+    is_io_uring_available, AsyncReader, AsyncWriter, BatchExecutor, BatchReadResult, BatchStats,
+    IoBatch, IoOperation, IoUringConfig, IoUringStats, IoUringStatsSnapshot, SegmentReader,
+    WalWriter,
 };
 pub use service_auth::{
     ApiKey, AuthMethod, ServiceAccount, ServiceAuthConfig, ServiceAuthError, ServiceAuthManager,

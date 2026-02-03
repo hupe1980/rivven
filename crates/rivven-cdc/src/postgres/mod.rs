@@ -1,19 +1,37 @@
 //! PostgreSQL CDC implementation using logical replication
 //!
-//! Supports:
+//! # Modules
+//!
+//! - **protocol**: WAL protocol handling (pgoutput decoder)
+//! - **source**: CDC streaming source (`PostgresCdc`)
+//! - **snapshot**: Snapshot source for initial data load
+//!
+//! # Features
+//!
+//! ## CDC Streaming
+//!
 //! - PostgreSQL 10+ with logical replication
 //! - pgoutput output plugin
 //! - Transaction boundaries (BEGIN/COMMIT)
-//! - Schema inference (20+ PostgreSQL types → Avro)
 //! - Table/column filtering
+//!
+//! ## Snapshot
+//!
+//! - Efficient keyset pagination
+//! - Table discovery with primary keys
+//! - Row count estimation via pg_class
+//! - WAL LSN watermarks for consistency
 //!
 //! # Architecture
 //!
 //! ```text
 //! PostgreSQL WAL → ReplicationClient → PgOutputDecoder → CdcEvent
+//! PostgreSQL Tables → PostgresSnapshotSource → CdcEvent (snapshot)
 //! ```
 //!
 //! # Example
+//!
+//! ## CDC Streaming
 //!
 //! ```rust,no_run
 //! use rivven_cdc::postgres::{PostgresCdc, PostgresCdcConfig};
@@ -31,11 +49,20 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! ## Snapshot
+//!
+//! ```rust,ignore
+//! use rivven_cdc::postgres::PostgresSnapshotSource;
+//!
+//! let source = PostgresSnapshotSource::connect("postgresql://localhost/mydb").await?;
+//! let watermark = source.get_watermark().await?;
+//! ```
 
 mod protocol;
+mod snapshot;
 mod source;
-mod type_mapper;
 
 pub use protocol::*;
+pub use snapshot::*;
 pub use source::*;
-pub use type_mapper::*;

@@ -207,26 +207,6 @@ demo-dashboard: build-release
     ./target/release/rivvend --dashboard --data-dir ./demo-data
 
 # ============================================================================
-# Dashboard (Leptos/WASM)
-# ============================================================================
-
-# Build dashboard WASM bundle
-dashboard-build:
-    cd crates/rivven-dashboard && trunk build --release
-
-# Start dashboard dev server
-dashboard-dev:
-    cd crates/rivven-dashboard && trunk serve --port 8081
-
-# Build dashboard and embed in server
-dashboard-install: dashboard-build
-    rm -rf crates/rivvend/static/*
-    cp -r crates/rivven-dashboard/dist/* crates/rivvend/static/
-
-# Full release with embedded dashboard
-release-with-dashboard: dashboard-install build-release
-
-# ============================================================================
 # Utilities
 # ============================================================================
 

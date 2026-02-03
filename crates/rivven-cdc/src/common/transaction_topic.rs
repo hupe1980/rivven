@@ -1,6 +1,6 @@
 //! # Transaction Metadata Topic
 //!
-//! Debezium-compatible transaction boundary events for exactly-once processing.
+//! Transaction boundary events for exactly-once processing.
 //!
 //! When `provide.transaction.metadata` is enabled, emits:
 //! - **BEGIN** events when transaction starts
@@ -148,8 +148,6 @@ impl TransactionEvent {
 }
 
 /// Transaction context added to individual CDC events.
-///
-/// Matches Debezium's `transaction` field in event envelopes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TransactionContext {
     /// Transaction ID (format: "txId:LSN")
@@ -179,7 +177,6 @@ struct InFlightTransaction {
     /// LSN/position
     lsn: String,
     /// Start timestamp (for duration tracking)
-    #[allow(dead_code)]
     start_ts_ms: i64,
     /// Latest timestamp
     latest_ts_ms: i64,
@@ -213,6 +210,11 @@ impl InFlightTransaction {
 
         (self.total_event_count, *dc_count)
     }
+
+    /// Get transaction duration in milliseconds
+    fn duration_ms(&self) -> i64 {
+        self.latest_ts_ms.saturating_sub(self.start_ts_ms)
+    }
 }
 
 /// Configuration for transaction topic emission.
@@ -233,7 +235,7 @@ pub struct TransactionTopicConfig {
 impl Default for TransactionTopicConfig {
     fn default() -> Self {
         Self {
-            topic_prefix: "debezium".to_string(),
+            topic_prefix: "rivven".to_string(),
             emit_begin: true,
             emit_end: true,
             enrich_events: true,
@@ -454,6 +456,8 @@ impl TransactionTopicEmitter {
                 .transactions_completed
                 .fetch_add(1, Ordering::Relaxed);
 
+            let duration_ms = txn.duration_ms();
+
             if self.config.emit_end {
                 self.stats.end_events.fetch_add(1, Ordering::Relaxed);
 
@@ -471,6 +475,7 @@ impl TransactionTopicEmitter {
                     txn_id = txn_id,
                     event_count = txn.total_event_count,
                     tables = data_collections.len(),
+                    duration_ms = duration_ms,
                     "Transaction END"
                 );
 

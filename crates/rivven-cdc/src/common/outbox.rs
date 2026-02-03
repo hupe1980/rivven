@@ -768,7 +768,8 @@ mod tests {
             self.should_fail.store(fail, Ordering::Relaxed);
         }
 
-        #[allow(dead_code)]
+        /// Get all published events (for test assertions).
+        #[allow(dead_code)] // Available for future test expansion
         async fn get_published(&self) -> Vec<OutboxEvent> {
             self.published.read().await.clone()
         }

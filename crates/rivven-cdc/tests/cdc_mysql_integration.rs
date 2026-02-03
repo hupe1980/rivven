@@ -15,8 +15,7 @@ mod harness;
 use harness::{init_test_logging, MariaDbTestContainer, MySqlTestContainer};
 use rivven_cdc::common::CdcSource;
 use rivven_cdc::mysql::{
-    BinlogDecoder, BinlogEvent, ColumnType, ColumnValue, MySqlBinlogClient, MySqlCdc,
-    MySqlCdcConfig,
+    BinlogDecoder, BinlogEvent, ColumnType, MySqlBinlogClient, MySqlCdc, MySqlCdcConfig,
 };
 use serial_test::serial;
 use std::time::Duration;
@@ -302,81 +301,6 @@ mod decoder_tests {
 }
 
 // ============================================================================
-// Type Mapper Tests
-// ============================================================================
-
-mod type_mapper_tests {
-    use super::*;
-    use apache_avro::schema::Schema;
-    use rivven_cdc::mysql::MySqlTypeMapper;
-
-    #[test]
-    fn test_int_to_avro() {
-        let schema = MySqlTypeMapper::to_avro_schema(ColumnType::Long, 0, false, "id");
-        assert!(matches!(schema, Schema::Int));
-    }
-
-    #[test]
-    fn test_bigint_to_avro() {
-        let schema = MySqlTypeMapper::to_avro_schema(ColumnType::LongLong, 0, false, "big_id");
-        assert!(matches!(schema, Schema::Long));
-    }
-
-    #[test]
-    fn test_varchar_to_avro() {
-        let schema = MySqlTypeMapper::to_avro_schema(ColumnType::Varchar, 255, false, "name");
-        assert!(matches!(schema, Schema::String));
-    }
-
-    #[test]
-    fn test_nullable_column() {
-        let schema = MySqlTypeMapper::to_avro_schema(ColumnType::Long, 0, true, "nullable_id");
-        assert!(matches!(schema, Schema::Union(_)));
-    }
-
-    #[test]
-    fn test_table_schema_generation() {
-        let columns = vec![
-            ("id".to_string(), ColumnType::Long, 0, false),
-            ("name".to_string(), ColumnType::Varchar, 255, true),
-            ("email".to_string(), ColumnType::VarString, 255, true),
-            ("created_at".to_string(), ColumnType::DateTime2, 6, false),
-        ];
-
-        let schema = MySqlTypeMapper::table_to_avro_schema("test_db", "users", &columns);
-
-        if let Schema::Record(record) = schema {
-            assert_eq!(record.name.name, "users");
-            assert_eq!(record.fields.len(), 4);
-        } else {
-            panic!("Expected Record schema");
-        }
-    }
-
-    #[test]
-    fn test_cdc_envelope_schema() {
-        let columns = vec![
-            ("id".to_string(), ColumnType::Long, 0, false),
-            ("value".to_string(), ColumnType::Varchar, 100, true),
-        ];
-
-        let schema = MySqlTypeMapper::cdc_envelope_schema("app", "events", &columns);
-
-        if let Schema::Record(record) = schema {
-            assert_eq!(record.name.name, "events_envelope");
-            let field_names: Vec<_> = record.fields.iter().map(|f| f.name.as_str()).collect();
-            assert!(field_names.contains(&"op"));
-            assert!(field_names.contains(&"ts_ms"));
-            assert!(field_names.contains(&"source"));
-            assert!(field_names.contains(&"before"));
-            assert!(field_names.contains(&"after"));
-        } else {
-            panic!("Expected Record schema");
-        }
-    }
-}
-
-// ============================================================================
 // CDC Source Tests
 // ============================================================================
 
@@ -584,72 +508,6 @@ mod filter_tests {
         }
 
         parts.iter().all(|part| value.contains(part))
-    }
-}
-
-// ============================================================================
-// Column Value Conversion Tests
-// ============================================================================
-
-mod column_value_tests {
-    use super::*;
-    use apache_avro::types::Value;
-    use rivven_cdc::mysql::column_value_to_avro;
-
-    #[test]
-    fn test_null_value() {
-        let avro = column_value_to_avro(&ColumnValue::Null, ColumnType::Long, false);
-        assert!(matches!(avro, Value::Null));
-    }
-
-    #[test]
-    fn test_int_value() {
-        let avro = column_value_to_avro(&ColumnValue::SignedInt(42), ColumnType::Long, false);
-        assert!(matches!(avro, Value::Int(42)));
-    }
-
-    #[test]
-    fn test_bigint_value() {
-        let avro = column_value_to_avro(
-            &ColumnValue::SignedInt(9999999999),
-            ColumnType::LongLong,
-            false,
-        );
-        assert!(matches!(avro, Value::Long(9999999999)));
-    }
-
-    #[test]
-    fn test_string_value() {
-        let avro = column_value_to_avro(
-            &ColumnValue::String("hello".to_string()),
-            ColumnType::Varchar,
-            false,
-        );
-        match avro {
-            Value::String(s) => assert_eq!(s, "hello"),
-            _ => panic!("Expected String value"),
-        }
-    }
-
-    #[test]
-    fn test_date_value() {
-        let avro = column_value_to_avro(
-            &ColumnValue::Date {
-                year: 2024,
-                month: 6,
-                day: 15,
-            },
-            ColumnType::Date,
-            false,
-        );
-        // Date is stored as days since epoch
-        assert!(matches!(avro, Value::Date(_)));
-    }
-
-    #[test]
-    fn test_nullable_wrapping() {
-        let avro = column_value_to_avro(&ColumnValue::SignedInt(1), ColumnType::Long, true);
-        assert!(matches!(avro, Value::Union(1, _)));
     }
 }
 

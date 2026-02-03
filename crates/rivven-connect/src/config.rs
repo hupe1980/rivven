@@ -37,6 +37,88 @@ pub struct ConnectConfig {
     /// Global settings
     #[serde(default)]
     pub settings: GlobalSettings,
+
+    /// Distributed mode configuration (optional)
+    /// When enabled, connectors are coordinated across multiple nodes
+    #[serde(default)]
+    pub distributed: Option<DistributedConfig>,
+}
+
+/// Distributed mode configuration for running Connect across multiple nodes
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DistributedConfig {
+    /// Enable distributed mode
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Unique node identifier (auto-generated if not specified)
+    #[serde(default)]
+    pub node_id: Option<String>,
+
+    /// Coordination topic for cluster state
+    #[serde(default = "default_cluster_topic")]
+    pub cluster_topic: String,
+
+    /// Heartbeat interval in milliseconds
+    #[serde(default = "default_heartbeat_interval_ms")]
+    pub heartbeat_interval_ms: u64,
+
+    /// Consider node dead if no heartbeat for this many milliseconds
+    #[serde(default = "default_heartbeat_timeout_ms")]
+    pub heartbeat_timeout_ms: u64,
+
+    /// Delay rebalance after membership change (milliseconds)
+    #[serde(default = "default_rebalance_delay_ms")]
+    pub rebalance_delay_ms: u64,
+
+    /// Failover configuration for singleton connectors
+    #[serde(default)]
+    pub failover: FailoverSettings,
+}
+
+/// Failover settings for singleton connectors (e.g., CDC)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FailoverSettings {
+    /// Heartbeat interval for singleton leader (milliseconds)
+    #[serde(default = "default_failover_heartbeat_ms")]
+    pub heartbeat_interval_ms: u64,
+
+    /// Consider singleton leader dead after this many milliseconds
+    #[serde(default = "default_failover_timeout_ms")]
+    pub failure_timeout_ms: u64,
+}
+
+impl Default for FailoverSettings {
+    fn default() -> Self {
+        Self {
+            heartbeat_interval_ms: default_failover_heartbeat_ms(),
+            failure_timeout_ms: default_failover_timeout_ms(),
+        }
+    }
+}
+
+fn default_cluster_topic() -> String {
+    "_connect_status".to_string()
+}
+
+fn default_heartbeat_interval_ms() -> u64 {
+    1000
+}
+
+fn default_heartbeat_timeout_ms() -> u64 {
+    10_000
+}
+
+fn default_rebalance_delay_ms() -> u64 {
+    3000
+}
+
+fn default_failover_heartbeat_ms() -> u64 {
+    1000
+}
+
+fn default_failover_timeout_ms() -> u64 {
+    10_000
 }
 
 fn default_version() -> String {

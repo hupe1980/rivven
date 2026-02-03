@@ -18,8 +18,13 @@ This crate contains comprehensive integration tests using [testcontainers](https
 | `cluster_consensus.rs` | 12 | 10 | 2 | Cluster formation and Raft consensus |
 | `security.rs` | 14 | 11 | 3 | Security boundaries and attack resistance |
 | `chaos.rs` | 12 | 11 | 1 | Chaos engineering and failure recovery |
+| `stress.rs` | 9 | 8 | 1 | High-load and performance stress tests |
+| `consumer_groups.rs` | 9 | 9 | 0 | Consumer group coordination tests |
+| `connect_e2e.rs` | 9 | 9 | 0 | Connector pipeline integration tests |
+| `durability.rs` | 4 | 4 | 0 | Data persistence and broker restart tests |
+| `rbac.rs` | 19 | 19 | 0 | Cedar RBAC policy enforcement tests |
 
-**Total: 110 tests (98 passed + 12 ignored)**
+**Total: 160 tests (147 passed + 13 ignored)**
 
 ## Prerequisites
 
@@ -42,12 +47,20 @@ cargo test -p rivven-integration-tests --test cdc_postgres
 cargo test -p rivven-integration-tests --test cdc_mysql
 cargo test -p rivven-integration-tests --test cdc_mariadb
 cargo test -p rivven-integration-tests --test security
+cargo test -p rivven-integration-tests --test stress
+cargo test -p rivven-integration-tests --test consumer_groups
+cargo test -p rivven-integration-tests --test connect_e2e
+cargo test -p rivven-integration-tests --test durability
+cargo test -p rivven-integration-tests --test rbac
 
 # Run with logging
 RUST_LOG=info cargo test -p rivven-integration-tests -- --nocapture
 
 # Run specific test
 cargo test -p rivven-integration-tests postgres_container_starts -- --exact
+
+# Run ignored tests (soak tests, extended load tests)
+cargo test -p rivven-integration-tests --test stress -- --ignored
 ```
 
 ## Test Infrastructure
@@ -119,7 +132,12 @@ rivven-integration-tests/
     ├── e2e_pipeline.rs       # Pipeline integration tests
     ├── cluster_consensus.rs  # Cluster behavior tests
     ├── security.rs           # Security boundary tests
-    └── chaos.rs              # Chaos engineering tests
+    ├── chaos.rs              # Chaos engineering tests
+    ├── stress.rs             # High-load stress tests
+    ├── consumer_groups.rs    # Consumer group coordination tests
+    ├── connect_e2e.rs        # Connector pipeline tests
+    ├── durability.rs         # Persistence and recovery tests
+    └── rbac.rs               # Cedar RBAC authorization tests
 ```
 
 ## Writing Tests
@@ -306,3 +324,7 @@ Tests run in GitHub Actions with Docker support:
 - [Testing Documentation](../../docs/docs/testing.md)
 - [CDC Architecture](../../docs/docs/cdc.md)
 - [Security](../../docs/docs/security.md)
+
+## License
+
+See root [LICENSE](../../LICENSE) file.

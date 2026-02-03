@@ -43,7 +43,13 @@ use rivven_connect::SourceConfigDerive;
 
 // Configuration with derive macro
 #[derive(Debug, Deserialize, Validate, JsonSchema, SourceConfigDerive)]
-#[source(name = "my-source", version = "1.0.0", description = "Custom data source")]
+#[source(
+    name = "my-source",
+    version = "1.0.0",
+    description = "Custom data source",
+    author = "Your Name",
+    license = "Apache-2.0"
+)]
 pub struct MySourceConfig {
     #[validate(url)]
     pub endpoint: String,
@@ -59,6 +65,7 @@ fn default_timeout() -> u64 { 30_000 }
 
 // The derive macro generates: MySourceConfigSpec
 // with spec(), name(), version() methods
+// The spec() includes automatic config_schema generation
 
 pub struct MySource;
 
@@ -115,7 +122,15 @@ use rivven_connect::prelude::*;
 use rivven_connect::SinkConfigDerive;
 
 #[derive(Debug, Deserialize, Validate, JsonSchema, SinkConfigDerive)]
-#[sink(name = "my-sink", version = "1.0.0", batching, batch_size = 1000)]
+#[sink(
+    name = "my-sink",
+    version = "1.0.0",
+    description = "Custom data sink",
+    author = "Your Name",
+    license = "Apache-2.0",
+    batching,
+    batch_size = 1000
+)]
 pub struct MySinkConfig {
     pub destination: String,
     
@@ -125,6 +140,7 @@ pub struct MySinkConfig {
 
 // The derive macro generates: MySinkConfigSpec
 // with spec(), name(), version(), batch_config() methods
+// The spec() includes automatic config_schema generation
 
 pub struct MySink;
 
@@ -240,33 +256,76 @@ impl Transform for FilterTransform {
 
 ## Derive Macro Attributes
 
+The derive macros generate a `*Spec` struct with `spec()`, `name()`, and `version()` methods. The generated `spec()` method uses `ConnectorSpec::builder()` and includes automatic JSON Schema generation via `config_schema::<T>()`.
+
 ### Source Attributes
 
-| Attribute | Type | Description |
-|-----------|------|-------------|
-| `name` | string | Connector name (default: struct name in lowercase) |
-| `version` | string | Connector version (default: "0.0.1") |
-| `description` | string | Human-readable description |
-| `documentation_url` | string | Link to documentation |
+| Attribute | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `name` | string | struct name (lowercase, -config removed) | Connector identifier |
+| `version` | string | "0.0.1" | Semantic version |
+| `description` | string | - | Human-readable description |
+| `author` | string | - | Author or maintainer |
+| `license` | string | - | License identifier (e.g., "Apache-2.0") |
+| `documentation_url` | string | - | Documentation URL |
+| `incremental` | flag | false | Supports incremental sync |
+
+**Example:**
+
+```rust
+#[derive(Debug, Deserialize, Validate, JsonSchema, SourceConfigDerive)]
+#[source(
+    name = "postgres-cdc",
+    version = "1.0.0",
+    description = "PostgreSQL CDC connector using logical replication",
+    author = "Rivven Team",
+    license = "Apache-2.0",
+    documentation_url = "https://rivven.dev/docs/connectors/postgres-cdc",
+    incremental
+)]
+pub struct PostgresCdcConfig {
+    pub connection_string: String,
+}
+```
 
 ### Sink Attributes
 
-| Attribute | Type | Description |
-|-----------|------|-------------|
-| `name` | string | Connector name |
-| `version` | string | Connector version |
-| `description` | string | Human-readable description |
-| `documentation_url` | string | Link to documentation |
-| `batching` | flag | Enable batch processing |
-| `batch_size` | usize | Default max batch size (default: 10,000) |
+| Attribute | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `name` | string | struct name (lowercase, -config removed) | Connector identifier |
+| `version` | string | "0.0.1" | Semantic version |
+| `description` | string | - | Human-readable description |
+| `author` | string | - | Author or maintainer |
+| `license` | string | - | License identifier |
+| `documentation_url` | string | - | Documentation URL |
+| `batching` | flag | false | Enable batch_config() method |
+| `batch_size` | usize | 10,000 | Default batch size |
+
+**Example:**
+
+```rust
+#[derive(Debug, Deserialize, Validate, JsonSchema, SinkConfigDerive)]
+#[sink(
+    name = "s3",
+    version = "1.0.0",
+    description = "Amazon S3 storage sink",
+    author = "Rivven Team",
+    license = "Apache-2.0",
+    batching,
+    batch_size = 1000
+)]
+pub struct S3SinkConfig {
+    pub bucket: String,
+}
+```
 
 ### Transform Attributes
 
-| Attribute | Type | Description |
-|-----------|------|-------------|
-| `name` | string | Transform name |
-| `version` | string | Transform version |
-| `description` | string | Human-readable description |
+| Attribute | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `name` | string | struct name (lowercase) | Transform identifier |
+| `version` | string | "0.0.1" | Semantic version |
+| `description` | string | - | Human-readable description |
 
 ## Configuration Validation
 

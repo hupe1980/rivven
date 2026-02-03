@@ -35,8 +35,11 @@ pub enum Error {
     #[error("All servers unavailable")]
     AllServersUnavailable,
 
+    #[error("Request timeout")]
+    Timeout,
+
     #[error("Timeout: {0}")]
-    Timeout(String),
+    TimeoutWithMessage(String),
 
     #[error("{0}")]
     Other(String),
@@ -79,8 +82,9 @@ mod tests {
             Error::AllServersUnavailable.to_string(),
             "All servers unavailable"
         );
+        assert_eq!(Error::Timeout.to_string(), "Request timeout");
         assert_eq!(
-            Error::Timeout("connect".to_string()).to_string(),
+            Error::TimeoutWithMessage("connect".to_string()).to_string(),
             "Timeout: connect"
         );
         assert_eq!(

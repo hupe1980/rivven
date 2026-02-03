@@ -397,6 +397,10 @@ impl Client {
     }
 
     /// Consume messages from a topic partition
+    ///
+    /// Uses read_uncommitted isolation level (default).
+    /// For transactional consumers that should not see aborted transaction messages,
+    /// use [`Self::consume_with_isolation`] with `isolation_level = 1` (read_committed).
     pub async fn consume(
         &mut self,
         topic: impl Into<String>,
@@ -404,11 +408,43 @@ impl Client {
         offset: u64,
         max_messages: usize,
     ) -> Result<Vec<MessageData>> {
+        self.consume_with_isolation(topic, partition, offset, max_messages, None)
+            .await
+    }
+
+    /// Consume messages from a topic partition with specified isolation level
+    ///
+    /// # Arguments
+    /// * `topic` - Topic name
+    /// * `partition` - Partition number
+    /// * `offset` - Starting offset
+    /// * `max_messages` - Maximum messages to return
+    /// * `isolation_level` - Transaction isolation level:
+    ///   - `None` or `Some(0)` = read_uncommitted (default): Returns all messages
+    ///   - `Some(1)` = read_committed: Filters out messages from aborted transactions
+    ///
+    /// # Read Committed Isolation (KIP-98)
+    ///
+    /// When using `isolation_level = Some(1)` (read_committed), the consumer will:
+    /// - Not see messages from transactions that were aborted
+    /// - Not see control records (transaction markers)
+    /// - Only see committed transactional messages
+    ///
+    /// This is essential for exactly-once semantics (EOS) consumers.
+    pub async fn consume_with_isolation(
+        &mut self,
+        topic: impl Into<String>,
+        partition: u32,
+        offset: u64,
+        max_messages: usize,
+        isolation_level: Option<u8>,
+    ) -> Result<Vec<MessageData>> {
         let request = Request::Consume {
             topic: topic.into(),
             partition,
             offset,
             max_messages,
+            isolation_level,
         };
 
         let response = self.send_request(request).await?;
@@ -418,6 +454,23 @@ impl Client {
             Response::Error { message } => Err(Error::ServerError(message)),
             _ => Err(Error::InvalidResponse),
         }
+    }
+
+    /// Consume messages with read_committed isolation level
+    ///
+    /// This is a convenience method for transactional consumers that should
+    /// only see committed messages. Messages from aborted transactions are filtered out.
+    ///
+    /// Equivalent to calling [`Self::consume_with_isolation`] with `isolation_level = Some(1)`.
+    pub async fn consume_read_committed(
+        &mut self,
+        topic: impl Into<String>,
+        partition: u32,
+        offset: u64,
+        max_messages: usize,
+    ) -> Result<Vec<MessageData>> {
+        self.consume_with_isolation(topic, partition, offset, max_messages, Some(1))
+            .await
     }
 
     /// Create a new topic
@@ -562,39 +615,18 @@ impl Client {
         }
     }
 
-    /// Register a schema
-    pub async fn register_schema(
-        &mut self,
-        subject: impl Into<String>,
-        schema: impl Into<String>,
-    ) -> Result<i32> {
-        let request = Request::RegisterSchema {
-            subject: subject.into(),
-            schema: schema.into(),
-        };
-
-        let response = self.send_request(request).await?;
-
-        match response {
-            Response::SchemaRegistered { id } => Ok(id),
-            Response::Error { message } => Err(Error::ServerError(message)),
-            _ => Err(Error::InvalidResponse),
-        }
-    }
-
-    /// Get a schema
-    pub async fn get_schema(&mut self, id: i32) -> Result<String> {
-        let request = Request::GetSchema { id };
-
-        let response = self.send_request(request).await?;
-
-        match response {
-            Response::Schema { id: _, schema } => Ok(schema),
-            Response::Error { message } => Err(Error::ServerError(message)),
-            _ => Err(Error::InvalidResponse),
-        }
-    }
-
+    /// Register a schema (supports Avro, Protobuf, JSON Schema)
+    ///
+    /// # Arguments
+    /// * `subject` - The subject name (typically topic-name + "-key" or "-value")
+    /// * `schema_type` - The schema format (Avro, Protobuf, or Json)
+    /// * `schema` - The schema definition string
+    ///
+    /// # Returns
+    /// The global schema ID
+    ///
+    /// # Example
+    /// ```rust,ignore
     /// List all consumer groups
     pub async fn list_groups(&mut self) -> Result<Vec<String>> {
         let request = Request::ListGroups;
@@ -671,7 +703,571 @@ impl Client {
             _ => Err(Error::InvalidResponse),
         }
     }
+
+    // ========================================================================
+    // Admin API (Kafka KIP-195/KIP-226 Parity)
+    // ========================================================================
+
+    /// Describe topic configurations
+    ///
+    /// Returns the current configuration for the specified topics.
+    ///
+    /// # Arguments
+    /// * `topics` - Topics to describe (empty slice = all topics)
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use rivven_client::Client;
+    /// # async fn example() -> rivven_client::Result<()> {
+    /// let mut client = Client::connect("127.0.0.1:9092").await?;
+    /// let configs = client.describe_topic_configs(&["orders", "events"]).await?;
+    /// for (topic, config) in configs {
+    ///     println!("{}: {:?}", topic, config);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn describe_topic_configs(
+        &mut self,
+        topics: &[&str],
+    ) -> Result<std::collections::HashMap<String, std::collections::HashMap<String, String>>> {
+        let request = Request::DescribeTopicConfigs {
+            topics: topics.iter().map(|s| s.to_string()).collect(),
+        };
+
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::TopicConfigsDescribed { configs } => {
+                let mut result = std::collections::HashMap::new();
+                for desc in configs {
+                    let mut topic_configs = std::collections::HashMap::new();
+                    for (key, value) in desc.configs {
+                        topic_configs.insert(key, value.value);
+                    }
+                    result.insert(desc.topic, topic_configs);
+                }
+                Ok(result)
+            }
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
+    /// Alter topic configuration
+    ///
+    /// Modifies configuration for an existing topic. Pass `None` as value to reset
+    /// a configuration key to its default.
+    ///
+    /// # Arguments
+    /// * `topic` - Topic name
+    /// * `configs` - Configuration changes: (key, value) pairs. Use `None` to reset to default.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use rivven_client::Client;
+    /// # async fn example() -> rivven_client::Result<()> {
+    /// let mut client = Client::connect("127.0.0.1:9092").await?;
+    /// let result = client.alter_topic_config("orders", &[
+    ///     ("retention.ms", Some("86400000")),  // 1 day retention
+    ///     ("cleanup.policy", Some("compact")), // Enable compaction
+    /// ]).await?;
+    /// println!("Changed {} configs", result.changed_count);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn alter_topic_config(
+        &mut self,
+        topic: impl Into<String>,
+        configs: &[(&str, Option<&str>)],
+    ) -> Result<AlterTopicConfigResult> {
+        use rivven_protocol::TopicConfigEntry;
+
+        let request = Request::AlterTopicConfig {
+            topic: topic.into(),
+            configs: configs
+                .iter()
+                .map(|(k, v)| TopicConfigEntry {
+                    key: k.to_string(),
+                    value: v.map(|s| s.to_string()),
+                })
+                .collect(),
+        };
+
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::TopicConfigAltered {
+                topic,
+                changed_count,
+            } => Ok(AlterTopicConfigResult {
+                topic,
+                changed_count,
+            }),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
+    /// Create additional partitions for an existing topic
+    ///
+    /// Increases the partition count for a topic. The new partition count
+    /// must be greater than the current count (you cannot reduce partitions).
+    ///
+    /// # Arguments
+    /// * `topic` - Topic name
+    /// * `new_partition_count` - New total partition count
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use rivven_client::Client;
+    /// # async fn example() -> rivven_client::Result<()> {
+    /// let mut client = Client::connect("127.0.0.1:9092").await?;
+    /// // Increase from 3 to 6 partitions
+    /// let new_count = client.create_partitions("orders", 6).await?;
+    /// println!("Topic now has {} partitions", new_count);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn create_partitions(
+        &mut self,
+        topic: impl Into<String>,
+        new_partition_count: u32,
+    ) -> Result<u32> {
+        let request = Request::CreatePartitions {
+            topic: topic.into(),
+            new_partition_count,
+            assignments: vec![], // Let broker auto-assign
+        };
+
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::PartitionsCreated {
+                new_partition_count,
+                ..
+            } => Ok(new_partition_count),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
+    /// Delete records before a given offset (log truncation)
+    ///
+    /// Removes all records with offsets less than the specified offset for each
+    /// partition. This is useful for freeing up disk space or removing old data.
+    ///
+    /// # Arguments
+    /// * `topic` - Topic name
+    /// * `partition_offsets` - List of (partition, before_offset) pairs
+    ///
+    /// # Returns
+    /// A list of results indicating the new low watermark for each partition.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use rivven_client::Client;
+    /// # async fn example() -> rivven_client::Result<()> {
+    /// let mut client = Client::connect("127.0.0.1:9092").await?;
+    /// // Delete records before offset 1000 on partitions 0, 1, 2
+    /// let results = client.delete_records("orders", &[
+    ///     (0, 1000),
+    ///     (1, 1000),
+    ///     (2, 1000),
+    /// ]).await?;
+    /// for r in results {
+    ///     println!("Partition {}: low watermark now {}", r.partition, r.low_watermark);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn delete_records(
+        &mut self,
+        topic: impl Into<String>,
+        partition_offsets: &[(u32, u64)],
+    ) -> Result<Vec<DeleteRecordsResult>> {
+        let request = Request::DeleteRecords {
+            topic: topic.into(),
+            partition_offsets: partition_offsets.to_vec(),
+        };
+
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::RecordsDeleted { results, .. } => Ok(results),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
+    // =========================================================================
+    // Idempotent Producer API (KIP-98)
+    // =========================================================================
+
+    /// Initialize an idempotent producer
+    ///
+    /// Returns a producer ID and epoch that should be used for all subsequent
+    /// idempotent publish operations. The broker uses these to detect and
+    /// deduplicate messages in case of retries.
+    ///
+    /// # Arguments
+    /// * `previous_producer_id` - If reconnecting, pass the previous producer_id
+    ///   to bump the epoch (prevents zombie producers)
+    ///
+    /// # Returns
+    /// `ProducerState` containing the producer_id and producer_epoch
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use rivven_client::Client;
+    /// # async fn example() -> rivven_client::Result<()> {
+    /// let mut client = Client::connect("127.0.0.1:9092").await?;
+    /// let producer = client.init_producer_id(None).await?;
+    /// println!("Producer ID: {}, Epoch: {}", producer.producer_id, producer.producer_epoch);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn init_producer_id(
+        &mut self,
+        previous_producer_id: Option<u64>,
+    ) -> Result<ProducerState> {
+        let request = Request::InitProducerId {
+            producer_id: previous_producer_id,
+        };
+
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::ProducerIdInitialized {
+                producer_id,
+                producer_epoch,
+            } => Ok(ProducerState {
+                producer_id,
+                producer_epoch,
+                next_sequence: 0,
+            }),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
+    /// Publish a message with idempotent semantics
+    ///
+    /// Uses producer_id/epoch/sequence for exactly-once delivery. The broker
+    /// deduplicates messages based on these values, making retries safe.
+    ///
+    /// # Arguments
+    /// * `topic` - Topic to publish to
+    /// * `key` - Optional message key (used for partitioning)
+    /// * `value` - Message payload
+    /// * `producer` - Producer state from `init_producer_id`
+    ///
+    /// # Returns
+    /// Tuple of (offset, partition, was_duplicate)
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use rivven_client::Client;
+    /// # async fn example() -> rivven_client::Result<()> {
+    /// let mut client = Client::connect("127.0.0.1:9092").await?;
+    /// let mut producer = client.init_producer_id(None).await?;
+    ///
+    /// let (offset, partition, duplicate) = client
+    ///     .publish_idempotent("orders", None::<Vec<u8>>, b"order-1".to_vec(), &mut producer)
+    ///     .await?;
+    ///
+    /// println!("Published to partition {} at offset {}", partition, offset);
+    /// if duplicate {
+    ///     println!("(This was a retry - message already existed)");
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn publish_idempotent(
+        &mut self,
+        topic: impl Into<String>,
+        key: Option<impl Into<Bytes>>,
+        value: impl Into<Bytes>,
+        producer: &mut ProducerState,
+    ) -> Result<(u64, u32, bool)> {
+        let sequence = producer.next_sequence;
+        producer.next_sequence += 1;
+
+        let request = Request::IdempotentPublish {
+            topic: topic.into(),
+            partition: None,
+            key: key.map(|k| k.into()),
+            value: value.into(),
+            producer_id: producer.producer_id,
+            producer_epoch: producer.producer_epoch,
+            sequence,
+        };
+
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::IdempotentPublished {
+                offset,
+                partition,
+                duplicate,
+            } => Ok((offset, partition, duplicate)),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
+    // =========================================================================
+    // Transaction API (KIP-98 Transactions)
+    // =========================================================================
+
+    /// Begin a new transaction
+    ///
+    /// Starts a transaction that can span multiple topics and partitions.
+    /// All writes within the transaction are atomic - they either all succeed
+    /// or all fail together.
+    ///
+    /// # Arguments
+    /// * `txn_id` - Unique transaction identifier (should be stable per producer)
+    /// * `producer` - Producer state from `init_producer_id`
+    /// * `timeout_ms` - Optional transaction timeout (defaults to 60s)
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use rivven_client::Client;
+    /// # async fn example() -> rivven_client::Result<()> {
+    /// let mut client = Client::connect("127.0.0.1:9092").await?;
+    /// let producer = client.init_producer_id(None).await?;
+    ///
+    /// // Start a transaction
+    /// client.begin_transaction("txn-1", &producer, None).await?;
+    /// // ... publish messages ...
+    /// client.commit_transaction("txn-1", &producer).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn begin_transaction(
+        &mut self,
+        txn_id: impl Into<String>,
+        producer: &ProducerState,
+        timeout_ms: Option<u64>,
+    ) -> Result<()> {
+        let request = Request::BeginTransaction {
+            txn_id: txn_id.into(),
+            producer_id: producer.producer_id,
+            producer_epoch: producer.producer_epoch,
+            timeout_ms,
+        };
+
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::TransactionStarted { .. } => Ok(()),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
+    /// Add partitions to an active transaction
+    ///
+    /// Registers partitions that will be written to within the transaction.
+    /// This must be called before publishing to a new partition.
+    ///
+    /// # Arguments
+    /// * `txn_id` - Transaction identifier
+    /// * `producer` - Producer state
+    /// * `partitions` - List of (topic, partition) pairs to add
+    pub async fn add_partitions_to_txn(
+        &mut self,
+        txn_id: impl Into<String>,
+        producer: &ProducerState,
+        partitions: &[(&str, u32)],
+    ) -> Result<usize> {
+        let request = Request::AddPartitionsToTxn {
+            txn_id: txn_id.into(),
+            producer_id: producer.producer_id,
+            producer_epoch: producer.producer_epoch,
+            partitions: partitions
+                .iter()
+                .map(|(t, p)| (t.to_string(), *p))
+                .collect(),
+        };
+
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::PartitionsAddedToTxn {
+                partition_count, ..
+            } => Ok(partition_count),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
+    /// Publish a message within a transaction
+    ///
+    /// Like `publish_idempotent`, but the message is only visible to consumers
+    /// after the transaction is committed.
+    ///
+    /// # Arguments
+    /// * `txn_id` - Transaction identifier
+    /// * `topic` - Topic to publish to
+    /// * `key` - Optional message key
+    /// * `value` - Message payload
+    /// * `producer` - Producer state with sequence tracking
+    ///
+    /// # Returns
+    /// Tuple of (offset, partition, sequence) - offset is pending until commit
+    pub async fn publish_transactional(
+        &mut self,
+        txn_id: impl Into<String>,
+        topic: impl Into<String>,
+        key: Option<impl Into<Bytes>>,
+        value: impl Into<Bytes>,
+        producer: &mut ProducerState,
+    ) -> Result<(u64, u32, i32)> {
+        let sequence = producer.next_sequence;
+        producer.next_sequence += 1;
+
+        let request = Request::TransactionalPublish {
+            txn_id: txn_id.into(),
+            topic: topic.into(),
+            partition: None,
+            key: key.map(|k| k.into()),
+            value: value.into(),
+            producer_id: producer.producer_id,
+            producer_epoch: producer.producer_epoch,
+            sequence,
+        };
+
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::TransactionalPublished {
+                offset,
+                partition,
+                sequence,
+            } => Ok((offset, partition, sequence)),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
+    /// Add consumer offsets to a transaction
+    ///
+    /// For exactly-once consume-transform-produce patterns: commits consumer
+    /// offsets atomically with the produced messages.
+    ///
+    /// # Arguments
+    /// * `txn_id` - Transaction identifier
+    /// * `producer` - Producer state
+    /// * `group_id` - Consumer group ID
+    /// * `offsets` - List of (topic, partition, offset) to commit
+    pub async fn add_offsets_to_txn(
+        &mut self,
+        txn_id: impl Into<String>,
+        producer: &ProducerState,
+        group_id: impl Into<String>,
+        offsets: &[(&str, u32, i64)],
+    ) -> Result<()> {
+        let request = Request::AddOffsetsToTxn {
+            txn_id: txn_id.into(),
+            producer_id: producer.producer_id,
+            producer_epoch: producer.producer_epoch,
+            group_id: group_id.into(),
+            offsets: offsets
+                .iter()
+                .map(|(t, p, o)| (t.to_string(), *p, *o))
+                .collect(),
+        };
+
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::OffsetsAddedToTxn { .. } => Ok(()),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
+    /// Commit a transaction
+    ///
+    /// Makes all writes in the transaction visible to consumers atomically.
+    /// If this fails, the transaction should be aborted.
+    ///
+    /// # Arguments
+    /// * `txn_id` - Transaction identifier
+    /// * `producer` - Producer state
+    pub async fn commit_transaction(
+        &mut self,
+        txn_id: impl Into<String>,
+        producer: &ProducerState,
+    ) -> Result<()> {
+        let request = Request::CommitTransaction {
+            txn_id: txn_id.into(),
+            producer_id: producer.producer_id,
+            producer_epoch: producer.producer_epoch,
+        };
+
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::TransactionCommitted { .. } => Ok(()),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
+    /// Abort a transaction
+    ///
+    /// Discards all writes in the transaction. Call this if any write fails
+    /// or if you need to cancel the transaction.
+    ///
+    /// # Arguments
+    /// * `txn_id` - Transaction identifier
+    /// * `producer` - Producer state
+    pub async fn abort_transaction(
+        &mut self,
+        txn_id: impl Into<String>,
+        producer: &ProducerState,
+    ) -> Result<()> {
+        let request = Request::AbortTransaction {
+            txn_id: txn_id.into(),
+            producer_id: producer.producer_id,
+            producer_epoch: producer.producer_epoch,
+        };
+
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::TransactionAborted { .. } => Ok(()),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
 }
+
+/// State for an idempotent/transactional producer
+#[derive(Debug, Clone)]
+pub struct ProducerState {
+    /// Producer ID assigned by the broker
+    pub producer_id: u64,
+    /// Current epoch (increments on reconnect)
+    pub producer_epoch: u16,
+    /// Next sequence number to use (per-producer, not per-partition)
+    pub next_sequence: i32,
+}
+
+/// Result of altering topic configuration
+#[derive(Debug, Clone)]
+pub struct AlterTopicConfigResult {
+    /// Topic name
+    pub topic: String,
+    /// Number of configurations changed
+    pub changed_count: usize,
+}
+
+/// Result of deleting records from a partition
+pub use rivven_protocol::DeleteRecordsResult;
 
 // ============================================================================
 // Authentication Session

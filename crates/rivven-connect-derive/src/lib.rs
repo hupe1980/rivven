@@ -6,10 +6,17 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use rivven_connect_derive::{Source, Sink, connector_spec};
+//! use rivven_connect_derive::{SourceConfig, SinkConfig, connector_spec};
 //!
-//! #[derive(Debug, Deserialize, Validate, JsonSchema, Source)]
-//! #[source(name = "my-source", version = "1.0.0")]
+//! #[derive(Debug, Deserialize, Validate, JsonSchema, SourceConfig)]
+//! #[source(
+//!     name = "my-source",
+//!     version = "1.0.0",
+//!     description = "Custom data source",
+//!     author = "Rivven Team",
+//!     license = "Apache-2.0",
+//!     documentation_url = "https://rivven.dev/docs/connectors/my-source"
+//! )]
 //! pub struct MySourceConfig {
 //!     #[validate(url)]
 //!     pub endpoint: String,
@@ -17,8 +24,13 @@
 //!     pub batch_size: usize,
 //! }
 //!
-//! #[derive(Debug, Deserialize, Validate, JsonSchema, Sink)]
-//! #[sink(name = "my-sink", version = "1.0.0")]
+//! #[derive(Debug, Deserialize, Validate, JsonSchema, SinkConfig)]
+//! #[sink(
+//!     name = "my-sink",
+//!     version = "1.0.0",
+//!     batching,
+//!     batch_size = 1000
+//! )]
 //! pub struct MySinkConfig {
 //!     pub bucket: String,
 //! }
@@ -46,6 +58,12 @@ struct SourceAttrs {
     /// Description of the connector
     #[darling(default)]
     description: Option<String>,
+    /// Author or maintainer
+    #[darling(default)]
+    author: Option<String>,
+    /// License identifier (e.g., "Apache-2.0")
+    #[darling(default)]
+    license: Option<String>,
     /// Documentation URL
     #[darling(default)]
     documentation_url: Option<String>,
@@ -77,6 +95,12 @@ struct SinkAttrs {
     /// Description of the connector
     #[darling(default)]
     description: Option<String>,
+    /// Author or maintainer
+    #[darling(default)]
+    author: Option<String>,
+    /// License identifier (e.g., "Apache-2.0")
+    #[darling(default)]
+    license: Option<String>,
     /// Documentation URL
     #[darling(default)]
     documentation_url: Option<String>,
@@ -106,13 +130,16 @@ struct TransformAttrs {
 
 /// Derive macro for implementing SourceConfig boilerplate
 ///
-/// This macro generates the `spec()` method for a source connector configuration.
+/// This macro generates a `*Spec` struct with `spec()`, `name()`, and `version()` methods.
+/// The generated spec includes config schema derived from the struct's JsonSchema implementation.
 ///
 /// # Attributes
 ///
-/// - `#[source(name = "...")]` - Connector name (required)
-/// - `#[source(version = "...")]` - Connector version (default: "0.0.1")
+/// - `#[source(name = "...")]` - Connector name (defaults to struct name without "Config")
+/// - `#[source(version = "...")]` - Connector version (default: env!("CARGO_PKG_VERSION") or "0.0.1")
 /// - `#[source(description = "...")]` - Connector description
+/// - `#[source(author = "...")]` - Author or maintainer
+/// - `#[source(license = "...")]` - License identifier (e.g., "Apache-2.0")
 /// - `#[source(documentation_url = "...")]` - Documentation URL
 /// - `#[source(incremental)]` - Enable incremental sync support
 ///
@@ -120,7 +147,14 @@ struct TransformAttrs {
 ///
 /// ```rust,ignore
 /// #[derive(Debug, Deserialize, Validate, JsonSchema, SourceConfig)]
-/// #[source(name = "postgres-cdc", version = "1.0.0", incremental)]
+/// #[source(
+///     name = "postgres-cdc",
+///     version = "1.0.0",
+///     description = "PostgreSQL CDC connector",
+///     author = "Rivven Team",
+///     license = "Apache-2.0",
+///     incremental
+/// )]
 /// pub struct PostgresCdcConfig {
 ///     pub connection_string: String,
 ///     pub slot_name: String,
@@ -143,14 +177,30 @@ pub fn derive_source_config(input: TokenStream) -> TokenStream {
         .unwrap_or_else(|| struct_name.to_string().to_lowercase().replace("config", ""));
     let version = attrs.version.unwrap_or_else(|| "0.0.1".to_string());
 
-    let description_code = match attrs.description {
-        Some(desc) => quote! { .with_description(#desc) },
+    let description_code = match &attrs.description {
+        Some(desc) => quote! { .description(#desc) },
         None => quote! {},
     };
 
-    let doc_url_code = match attrs.documentation_url {
-        Some(url) => quote! { .with_documentation_url(#url) },
+    let author_code = match &attrs.author {
+        Some(author) => quote! { .author(#author) },
         None => quote! {},
+    };
+
+    let license_code = match &attrs.license {
+        Some(license) => quote! { .license(#license) },
+        None => quote! {},
+    };
+
+    let doc_url_code = match &attrs.documentation_url {
+        Some(url) => quote! { .documentation_url(#url) },
+        None => quote! {},
+    };
+
+    let incremental_code = if attrs.incremental {
+        quote! { .incremental(true) }
+    } else {
+        quote! {}
     };
 
     let expanded = quote! {
@@ -158,11 +208,15 @@ pub fn derive_source_config(input: TokenStream) -> TokenStream {
         pub struct #spec_struct_name;
 
         impl #spec_struct_name {
-            /// Returns the connector specification
+            /// Returns the connector specification with config schema
             pub fn spec() -> rivven_connect::ConnectorSpec {
-                rivven_connect::ConnectorSpec::new(#name, #version)
+                rivven_connect::ConnectorSpec::builder(#name, #version)
                     #description_code
+                    #author_code
+                    #license_code
                     #doc_url_code
+                    #incremental_code
+                    .config_schema::<#struct_name>()
                     .build()
             }
 
@@ -183,22 +237,34 @@ pub fn derive_source_config(input: TokenStream) -> TokenStream {
 
 /// Derive macro for implementing SinkConfig boilerplate
 ///
-/// This macro generates the `spec()` method for a sink connector configuration.
+/// This macro generates a `*Spec` struct with `spec()`, `name()`, `version()`, and optionally
+/// `batch_config()` methods. The generated spec includes config schema derived from the struct's
+/// JsonSchema implementation.
 ///
 /// # Attributes
 ///
-/// - `#[sink(name = "...")]` - Connector name (required)
+/// - `#[sink(name = "...")]` - Connector name (defaults to struct name without "Config")
 /// - `#[sink(version = "...")]` - Connector version (default: "0.0.1")
 /// - `#[sink(description = "...")]` - Connector description
+/// - `#[sink(author = "...")]` - Author or maintainer
+/// - `#[sink(license = "...")]` - License identifier (e.g., "Apache-2.0")
 /// - `#[sink(documentation_url = "...")]` - Documentation URL
-/// - `#[sink(batching)]` - Enable batching support
-/// - `#[sink(batch_size = N)]` - Default batch size
+/// - `#[sink(batching)]` - Enable batching support (generates batch_config() method)
+/// - `#[sink(batch_size = N)]` - Default batch size (default: 10000)
 ///
 /// # Example
 ///
 /// ```rust,ignore
 /// #[derive(Debug, Deserialize, Validate, JsonSchema, SinkConfig)]
-/// #[sink(name = "s3-sink", version = "1.0.0", batching, batch_size = 1000)]
+/// #[sink(
+///     name = "s3-sink",
+///     version = "1.0.0",
+///     description = "Amazon S3 storage sink",
+///     author = "Rivven Team",
+///     license = "Apache-2.0",
+///     batching,
+///     batch_size = 1000
+/// )]
 /// pub struct S3SinkConfig {
 ///     pub bucket: String,
 ///     pub prefix: Option<String>,
@@ -221,13 +287,23 @@ pub fn derive_sink_config(input: TokenStream) -> TokenStream {
         .unwrap_or_else(|| struct_name.to_string().to_lowercase().replace("config", ""));
     let version = attrs.version.unwrap_or_else(|| "0.0.1".to_string());
 
-    let description_code = match attrs.description {
-        Some(desc) => quote! { .with_description(#desc) },
+    let description_code = match &attrs.description {
+        Some(desc) => quote! { .description(#desc) },
         None => quote! {},
     };
 
-    let doc_url_code = match attrs.documentation_url {
-        Some(url) => quote! { .with_documentation_url(#url) },
+    let author_code = match &attrs.author {
+        Some(author) => quote! { .author(#author) },
+        None => quote! {},
+    };
+
+    let license_code = match &attrs.license {
+        Some(license) => quote! { .license(#license) },
+        None => quote! {},
+    };
+
+    let doc_url_code = match &attrs.documentation_url {
+        Some(url) => quote! { .documentation_url(#url) },
         None => quote! {},
     };
 
@@ -251,11 +327,14 @@ pub fn derive_sink_config(input: TokenStream) -> TokenStream {
         pub struct #spec_struct_name;
 
         impl #spec_struct_name {
-            /// Returns the connector specification
+            /// Returns the connector specification with config schema
             pub fn spec() -> rivven_connect::ConnectorSpec {
-                rivven_connect::ConnectorSpec::new(#name, #version)
+                rivven_connect::ConnectorSpec::builder(#name, #version)
                     #description_code
+                    #author_code
+                    #license_code
                     #doc_url_code
+                    .config_schema::<#struct_name>()
                     .build()
             }
 

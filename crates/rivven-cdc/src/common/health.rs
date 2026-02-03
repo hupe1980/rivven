@@ -174,7 +174,7 @@ struct MonitorState {
     consecutive_successes: AtomicU64,
     last_healthy: RwLock<Option<Instant>>,
     check_results: RwLock<HashMap<String, CheckStatus>>,
-    #[allow(dead_code)] // Reserved for recovery coordinator integration
+    /// Tracks whether automatic recovery is in progress
     recovery_in_progress: AtomicBool,
 }
 
@@ -347,6 +347,56 @@ impl HealthMonitor {
     pub fn mark_disconnected(&self) {
         self.state.healthy.store(false, Ordering::Relaxed);
         warn!("System marked as disconnected");
+    }
+
+    /// Check if automatic recovery is currently in progress.
+    pub fn is_recovery_in_progress(&self) -> bool {
+        self.state.recovery_in_progress.load(Ordering::Relaxed)
+    }
+
+    /// Mark that automatic recovery has started.
+    ///
+    /// Returns false if recovery was already in progress.
+    pub fn start_recovery(&self) -> bool {
+        self.state
+            .recovery_in_progress
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    /// Mark that automatic recovery has completed.
+    pub fn end_recovery(&self, success: bool) {
+        self.state
+            .recovery_in_progress
+            .store(false, Ordering::Release);
+        if success {
+            self.mark_connected();
+            info!("Recovery completed successfully");
+        } else {
+            warn!("Recovery attempt failed");
+        }
+    }
+
+    /// Attempt automatic recovery with exponential backoff.
+    ///
+    /// Uses the provided recovery function and integrates with RecoveryCoordinator.
+    pub async fn attempt_recovery<F, Fut>(
+        &self,
+        coordinator: &RecoveryCoordinator,
+        recover_fn: F,
+    ) -> bool
+    where
+        F: Fn() -> Fut,
+        Fut: Future<Output = bool>,
+    {
+        if !self.start_recovery() {
+            debug!("Recovery already in progress, skipping");
+            return false;
+        }
+
+        let success = coordinator.recover(&recover_fn).await;
+        self.end_recovery(success);
+        success
     }
 
     /// Spawn background health check task.

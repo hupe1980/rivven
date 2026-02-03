@@ -86,23 +86,23 @@ pub enum Request {
 
     /// Authenticate with SASL bytes (for Kafka client compatibility)
     SaslAuthenticate {
-        #[serde(with = "rivven_core::serde_utils::bytes_serde")]
+        #[serde(with = "crate::serde_utils::bytes_serde")]
         mechanism: Bytes,
-        #[serde(with = "rivven_core::serde_utils::bytes_serde")]
+        #[serde(with = "crate::serde_utils::bytes_serde")]
         auth_bytes: Bytes,
     },
 
     /// SCRAM-SHA-256: Client-first message
     ScramClientFirst {
         /// Client-first-message bytes (`n,,n=<user>,r=<nonce>`)
-        #[serde(with = "rivven_core::serde_utils::bytes_serde")]
+        #[serde(with = "crate::serde_utils::bytes_serde")]
         message: Bytes,
     },
 
     /// SCRAM-SHA-256: Client-final message
     ScramClientFinal {
         /// Client-final-message bytes (`c=<binding>,r=<nonce>,p=<proof>`)
-        #[serde(with = "rivven_core::serde_utils::bytes_serde")]
+        #[serde(with = "crate::serde_utils::bytes_serde")]
         message: Bytes,
     },
 
@@ -110,9 +110,9 @@ pub enum Request {
     Publish {
         topic: String,
         partition: Option<u32>,
-        #[serde(with = "rivven_core::serde_utils::option_bytes_serde")]
+        #[serde(with = "crate::serde_utils::option_bytes_serde")]
         key: Option<Bytes>,
-        #[serde(with = "rivven_core::serde_utils::bytes_serde")]
+        #[serde(with = "crate::serde_utils::bytes_serde")]
         value: Bytes,
     },
 
@@ -122,6 +122,12 @@ pub enum Request {
         partition: u32,
         offset: u64,
         max_messages: usize,
+        /// Isolation level for transactional reads (KIP-98)
+        /// None = read_uncommitted (default, backward compatible)
+        /// Some(0) = read_uncommitted
+        /// Some(1) = read_committed (filters aborted transaction messages)
+        #[serde(default)]
+        isolation_level: Option<u8>,
     },
 
     /// Create a new topic
@@ -163,12 +169,6 @@ pub enum Request {
     /// Ping
     Ping,
 
-    /// Register a schema
-    RegisterSchema { subject: String, schema: String },
-
-    /// Get a schema
-    GetSchema { id: i32 },
-
     /// Get offset bounds for a partition
     GetOffsetBounds { topic: String, partition: u32 },
 
@@ -207,9 +207,9 @@ pub enum Request {
     IdempotentPublish {
         topic: String,
         partition: Option<u32>,
-        #[serde(with = "rivven_core::serde_utils::option_bytes_serde")]
+        #[serde(with = "crate::serde_utils::option_bytes_serde")]
         key: Option<Bytes>,
-        #[serde(with = "rivven_core::serde_utils::bytes_serde")]
+        #[serde(with = "crate::serde_utils::bytes_serde")]
         value: Bytes,
         /// Producer ID from InitProducerId response
         producer_id: u64,
@@ -252,9 +252,9 @@ pub enum Request {
         txn_id: String,
         topic: String,
         partition: Option<u32>,
-        #[serde(with = "rivven_core::serde_utils::option_bytes_serde")]
+        #[serde(with = "crate::serde_utils::option_bytes_serde")]
         key: Option<Bytes>,
-        #[serde(with = "rivven_core::serde_utils::bytes_serde")]
+        #[serde(with = "crate::serde_utils::bytes_serde")]
         value: Bytes,
         /// Producer ID
         producer_id: u64,
@@ -375,14 +375,14 @@ pub enum Response {
     /// SCRAM-SHA-256: Server-first message (challenge)
     ScramServerFirst {
         /// Server-first-message bytes (`r=<nonce>,s=<salt>,i=<iterations>`)
-        #[serde(with = "rivven_core::serde_utils::bytes_serde")]
+        #[serde(with = "crate::serde_utils::bytes_serde")]
         message: Bytes,
     },
 
     /// SCRAM-SHA-256: Server-final message (verification or error)
     ScramServerFinal {
         /// Server-final-message bytes (`v=<verifier>` or `e=<error>`)
-        #[serde(with = "rivven_core::serde_utils::bytes_serde")]
+        #[serde(with = "crate::serde_utils::bytes_serde")]
         message: Bytes,
         /// Session ID (if authentication succeeded)
         session_id: Option<String>,
@@ -423,12 +423,6 @@ pub enum Response {
         /// Topic metadata
         topics: Vec<TopicMetadata>,
     },
-
-    /// Schema registration result
-    SchemaRegistered { id: i32 },
-
-    /// Schema details
-    Schema { id: i32, schema: String },
 
     /// Pong
     Pong,

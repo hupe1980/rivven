@@ -1,11 +1,28 @@
 # rivven
 
-Command-line interface for Rivven event streaming platform.
+> Command-line interface for the Rivven event streaming platform.
+
+## Overview
+
+`rivven` provides a unified CLI for managing topics, producing/consuming messages, and administering clusters. Designed for both interactive use and scripting.
 
 ## Installation
 
 ```bash
 cargo install rivven
+```
+
+## Quick Start
+
+```bash
+# Create a topic
+rivven topic create my-topic --partitions 3
+
+# Produce messages
+rivven produce my-topic "Hello, Rivven!"
+
+# Consume messages
+rivven consume my-topic --from-beginning
 ```
 
 ## Commands
@@ -14,87 +31,82 @@ cargo install rivven
 
 ```bash
 # List topics
-rivven topic list --server localhost:9092
+rivven topic list
 
-# Create topic
-rivven topic create my-topic --partitions 3 --server localhost:9092
+# Create topic with partitions
+rivven topic create my-topic --partitions 3
+
+# Describe topic details
+rivven topic describe my-topic
 
 # Delete topic
-rivven topic delete my-topic --server localhost:9092
-
-# Describe topic
-rivven topic describe my-topic --server localhost:9092
+rivven topic delete my-topic
 ```
 
 ### Produce Messages
 
 ```bash
 # Produce from stdin
-echo '{"event": "test"}' | rivven produce my-topic --server localhost:9092
+echo '{"event": "test"}' | rivven produce my-topic
 
 # Produce with key
-rivven produce my-topic --key user-123 --value '{"action": "login"}' --server localhost:9092
+rivven produce my-topic --key user-123 --value '{"action": "login"}'
 
 # Produce from file
-rivven produce my-topic --file events.jsonl --server localhost:9092
+rivven produce my-topic --file events.jsonl
 ```
 
 ### Consume Messages
 
 ```bash
 # Consume from beginning
-rivven consume my-topic --from-beginning --server localhost:9092
+rivven consume my-topic --from-beginning
 
-# Consume with group
-rivven consume my-topic --group my-group --server localhost:9092
+# Consume with consumer group
+rivven consume my-topic --group my-group
 
-# Consume specific partition
-rivven consume my-topic --partition 0 --offset 100 --server localhost:9092
+# Consume specific partition/offset
+rivven consume my-topic --partition 0 --offset 100
 
 # Consume with limit
-rivven consume my-topic --max-messages 10 --server localhost:9092
+rivven consume my-topic --max-messages 10
 ```
 
 ### Cluster Operations
 
 ```bash
 # Cluster status
-rivven cluster status --server localhost:9092
+rivven cluster status
 
 # List brokers
-rivven cluster brokers --server localhost:9092
+rivven cluster brokers
 
 # Consumer groups
-rivven group list --server localhost:9092
-rivven group describe my-group --server localhost:9092
+rivven group list
+rivven group describe my-group
 ```
 
 ## Configuration
 
-Environment variables:
-- `RIVVEN_BOOTSTRAP_SERVERS` - Default bootstrap servers
-- `RIVVEN_TLS_ENABLED` - Enable TLS
-- `RIVVEN_TLS_CA_FILE` - CA certificate file
+| Variable | Description |
+|:---------|:------------|
+| `RIVVEN_BOOTSTRAP_SERVERS` | Default bootstrap servers |
+| `RIVVEN_TLS_ENABLED` | Enable TLS |
+| `RIVVEN_TLS_CA_FILE` | CA certificate file |
 
 ## Output Formats
 
 ```bash
-# JSON output
-rivven topic list --output json
-
-# Table output (default)
-rivven topic list --output table
-
-# Compact output
-rivven topic list --output compact
+rivven topic list --output json    # JSON output
+rivven topic list --output table   # Table output (default)
+rivven topic list --output compact # Compact output
 ```
 
-## Related Crates
+## Documentation
 
-- [`rivvend`](https://crates.io/crates/rivvend) - Broker server daemon
-- [`rivven-client`](https://crates.io/crates/rivven-client) - Rust client library
-- [`rivven-connect`](https://crates.io/crates/rivven-connect) - Connector framework
+- [Getting Started](https://rivven.hupe1980.github.io/rivven/docs/getting-started)
+- [CLI Reference](https://rivven.hupe1980.github.io/rivven/docs/cli)
 
 ## License
 
-See root [LICENSE](../../LICENSE) file.
+Apache-2.0. See [LICENSE](../../LICENSE).

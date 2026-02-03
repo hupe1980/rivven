@@ -12,11 +12,6 @@
 //! - **Migration automation**: Trigger schema migrations in data warehouses
 //! - **Audit compliance**: Record who changed what and when
 //!
-//! ## Debezium Compatibility
-//!
-//! This implementation follows Debezium's schema change event format for
-//! compatibility with existing CDC pipelines.
-//!
 //! ## Usage
 //!
 //! ```ignore
@@ -37,6 +32,7 @@
 //! }
 //! ```
 
+use super::pattern::pattern_match;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -192,8 +188,8 @@ impl ColumnDefinition {
 
 /// Schema change event (DDL).
 ///
-/// This structure is designed to be compatible with Debezium's schema change
-/// event format while adding Rivven-specific enhancements.
+/// This structure represents a DDL change event with comprehensive
+/// metadata for downstream schema evolution handling.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SchemaChangeEvent {
     /// Source database type: "postgres", "mysql", "mariadb"
@@ -477,7 +473,7 @@ impl SchemaChangeConfig {
     pub fn is_table_excluded(&self, schema: &str, table: &str) -> bool {
         let full_name = format!("{}.{}", schema, table);
         for pattern in &self.exclude_tables {
-            if Self::glob_match(pattern, &full_name) || Self::glob_match(pattern, table) {
+            if pattern_match(pattern, &full_name) || pattern_match(pattern, table) {
                 return true;
             }
         }
@@ -487,43 +483,6 @@ impl SchemaChangeConfig {
     /// Check if a change type should be excluded.
     pub fn is_type_excluded(&self, change_type: SchemaChangeType) -> bool {
         self.exclude_types.contains(&change_type)
-    }
-
-    /// Simple glob matching (supports * and ?).
-    fn glob_match(pattern: &str, text: &str) -> bool {
-        let pattern_lower = pattern.to_lowercase();
-        let text_lower = text.to_lowercase();
-        Self::glob_match_impl(pattern_lower.as_bytes(), text_lower.as_bytes())
-    }
-
-    fn glob_match_impl(pattern: &[u8], text: &[u8]) -> bool {
-        let mut pi = 0;
-        let mut ti = 0;
-        let mut star_pi = usize::MAX;
-        let mut star_ti = usize::MAX;
-
-        while ti < text.len() {
-            if pi < pattern.len() && (pattern[pi] == b'?' || pattern[pi] == text[ti]) {
-                pi += 1;
-                ti += 1;
-            } else if pi < pattern.len() && pattern[pi] == b'*' {
-                star_pi = pi;
-                star_ti = ti;
-                pi += 1;
-            } else if star_pi != usize::MAX {
-                pi = star_pi + 1;
-                star_ti += 1;
-                ti = star_ti;
-            } else {
-                return false;
-            }
-        }
-
-        while pi < pattern.len() && pattern[pi] == b'*' {
-            pi += 1;
-        }
-
-        pi == pattern.len()
     }
 }
 
@@ -1171,20 +1130,6 @@ mod tests {
         assert!(config.is_type_excluded(SchemaChangeType::CreateIndex));
         assert!(config.is_type_excluded(SchemaChangeType::DropIndex));
         assert!(!config.is_type_excluded(SchemaChangeType::Create));
-    }
-
-    #[test]
-    fn test_glob_matching() {
-        assert!(SchemaChangeConfig::glob_match("temp_*", "temp_data"));
-        assert!(SchemaChangeConfig::glob_match("temp_*", "temp_"));
-        assert!(!SchemaChangeConfig::glob_match("temp_*", "temporary"));
-
-        assert!(SchemaChangeConfig::glob_match("*_log", "audit_log"));
-        assert!(SchemaChangeConfig::glob_match("user?", "users"));
-        assert!(!SchemaChangeConfig::glob_match("user?", "username"));
-
-        assert!(SchemaChangeConfig::glob_match("public.*", "public.users"));
-        assert!(SchemaChangeConfig::glob_match("*.users", "public.users"));
     }
 
     #[test]

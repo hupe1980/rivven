@@ -505,6 +505,18 @@ mod tests {
         Node::new(info)
     }
 
+    fn create_test_node_with_load(
+        id: &str,
+        rack: Option<&str>,
+        leader_count: u32,
+        replica_count: u32,
+    ) -> Node {
+        let mut node = create_test_node(id, rack);
+        node.partition_leader_count = leader_count;
+        node.partition_replica_count = replica_count;
+        node
+    }
+
     #[test]
     fn test_consistent_hash_placement() {
         let mut placer = PartitionPlacer::new(PlacementConfig::default());
@@ -577,5 +589,233 @@ mod tests {
         // RF=2 should succeed
         let replicas = placer.assign_partition("test", 0, 2).unwrap();
         assert_eq!(replicas.len(), 2);
+    }
+
+    // ========================================================================
+    // Round-Robin Placement Tests
+    // ========================================================================
+
+    #[test]
+    fn test_round_robin_placement() {
+        let config = PlacementConfig {
+            strategy: PlacementStrategy::RoundRobin,
+            rack_aware: false,
+            ..Default::default()
+        };
+        let mut placer = PartitionPlacer::new(config);
+
+        for i in 1..=4 {
+            placer.add_node(&create_test_node(&format!("node-{}", i), None));
+        }
+
+        // Partition 0 should start at node 0
+        let replicas0 = placer.assign_partition("test", 0, 2).unwrap();
+        assert_eq!(replicas0.len(), 2);
+
+        // Partition 1 should start at node 1
+        let replicas1 = placer.assign_partition("test", 1, 2).unwrap();
+        assert_eq!(replicas1.len(), 2);
+
+        // Different start positions (round-robin based on partition number)
+        assert_ne!(replicas0[0], replicas1[0]);
+    }
+
+    #[test]
+    fn test_round_robin_wraps_around() {
+        let config = PlacementConfig {
+            strategy: PlacementStrategy::RoundRobin,
+            rack_aware: false,
+            ..Default::default()
+        };
+        let mut placer = PartitionPlacer::new(config);
+
+        for i in 1..=3 {
+            placer.add_node(&create_test_node(&format!("node-{}", i), None));
+        }
+
+        // Partition 5 should wrap (5 % 3 = 2, so starts at index 2)
+        let replicas = placer.assign_partition("test", 5, 2).unwrap();
+        assert_eq!(replicas.len(), 2);
+    }
+
+    // ========================================================================
+    // Least-Loaded Placement Tests
+    // ========================================================================
+
+    #[test]
+    fn test_least_loaded_placement() {
+        let config = PlacementConfig {
+            strategy: PlacementStrategy::LeastLoaded,
+            rack_aware: false,
+            ..Default::default()
+        };
+        let mut placer = PartitionPlacer::new(config);
+
+        // Create nodes with different loads
+        let node1 = create_test_node_with_load("node-1", None, 10, 20);
+        let node2 = create_test_node_with_load("node-2", None, 1, 2);
+        let node3 = create_test_node_with_load("node-3", None, 5, 10);
+        let node4 = create_test_node_with_load("node-4", None, 0, 0);
+
+        placer.add_node(&node1);
+        placer.add_node(&node2);
+        placer.add_node(&node3);
+        placer.add_node(&node4);
+
+        // Should pick least loaded nodes
+        let replicas = placer.assign_partition("test", 0, 2).unwrap();
+        assert_eq!(replicas.len(), 2);
+
+        // node-4 (load=0) should be selected
+        assert!(replicas.contains(&"node-4".to_string()));
+        // node-2 (load=1*3+2=5) should be second
+        assert!(replicas.contains(&"node-2".to_string()));
+    }
+
+    #[test]
+    fn test_least_loaded_considers_leaders_heavier() {
+        let config = PlacementConfig {
+            strategy: PlacementStrategy::LeastLoaded,
+            rack_aware: false,
+            ..Default::default()
+        };
+        let mut placer = PartitionPlacer::new(config);
+
+        // Node with 2 leaders (load = 2*3 = 6) should be less preferred
+        // than node with 5 replicas (load = 5)
+        let node_more_leaders = create_test_node_with_load("node-a", None, 2, 0);
+        let node_more_replicas = create_test_node_with_load("node-b", None, 0, 5);
+        let node_balanced = create_test_node_with_load("node-c", None, 1, 2);
+
+        placer.add_node(&node_more_leaders);
+        placer.add_node(&node_more_replicas);
+        placer.add_node(&node_balanced);
+
+        let replicas = placer.assign_partition("test", 0, 2).unwrap();
+
+        // node-b (5 replicas = load 5) should be selected over node-a (2 leaders = load 6)
+        assert!(replicas.contains(&"node-b".to_string()));
+        assert!(replicas.contains(&"node-c".to_string())); // load = 3+2 = 5
+    }
+
+    // ========================================================================
+    // Node Removal and Reassignment Tests
+    // ========================================================================
+
+    #[test]
+    fn test_remove_node() {
+        let mut placer = PartitionPlacer::new(PlacementConfig::default());
+
+        placer.add_node(&create_test_node("node-1", Some("rack-1")));
+        placer.add_node(&create_test_node("node-2", Some("rack-2")));
+        placer.add_node(&create_test_node("node-3", Some("rack-3")));
+
+        assert_eq!(placer.nodes.len(), 3);
+
+        placer.remove_node(&"node-2".to_string());
+
+        assert_eq!(placer.nodes.len(), 2);
+        assert!(!placer.nodes.contains_key("node-2"));
+
+        // rack-2 should have no nodes
+        let rack2_nodes = placer.racks.get("rack-2").cloned().unwrap_or_default();
+        assert!(!rack2_nodes.contains(&"node-2".to_string()));
+    }
+
+    #[test]
+    fn test_calculate_reassignments() {
+        let mut placer = PartitionPlacer::new(PlacementConfig::default());
+
+        placer.add_node(&create_test_node("node-1", None));
+        placer.add_node(&create_test_node("node-2", None));
+        placer.add_node(&create_test_node("node-3", None));
+
+        // Create current assignments: topic "test" with partition 0 on node-1, node-2
+        let mut current_assignments: HashMap<String, Vec<Vec<String>>> = HashMap::new();
+        current_assignments.insert(
+            "test".to_string(),
+            vec![vec!["node-1".to_string(), "node-2".to_string()]],
+        );
+
+        // Remove node-2 - should need reassignment
+        placer.remove_node(&"node-2".to_string());
+
+        let removed_nodes = vec!["node-2".to_string()];
+        let reassignments =
+            placer.calculate_reassignments(&current_assignments, &[], &removed_nodes);
+
+        // Should have reassignment for topic "test"
+        assert!(reassignments.contains_key("test"));
+        // The partition 0 should be reassigned
+        let topic_reassignments = reassignments.get("test").unwrap();
+        assert!(!topic_reassignments.is_empty());
+    }
+
+    // ========================================================================
+    // Distribution Statistics Tests
+    // ========================================================================
+
+    #[test]
+    fn test_distribution_stats() {
+        let mut placer = PartitionPlacer::new(PlacementConfig::default());
+
+        let node1 = create_test_node_with_load("node-1", Some("rack-1"), 5, 10);
+        let node2 = create_test_node_with_load("node-2", Some("rack-1"), 3, 8);
+        let node3 = create_test_node_with_load("node-3", Some("rack-2"), 4, 12);
+
+        placer.add_node(&node1);
+        placer.add_node(&node2);
+        placer.add_node(&node3);
+
+        let stats = placer.get_distribution_stats();
+
+        assert_eq!(stats.node_count, 3);
+        assert_eq!(stats.rack_count, 2);
+        assert_eq!(stats.total_leaders, 12); // 5+3+4
+        assert_eq!(stats.total_replicas, 30); // 10+8+12
+        assert_eq!(stats.leader_min, 3);
+        assert_eq!(stats.leader_max, 5);
+        assert!((stats.leader_avg - 4.0).abs() < 0.01);
+    }
+
+    // ========================================================================
+    // Update Load Tests
+    // ========================================================================
+
+    #[test]
+    fn test_update_node_load() {
+        let mut placer = PartitionPlacer::new(PlacementConfig::default());
+
+        placer.add_node(&create_test_node("node-1", None));
+
+        // Update load
+        placer.update_node_load(&"node-1".to_string(), 10, 20);
+
+        let info = placer.nodes.get("node-1").unwrap();
+        assert_eq!(info.leader_count, 10);
+        assert_eq!(info.replica_count, 20);
+    }
+
+    // ========================================================================
+    // Placement Config Tests
+    // ========================================================================
+
+    #[test]
+    fn test_placement_config_defaults() {
+        let config = PlacementConfig::default();
+        assert_eq!(config.strategy, PlacementStrategy::ConsistentHash);
+        assert!(config.rack_aware);
+        assert_eq!(config.virtual_nodes, 150);
+        assert_eq!(config.max_partitions_per_node, 0);
+    }
+
+    #[test]
+    fn test_fxhash_deterministic() {
+        let hash1 = fxhash("test-key");
+        let hash2 = fxhash("test-key");
+        assert_eq!(hash1, hash2);
+
+        let hash3 = fxhash("different-key");
+        assert_ne!(hash1, hash3);
     }
 }

@@ -1,19 +1,26 @@
 use crate::metrics::{CoreMetrics, Timer};
-use crate::storage::LogManager;
+use crate::storage::{LogManager, TieredStorage};
 use crate::{Config, Message, Result};
+use bytes::Bytes;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// A single partition within a topic
 #[derive(Debug)]
 pub struct Partition {
+    /// Topic name (for tiered storage)
+    topic: String,
+
     /// Partition ID
     id: u32,
 
     /// Storage Manager
     log_manager: Arc<RwLock<LogManager>>,
+
+    /// Tiered storage (optional, for hot/warm/cold data tiering)
+    tiered_storage: Option<Arc<TieredStorage>>,
 
     /// Current offset (next offset to be assigned)
     /// Lock-free atomic for 5-10x throughput improvement
@@ -23,7 +30,22 @@ pub struct Partition {
 impl Partition {
     /// Create a new partition
     pub async fn new(config: &Config, topic: &str, id: u32) -> Result<Self> {
-        info!("Creating partition {} for topic {}", id, topic);
+        Self::new_with_tiered_storage(config, topic, id, None).await
+    }
+
+    /// Create a new partition with optional tiered storage
+    pub async fn new_with_tiered_storage(
+        config: &Config,
+        topic: &str,
+        id: u32,
+        tiered_storage: Option<Arc<TieredStorage>>,
+    ) -> Result<Self> {
+        info!(
+            "Creating partition {} for topic {} (tiered_storage: {})",
+            id,
+            topic,
+            tiered_storage.is_some()
+        );
         let base_dir = std::path::PathBuf::from(&config.data_dir);
         let log_manager = LogManager::new(base_dir, topic, id, config.max_segment_size).await?;
 
@@ -32,8 +54,10 @@ impl Partition {
         let next_offset = AtomicU64::new(recovered_offset);
 
         Ok(Self {
+            topic: topic.to_string(),
             id,
             log_manager: Arc::new(RwLock::new(log_manager)),
+            tiered_storage,
             next_offset,
         })
     }
@@ -41,6 +65,16 @@ impl Partition {
     /// Get the partition ID
     pub fn id(&self) -> u32 {
         self.id
+    }
+
+    /// Get the topic name
+    pub fn topic(&self) -> &str {
+        &self.topic
+    }
+
+    /// Check if tiered storage is enabled
+    pub fn has_tiered_storage(&self) -> bool {
+        self.tiered_storage.is_some()
     }
 
     /// Append a message to the partition
@@ -53,8 +87,26 @@ impl Partition {
 
         message.offset = offset;
 
-        let mut log = self.log_manager.write().await;
-        log.append(offset, message).await?;
+        // Write to log manager (primary storage)
+        {
+            let mut log = self.log_manager.write().await;
+            log.append(offset, message.clone()).await?;
+        }
+
+        // Also write to tiered storage if enabled
+        if let Some(tiered) = &self.tiered_storage {
+            let data = message.to_bytes()?;
+            if let Err(e) = tiered
+                .write(&self.topic, self.id, offset, offset + 1, Bytes::from(data))
+                .await
+            {
+                // Log warning but don't fail - log manager has the authoritative copy
+                warn!(
+                    "Failed to write to tiered storage: {} (data safe in log)",
+                    e
+                );
+            }
+        }
 
         // Record metrics
         CoreMetrics::increment_messages_appended();
@@ -124,13 +176,48 @@ impl Partition {
             .fetch_add(batch_size as u64, Ordering::SeqCst);
 
         let mut offsets = Vec::with_capacity(batch_size);
-        let mut log = self.log_manager.write().await;
+        let mut batch_data = Vec::new();
 
-        for (i, mut message) in messages.into_iter().enumerate() {
-            let offset = start_offset + i as u64;
-            message.offset = offset;
-            log.append(offset, message).await?;
-            offsets.push(offset);
+        // Write to log manager
+        {
+            let mut log = self.log_manager.write().await;
+            for (i, mut message) in messages.into_iter().enumerate() {
+                let offset = start_offset + i as u64;
+                message.offset = offset;
+
+                // Collect data for tiered storage
+                if self.tiered_storage.is_some() {
+                    if let Ok(data) = message.to_bytes() {
+                        batch_data.extend_from_slice(&data);
+                    }
+                }
+
+                log.append(offset, message).await?;
+                offsets.push(offset);
+            }
+        }
+
+        // Also write to tiered storage if enabled
+        if let Some(tiered) = &self.tiered_storage {
+            if !batch_data.is_empty() {
+                let end_offset = start_offset + batch_size as u64;
+                if let Err(e) = tiered
+                    .write(
+                        &self.topic,
+                        self.id,
+                        start_offset,
+                        end_offset,
+                        Bytes::from(batch_data),
+                    )
+                    .await
+                {
+                    // Log warning but don't fail - log manager has the authoritative copy
+                    warn!(
+                        "Failed to write batch to tiered storage: {} (data safe in log)",
+                        e
+                    );
+                }
+            }
         }
 
         // Record metrics
@@ -152,7 +239,14 @@ impl Partition {
     /// Flush partition data to disk ensuring durability
     pub async fn flush(&self) -> Result<()> {
         let log = self.log_manager.read().await;
-        log.flush().await
+        log.flush().await?;
+
+        // Also flush tiered storage hot tier if enabled
+        if let Some(tiered) = &self.tiered_storage {
+            tiered.flush_hot_tier(&self.topic, self.id).await?;
+        }
+
+        Ok(())
     }
 
     /// Find the first offset with timestamp >= target_timestamp (milliseconds since epoch)
@@ -160,6 +254,11 @@ impl Partition {
     pub async fn find_offset_for_timestamp(&self, target_timestamp: i64) -> Result<Option<u64>> {
         let log = self.log_manager.read().await;
         log.find_offset_for_timestamp(target_timestamp).await
+    }
+
+    /// Get tiered storage statistics for this partition
+    pub fn tiered_storage_stats(&self) -> Option<crate::storage::TieredStorageStatsSnapshot> {
+        self.tiered_storage.as_ref().map(|ts| ts.stats())
     }
 }
 

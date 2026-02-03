@@ -112,6 +112,11 @@ impl ConnectorTask {
         task
     }
 
+    /// Get the assigned node (if any)
+    pub fn assigned_node(&self) -> Option<&NodeId> {
+        self.assigned_node.as_ref()
+    }
+
     /// Check if task is assigned to a specific node
     pub fn is_assigned_to(&self, node: &NodeId) -> bool {
         self.assigned_node.as_ref() == Some(node)

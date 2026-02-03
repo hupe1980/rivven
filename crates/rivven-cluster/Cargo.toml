@@ -9,7 +9,7 @@ description = "Distributed clustering for Rivven - SWIM membership, Raft consens
 
 [features]
 default = ["raft", "swim", "metrics-prometheus", "compression"]
-raft = ["dep:openraft", "dep:rocksdb", "dep:reqwest"]
+raft = ["dep:openraft", "dep:redb", "dep:reqwest"]
 swim = []
 quic = ["dep:quinn", "dep:rustls", "dep:rustls-pemfile", "dep:rcgen", "dep:rustls-native-certs", "dep:sha2", "dep:hex", "dep:x509-parser"]
 full = ["raft", "swim", "metrics-prometheus", "compression", "quic"]
@@ -45,7 +45,7 @@ tokio-util = { version = "0.7", features = ["codec"] }
 
 # Raft consensus
 openraft = { version = "0.9", features = ["serde", "storage-v2"], optional = true }
-rocksdb = { version = "0.21", optional = true }
+redb = { version = "2.4", optional = true }
 reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json"], optional = true }
 
 # Consistent hashing
@@ -53,7 +53,7 @@ hashring = "0.3"
 
 # QUIC transport
 quinn = { version = "0.11", optional = true }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"], optional = true }
+rustls = { version = "0.23", optional = true }
 rustls-pemfile = { version = "2.1", optional = true }
 rcgen = { version = "0.13", optional = true }
 rustls-native-certs = { version = "0.7", optional = true }

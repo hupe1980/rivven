@@ -9,6 +9,8 @@
 //! - `Metrics` - Observability for connectors
 //! - `testing` - Mock sources/sinks for testing
 //! - `retry` - Retry utilities for resilient operations
+//! - `metadata` - Connector categorization and discovery
+//! - `inventory` - Scalable connector registry (300+ connectors)
 //!
 //! # Example
 //!
@@ -34,6 +36,8 @@ pub mod batch;
 pub mod catalog;
 pub mod circuit_breaker;
 pub mod event;
+pub mod inventory;
+pub mod metadata;
 pub mod metrics;
 pub mod registry;
 pub mod retry;
@@ -95,3 +99,11 @@ pub use testing::{
     assertions, events, MockSink, MockSinkConfig, MockSource, MockSourceConfig, MockTransform,
     TestHarness, TestResult,
 };
+
+// Re-export metadata types (for connector categorization)
+pub use metadata::{
+    ConnectorCategory, ConnectorMetadata, ConnectorMetadataBuilder, ConnectorType, SupportLevel,
+};
+
+// Re-export inventory types (for scalable connector management)
+pub use inventory::{ConnectorInventory, HasMetadata, SinkEntry, SourceEntry};

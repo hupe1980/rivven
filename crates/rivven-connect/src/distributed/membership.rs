@@ -140,7 +140,9 @@ pub enum MembershipEvent {
 }
 
 /// Connect cluster membership
-#[allow(dead_code)] // Part of distributed mode infrastructure
+///
+/// Full-featured membership manager using SWIM protocol concepts
+/// for distributed failure detection and membership tracking.
 pub struct ConnectMembership {
     /// Our node ID
     node_id: NodeId,
@@ -184,6 +186,11 @@ impl ConnectMembership {
     /// Get our node ID
     pub fn node_id(&self) -> &NodeId {
         &self.node_id
+    }
+
+    /// Get our address
+    pub fn address(&self) -> &str {
+        &self.address
     }
 
     /// Subscribe to membership events

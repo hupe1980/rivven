@@ -64,58 +64,125 @@ impl StorageTier {
 }
 
 /// Configuration for tiered storage
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TieredStorageConfig {
+    /// Enable tiered storage (default: false)
+    #[serde(default)]
+    pub enabled: bool,
     /// Maximum size of hot tier in bytes
+    #[serde(default = "default_hot_tier_max_bytes")]
     pub hot_tier_max_bytes: u64,
-    /// Maximum age of data in hot tier before demotion
-    pub hot_tier_max_age: Duration,
+    /// Maximum age of data in hot tier before demotion (seconds)
+    #[serde(default = "default_hot_tier_max_age_secs")]
+    pub hot_tier_max_age_secs: u64,
     /// Maximum size of warm tier in bytes
+    #[serde(default = "default_warm_tier_max_bytes")]
     pub warm_tier_max_bytes: u64,
-    /// Maximum age of data in warm tier before demotion  
-    pub warm_tier_max_age: Duration,
+    /// Maximum age of data in warm tier before demotion (seconds)
+    #[serde(default = "default_warm_tier_max_age_secs")]
+    pub warm_tier_max_age_secs: u64,
     /// Path for warm tier storage
-    pub warm_tier_path: PathBuf,
+    #[serde(default = "default_warm_tier_path")]
+    pub warm_tier_path: String,
     /// Cold storage backend configuration
+    #[serde(default)]
     pub cold_storage: ColdStorageConfig,
-    /// How often to run tier migration
-    pub migration_interval: Duration,
+    /// How often to run tier migration (seconds)
+    #[serde(default = "default_migration_interval_secs")]
+    pub migration_interval_secs: u64,
     /// Number of concurrent migration operations
+    #[serde(default = "default_migration_concurrency")]
     pub migration_concurrency: usize,
     /// Enable access-based promotion (promote frequently accessed cold data)
+    #[serde(default = "default_enable_promotion")]
     pub enable_promotion: bool,
     /// Access count threshold for promotion
+    #[serde(default = "default_promotion_threshold")]
     pub promotion_threshold: u64,
     /// Compaction threshold (ratio of dead bytes to total)
+    #[serde(default = "default_compaction_threshold")]
     pub compaction_threshold: f64,
+}
+
+fn default_hot_tier_max_bytes() -> u64 {
+    1024 * 1024 * 1024
+} // 1 GB
+fn default_hot_tier_max_age_secs() -> u64 {
+    3600
+} // 1 hour
+fn default_warm_tier_max_bytes() -> u64 {
+    100 * 1024 * 1024 * 1024
+} // 100 GB
+fn default_warm_tier_max_age_secs() -> u64 {
+    86400 * 7
+} // 7 days
+fn default_warm_tier_path() -> String {
+    "/var/lib/rivven/warm".to_string()
+}
+fn default_migration_interval_secs() -> u64 {
+    60
+}
+fn default_migration_concurrency() -> usize {
+    4
+}
+fn default_enable_promotion() -> bool {
+    true
+}
+fn default_promotion_threshold() -> u64 {
+    100
+}
+fn default_compaction_threshold() -> f64 {
+    0.5
 }
 
 impl Default for TieredStorageConfig {
     fn default() -> Self {
         Self {
-            hot_tier_max_bytes: 1024 * 1024 * 1024,            // 1 GB
-            hot_tier_max_age: Duration::from_secs(3600),       // 1 hour
-            warm_tier_max_bytes: 100 * 1024 * 1024 * 1024,     // 100 GB
-            warm_tier_max_age: Duration::from_secs(86400 * 7), // 7 days
-            warm_tier_path: PathBuf::from("/var/lib/rivven/warm"),
+            enabled: false,
+            hot_tier_max_bytes: default_hot_tier_max_bytes(),
+            hot_tier_max_age_secs: default_hot_tier_max_age_secs(),
+            warm_tier_max_bytes: default_warm_tier_max_bytes(),
+            warm_tier_max_age_secs: default_warm_tier_max_age_secs(),
+            warm_tier_path: default_warm_tier_path(),
             cold_storage: ColdStorageConfig::default(),
-            migration_interval: Duration::from_secs(60),
-            migration_concurrency: 4,
-            enable_promotion: true,
-            promotion_threshold: 100,
-            compaction_threshold: 0.5,
+            migration_interval_secs: default_migration_interval_secs(),
+            migration_concurrency: default_migration_concurrency(),
+            enable_promotion: default_enable_promotion(),
+            promotion_threshold: default_promotion_threshold(),
+            compaction_threshold: default_compaction_threshold(),
         }
     }
 }
 
 impl TieredStorageConfig {
+    /// Get hot tier max age as Duration
+    pub fn hot_tier_max_age(&self) -> Duration {
+        Duration::from_secs(self.hot_tier_max_age_secs)
+    }
+
+    /// Get warm tier max age as Duration
+    pub fn warm_tier_max_age(&self) -> Duration {
+        Duration::from_secs(self.warm_tier_max_age_secs)
+    }
+
+    /// Get warm tier path as PathBuf
+    pub fn warm_tier_path_buf(&self) -> PathBuf {
+        PathBuf::from(&self.warm_tier_path)
+    }
+
+    /// Get migration interval as Duration
+    pub fn migration_interval(&self) -> Duration {
+        Duration::from_secs(self.migration_interval_secs)
+    }
+
     /// High-performance config for low-latency workloads
     pub fn high_performance() -> Self {
         Self {
-            hot_tier_max_bytes: 8 * 1024 * 1024 * 1024,    // 8 GB
-            hot_tier_max_age: Duration::from_secs(7200),   // 2 hours
+            enabled: true,
+            hot_tier_max_bytes: 8 * 1024 * 1024 * 1024, // 8 GB
+            hot_tier_max_age_secs: 7200,                // 2 hours
             warm_tier_max_bytes: 500 * 1024 * 1024 * 1024, // 500 GB
-            migration_interval: Duration::from_secs(30),
+            migration_interval_secs: 30,
             ..Default::default()
         }
     }
@@ -123,45 +190,98 @@ impl TieredStorageConfig {
     /// Cost-optimized config for archival workloads
     pub fn cost_optimized() -> Self {
         Self {
-            hot_tier_max_bytes: 256 * 1024 * 1024,         // 256 MB
-            hot_tier_max_age: Duration::from_secs(300),    // 5 minutes
-            warm_tier_max_bytes: 10 * 1024 * 1024 * 1024,  // 10 GB
-            warm_tier_max_age: Duration::from_secs(86400), // 1 day
-            migration_interval: Duration::from_secs(120),
+            enabled: true,
+            hot_tier_max_bytes: 256 * 1024 * 1024, // 256 MB
+            hot_tier_max_age_secs: 300,            // 5 minutes
+            warm_tier_max_bytes: 10 * 1024 * 1024 * 1024, // 10 GB
+            warm_tier_max_age_secs: 86400,         // 1 day
+            migration_interval_secs: 120,
             enable_promotion: false,
+            ..Default::default()
+        }
+    }
+
+    /// Testing config for integration tests (fast migration, small tiers)
+    pub fn testing() -> Self {
+        Self {
+            enabled: true,
+            hot_tier_max_bytes: 1024 * 1024,       // 1 MB
+            hot_tier_max_age_secs: 5,              // 5 seconds
+            warm_tier_max_bytes: 10 * 1024 * 1024, // 10 MB
+            warm_tier_max_age_secs: 10,            // 10 seconds
+            migration_interval_secs: 1,
+            migration_concurrency: 2,
+            enable_promotion: true,
+            promotion_threshold: 3,
+            compaction_threshold: 0.3,
             ..Default::default()
         }
     }
 }
 
 /// Cold storage backend configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ColdStorageConfig {
     /// Local filesystem (for development/testing)
-    LocalFs { path: PathBuf },
-    /// S3-compatible object storage
+    LocalFs {
+        #[serde(default = "default_cold_storage_path")]
+        path: String,
+    },
+    /// S3-compatible object storage (AWS S3, MinIO, Cloudflare R2, etc.)
     S3 {
-        endpoint: String,
+        /// S3 endpoint URL (e.g., `https://s3.us-east-1.amazonaws.com` or `http://localhost:9000` for MinIO)
+        endpoint: Option<String>,
+        /// S3 bucket name
         bucket: String,
+        /// AWS region (e.g., "us-east-1")
         region: String,
+        /// AWS access key ID (optional, uses default credential chain if not provided)
         access_key: Option<String>,
+        /// AWS secret access key
         secret_key: Option<String>,
+        /// Use path-style URLs (required for MinIO and some S3-compatible services)
+        #[serde(default)]
         use_path_style: bool,
+    },
+    /// Google Cloud Storage
+    Gcs {
+        /// GCS bucket name
+        bucket: String,
+        /// Path to service account key JSON file (optional, uses default credentials if not provided)
+        service_account_path: Option<String>,
     },
     /// Azure Blob Storage
     AzureBlob {
+        /// Azure storage account name
         account: String,
+        /// Azure container name
         container: String,
+        /// Azure storage access key (optional, uses DefaultAzureCredential if not provided)
         access_key: Option<String>,
     },
     /// Disabled (warm tier is final)
     Disabled,
 }
 
+fn default_cold_storage_path() -> String {
+    "/var/lib/rivven/cold".to_string()
+}
+
 impl Default for ColdStorageConfig {
     fn default() -> Self {
         ColdStorageConfig::LocalFs {
-            path: PathBuf::from("/var/lib/rivven/cold"),
+            path: default_cold_storage_path(),
+        }
+    }
+}
+
+impl ColdStorageConfig {
+    /// Get path as PathBuf for LocalFs variant
+    pub fn local_fs_path(&self) -> Option<PathBuf> {
+        match self {
+            ColdStorageConfig::LocalFs { path } => Some(PathBuf::from(path)),
+            _ => None,
         }
     }
 }
@@ -731,6 +851,232 @@ impl ColdStorageBackend for DisabledColdStorage {
     }
 }
 
+// ============================================================================
+// Cloud Storage Backends (S3, GCS, Azure)
+// ============================================================================
+
+/// Object Store based cold storage backend
+///
+/// Provides a unified interface for S3, GCS, Azure Blob Storage, and MinIO
+/// using the `object_store` crate.
+#[cfg(feature = "cloud-storage")]
+pub struct ObjectStoreColdStorage {
+    store: Arc<dyn object_store::ObjectStore>,
+    /// Optional prefix for all keys (e.g., "rivven/segments/")
+    prefix: String,
+}
+
+#[cfg(feature = "cloud-storage")]
+impl ObjectStoreColdStorage {
+    /// Create a new S3-compatible cold storage backend
+    #[cfg(feature = "s3")]
+    pub fn s3(
+        bucket: &str,
+        region: &str,
+        endpoint: Option<&str>,
+        access_key: Option<&str>,
+        secret_key: Option<&str>,
+        use_path_style: bool,
+    ) -> Result<Self> {
+        use object_store::aws::AmazonS3Builder;
+
+        let mut builder = AmazonS3Builder::new()
+            .with_bucket_name(bucket)
+            .with_region(region);
+
+        if let Some(endpoint) = endpoint {
+            builder = builder.with_endpoint(endpoint);
+        }
+
+        if let (Some(key), Some(secret)) = (access_key, secret_key) {
+            builder = builder
+                .with_access_key_id(key)
+                .with_secret_access_key(secret);
+        }
+
+        if use_path_style {
+            builder = builder.with_virtual_hosted_style_request(false);
+        }
+
+        let store = builder
+            .build()
+            .map_err(|e| Error::Other(format!("Failed to create S3 client: {}", e)))?;
+
+        Ok(Self {
+            store: Arc::new(store),
+            prefix: String::new(),
+        })
+    }
+
+    /// Create a new MinIO cold storage backend (S3-compatible)
+    #[cfg(feature = "s3")]
+    pub fn minio(endpoint: &str, bucket: &str, access_key: &str, secret_key: &str) -> Result<Self> {
+        Self::s3(
+            bucket,
+            "us-east-1", // MinIO doesn't care about region
+            Some(endpoint),
+            Some(access_key),
+            Some(secret_key),
+            true, // MinIO requires path-style
+        )
+    }
+
+    /// Create a new Google Cloud Storage backend
+    #[cfg(feature = "gcs")]
+    pub fn gcs(bucket: &str, service_account_path: Option<&std::path::Path>) -> Result<Self> {
+        use object_store::gcp::GoogleCloudStorageBuilder;
+
+        let mut builder = GoogleCloudStorageBuilder::new().with_bucket_name(bucket);
+
+        if let Some(path) = service_account_path {
+            builder = builder.with_service_account_path(path.to_string_lossy());
+        }
+
+        let store = builder
+            .build()
+            .map_err(|e| Error::Other(format!("Failed to create GCS client: {}", e)))?;
+
+        Ok(Self {
+            store: Arc::new(store),
+            prefix: String::new(),
+        })
+    }
+
+    /// Create a new Azure Blob Storage backend
+    #[cfg(feature = "azure")]
+    pub fn azure(account: &str, container: &str, access_key: Option<&str>) -> Result<Self> {
+        use object_store::azure::MicrosoftAzureBuilder;
+
+        let mut builder = MicrosoftAzureBuilder::new()
+            .with_account(account)
+            .with_container_name(container);
+
+        if let Some(key) = access_key {
+            builder = builder.with_access_key(key);
+        }
+
+        let store = builder
+            .build()
+            .map_err(|e| Error::Other(format!("Failed to create Azure Blob client: {}", e)))?;
+
+        Ok(Self {
+            store: Arc::new(store),
+            prefix: String::new(),
+        })
+    }
+
+    /// Set a prefix for all keys
+    pub fn with_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.prefix = prefix.into();
+        if !self.prefix.is_empty() && !self.prefix.ends_with('/') {
+            self.prefix.push('/');
+        }
+        self
+    }
+
+    fn full_path(&self, key: &str) -> object_store::path::Path {
+        object_store::path::Path::from(format!("{}{}", self.prefix, key))
+    }
+}
+
+#[cfg(feature = "cloud-storage")]
+#[async_trait::async_trait]
+impl ColdStorageBackend for ObjectStoreColdStorage {
+    async fn upload(&self, key: &str, data: &[u8]) -> Result<()> {
+        use object_store::ObjectStore;
+
+        let path = self.full_path(key);
+        let payload = object_store::PutPayload::from(data.to_vec());
+
+        self.store
+            .put(&path, payload)
+            .await
+            .map_err(|e| Error::Other(format!("Failed to upload to object store: {}", e)))?;
+
+        Ok(())
+    }
+
+    async fn download(&self, key: &str) -> Result<Option<Bytes>> {
+        use object_store::ObjectStore;
+
+        let path = self.full_path(key);
+
+        match self.store.get(&path).await {
+            Ok(result) => {
+                let bytes = result
+                    .bytes()
+                    .await
+                    .map_err(|e| Error::Other(format!("Failed to read object: {}", e)))?;
+                Ok(Some(bytes))
+            }
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(Error::Other(format!(
+                "Failed to download from object store: {}",
+                e
+            ))),
+        }
+    }
+
+    async fn delete(&self, key: &str) -> Result<()> {
+        use object_store::ObjectStore;
+
+        let path = self.full_path(key);
+
+        // Ignore NotFound errors on delete
+        match self.store.delete(&path).await {
+            Ok(()) => Ok(()),
+            Err(object_store::Error::NotFound { .. }) => Ok(()),
+            Err(e) => Err(Error::Other(format!(
+                "Failed to delete from object store: {}",
+                e
+            ))),
+        }
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        use futures::StreamExt;
+        use object_store::ObjectStore;
+
+        let full_prefix = self.full_path(prefix);
+        let mut stream = self.store.list(Some(&full_prefix));
+        let mut keys = Vec::new();
+
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(meta) => {
+                    let key = meta.location.to_string();
+                    // Strip the prefix to return relative keys
+                    if let Some(relative) = key.strip_prefix(&self.prefix) {
+                        keys.push(relative.to_string());
+                    } else {
+                        keys.push(key);
+                    }
+                }
+                Err(e) => {
+                    return Err(Error::Other(format!("Failed to list objects: {}", e)));
+                }
+            }
+        }
+
+        Ok(keys)
+    }
+
+    async fn exists(&self, key: &str) -> Result<bool> {
+        use object_store::ObjectStore;
+
+        let path = self.full_path(key);
+
+        match self.store.head(&path).await {
+            Ok(_) => Ok(true),
+            Err(object_store::Error::NotFound { .. }) => Ok(false),
+            Err(e) => Err(Error::Other(format!(
+                "Failed to check object existence: {}",
+                e
+            ))),
+        }
+    }
+}
+
 /// Migration task
 #[derive(Debug)]
 enum MigrationTask {
@@ -769,27 +1115,87 @@ pub struct TieredStorage {
     shutdown: tokio::sync::broadcast::Sender<()>,
 }
 
+impl std::fmt::Debug for TieredStorage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TieredStorage")
+            .field("config", &self.config)
+            .field("hot_tier", &self.hot_tier)
+            .field("warm_tier", &self.warm_tier)
+            .field("cold_storage", &"<dyn ColdStorageBackend>")
+            .finish()
+    }
+}
+
 impl TieredStorage {
     /// Create new tiered storage system
     pub async fn new(config: TieredStorageConfig) -> Result<Arc<Self>> {
         let hot_tier = Arc::new(HotTier::new(config.hot_tier_max_bytes));
         let warm_tier = Arc::new(WarmTier::new(
-            config.warm_tier_path.clone(),
+            config.warm_tier_path_buf(),
             config.warm_tier_max_bytes,
         )?);
 
         let cold_storage: Arc<dyn ColdStorageBackend> = match &config.cold_storage {
-            ColdStorageConfig::LocalFs { path } => Arc::new(LocalFsColdStorage::new(path.clone())?),
-            ColdStorageConfig::Disabled => Arc::new(DisabledColdStorage),
-            // S3 and Azure would be implemented with their respective SDKs
-            ColdStorageConfig::S3 { .. } => {
-                // Would use aws-sdk-s3 crate
-                return Err(Error::Other("S3 cold storage not yet implemented".into()));
+            ColdStorageConfig::LocalFs { path } => {
+                Arc::new(LocalFsColdStorage::new(PathBuf::from(path))?)
             }
-            ColdStorageConfig::AzureBlob { .. } => {
-                // Would use azure_storage_blobs crate
+            ColdStorageConfig::Disabled => Arc::new(DisabledColdStorage),
+
+            #[cfg(feature = "s3")]
+            ColdStorageConfig::S3 {
+                endpoint,
+                bucket,
+                region,
+                access_key,
+                secret_key,
+                use_path_style,
+            } => Arc::new(ObjectStoreColdStorage::s3(
+                bucket,
+                region,
+                endpoint.as_deref(),
+                access_key.as_deref(),
+                secret_key.as_deref(),
+                *use_path_style,
+            )?),
+
+            #[cfg(not(feature = "s3"))]
+            ColdStorageConfig::S3 { .. } => {
                 return Err(Error::Other(
-                    "Azure Blob cold storage not yet implemented".into(),
+                    "S3 cold storage requires the 's3' feature flag".into(),
+                ));
+            }
+
+            #[cfg(feature = "gcs")]
+            ColdStorageConfig::Gcs {
+                bucket,
+                service_account_path,
+            } => Arc::new(ObjectStoreColdStorage::gcs(
+                bucket,
+                service_account_path.as_ref().map(std::path::Path::new),
+            )?),
+
+            #[cfg(not(feature = "gcs"))]
+            ColdStorageConfig::Gcs { .. } => {
+                return Err(Error::Other(
+                    "GCS cold storage requires the 'gcs' feature flag".into(),
+                ));
+            }
+
+            #[cfg(feature = "azure")]
+            ColdStorageConfig::AzureBlob {
+                account,
+                container,
+                access_key,
+            } => Arc::new(ObjectStoreColdStorage::azure(
+                account,
+                container,
+                access_key.as_deref(),
+            )?),
+
+            #[cfg(not(feature = "azure"))]
+            ColdStorageConfig::AzureBlob { .. } => {
+                return Err(Error::Other(
+                    "Azure Blob cold storage requires the 'azure' feature flag".into(),
                 ));
             }
         };
@@ -1069,7 +1475,7 @@ impl TieredStorage {
     /// Start the background tier manager (checks for demotions)
     fn start_tier_manager(self: Arc<Self>) {
         let mut shutdown_rx = self.shutdown.subscribe();
-        let migration_interval = self.config.migration_interval;
+        let migration_interval = self.config.migration_interval();
 
         tokio::spawn(async move {
             let mut ticker = interval(migration_interval);
@@ -1091,8 +1497,8 @@ impl TieredStorage {
 
     /// Check and queue tier migrations
     async fn check_tier_migrations(&self) -> Result<()> {
-        let hot_max_age = self.config.hot_tier_max_age;
-        let warm_max_age = self.config.warm_tier_max_age;
+        let hot_max_age = self.config.hot_tier_max_age();
+        let warm_max_age = self.config.warm_tier_max_age();
 
         // Check hot tier for demotions
         let hot_candidates: Vec<_> = {
@@ -1687,12 +2093,13 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         let config = TieredStorageConfig {
+            enabled: true,
             hot_tier_max_bytes: 1024 * 1024,
-            warm_tier_path: temp_dir.path().join("warm"),
+            warm_tier_path: temp_dir.path().join("warm").to_string_lossy().to_string(),
             cold_storage: ColdStorageConfig::LocalFs {
-                path: temp_dir.path().join("cold"),
+                path: temp_dir.path().join("cold").to_string_lossy().to_string(),
             },
-            migration_interval: Duration::from_secs(3600), // Disable auto migration
+            migration_interval_secs: 3600, // Disable auto migration
             ..Default::default()
         };
 
@@ -1750,12 +2157,13 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         let config = TieredStorageConfig {
+            enabled: true,
             hot_tier_max_bytes: 10 * 1024 * 1024, // 10 MB
-            warm_tier_path: temp_dir.path().join("warm"),
+            warm_tier_path: temp_dir.path().join("warm").to_string_lossy().to_string(),
             cold_storage: ColdStorageConfig::LocalFs {
-                path: temp_dir.path().join("cold"),
+                path: temp_dir.path().join("cold").to_string_lossy().to_string(),
             },
-            migration_interval: Duration::from_secs(3600),
+            migration_interval_secs: 3600,
             compaction_threshold: 0.1, // Low threshold for testing
             ..Default::default()
         };
@@ -1831,12 +2239,13 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
 
         let config = TieredStorageConfig {
+            enabled: true,
             hot_tier_max_bytes: 10 * 1024 * 1024,
-            warm_tier_path: temp_dir.path().join("warm"),
+            warm_tier_path: temp_dir.path().join("warm").to_string_lossy().to_string(),
             cold_storage: ColdStorageConfig::LocalFs {
-                path: temp_dir.path().join("cold"),
+                path: temp_dir.path().join("cold").to_string_lossy().to_string(),
             },
-            migration_interval: Duration::from_secs(3600),
+            migration_interval_secs: 3600,
             ..Default::default()
         };
 

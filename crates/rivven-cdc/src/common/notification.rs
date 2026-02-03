@@ -9,10 +9,6 @@
 //! - **Error Notifications**: Immediate alerts on failures
 //! - **Multiple Channels**: Sink, log, metrics, webhook support
 //!
-//! ## Debezium Compatibility
-//!
-//! Compatible with Debezium notification format and status types.
-//!
 //! ## Usage
 //!
 //! ```rust,ignore
@@ -40,7 +36,7 @@ use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-/// Notification types - compatible with Debezium.
+/// Notification types.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum NotificationType {

@@ -3,16 +3,63 @@
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
+/// Schema type (format) for schema registry
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum SchemaType {
+    /// Apache Avro (recommended for production)
+    #[default]
+    #[serde(alias = "avro", alias = "AVRO")]
+    Avro,
+
+    /// JSON Schema
+    #[serde(alias = "json", alias = "JSON")]
+    Json,
+
+    /// Protocol Buffers
+    #[serde(alias = "protobuf", alias = "PROTOBUF")]
+    Protobuf,
+}
+
+impl SchemaType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SchemaType::Avro => "AVRO",
+            SchemaType::Json => "JSON",
+            SchemaType::Protobuf => "PROTOBUF",
+        }
+    }
+}
+
+impl std::fmt::Display for SchemaType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for SchemaType {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_uppercase().as_str() {
+            "AVRO" => Ok(SchemaType::Avro),
+            "JSON" | "JSONSCHEMA" | "JSON_SCHEMA" => Ok(SchemaType::Json),
+            "PROTOBUF" | "PROTO" => Ok(SchemaType::Protobuf),
+            _ => Err(format!("Unknown schema type: {}", s)),
+        }
+    }
+}
+
 /// Serialized message data for transport
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MessageData {
     /// Message offset in the partition
     pub offset: u64,
     /// Optional message key
-    #[serde(with = "rivven_core::serde_utils::option_bytes_serde")]
+    #[serde(with = "crate::serde_utils::option_bytes_serde")]
     pub key: Option<Bytes>,
     /// Message value/payload
-    #[serde(with = "rivven_core::serde_utils::bytes_serde")]
+    #[serde(with = "crate::serde_utils::bytes_serde")]
     pub value: Bytes,
     /// Timestamp in milliseconds since epoch
     pub timestamp: i64,

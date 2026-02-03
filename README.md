@@ -3,55 +3,94 @@
 [![CI](https://github.com/hupe1980/rivven/actions/workflows/ci.yml/badge.svg)](https://github.com/hupe1980/rivven/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![crates.io](https://img.shields.io/crates/v/rivven.svg)](https://crates.io/crates/rivven)
-[![Documentation](https://img.shields.io/badge/docs-hupe1980.github.io%2Frivven-blue)](https://hupe1980.github.io/rivven)
+[![Documentation](https://img.shields.io/badge/docs-rivven.hupe1980.github.io%2Frivven-blue)](https://rivven.hupe1980.github.io/rivven)
 [![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS-blue)](https://github.com/hupe1980/rivven)
 
-> **Production-grade**, high-performance, single-binary distributed event streaming platform written in Rust.
+> **A production-grade, high-performance distributed event streaming platform written in Rust.**  
+> Lightweight binaries. Zero runtime dependencies. Sub-second startup.
 
-**[Documentation](https://hupe1980.github.io/rivven)** | **[Getting Started](https://hupe1980.github.io/rivven/docs/getting-started)** | **[Architecture](https://hupe1980.github.io/rivven/docs/architecture)**
+**[📖 Documentation](https://rivven.hupe1980.github.io/rivven)** • **[🚀 Getting Started](https://rivven.hupe1980.github.io/rivven/docs/getting-started)** • **[🏗️ Architecture](https://rivven.hupe1980.github.io/rivven/docs/architecture)**
 
 ---
 
-## ✨ Features
+## Why Rivven?
 
-### 🚀 Performance
+Modern event streaming shouldn't require a JVM, ZooKeeper, or a team of dedicated operators. Rivven delivers enterprise-grade capabilities with lightweight, focused binaries:
+
+| Traditional Platforms | Rivven |
+|:---------------------|:-------|
+| JVM + ZooKeeper + heavy dependencies | Lightweight native binaries, no runtime dependencies |
+| Minutes to start | <1 second startup |
+| Complex configuration | Sensible defaults, auto-create topics |
+| Separate CDC tools | Native CDC with `rivven-connect` |
+| External schema registry | Integrated `rivven-schema` registry |
+
+---
+
+## ✨ Key Features
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### 🚀 High Performance
 - Lock-free architecture with zero-copy I/O
-- Batch APIs for maximum throughput
-- Sticky partitioning (Kafka 2.4+ compatible)
-- LZ4/Zstd compression built-in
+- Batch APIs for maximum throughput  
+- LZ4/Zstd/Snappy compression
+- Sticky partitioning for optimal batching
 
-### 📦 Simplicity
-- Single binary — no JVM, no ZooKeeper
-- <1s startup time
+</td>
+<td width="50%" valign="top">
+
+### 📦 Operational Simplicity
+- Lightweight native binaries — no JVM, no ZooKeeper
+- <1 second startup time
 - Auto-create topics with configurable defaults
-- Built-in dashboard at `/dashboard`
+- Built-in web dashboard
 
-### 🗄️ Storage
-- Tiered storage: hot/warm/cold tiers
-- S3, GCS, Azure, MinIO backends
-- Log compaction for stateful topics
-- Exactly-once semantics (KIP-98)
-
-### 🔒 Security
-- TLS/mTLS transport encryption
-- SCRAM-SHA-256 authentication
-- OIDC authentication support
-- Cedar policies for fine-grained RBAC
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
 
 ### 🔄 Change Data Capture
 - PostgreSQL CDC with logical replication
-- MySQL CDC with binlog streaming (caching_sha2_password support)
+- MySQL CDC with binlog streaming
 - 17 built-in transforms (SMTs)
+- Schema inference and evolution
+
+</td>
+<td width="50%" valign="top">
 
 ### 📊 Schema Registry
-- Avro, Protobuf, and JSON Schema support
-- Confluent-compatible wire format
-- Embedded or external deployment modes
+- Avro, Protobuf, and JSON Schema
+- Standard wire format and REST API
+- Compatibility checking and evolution
+- Multi-tenant schema contexts
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### 🔒 Enterprise Security
+- TLS/mTLS transport encryption
+- SCRAM-SHA-256, OIDC, API key auth
+- Cedar policy engine for fine-grained RBAC
+- Credential isolation between components
+
+</td>
+<td width="50%" valign="top">
 
 ### ☁️ Cloud Native
 - Kubernetes operator with CRDs
 - Prometheus metrics built-in
-- Consumer groups with KIP-345/429
+- Tiered storage (S3, GCS, Azure, MinIO)
+- Consumer groups with cooperative rebalancing
+
+</td>
+</tr>
+</table>
 
 ---
 
@@ -59,7 +98,7 @@
 
 ```bash
 # Install
-cargo install rivven rivvend rivven-connect
+cargo install rivven rivvend rivven-connect rivven-schema
 
 # Start broker with dashboard
 rivvend --dashboard --data-dir ./data
@@ -73,7 +112,11 @@ rivven consume events --from-beginning
 ### Docker
 
 ```bash
-docker run -d -p 9092:9092 -p 9094:9094 ghcr.io/hupe1980/rivven:latest --dashboard
+# Start broker
+docker run -d -p 9092:9092 -p 9094:9094 ghcr.io/hupe1980/rivvend:latest --dashboard
+
+# Start schema registry
+docker run -d -p 8081:8081 ghcr.io/hupe1980/rivven-schema:latest serve --port 8081
 ```
 
 ---
@@ -105,7 +148,68 @@ sinks:
 rivven-connect run --config connect.yaml
 ```
 
-**Built-in connectors**: PostgreSQL CDC, MySQL CDC, Kafka, MQTT, SQS, Pub/Sub, S3, GCS, Azure, Snowflake, BigQuery, Redshift, HTTP
+**Built-in connectors**: PostgreSQL CDC • MySQL CDC • MQTT • SQS • Pub/Sub • S3 • GCS • Azure • Snowflake • BigQuery • Redshift • HTTP
+
+---
+
+## 📊 Performance
+
+| Benchmark | Result | Notes |
+|:----------|:-------|:------|
+| Message append (100KB) | **46 µs** | ~2 GiB/s throughput |
+| Batch read (1K msgs) | **1.2 ms** | ~836K messages/s |
+| Schema lookup | **29 ns** | O(1) with caching |
+
+---
+
+## 🏗️ Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      RIVVEN ARCHITECTURE                        │
+├─────────────────────────────────────────────────────────────────┤
+│  ┌──────────────────┐       ┌────────────────────────────────┐  │
+│  │     rivvend      │       │       rivven-connect           │  │
+│  │    (broker)      │◄─────►│  (connector runtime)           │  │
+│  │                  │ proto │                                │  │
+│  │  • Storage       │       │  Sources: postgres-cdc, mysql  │  │
+│  │  • Replication   │       │  Sinks:   s3, snowflake, http  │  │
+│  │  • Auth/RBAC     │       │  Transforms: SMTs, filters     │  │
+│  └──────────────────┘       └────────────────────────────────┘  │
+│           │                            │                        │
+│           ▼                            ▼                        │
+│  ┌──────────────────┐       ┌────────────────────────────────┐  │
+│  │  rivven-schema   │       │        rivven-operator         │  │
+│  │ (schema registry)│       │      (kubernetes CRDs)         │  │
+│  └──────────────────┘       └────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Crate Overview
+
+| Crate | Binary | Description |
+|:------|:-------|:------------|
+| `rivvend` | `rivvend` | Message broker with storage, replication, and auth |
+| `rivven-connect` | `rivven-connect` | Connector runtime for CDC and data pipelines |
+| `rivven-schema` | `rivven-schema` | Schema registry with Avro, Protobuf, JSON Schema |
+| `rivven` | `rivven` | Command-line interface |
+| `rivven-core` | — | Storage engine, partitions, consumer groups |
+| `rivven-client` | — | Native async Rust client library |
+| `rivven-cluster` | — | Raft consensus and distributed coordination |
+| `rivven-operator` | — | Kubernetes operator with CRDs |
+
+<details>
+<summary>Additional crates</summary>
+
+| Crate | Description |
+|:------|:------------|
+| `rivven-cdc` | PostgreSQL and MySQL CDC primitives |
+| `rivven-connect-derive` | Proc macros for connector SDK |
+| `rivven-protocol` | Wire protocol implementation |
+| `rivven-python` | Python bindings (PyO3) |
+| `rivven-integration-tests` | End-to-end integration tests |
+
+</details>
 
 ---
 
@@ -113,46 +217,18 @@ rivven-connect run --config connect.yaml
 
 | Guide | Description |
 |:------|:------------|
-| [Getting Started](https://hupe1980.github.io/rivven/docs/getting-started) | Installation and first steps |
-| [Architecture](https://hupe1980.github.io/rivven/docs/architecture) | System design and internals |
-| [CDC Guide](https://hupe1980.github.io/rivven/docs/cdc) | Database change data capture |
-| [Connectors](https://hupe1980.github.io/rivven/docs/connectors) | Sources, sinks, and transforms |
-| [Schema Registry](https://hupe1980.github.io/rivven/docs/schema-registry) | Avro, Protobuf, and JSON Schema |
-| [Security](https://hupe1980.github.io/rivven/docs/security) | TLS, authentication, and RBAC |
-| [Tiered Storage](https://hupe1980.github.io/rivven/docs/tiered-storage) | Hot/warm/cold storage tiers |
-| [Kubernetes](https://hupe1980.github.io/rivven/docs/kubernetes) | Production deployment |
-| [Testing](https://hupe1980.github.io/rivven/docs/testing) | Integration tests with testcontainers |
+| [Getting Started](https://rivven.hupe1980.github.io/rivven/docs/getting-started) | Installation and first steps |
+| [Architecture](https://rivven.hupe1980.github.io/rivven/docs/architecture) | System design and internals |
+| [CDC Guide](https://rivven.hupe1980.github.io/rivven/docs/cdc) | Database change data capture |
+| [Connectors](https://rivven.hupe1980.github.io/rivven/docs/connectors) | Sources, sinks, and transforms |
+| [Schema Registry](https://rivven.hupe1980.github.io/rivven/docs/schema-registry) | Avro, Protobuf, and JSON Schema |
+| [Security](https://rivven.hupe1980.github.io/rivven/docs/security) | TLS, authentication, and RBAC |
+| [Kubernetes](https://rivven.hupe1980.github.io/rivven/docs/kubernetes) | Production deployment with operator |
+| [Tiered Storage](https://rivven.hupe1980.github.io/rivven/docs/tiered-storage) | Hot/warm/cold storage tiers |
 
 ---
 
-## 🏗️ Architecture
-
-| Crate | Binary | Description |
-|:------|:-------|:------------|
-| `rivven` | `rivven` | Command-line interface |
-| `rivvend` | `rivvend` | Broker with TCP server, protocol handling |
-| `rivven-connect` | `rivven-connect` | Connector framework for CDC & ETL |
-| `rivven-core` | — | Storage engine, partitions, consumers |
-| `rivven-client` | — | Rust client library |
-| `rivven-cluster` | — | Raft-based distributed coordination |
-
-<details>
-<summary>View all crates</summary>
-
-| Crate | Description |
-|:------|:------------|
-| `rivven-cdc` | PostgreSQL and MySQL CDC |
-| `rivven-dashboard` | Leptos web dashboard |
-| `rivven-storage` | Cloud storage (S3, GCS, Azure) |
-| `rivven-warehouse` | Data warehouses (Snowflake, BigQuery, Redshift) |
-| `rivven-operator` | Kubernetes operator |
-| `rivven-python` | Python bindings (PyO3) |
-
-</details>
-
----
-
-## 🖥️ Supported Platforms
+## 🖥️ Platform Support
 
 | Platform | Status |
 |:---------|:-------|
@@ -168,11 +244,16 @@ rivven-connect run --config connect.yaml
 git clone https://github.com/hupe1980/rivven.git
 cd rivven
 cargo build --release
-./target/release/rivvend --data-dir ./data
+
+# Binaries are in target/release/
+./target/release/rivvend --help        # Broker
+./target/release/rivven --help         # CLI
+./target/release/rivven-connect --help # Connectors
+./target/release/rivven-schema --help  # Schema Registry
 ```
 
 ---
 
-## 📄 License
+## 📜 License
 
-Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
+Licensed under the [Apache License, Version 2.0](LICENSE).

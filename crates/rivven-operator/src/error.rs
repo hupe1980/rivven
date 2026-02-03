@@ -53,6 +53,14 @@ pub enum OperatorError {
     #[error("RivvenCluster not found: {0}")]
     ClusterNotFound(String),
 
+    /// Connection to cluster failed
+    #[error("Connection to cluster failed: {0}")]
+    ConnectionFailed(String),
+
+    /// Cluster operation error
+    #[error("Cluster operation error: {0}")]
+    ClusterError(String),
+
     /// Topic operation failed
     #[error("Topic operation failed: {0}")]
     TopicError(String),

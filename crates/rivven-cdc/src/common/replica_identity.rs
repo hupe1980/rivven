@@ -20,10 +20,9 @@
 //! - Audit logs and compliance requirements may not be met
 //! - Log compaction keys may be incomplete
 //!
-//! ## Debezium Compatibility
+//! ## Enforcement
 //!
-//! Debezium warns when tables don't have REPLICA IDENTITY FULL set.
-//! This module provides similar enforcement with configurable behavior:
+//! This module provides enforcement with configurable behavior:
 //!
 //! - **Warn**: Log warning but continue (default)
 //! - **Skip**: Skip events from tables without FULL

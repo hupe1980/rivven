@@ -1,6 +1,6 @@
 //! # CDC Signaling
 //!
-//! Multi-channel control system for CDC connectors - Debezium-compatible signaling.
+//! Multi-channel control system for CDC connectors.
 //!
 //! ## Features
 //!
@@ -8,16 +8,16 @@
 //! - **Pause/Resume**: Control streaming without restarting
 //! - **Incremental Snapshots**: Chunk-based table re-snapshots
 //! - **Custom Signals**: Application-defined signal handlers
-//! - **Multi-Channel**: Source table, Kafka/Topic, File, API channels
+//! - **Multi-Channel**: Source table, Topic, File, API channels
 //!
-//! ## Signal Channels (Debezium Compatible)
+//! ## Signal Channels
 //!
-//! Rivven supports multiple signal channels, matching Debezium's architecture:
+//! Rivven supports multiple signal channels:
 //!
 //! | Channel | Description | Use Case |
 //! |---------|-------------|----------|
 //! | `source` | Signal table captured via CDC stream | Default, required for incremental snapshots |
-//! | `topic` | Signals from a Rivven/Kafka topic | Avoids database writes |
+//! | `topic` | Signals from a Rivven topic | Avoids database writes |
 //! | `file` | Signals from a JSON file | Simple deployments |
 //! | `api` | HTTP/gRPC API calls | Programmatic control |
 //!
@@ -25,10 +25,10 @@
 //! mechanism for incremental snapshot deduplication. Signals flow through the CDC stream,
 //! so no separate database connection is required.
 //!
-//! ## Debezium-Compatible Signal Table
+//! ## Signal Table Schema
 //!
 //! ```sql
-//! CREATE TABLE debezium_signal (
+//! CREATE TABLE rivven_signal (
 //!     id VARCHAR(42) PRIMARY KEY,
 //!     type VARCHAR(32) NOT NULL,
 //!     data VARCHAR(2048) NULL
@@ -42,8 +42,8 @@
 //!
 //! let config = SignalConfig::builder()
 //!     .enabled_channels(vec![ChannelType::Source, ChannelType::Topic])
-//!     .signal_data_collection("public.debezium_signal")  // Source channel table
-//!     .signal_topic("cdc-signals")                        // Topic channel
+//!     .signal_data_collection("public.rivven_signal")  // Source channel table
+//!     .signal_topic("cdc-signals")                     // Topic channel
 //!     .build();
 //! ```
 //!
@@ -73,7 +73,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-/// Signal action types - compatible with Debezium.
+/// Signal action types.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SignalAction {
@@ -181,7 +181,7 @@ impl SignalData {
     }
 }
 
-/// A CDC signal - Debezium compatible format.
+/// A CDC signal.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Signal {
     /// Unique signal identifier
@@ -311,12 +311,10 @@ pub enum SignalSource {
     Api,
     /// Signal from database table
     Source,
-    /// Signal from Kafka topic
-    Kafka,
+    /// Signal from Rivven topic
+    Topic,
     /// Signal from file
     File,
-    /// Signal from JMX
-    Jmx,
 }
 
 /// Result of processing a signal.
@@ -581,7 +579,7 @@ impl SignalProcessor {
         result
     }
 
-    /// Parse signal from Debezium-compatible table row.
+    /// Parse signal from table row.
     pub fn parse_from_row(
         id: &str,
         signal_type: &str,
@@ -633,7 +631,7 @@ impl SignalChannel {
 // Signal Channel Configuration
 // ============================================================================
 
-/// Signal channel types - Debezium compatible.
+/// Signal channel types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
 #[serde(rename_all = "lowercase")]
 #[derive(Default)]
@@ -641,25 +639,22 @@ pub enum SignalChannelType {
     /// Source channel - signal table captured via CDC stream (default)
     #[default]
     Source,
-    /// Topic channel - signals from Rivven/Kafka topic
+    /// Topic channel - signals from Rivven topic
     Topic,
     /// File channel - signals from a JSON file
     File,
     /// API channel - signals from HTTP/gRPC
     Api,
-    /// JMX channel (for compatibility, maps to API)
-    Jmx,
 }
 
 impl SignalChannelType {
-    /// Get the channel name as string (Debezium compatible).
+    /// Get the channel name as string.
     pub fn as_str(&self) -> &'static str {
         match self {
             SignalChannelType::Source => "source",
-            SignalChannelType::Topic => "kafka", // Debezium uses "kafka"
+            SignalChannelType::Topic => "topic",
             SignalChannelType::File => "file",
             SignalChannelType::Api => "api",
-            SignalChannelType::Jmx => "jmx",
         }
     }
 
@@ -667,19 +662,18 @@ impl SignalChannelType {
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "source" => Some(SignalChannelType::Source),
-            "kafka" | "topic" => Some(SignalChannelType::Topic),
+            "topic" => Some(SignalChannelType::Topic),
             "file" => Some(SignalChannelType::File),
             "api" => Some(SignalChannelType::Api),
-            "jmx" => Some(SignalChannelType::Jmx),
             _ => None,
         }
     }
 }
 
-/// Configuration for CDC signaling - Debezium compatible.
+/// Configuration for CDC signaling.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignalConfig {
-    /// Enabled signal channels (default: source, kafka)
+    /// Enabled signal channels (default: source, topic)
     #[serde(default = "default_enabled_channels")]
     pub enabled_channels: Vec<SignalChannelType>,
 
@@ -759,7 +753,7 @@ impl SignalConfig {
         })
     }
 
-    /// Parse enabled channels from comma-separated string (Debezium format).
+    /// Parse enabled channels from comma-separated string.
     pub fn parse_enabled_channels(s: &str) -> Vec<SignalChannelType> {
         s.split(',')
             .filter_map(|c| SignalChannelType::parse(c.trim()))
@@ -842,7 +836,7 @@ impl SignalConfigBuilder {
 }
 
 // ============================================================================
-// Signal Channel Reader Trait (Debezium SPI Compatible)
+// Signal Channel Reader Trait
 // ============================================================================
 
 /// Signal record from a channel - minimal data needed.
@@ -896,7 +890,6 @@ impl SignalRecord {
 
 /// Trait for reading signals from a channel.
 ///
-/// This is the Rust equivalent of Debezium's `SignalChannelReader` SPI.
 /// Implementations provide different signal sources (database, topic, file, etc.).
 #[async_trait::async_trait]
 pub trait SignalChannelReader: Send + Sync {
@@ -1199,7 +1192,7 @@ impl SignalManager {
                 let source = match channel.name() {
                     "source" => SignalSource::Source,
                     "file" => SignalSource::File,
-                    "kafka" | "topic" => SignalSource::Kafka,
+                    "topic" => SignalSource::Topic,
                     _ => SignalSource::Api,
                 };
 
@@ -1400,8 +1393,8 @@ mod tests {
 
     #[test]
     fn test_signal_with_source() {
-        let signal = Signal::pause().with_source(SignalSource::Kafka);
-        assert_eq!(signal.source, SignalSource::Kafka);
+        let signal = Signal::pause().with_source(SignalSource::Topic);
+        assert_eq!(signal.source, SignalSource::Topic);
     }
 
     #[test]
@@ -1511,9 +1504,9 @@ mod tests {
         let result = processor.process(api_signal).await;
         assert!(result.is_success());
 
-        // Kafka source should be ignored
-        let kafka_signal = Signal::pause().with_source(SignalSource::Kafka);
-        let result = processor.process(kafka_signal).await;
+        // Topic source should be ignored
+        let topic_signal = Signal::pause().with_source(SignalSource::Topic);
+        let result = processor.process(topic_signal).await;
         assert!(matches!(result, SignalResult::Ignored(_)));
     }
 
@@ -1612,10 +1605,9 @@ mod tests {
     #[test]
     fn test_signal_channel_type_str() {
         assert_eq!(SignalChannelType::Source.as_str(), "source");
-        assert_eq!(SignalChannelType::Topic.as_str(), "kafka");
+        assert_eq!(SignalChannelType::Topic.as_str(), "topic");
         assert_eq!(SignalChannelType::File.as_str(), "file");
         assert_eq!(SignalChannelType::Api.as_str(), "api");
-        assert_eq!(SignalChannelType::Jmx.as_str(), "jmx");
     }
 
     #[test]
@@ -1623,10 +1615,6 @@ mod tests {
         assert_eq!(
             SignalChannelType::parse("source"),
             Some(SignalChannelType::Source)
-        );
-        assert_eq!(
-            SignalChannelType::parse("kafka"),
-            Some(SignalChannelType::Topic)
         );
         assert_eq!(
             SignalChannelType::parse("topic"),
@@ -1654,7 +1642,7 @@ mod tests {
     fn test_signal_config_builder() {
         let config = SignalConfig::builder()
             .enabled_channels(vec![SignalChannelType::Source, SignalChannelType::File])
-            .signal_data_collection("public.debezium_signal")
+            .signal_data_collection("public.rivven_signal")
             .signal_file("/tmp/signals.json")
             .signal_poll_interval_ms(500)
             .consumer_property("bootstrap.servers", "localhost:9092")
@@ -1665,7 +1653,7 @@ mod tests {
         assert!(!config.is_channel_enabled(SignalChannelType::Topic));
         assert_eq!(
             config.signal_data_collection,
-            Some("public.debezium_signal".to_string())
+            Some("public.rivven_signal".to_string())
         );
         assert_eq!(config.signal_file, Some("/tmp/signals.json".to_string()));
         assert_eq!(config.signal_poll_interval_ms, 500);
@@ -1674,16 +1662,16 @@ mod tests {
     #[test]
     fn test_signal_config_table_name() {
         let config = SignalConfig::builder()
-            .signal_data_collection("public.debezium_signal")
+            .signal_data_collection("public.rivven_signal")
             .build();
 
-        assert_eq!(config.signal_table_name(), Some("debezium_signal"));
+        assert_eq!(config.signal_table_name(), Some("rivven_signal"));
         assert_eq!(config.signal_schema_name(), Some("public"));
     }
 
     #[test]
     fn test_signal_config_parse_channels() {
-        let channels = SignalConfig::parse_enabled_channels("source, kafka, file");
+        let channels = SignalConfig::parse_enabled_channels("source, topic, file");
 
         assert_eq!(channels.len(), 3);
         assert!(channels.contains(&SignalChannelType::Source));
@@ -1724,7 +1712,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_source_signal_channel() {
-        let mut channel = SourceSignalChannel::new("public.debezium_signal");
+        let mut channel = SourceSignalChannel::new("public.rivven_signal");
 
         // Initialize
         channel.init().await.unwrap();
@@ -1760,11 +1748,11 @@ mod tests {
 
     #[test]
     fn test_source_signal_channel_is_signal_event() {
-        let channel = SourceSignalChannel::new("public.debezium_signal");
+        let channel = SourceSignalChannel::new("public.rivven_signal");
 
-        assert!(channel.is_signal_event("public", "debezium_signal"));
+        assert!(channel.is_signal_event("public", "rivven_signal"));
         assert!(!channel.is_signal_event("public", "users"));
-        assert!(!channel.is_signal_event("other", "debezium_signal"));
+        assert!(!channel.is_signal_event("other", "rivven_signal"));
     }
 
     #[tokio::test]
@@ -1806,7 +1794,7 @@ mod tests {
     async fn test_signal_manager() {
         let config = SignalConfig::builder()
             .enabled_channels(vec![SignalChannelType::Source])
-            .signal_data_collection("public.debezium_signal")
+            .signal_data_collection("public.rivven_signal")
             .build();
 
         let processor = Arc::new(SignalProcessor::new());

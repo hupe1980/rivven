@@ -24,6 +24,7 @@
 mod error;
 mod messages;
 mod metadata;
+pub mod serde_utils;
 mod types;
 
 pub use error::{ProtocolError, Result};
@@ -32,7 +33,7 @@ pub use messages::{
     TopicConfigEntry, TopicConfigValue,
 };
 pub use metadata::{BrokerInfo, PartitionMetadata, TopicMetadata};
-pub use types::MessageData;
+pub use types::{MessageData, SchemaType};
 
 /// Protocol version for compatibility checking
 pub const PROTOCOL_VERSION: u32 = 1;

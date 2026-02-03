@@ -387,6 +387,14 @@ pub struct EventMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sequence: Option<u64>,
 
+    /// Schema registry ID (for Avro/schema-aware sinks)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_id: Option<u32>,
+
+    /// Schema subject name (e.g., "topic-value", "topic-key")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_subject: Option<String>,
+
     /// Additional metadata
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
@@ -406,11 +414,22 @@ impl EventMetadata {
         }
     }
 
+    /// Create metadata with schema information
+    pub fn with_schema(schema_id: u32, subject: impl Into<String>) -> Self {
+        Self {
+            schema_id: Some(schema_id),
+            schema_subject: Some(subject.into()),
+            ..Default::default()
+        }
+    }
+
     /// Check if metadata has any values
     pub fn is_empty(&self) -> bool {
         self.position.is_none()
             && self.transaction_id.is_none()
             && self.sequence.is_none()
+            && self.schema_id.is_none()
+            && self.schema_subject.is_none()
             && self.extra.is_empty()
     }
 }

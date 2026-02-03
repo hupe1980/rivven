@@ -232,6 +232,7 @@ impl Cli {
             data_dir: self.data_dir.display().to_string(),
             max_segment_size: self.max_segment_size,
             log_level: self.log_level.clone(),
+            tiered_storage: rivven_core::storage::TieredStorageConfig::default(),
         }
     }
 

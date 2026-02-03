@@ -16,8 +16,6 @@
 //! - [`Pipeline`] - Composable CDC processing pipelines
 //! - [`Deduplicator`] - Idempotent event processing
 //! - [`ParallelCoordinator`] - Multi-table parallel CDC
-//! - [`SchemaTracker`] - Schema evolution tracking
-//! - [`OutboxProcessor`] - Transactional outbox pattern
 //! - [`Compactor`] - Log compaction (keep latest per key)
 //! - [`FieldEncryptor`] - Column-level encryption
 //! - [`TransactionGrouper`] - Atomic transaction processing
@@ -44,14 +42,13 @@
 //! │  Pipeline      ←─── Transform, filter, route events         │
 //! │  Deduplicator  ←─── Bloom + LRU duplicate detection         │
 //! │  Parallel      ←─── Multi-table concurrent processing       │
-//! │  SchemaTracker ←─── Evolution tracking, compatibility       │
 //! │  Outbox        ←─── Transactional outbox pattern            │
 //! │  Compaction    ←─── Log compaction, tombstones              │
 //! │  Encryption    ←─── Field-level encryption (AES-256-GCM)    │
 //! │  Heartbeat     ←─── Replication slot health, WAL advance    │
 //! │  Signal        ←─── Control signals (snapshot, pause)       │
 //! │  Notification  ←─── Progress, status, error alerts          │
-//! │  SMT           ←─── Single Message Transforms (Debezium)    │
+//! │  SMT           ←─── Single Message Transforms               │
 //! │  Tombstone     ←─── Log compaction tombstone emission       │
 //! └─────────────────────────────────────────────────────────────┘
 //! ```
@@ -74,13 +71,15 @@ mod notification;
 mod outbox;
 mod parallel;
 mod partitioner;
+pub mod pattern;
 mod pipeline;
+pub mod progress_stores;
 pub mod read_only;
 pub mod replica_identity;
 mod resilience;
 mod router;
 pub mod schema_change;
-mod schema_evolution;
+mod serialization;
 mod signal;
 mod smt;
 mod snapshot;
@@ -104,18 +103,26 @@ pub use filter::*;
 pub use health::*;
 pub use heartbeat::*;
 pub use incremental_snapshot::{
-    AdditionalCondition, ChunkBuffer, ChunkState, IncrementalSnapshotConfig,
+    AdditionalCondition, AggregateBufferStats, ChunkBoundary, ChunkBuffer, ChunkBufferStats,
+    ChunkQueryBuilder, ChunkState, ChunkingStrategy, IncrementalSnapshotConfig,
     IncrementalSnapshotConfigBuilder, IncrementalSnapshotContext, IncrementalSnapshotCoordinator,
     IncrementalSnapshotRequest, IncrementalSnapshotState, IncrementalSnapshotStats,
-    IncrementalSnapshotStatsSnapshot, SnapshotChunk, SnapshotTable, WatermarkSignal,
-    WatermarkStrategy, WatermarkType,
+    IncrementalSnapshotStatsSnapshot, KeyRange, QuerySpec, SnapshotChunk, SnapshotKey,
+    SnapshotTable, WatermarkSignal, WatermarkStrategy, WatermarkType,
 };
 pub use metrics::*;
 pub use notification::*;
 pub use outbox::*;
 pub use parallel::*;
 pub use partitioner::*;
+pub use pattern::{
+    matches_any_pattern, matches_qualified_name, pattern_match, pattern_match_case_sensitive,
+    PatternError, PatternMatcher, PatternSet, PatternSyntax, SharedPatternSet,
+};
 pub use pipeline::*;
+pub use progress_stores::FileProgressStore;
+#[cfg(feature = "postgres")]
+pub use progress_stores::PostgresProgressStore;
 pub use read_only::{
     DeduplicationResult, ReadOnlyConfig, ReadOnlyConfigBuilder, ReadOnlyError, ReadOnlyFeature,
     ReadOnlyGuard, ReadOnlyWatermarkStats, ReadOnlyWatermarkTracker, WatermarkSource,
@@ -131,10 +138,13 @@ pub use schema_change::{
     SchemaChangeConfigBuilder, SchemaChangeEmitter, SchemaChangeEvent, SchemaChangeStats,
     SchemaChangeStatsSnapshot, SchemaChangeType,
 };
-pub use schema_evolution::*;
+pub use serialization::{SerializationConfig, SerializationFormat};
 pub use signal::*;
 pub use smt::*;
 pub use snapshot::*;
+// Note: Database-specific snapshot sources are in their respective modules:
+// - PostgresSnapshotSource, discover_primary_key, etc. -> rivven_cdc::postgres::*
+// - MySqlSnapshotSource -> rivven_cdc::mysql::*
 pub use tls::{SslMode, TlsConfig};
 pub use tombstone::{TombstoneConfig, TombstoneEmitter, TombstoneStats};
 pub use traits::*;

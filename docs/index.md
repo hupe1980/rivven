@@ -2,14 +2,14 @@
 layout: default
 title: Home
 nav_order: 1
-description: "Rivven is a lightweight, cross-platform, single-binary distributed event streaming platform built in Rust."
+description: "Rivven is a production-grade, high-performance distributed event streaming platform written in Rust."
 permalink: /
 ---
 
 # Rivven
 {: .fs-9 }
 
-A lightweight, cross-platform, single-binary distributed event streaming platform.
+A production-grade, high-performance distributed event streaming platform.
 {: .fs-6 .fw-300 }
 
 [Get Started](/rivven/docs/getting-started){: .btn .btn-primary .fs-5 .mb-4 .mb-md-0 .mr-2 }
@@ -19,20 +19,28 @@ A lightweight, cross-platform, single-binary distributed event streaming platfor
 
 ## Why Rivven?
 
-Rivven brings **Kafka-class event streaming** to the modern era—without the JVM complexity, ZooKeeper dependencies, or operational overhead.
-
 {: .highlight }
-> **Single binary. Zero dependencies. Production ready.**
+> **Lightweight binaries. Zero dependencies. Sub-second startup. Production ready.**
+
+Modern event streaming shouldn't require a JVM, ZooKeeper, or a team of dedicated operators. Rivven delivers enterprise-grade capabilities with lightweight, focused binaries:
+
+| Traditional Platforms | Rivven |
+|:---------------------|:-------|
+| JVM + ZooKeeper + heavy dependencies | Lightweight native binaries, no runtime dependencies |
+| Minutes to start | <1 second startup |
+| Separate CDC tools required | Native CDC with `rivven-connect` |
+| External schema registry | Integrated `rivven-schema` registry |
+| Complex operational overhead | Sensible defaults, auto-create topics |
 
 ---
 
-## Features at a Glance
+## Key Features
 
-### 🚀 Core Streaming
-- **High-throughput message broker** with partitioned topics
-- **Consumer groups** with automatic offset management
-- **Raft consensus** for distributed coordination
-- **LZ4/Zstd compression** for efficient storage
+### 🚀 High Performance
+- **Lock-free architecture** with zero-copy I/O
+- **Batch APIs** for maximum throughput
+- **LZ4/Zstd/Snappy compression** for efficient storage
+- **Sticky partitioning** for optimal batching
 
 ### 🔄 Change Data Capture
 - **PostgreSQL CDC** with logical replication
@@ -41,24 +49,26 @@ Rivven brings **Kafka-class event streaming** to the modern era—without the JV
 - **17 built-in transforms** (SMTs) for data transformation
 
 ### 🔌 Connectors
-- **Sources**: PostgreSQL, MySQL, Kafka, MQTT, SQS, Pub/Sub
+- **Sources**: PostgreSQL, MySQL, MQTT, SQS, Pub/Sub, HTTP
 - **Sinks**: S3, GCS, Azure, Snowflake, BigQuery, Redshift, HTTP
 - **SDK** for building custom connectors
 
 ### 📊 Schema Registry
 - **Avro**, **Protobuf**, and **JSON Schema** support
-- **Confluent-compatible** wire format
-- **Embedded or external** deployment modes
+- **Standard wire format** and REST API
+- **External registry** integration (AWS Glue)
+- **Schema evolution** with compatibility checking
 
-### 🔒 Security
+### 🔒 Enterprise Security
 - **TLS/mTLS** for transport encryption
-- **SCRAM-SHA-256** authentication
-- **RBAC** with Cedar policy engine
+- **SCRAM-SHA-256** and **OIDC** authentication
+- **Cedar policy engine** for fine-grained RBAC
 - **Credential isolation** between components
 
 ### ☸️ Cloud Native
 - **Kubernetes Operator** with CRDs
 - **Prometheus metrics** built-in
+- **Tiered storage** (S3, GCS, Azure, MinIO)
 - **Web dashboard** for monitoring
 
 ---
@@ -69,31 +79,29 @@ Rivven brings **Kafka-class event streaming** to the modern era—without the JV
 
 ```bash
 # From crates.io
-cargo install rivven
+cargo install rivven rivvend rivven-connect rivven-schema
 
-# Or build from source
-git clone https://github.com/hupe1980/rivven
-cd rivven
-cargo build --release
+# Or with Docker
+docker pull ghcr.io/hupe1980/rivvend:latest
 ```
 
 ### Start the Broker
 
 ```bash
-rivvend
+rivvend --dashboard
 ```
 
 ### Publish & Consume
 
 ```bash
 # Create a topic
-rivven topic create events
+rivven topic create events --partitions 3
 
 # Publish messages
 rivven produce events "Hello, Rivven!"
 
 # Consume messages
-rivven consume events
+rivven consume events --from-beginning
 ```
 
 ### Stream CDC to Broker
@@ -134,16 +142,20 @@ rivven-connect -c rivven-connect.yaml
 ┌─────────────────────────────────────────────────────────────────┐
 │                      RIVVEN ARCHITECTURE                        │
 ├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ┌──────────────────┐       ┌────────────────────────────────┐ │
-│  │     rivvend      │       │       rivven-connect           │ │
-│  │    (broker)      │◄─────►│  (SDK + CLI)                   │ │
-│  │                  │native │                                 │ │
-│  │  • Storage       │proto  │  SDK:   Source, Sink, Transform │ │
-│  │  • Replication   │       │  CLI:   Config-driven pipelines │ │
-│  │  • Consumer Grps │       │  Sources: postgres-cdc, mysql   │ │
-│  │  • Auth/RBAC     │       │  Sinks:   stdout, s3, http      │ │
-│  └──────────────────┘       └────────────────────────────────┘ │
+│  ┌──────────────────┐       ┌────────────────────────────────┐  │
+│  │     rivvend      │       │       rivven-connect           │  │
+│  │    (broker)      │◄─────►│  (connector runtime)           │  │
+│  │                  │ proto │                                │  │
+│  │  • Storage       │       │  Sources: postgres-cdc, mysql  │  │
+│  │  • Replication   │       │  Sinks:   s3, snowflake, http  │  │
+│  │  • Auth/RBAC     │       │  Transforms: SMTs, filters     │  │
+│  └──────────────────┘       └────────────────────────────────┘  │
+│           │                            │                        │
+│           ▼                            ▼                        │
+│  ┌──────────────────┐       ┌────────────────────────────────┐  │
+│  │  rivven-schema   │       │        rivven-operator         │  │
+│  │ (schema registry)│       │      (kubernetes CRDs)         │  │
+│  └──────────────────┘       └────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -151,17 +163,15 @@ rivven-connect -c rivven-connect.yaml
 
 ## Performance
 
-| Workload | Result | Notes |
-|:---------|:-------|:------|
-| Append 100KB | 46 µs | ~2 GiB/s throughput |
-| Batch read 1K | 1.2 ms | ~836K messages/s |
-| Schema lookup | 29 ns | O(1) with caching |
+| Benchmark | Result | Notes |
+|:----------|:-------|:------|
+| Message append (100KB) | **46 µs** | ~2 GiB/s throughput |
+| Batch read (1K msgs) | **1.2 ms** | ~836K messages/s |
+| Schema lookup | **29 ns** | O(1) with caching |
 
 ---
 
 ## Documentation
-
-<div class="code-example" markdown="1">
 
 | Guide | Description |
 |:------|:------------|
@@ -173,13 +183,6 @@ rivven-connect -c rivven-connect.yaml
 | [Security](/rivven/docs/security) | Authentication, TLS, and RBAC |
 | [Kubernetes](/rivven/docs/kubernetes) | Operator and Helm deployment |
 | [Tiered Storage](/rivven/docs/tiered-storage) | Hot/warm/cold storage tiers |
-| [Consumer Groups](/rivven/docs/consumer-groups) | Static membership & cooperative rebalancing |
-| [OIDC Authentication](/rivven/docs/oidc) | OpenID Connect integration |
-| [Cedar Authorization](/rivven/docs/cedar) | Policy-as-code with AWS Cedar |
-| [Log Compaction](/rivven/docs/log-compaction) | Kafka-compatible compaction |
-| [Compression](/rivven/docs/compression) | LZ4 and Zstd compression |
-
-</div>
 
 ---
 

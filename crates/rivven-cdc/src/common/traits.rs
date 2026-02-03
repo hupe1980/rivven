@@ -40,20 +40,6 @@ pub trait CdcConfig: Send + Sync {
     fn validate(&self) -> Result<()>;
 }
 
-/// Trait for type mappers (database types → Avro)
-pub trait TypeMapper {
-    /// Map a database column type to an Avro schema JSON representation
-    fn to_avro_json(&self, column_type: &str, nullable: bool) -> serde_json::Value;
-
-    /// Generate a complete Avro schema for a table
-    fn table_to_avro_schema(
-        &self,
-        namespace: &str,
-        table: &str,
-        columns: &[(String, String, bool)], // (name, type, nullable)
-    ) -> anyhow::Result<apache_avro::Schema>;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

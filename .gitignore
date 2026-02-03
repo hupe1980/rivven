@@ -20,12 +20,6 @@ target
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-# Trunk WASM build artifacts (target only - dist/ is tracked for cargo publish)
-crates/rivvend/dashboard/target/
-# Restored from template during build (don't commit these)
-crates/rivvend/dashboard/Cargo.toml
-crates/rivvend/dashboard/Cargo.lock
-
 # Python native modules
 python/rivven/*.so
 python/rivven/*.pyd
@@ -45,4 +39,5 @@ _prompts/
 BACKLOG.md 
 CONCEPT.md
 CDC.md
+.DS_Store
 

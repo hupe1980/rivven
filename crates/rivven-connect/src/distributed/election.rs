@@ -306,7 +306,9 @@ impl LeaderElection {
 }
 
 /// Manager for multiple leader elections (one per singleton connector)
-#[allow(dead_code)] // Part of distributed mode infrastructure
+///
+/// Manages leader election instances for all singleton connectors,
+/// ensuring exactly one leader per connector across the cluster.
 pub struct ElectionManager {
     /// Our node ID
     node_id: NodeId,
@@ -316,7 +318,6 @@ pub struct ElectionManager {
     failure_timeout: Duration,
 }
 
-#[allow(dead_code)] // Part of distributed mode infrastructure
 impl ElectionManager {
     pub fn new(node_id: NodeId, failure_timeout: Duration) -> Self {
         Self {

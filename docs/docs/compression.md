@@ -7,7 +7,7 @@ nav_order: 19
 # Compression
 {: .no_toc }
 
-LZ4 and Zstd compression for storage and network efficiency.
+LZ4, Zstd, and Snappy compression for storage and network efficiency.
 {: .fs-6 .fw-300 }
 
 ## Table of contents
@@ -20,12 +20,13 @@ LZ4 and Zstd compression for storage and network efficiency.
 
 ## Overview
 
-Rivven supports **two compression algorithms** optimized for different use cases:
+Rivven supports **four compression algorithms** optimized for different use cases:
 
 | Algorithm | Speed | Ratio | Best For |
 |:----------|:------|:------|:---------|
-| **LZ4** | ~3 GB/s | ~2-3x | Real-time streaming, low latency |
-| **Zstd** | ~500 MB/s | ~3-5x | Storage, network transfers |
+| **LZ4** | ~4 GB/s | ~2-3x | Real-time streaming, lowest latency |
+| **Snappy** | ~1.5 GB/s | ~2-3x | Interoperability, balanced workloads |
+| **Zstd** | ~1 GB/s | ~3-5x | Storage, network transfers, cold data |
 | **None** | N/A | 1x | Pre-compressed data, tiny payloads |
 
 ---
@@ -37,7 +38,7 @@ Rivven supports **two compression algorithms** optimized for different use cases
 ```yaml
 # Producer config
 producer:
-  compression: lz4  # none, lz4, zstd
+  compression: lz4  # none, lz4, snappy, zstd
 
 # Or per-message
 producer.send(Record::new()
@@ -61,6 +62,7 @@ rivven topic create events \
 | `producer` | Use producer's compression (default) |
 | `none` | Decompress and store uncompressed |
 | `lz4` | Re-compress with LZ4 |
+| `snappy` | Re-compress with Snappy |
 | `zstd` | Re-compress with Zstd |
 
 ### Server Defaults
@@ -97,6 +99,19 @@ defaults:
 - High-throughput workloads
 - When CPU is the bottleneck
 
+### Snappy
+
+**Characteristics**:
+- Very fast decompression (~1.5 GB/s)
+- Fast compression (~500 MB/s)
+- Moderate compression ratio (2-3x)
+- Widely supported protocol format
+
+**Best for**:
+- Balanced speed/ratio workloads
+- Interoperability with existing systems
+- Google Cloud integrations (native Snappy support)
+
 ### Zstd
 
 **Characteristics**:
@@ -113,32 +128,54 @@ defaults:
 
 ---
 
+## Protocol Compatibility
+
+Rivven supports standard compression formats with type IDs:
+
+| Type ID | Algorithm | Rivven Support |
+|:--------|:----------|:---------------|
+| 0 | None | ✅ |
+| 2 | Snappy | ✅ |
+| 3 | LZ4 | ✅ |
+| 4 | Zstd | ✅ |
+
+```rust
+// Convert between protocol and Rivven compression types
+let type_id = CompressionAlgorithm::Snappy.type_id(); // Returns 2
+let algo = CompressionAlgorithm::from_type_id(2); // Returns Some(Snappy)
+```
+
+---
+
 ## Compression Ratios
 
 Typical compression ratios by data type:
 
-| Data Type | LZ4 | Zstd |
-|:----------|:----|:-----|
-| JSON logs | 4-6x | 6-10x |
-| Protobuf | 2-3x | 3-5x |
-| Avro | 2-3x | 3-4x |
-| Plain text | 3-4x | 5-8x |
-| Already compressed | 1x | 1x |
-| Random bytes | 1x | 1x |
+| Data Type | LZ4 | Snappy | Zstd |
+|:----------|:----|:-------|:-----|
+| JSON logs | 4-6x | 4-5x | 6-10x |
+| Protobuf | 2-3x | 2-3x | 3-5x |
+| Avro | 2-3x | 2-3x | 3-4x |
+| Plain text | 3-4x | 3-4x | 5-8x |
+| Already compressed | 1x | 1x | 1x |
+| Random bytes | 1x | 1x | 1x |
 
 ---
 
 ## Wire Format
 
 ```
-+-------+----------------+------------------+
-| Flags | Original Size  | Compressed Data  |
-| 1 byte| 4 bytes (opt)  | N bytes          |
-+-------+----------------+------------------+
++-------+----------------+----------+------------------+
+| Flags | Original Size  | Checksum | Compressed Data  |
+| 1 byte| 4 bytes (opt)  | 4B (opt) | N bytes          |
++-------+----------------+----------+------------------+
 
 Flags byte:
-  bits 0-1: Algorithm (00=None, 01=LZ4, 10=Zstd)
+  bits 0-2: Algorithm (000=None, 001=LZ4, 010=Zstd, 011=Snappy)
+  bit 3:    Reserved
   bit 4:    Has original size prefix
+  bit 5:    Has CRC32 checksum
+  bits 6-7: Reserved
 ```
 
 ---
@@ -162,7 +199,7 @@ Rivven compresses at the **batch level**, not per-message:
 **Benefits**:
 - Better compression ratio (more context)
 - Amortized compression overhead
-- Kafka-compatible batching
+- Protocol-compatible batching
 
 ---
 

@@ -20,23 +20,26 @@ Understanding Rivven's design and components.
 
 ## Design Principles
 
-### Single-Binary Simplicity
+### Lightweight, Focused Binaries
 
-Rivven is designed as a **single binary** that contains everything needed to run:
-
-- No JVM or runtime dependencies
-- No ZooKeeper or external coordinators
-- Self-contained storage engine
-- Embedded Raft consensus
-
-### Two Binaries, Clear Responsibilities
+Rivven provides **four focused binaries**, each with a clear responsibility:
 
 | Binary | Purpose |
 |:-------|:--------|
 | `rivvend` | Message broker with storage, replication, and auth |
-| `rivven-connect` | Connector framework for sources and sinks |
+| `rivven` | Command-line interface for topic and cluster management |
+| `rivven-schema` | Schema registry with Avro, Protobuf, JSON Schema |
+| `rivven-connect` | Connector runtime for CDC and data pipelines |
 
-This separation provides **security isolation**—database credentials stay in the connector process, never reaching the broker.
+All binaries share these characteristics:
+- No JVM or runtime dependencies
+- No ZooKeeper or external coordinators
+- Sub-second startup time
+- Native Rust performance
+
+### Security Through Separation
+
+This multi-binary architecture provides **security isolation**—database credentials stay in the connector process, never reaching the broker. Schema registry credentials are similarly isolated.
 
 ### Rivven Connect Features
 
@@ -77,94 +80,95 @@ This separation provides **security isolation**—database credentials stay in t
 | `rivven-client` | Rust client | Native async client library |
 | `rivven` | CLI | Command-line interface |
 | `rivven-cluster` | Distributed | Raft consensus, SWIM gossip, partitioning |
-| `rivven-cdc` | CDC library | PostgreSQL and MySQL replication |
-| `rivven-connect` | Connector CLI & SDK | Configuration-driven connectors + traits |
-| `rivven-queue` | Message queues | Kafka and MQTT connectors |
-| `rivven-storage` | Object storage | S3, GCS, Azure Blob sinks |
-| `rivven-warehouse` | Data warehouses | Snowflake, BigQuery, Redshift sinks |
+| `rivven-cdc` | CDC library | PostgreSQL and MySQL replication primitives |
+| `rivven-connect` | Connector SDK & Runtime | Built-in connectors + SDK traits |
+| `rivven-schema` | Schema Registry | High-performance schema management |
 | `rivven-operator` | Kubernetes | CRDs and controller |
 | `rivven-python` | Python bindings | PyO3-based Python SDK |
 
 ---
 
-## Grouped Connector Crates
+## Connector Architecture
 
-Rivven organizes connectors into **domain-specific crates** to isolate heavy dependencies
-and allow users to include only the connectors they need. This follows a modular architecture
-where each crate focuses on a specific integration domain.
+Rivven organizes connectors **within rivven-connect** using feature flags to isolate heavy dependencies.
+This follows a modular architecture where each connector category can be enabled independently.
 
 ### Architecture Overview
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    rivven-connect (SDK)                         │
+│                    rivven-connect (SDK + Runtime)               │
 │  SourceFactory, SinkFactory, AnySource, AnySink, Registry       │
-└─────────────────────────────────────────────────────────────────┘
-        ↑ implement traits
-┌─────────────┬─────────────┬───────────────┬─────────────────────┐
-│ rivven-cdc  │ rivven-     │ rivven-       │ rivven-queue        │
-│ (sources:   │ storage     │ warehouse     │ (source/sink:       │
-│ pg, mysql)  │ (sink: s3,  │ (sink: bq,    │ kafka, mqtt)        │
-│             │ gcs, azure) │ snowflake)    │                     │
-└─────────────┴─────────────┴───────────────┴─────────────────────┘
-        ↑ compose
-┌─────────────────────────────────────────────────────────────────┐
-│                     rivven-connect (CLI)                         │
-│  Composes adapters, runs pipelines, no adapter code              │
+├─────────────────────────────────────────────────────────────────┤
+│                    Built-in Connectors                          │
+│  ├── Database CDC: postgres-cdc, mysql-cdc                      │
+│  ├── Messaging: mqtt, sqs, pubsub                               │
+│  ├── Storage: s3, gcs, azure-blob                               │
+│  ├── Warehouse: snowflake, bigquery, redshift                   │
+│  └── Utility: datagen, stdout, http-webhook                     │
+├─────────────────────────────────────────────────────────────────┤
+│                    External Crates                              │
+│  └── rivven-cdc: Optional reusable CDC primitives               │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### Grouped Crates
+### Connector Feature Flags
 
-| Crate | Domain | Connectors | Feature Flags |
-|:------|:-------|:-----------|:--------------|
-| `rivven-cdc` | Databases | postgres-cdc, mysql-cdc | `postgres`, `mysql` |
-| `rivven-storage` | Object Storage | S3, GCS, Azure Blob | `s3`, `gcs`, `azure` |
-| `rivven-warehouse` | Data Warehouses | BigQuery, Redshift, Snowflake | `bigquery`, `redshift`, `snowflake` |
-| `rivven-queue` | Message Queues | Kafka, MQTT | `kafka`, `mqtt` |
+| Feature | Domain | Connectors |
+|:--------|:-------|:-----------|
+| `postgres` | Database CDC | postgres-cdc |
+| `mysql` | Database CDC | mysql-cdc |
+| `mqtt` | Messaging | mqtt |
+| `sqs` | Messaging | AWS SQS |
+| `pubsub` | Messaging | Google Pub/Sub |
+| `s3` | Object Storage | Amazon S3, MinIO, R2 |
+| `gcs` | Object Storage | Google Cloud Storage |
+| `azure` | Object Storage | Azure Blob Storage |
+| `snowflake` | Data Warehouse | Snowflake |
+| `bigquery` | Data Warehouse | Google BigQuery |
+| `redshift` | Data Warehouse | Amazon Redshift |
+| `parquet` | File Format | Parquet output format |
 
-### Benefits of Grouped Crates
+### Benefits of Feature Flags
 
-1. **Dependency Isolation** - Heavy dependencies (Kafka, cloud SDKs) only included when needed
+1. **Dependency Isolation** - Heavy dependencies (cloud SDKs) only included when needed
 2. **Build Time Reduction** - Compile only the connectors you use
-3. **Single Binary Option** - Enable all features for complete functionality
-4. **Pluggable Architecture** - Add new connector crates without modifying core
+3. **Single Binary Option** - Enable `full` feature for all connectors
+4. **Minimal Core** - Default build includes only datagen and stdout
 
 ### Usage Example
 
 ```toml
 # Only include what you need
 [dependencies]
-rivven-connect = "0.0.4"
-rivven-cdc = { version = "0.0.4", features = ["postgres"] }
-rivven-queue = { version = "0.0.4", features = ["kafka"] }
+rivven-connect = { version = "0.0.4", features = ["postgres", "s3"] }
 
 # Or include everything
 [dependencies]
 rivven-connect = { version = "0.0.4", features = ["full"] }
-rivven-queue = { version = "0.0.4", features = ["full"] }
-rivven-storage = { version = "0.0.4", features = ["full"] }
-rivven-warehouse = { version = "0.0.4", features = ["full"] }
 ```
 
-### Registering Connectors
+### Bundle Features
 
-Each crate provides registration functions to add connectors to the runtime:
+| Bundle | Includes |
+|:-------|:---------|
+| `queue-full` | mqtt, sqs, pubsub |
+| `storage-full` | s3, gcs, azure, parquet |
+| `warehouse-full` | snowflake, bigquery, redshift |
+| `full` | All connectors |
+
+### Creating Custom Registries
 
 ```rust
 use rivven_connect::connectors::{create_source_registry, create_sink_registry};
 
-let mut sources = create_source_registry();
-let mut sinks = create_sink_registry();
+// Get pre-configured registries with all enabled connectors
+let sources = create_source_registry();
+let sinks = create_sink_registry();
 
-// Add queue connectors
-rivven_queue::register_all_connectors(&mut sources, &mut sinks);
-
-// Add storage sinks
-rivven_storage::register_all_sinks(&mut sinks);
-
-// Add warehouse sinks
-rivven_warehouse::register_all_sinks(&mut sinks);
+// Or use the connector inventory for rich metadata
+use rivven_connect::connectors::create_connector_inventory;
+let inventory = create_connector_inventory();
 ```
 
 ---
@@ -187,6 +191,65 @@ data/
             └── ...
 ```
 
+### Durability Guarantees
+
+Rivven ensures **full durability** across broker restarts through multiple mechanisms:
+
+#### Topic Metadata Persistence
+
+Topic configuration and metadata are persisted to `topic_metadata.json`:
+
+```json
+[
+  {
+    "name": "orders",
+    "num_partitions": 8,
+    "created_at": 1706745600
+  },
+  {
+    "name": "events",
+    "num_partitions": 4,
+    "created_at": 1706745900
+  }
+]
+```
+
+This ensures:
+- **Topics survive restarts** - All topic definitions are restored automatically
+- **Partition counts preserved** - No need to recreate topics after restart
+- **Atomic updates** - Metadata file is updated transactionally on create/delete
+
+#### Recovery Process
+
+On startup, the broker performs recovery in this order:
+
+1. **Primary Recovery** - Load `topic_metadata.json` if present
+2. **Fallback Recovery** - Scan data directory for `partition-*` subdirs
+3. **Segment Recovery** - Validate and load existing segment files
+4. **Offset Recovery** - Restore consumer group offsets from storage
+
+```
+┌───────────────┐     ┌──────────────┐     ┌─────────────┐
+│ Load Metadata │────>│ Scan Partitions │──>│ Validate    │
+│ JSON          │     │ (fallback)       │  │ Segments    │
+└───────────────┘     └──────────────────┘  └─────────────┘
+                                                   │
+                                                   ▼
+                              ┌─────────────────────────────┐
+                              │ Broker Ready (all data      │
+                              │ restored, no data loss)     │
+                              └─────────────────────────────┘
+```
+
+#### Data Integrity
+
+| Component | Durability Mechanism | Recovery Method |
+|:----------|:--------------------|:----------------|
+| Topic Metadata | JSON file | Load on startup |
+| Messages | Segment files (.log) | Memory-map existing |
+| Offsets | Index files (.idx) | Rebuild from segments |
+| Consumer Groups | Offset storage | Replay from log |
+
 ### Segment Files
 
 - **Append-only** log files
@@ -207,6 +270,63 @@ data/
 | LZ4 | ~2x | Very fast | Real-time streaming |
 | Zstd | ~4x | Fast | Batch/archival |
 | None | 1x | N/A | Already compressed data |
+
+---
+
+## Performance Optimizations
+
+### io_uring Async I/O (Linux)
+
+On Linux 5.6+, Rivven uses **io_uring** for kernel-bypassing async I/O:
+
+- **Submission Queue** - Batch I/O operations without syscalls
+- **Completion Queue** - Poll results without context switches
+- **Registered Buffers** - Zero-copy with pre-registered memory
+
+```
+┌────────────┐     ┌─────────────────┐     ┌────────────┐
+│ Application│     │    io_uring     │     │   Kernel   │
+│   Thread   │────>│ Submission Ring │────>│  I/O Path  │
+│            │<────│ Completion Ring │<────│            │
+└────────────┘     └─────────────────┘     └────────────┘
+```
+
+**Performance comparison:**
+
+| Backend | IOPS (4KB) | Latency p99 | CPU Usage |
+|:--------|:-----------|:------------|:----------|
+| epoll   | 200K       | 1.5ms       | 80%       |
+| io_uring| 800K       | 0.3ms       | 40%       |
+
+### Request Pipelining (Client)
+
+The Rivven client supports **HTTP/2-style request pipelining**:
+
+- Multiple in-flight requests over single TCP connection
+- Automatic batching with configurable flush intervals
+- Backpressure via semaphores to prevent memory exhaustion
+
+```rust
+use rivven_client::{PipelinedClient, PipelineConfig};
+
+let client = PipelinedClient::connect(addr, PipelineConfig::high_throughput()).await?;
+
+// Send requests without waiting for responses
+let f1 = client.send(Request::Publish { /* ... */ });
+let f2 = client.send(Request::Publish { /* ... */ });
+let f3 = client.send(Request::Consume { /* ... */ });
+
+// Await responses concurrently
+let (r1, r2, r3) = tokio::join!(f1, f2, f3);
+```
+
+### Zero-Copy Transfers
+
+Rivven minimizes data copying throughout the stack:
+
+- **Memory-mapped segments** - Direct disk-to-network transfers
+- **Buffer pooling** - Reusable byte buffers reduce allocations
+- **Vectored I/O** - Scatter-gather for multi-buffer operations
 
 ---
 
@@ -311,13 +431,13 @@ For detailed usage, see the [Exactly-Once Guide](exactly-once).
 
 ## Message Partitioning
 
-### Sticky Partitioner (Kafka 2.4+ Style)
+### Sticky Partitioner
 
 Rivven implements **sticky partitioning** for optimal throughput and distribution:
 
 | Message Type | Strategy | Behavior |
 |:-------------|:---------|:---------|
-| With key | Murmur2 hash | Same key → same partition (Kafka-compatible) |
+| With key | Murmur2 hash | Same key → same partition |
 | Without key | Sticky batching | Batches to one partition, rotates periodically |
 | Explicit partition | Direct | Uses specified partition |
 
@@ -338,7 +458,7 @@ Messages without keys stick to one partition until:
 
 ### Key Hashing (Murmur2)
 
-Keyed messages use **Murmur2** hash for Kafka compatibility:
+Keyed messages use **Murmur2** hash for consistent routing:
 
 ```rust
 // Same key always routes to same partition
@@ -347,7 +467,6 @@ partition = murmur2_hash(key) % num_partitions
 
 This ensures:
 - Ordering guarantee for messages with same key
-- Compatibility with Kafka client expectations
 - Deterministic routing across restarts
 
 ---

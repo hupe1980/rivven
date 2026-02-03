@@ -262,15 +262,15 @@ rivven-client --bootstrap-servers rivven:9092 --auth-token "$TOKEN"
 
 ### SASL/OAUTHBEARER
 
-For Kafka-compatible clients, Rivven supports SASL/OAUTHBEARER:
+For protocol-compatible clients, Rivven supports SASL/OAUTHBEARER:
 
 ```properties
-# Kafka client properties
+# Client properties
 security.protocol=SASL_SSL
 sasl.mechanism=OAUTHBEARER
-sasl.jaas.config=org.apache.kafka.common.security.oauthbearer.OAuthBearerLoginModule required \
+sasl.jaas.config=org.rivven.common.security.oauthbearer.OAuthBearerLoginModule required \
   oauth.token.endpoint.uri="https://keycloak.example.com/realms/rivven/protocol/openid-connect/token" \
-  oauth.client.id="kafka-client" \
+  oauth.client.id="rivven-client" \
   oauth.client.secret="secret";
 ```
 

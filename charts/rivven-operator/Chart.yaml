@@ -23,6 +23,16 @@ annotations:
   artifacthub.io/crds: |
     - kind: RivvenCluster
       version: v1alpha1
-      name: rivvenclusters.rivven.io
+      name: rivvenclusters.rivven.hupe1980.github.io
       displayName: Rivven Cluster
       description: Represents a Rivven streaming cluster
+    - kind: RivvenConnect
+      version: v1alpha1
+      name: rivvenconnects.rivven.hupe1980.github.io
+      displayName: Rivven Connect
+      description: Manages CDC and ETL connectors
+    - kind: RivvenSchemaRegistry
+      version: v1alpha1
+      name: rivvenschemaregistries.rivven.hupe1980.github.io
+      displayName: Rivven Schema Registry
+      description: Confluent-compatible schema registry

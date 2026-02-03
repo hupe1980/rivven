@@ -1,7 +1,9 @@
 //! Rivven test context for CDC integration tests
 
 use anyhow::{Context, Result};
-use rivven_cdc::common::{CdcConnector, CdcEvent, CdcSource};
+use async_trait::async_trait;
+use bytes::Bytes;
+use rivven_cdc::common::{CdcConnector, CdcEvent, CdcSource, EventSink};
 use rivven_cdc::postgres::{PostgresCdc, PostgresCdcConfig};
 use rivven_core::{Config, Message, Partition, TopicManager};
 use std::collections::HashMap;
@@ -11,6 +13,32 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use tracing::{debug, info};
+
+/// EventSink adapter for Rivven partitions
+/// This allows CDC events to be written to Rivven partitions
+#[derive(Debug)]
+struct PartitionSink {
+    partition: Arc<Partition>,
+}
+
+impl PartitionSink {
+    fn new(partition: Arc<Partition>) -> Self {
+        Self { partition }
+    }
+}
+
+#[async_trait]
+impl EventSink for PartitionSink {
+    async fn append(&self, event: &CdcEvent) -> rivven_cdc::common::Result<u64> {
+        let json = serde_json::to_vec(event)
+            .map_err(|e| rivven_cdc::common::CdcError::Serialization(e.to_string()))?;
+        let message = Message::new(Bytes::from(json));
+        self.partition
+            .append(message)
+            .await
+            .map_err(|e| rivven_cdc::common::CdcError::Io(std::io::Error::other(e.to_string())))
+    }
+}
 
 /// Rivven context for CDC testing
 pub struct RivvenTestContext {
@@ -34,7 +62,7 @@ impl RivvenTestContext {
         };
 
         let topic_manager = TopicManager::new(config);
-        let connector = Arc::new(CdcConnector::new());
+        let connector = Arc::new(CdcConnector::postgres());
 
         Ok(Self {
             topic_manager,
@@ -61,9 +89,10 @@ impl RivvenTestContext {
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         let partition = topic.partition(0).map_err(|e| anyhow::anyhow!("{}", e))?;
-        self.connector
-            .register_topic(topic_name.clone(), partition.clone())
-            .await;
+
+        // Create a PartitionSink adapter and register it
+        let sink = Arc::new(PartitionSink::new(partition.clone()));
+        self.connector.register_sink(topic_name.clone(), sink).await;
         self.partitions.insert(topic_name, partition.clone());
 
         info!(

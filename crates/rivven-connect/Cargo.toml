@@ -22,13 +22,41 @@ postgres = ["rivven-cdc/postgres", "tokio-postgres"]
 mysql = ["rivven-cdc/mysql"]
 tls = ["rivven-client/tls"]
 http = []  # HTTP connector is now built-in, just feature-gated
-full = ["postgres", "mysql", "tls", "http"]
+
+# Queue connectors (message queues)
+kafka = []      # Kafka source/sink
+mqtt = []       # MQTT source
+sqs = []        # AWS SQS source
+pubsub = []     # Google Pub/Sub source
+
+# Storage connectors - unified via object_store crate
+cloud-storage = ["dep:object_store"]
+s3 = ["cloud-storage", "object_store/aws"]
+gcs = ["cloud-storage", "object_store/gcp"]
+azure = ["cloud-storage", "object_store/azure"]
+parquet = ["dep:parquet", "dep:arrow", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-json"]
+
+# Warehouse connectors (data warehouse sinks)
+snowflake = ["dep:jsonwebtoken", "dep:rsa"]
+bigquery = ["dep:gcp-bigquery-client", "dep:google-cloud-auth"]
+redshift = ["dep:aws-sdk-redshift", "dep:aws-credential-types", "dep:rustls", "dep:webpki-roots", "dep:tokio-postgres-rustls"]
+
+# Lakehouse connectors (open table formats)
+iceberg = ["parquet", "dep:iceberg", "dep:iceberg-catalog-rest"]
+
+# Feature bundles
+queue-full = ["kafka", "mqtt", "sqs", "pubsub"]
+storage-full = ["s3", "gcs", "azure", "parquet"]
+warehouse-full = ["snowflake", "bigquery", "redshift"]
+lakehouse-full = ["iceberg"]
+full = ["postgres", "mysql", "tls", "http", "queue-full", "storage-full", "warehouse-full", "lakehouse-full"]
 
 [dependencies]
 # Internal crates
 rivven-cdc = { workspace = true }
 rivven-core = { workspace = true }
 rivven-client = { workspace = true }
+rivven-schema = { workspace = true, features = ["types"] }  # Types only - codecs are in format/
 
 # Async
 tokio = { workspace = true }
@@ -64,7 +92,6 @@ schemars = "0.8"
 validator = { version = "0.20", features = ["derive"] }
 uuid = { version = "1.0", features = ["v4"] }
 secrecy = { version = "0.10", features = ["serde"] }
-zeroize = "1.8"
 parking_lot = "0.12"
 
 # Derive macros for connector development
@@ -72,21 +99,58 @@ rivven-connect-derive = { workspace = true }
 
 # Schema registry and plugin support
 base64 = "0.22"
-lru = "0.12"
-arc-swap = "1.7"
-wasmparser = "0.224"
+urlencoding = "2.1"
 
 # Native Avro support
 apache-avro = { version = "0.17", features = ["derive"] }
 md5 = "0.7"
+hex = "0.4"
 
 # Native Protobuf support
 prost = "0.13"
 prost-types = "0.13"
 prost-reflect = "0.15"
 
+# Compression (for storage connectors)
+flate2 = "1"
+zstd = "0.13"
+snap = "1.1"
+lz4 = "1.24"
+
+# Unified object storage (optional - replaces individual cloud SDKs)
+object_store = { version = "0.11", optional = true }
+
+# AWS SDK (optional - for SQS, Redshift only; S3 uses object_store)
+aws-sdk-redshift = { version = "1", optional = true }
+aws-credential-types = { version = "1", features = ["hardcoded-credentials"], optional = true }
+
+# Google Cloud (optional - for BigQuery, Pub/Sub only; GCS uses object_store)
+gcp-bigquery-client = { version = "0.25", optional = true }
+google-cloud-auth = { version = "0.17", optional = true }
+
+# Apache Parquet - use version 57 to match iceberg crate's internal dependencies
+parquet = { version = "57", optional = true }
+arrow = { version = "57", optional = true }
+arrow-array = { version = "57", optional = true }
+arrow-schema = { version = "57", optional = true }
+arrow-json = { version = "57", optional = true }
+
+# Apache Iceberg (optional)
+iceberg = { version = "0.8", optional = true }
+iceberg-catalog-rest = { version = "0.8", optional = true }
+
+# Snowflake (optional)
+jsonwebtoken = { version = "9", optional = true }
+rsa = { version = "0.9", optional = true }
+
+# Redshift TLS (optional)
+rustls = { version = "0.23", optional = true }
+webpki-roots = { version = "0.26", optional = true }
+tokio-postgres-rustls = { version = "0.13", optional = true }
+
 [dev-dependencies]
 tokio-test = "0.4"
+static_assertions = "1.1"
 # Note: rivvend is NOT a dev-dependency to avoid circular publish issues
 # Integration tests that need rivvend should be in a separate workspace crate
 testcontainers = "0.23"

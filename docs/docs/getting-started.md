@@ -23,7 +23,7 @@ Get Rivven up and running in minutes.
 ### From Crates.io
 
 ```bash
-cargo install rivven
+cargo install rivven rivvend rivven-connect rivven-schema
 ```
 
 ### From Source
@@ -37,13 +37,22 @@ cargo build --release
 ./target/release/rivvend --help
 ./target/release/rivven --help
 ./target/release/rivven-connect --help
+./target/release/rivven-schema --help
 ```
 
 ### Docker
 
 ```bash
-docker pull ghcr.io/hupe1980/rivven:latest
-docker run -p 9092:9092 ghcr.io/hupe1980/rivven:latest
+# Pull all images
+docker pull ghcr.io/hupe1980/rivvend:latest
+docker pull ghcr.io/hupe1980/rivven-connect:latest
+docker pull ghcr.io/hupe1980/rivven-schema:latest
+
+# Start broker
+docker run -d -p 9092:9092 -p 9094:9094 ghcr.io/hupe1980/rivvend:latest --dashboard
+
+# Start schema registry (optional)
+docker run -d -p 8081:8081 ghcr.io/hupe1980/rivven-schema:latest serve --port 8081
 ```
 
 ---
@@ -298,9 +307,62 @@ for msg in messages:
 
 ---
 
+## Schema Registry
+
+Rivven includes a high-performance Schema Registry for schema management.
+
+### Start the Registry
+
+```bash
+# Start schema registry (in-memory storage for development)
+rivven-schema serve --port 8081
+
+# With broker-backed storage (production)
+rivven-schema serve --port 8081 --broker localhost:9092
+```
+
+### Register and Query Schemas
+
+```bash
+# Register a schema
+rivven-schema register --url http://localhost:8081 --subject user-value \
+  --schema '{"type":"record","name":"User","fields":[{"name":"id","type":"long"},{"name":"name","type":"string"}]}'
+
+# List subjects
+rivven-schema subjects --url http://localhost:8081
+
+# Get schema by ID
+rivven-schema get --url http://localhost:8081 --id 1
+```
+
+### Programmatic Usage
+
+```rust
+use rivven_schema::{SchemaRegistry, RegistryConfig, SchemaType};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let registry = SchemaRegistry::new(RegistryConfig::memory()).await?;
+    
+    let schema_id = registry.register(
+        "user-value",
+        SchemaType::Avro,
+        r#"{"type":"record","name":"User","fields":[...]}"#
+    ).await?;
+    
+    println!("Registered schema ID: {}", schema_id.0);
+    Ok(())
+}
+```
+
+For more details, see the [Schema Registry](schema-registry) guide.
+
+---
+
 ## Next Steps
 
 - [Architecture](architecture) — Understand system design
+- [Schema Registry](schema-registry) — Avro, Protobuf, and JSON Schema
 - [CDC Guide](cdc) — Set up Change Data Capture
 - [Connectors](connectors) — Configure sources and sinks
 - [Security](security) — Enable TLS and authentication

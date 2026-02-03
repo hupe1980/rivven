@@ -1,4 +1,4 @@
-apiVersion: rivven.io/v1alpha1
+apiVersion: rivven.hupe1980.github.io/v1alpha1
 kind: RivvenCluster
 metadata:
   name: production-cluster

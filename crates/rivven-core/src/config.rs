@@ -1,3 +1,4 @@
+use crate::storage::TieredStorageConfig;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for Rivven
@@ -23,6 +24,10 @@ pub struct Config {
 
     /// Log level
     pub log_level: String,
+
+    /// Tiered storage configuration (hot/warm/cold data tiering)
+    #[serde(default)]
+    pub tiered_storage: TieredStorageConfig,
 }
 
 impl Default for Config {
@@ -35,6 +40,7 @@ impl Default for Config {
             data_dir: "./data".to_string(),
             max_segment_size: 1024 * 1024 * 1024, // 1GB
             log_level: "info".to_string(),
+            tiered_storage: TieredStorageConfig::default(),
         }
     }
 }
@@ -72,6 +78,18 @@ impl Config {
     /// Set the data directory
     pub fn with_data_dir(mut self, data_dir: String) -> Self {
         self.data_dir = data_dir;
+        self
+    }
+
+    /// Set tiered storage configuration
+    pub fn with_tiered_storage(mut self, config: TieredStorageConfig) -> Self {
+        self.tiered_storage = config;
+        self
+    }
+
+    /// Enable tiered storage with default settings
+    pub fn with_tiered_storage_enabled(mut self) -> Self {
+        self.tiered_storage.enabled = true;
         self
     }
 

@@ -10,17 +10,16 @@
 //! - **Signal table (source channel)**: Cannot INSERT signals into the database
 //! - **Signal table watermarking**: Cannot write watermarks for incremental snapshots
 //!
-//! This module provides alternative implementations that work with read-only connections,
-//! following Debezium's `read.only=true` approach.
+//! This module provides alternative implementations that work with read-only connections.
 //!
 //! ## Read-Only Incremental Snapshots
 //!
-//! Debezium's read-only incremental snapshot uses transaction IDs from the WAL stream
+//! Read-only incremental snapshot uses transaction IDs from the WAL stream
 //! or heartbeat events as watermarks, instead of writing to a signal table.
 //!
 //! **Requirements:**
 //! - PostgreSQL 13+ (for `pg_current_xact_id_if_assigned()`)
-//! - Use non-source signal channels (topic, file, jmx, api)
+//! - Use non-source signal channels (topic, file, api)
 //!
 //! ## Configuration
 //!
@@ -39,9 +38,8 @@
 //! | Channel | Read-Only Compatible | Notes |
 //! |---------|---------------------|-------|
 //! | `source` | ❌ | Requires database writes |
-//! | `topic` | ✅ | Signals via Kafka/Rivven topic |
+//! | `topic` | ✅ | Signals via Rivven topic |
 //! | `file` | ✅ | Signals via JSON file |
-//! | `jmx` | ✅ | Signals via JMX MBean |
 //! | `api` | ✅ | Signals via HTTP/gRPC |
 //!
 //! ## Watermarking Strategy
@@ -82,7 +80,7 @@ pub struct ReadOnlyConfig {
 
     /// Allowed signal channels in read-only mode
     ///
-    /// Default: [Topic, File, Jmx, Api]
+    /// Default: [Topic, File, Api]
     /// Source channel is automatically excluded.
     #[serde(default = "default_read_only_channels")]
     pub allowed_channels: Vec<SignalChannelType>,
@@ -109,7 +107,6 @@ fn default_read_only_channels() -> Vec<SignalChannelType> {
     vec![
         SignalChannelType::Topic,
         SignalChannelType::File,
-        SignalChannelType::Jmx,
         SignalChannelType::Api,
     ]
 }
@@ -341,7 +338,7 @@ impl ReadOnlyWatermarkTracker {
 
     /// Check if an event with the given XID should be deduplicated against snapshot data.
     ///
-    /// This implements Debezium's read-only deduplication logic:
+    /// Read-only deduplication logic:
     /// - If XID is before the snapshot window, event wins (not captured in snapshot)
     /// - If XID is within the window, compare against snapshot buffer
     /// - If XID is after the window, event wins (happened after snapshot)
@@ -454,7 +451,7 @@ impl ReadOnlyGuard {
             ReadOnlyFeature::SignalTableSource => Err(ReadOnlyError::FeatureUnavailable {
                 feature: "Signal table (source channel)",
                 reason: "Source channel requires database writes",
-                alternative: "Use topic, file, jmx, or api signal channels",
+                alternative: "Use topic, file, or api signal channels",
             }),
             ReadOnlyFeature::SignalTableWatermarking => Err(ReadOnlyError::FeatureUnavailable {
                 feature: "Signal table watermarking",
@@ -600,7 +597,6 @@ mod tests {
         // Other channels should be allowed
         assert!(config.is_channel_allowed(SignalChannelType::Topic));
         assert!(config.is_channel_allowed(SignalChannelType::File));
-        assert!(config.is_channel_allowed(SignalChannelType::Jmx));
         assert!(config.is_channel_allowed(SignalChannelType::Api));
     }
 

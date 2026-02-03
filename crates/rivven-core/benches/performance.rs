@@ -92,51 +92,6 @@ fn bench_single_vs_batch(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_schema_caching(c: &mut Criterion) {
-    let rt = Runtime::new().unwrap();
-    let mut group = c.benchmark_group("schema_caching");
-
-    use rivven_core::schema_registry::{MemorySchemaRegistry, SchemaRegistry};
-
-    let schema_str = r#"{"type":"record","name":"User","fields":[{"name":"id","type":"int"},{"name":"name","type":"string"}]}"#;
-
-    // Register schema once
-    let registry = MemorySchemaRegistry::new();
-    let schema_id =
-        rt.block_on(async { registry.register("user-value", schema_str).await.unwrap() });
-
-    // Benchmark Arc-based lookups (no cloning)
-    group.bench_function("arc_based_lookup", |b| {
-        b.to_async(&rt).iter(|| async {
-            let _ = black_box(registry.get_schema(schema_id).await);
-        });
-    });
-
-    // Benchmark concurrent access
-    group.bench_function("concurrent_10_threads", |b| {
-        let registry = Arc::new(registry.clone());
-
-        b.to_async(&rt).iter(|| async {
-            let registry = Arc::clone(&registry);
-            let mut handles = vec![];
-
-            for _ in 0..10 {
-                let reg = Arc::clone(&registry);
-                let handle = tokio::spawn(async move {
-                    let _ = black_box(reg.get_schema(schema_id).await);
-                });
-                handles.push(handle);
-            }
-
-            for handle in handles {
-                handle.await.unwrap();
-            }
-        });
-    });
-
-    group.finish();
-}
-
 fn bench_message_sizes(c: &mut Criterion) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("message_sizes");
@@ -280,7 +235,6 @@ criterion_group!(
     bench_offset_allocation,
     bench_batch_append,
     bench_single_vs_batch,
-    bench_schema_caching,
     bench_message_sizes,
     bench_concurrent_appends,
     bench_read_performance,

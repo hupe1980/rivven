@@ -76,10 +76,16 @@ namespace Rivven {
     partitions: Long,
     replication_factor: Long,
     retention_ms: Long,
+    name: String,
   };
   
   entity ConsumerGroup {
-    members: Set<User>,
+    name: String,
+  };
+
+  entity Schema {
+    name: String,
+    version: Long,
   };
   
   entity Cluster;
@@ -91,9 +97,13 @@ namespace Rivven {
   // Consumer group actions  
   action join, leave, commit, fetch_offsets
     appliesTo { principal: [User, Group], resource: [ConsumerGroup] };
+
+  // Schema actions (for rivven-schema)
+  action create, delete, alter, describe
+    appliesTo { principal: [User, Group], resource: [Schema] };
   
   // Cluster actions
-  action admin
+  action admin, alter_configs, describe_configs
     appliesTo { principal: [User, Group], resource: [Cluster] };
 }
 ```
@@ -337,7 +347,7 @@ Cedar policies can access request context:
 | `context.time.hour` | Long | Hour (0-23) |
 | `context.time.dayOfWeek` | Long | Day (1=Mon, 7=Sun) |
 | `context.tls_verified` | Bool | mTLS client verified |
-| `context.client_id` | String | Kafka client ID |
+| `context.client_id` | String | Client ID |
 | `context.correlation_id` | String | Request correlation ID |
 
 ### Context Example
@@ -515,6 +525,94 @@ authorization:
   cedar:
     entity_cache_size: 10000
     entity_cache_ttl_secs: 300
+```
+
+---
+
+## Schema Registry Integration
+
+The Schema Registry (`rivven-schema`) supports Cedar authorization for schema operations.
+
+### Enable Cedar for Schema Registry
+
+Build with the `cedar` feature:
+
+```bash
+cargo build -p rivven-schema --features cedar
+```
+
+### Schema Actions
+
+| Action | Description |
+|:-------|:------------|
+| `describe` | Get schemas, list subjects, check compatibility |
+| `create` | Register new schemas |
+| `alter` | Update subject configuration |
+| `delete` | Delete schemas or subjects |
+
+### Schema Policy Examples
+
+```cedar
+// Schema admins can do anything
+permit(
+  principal in Rivven::Group::"schema-admins",
+  action,
+  resource is Rivven::Schema
+);
+
+// Developers can read and register schemas for their team
+permit(
+  principal in Rivven::Group::"team-orders",
+  action in [Rivven::Action::"describe", Rivven::Action::"create"],
+  resource is Rivven::Schema
+) when {
+  resource.name like "orders-*"
+};
+
+// Prevent deleting production schemas
+forbid(
+  principal,
+  action == Rivven::Action::"delete",
+  resource is Rivven::Schema
+) when {
+  resource.name like "*-prod-*"
+};
+```
+
+### Programmatic Setup
+
+```rust
+use rivven_schema::{SchemaServer, ServerConfig, AuthConfig, CedarAuthorizer};
+use rivven_core::AuthManager;
+use std::sync::Arc;
+
+// Create Cedar authorizer
+let authorizer = Arc::new(CedarAuthorizer::new()?);
+
+// Add schema policies
+authorizer.add_policies(r#"
+permit(
+  principal in Rivven::Group::"schema-admins",
+  action,
+  resource is Rivven::Schema
+);
+
+permit(
+  principal,
+  action == Rivven::Action::"describe",
+  resource is Rivven::Schema
+);
+"#)?;
+
+// Add users and groups
+authorizer.add_group("schema-admins", &[])?;
+authorizer.add_user("alice", Some("alice@example.com"), &["admin"], &["schema-admins"], false)?;
+
+// Configure server with Cedar
+let config = ServerConfig::default()
+    .with_auth(AuthConfig::required().with_cedar());
+
+let server = SchemaServer::with_cedar(registry, config, auth_manager, authorizer);
 ```
 
 ---

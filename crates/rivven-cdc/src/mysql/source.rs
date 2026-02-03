@@ -4,7 +4,7 @@
 
 #[cfg(feature = "mysql-tls")]
 use crate::common::TlsConfig;
-use crate::common::{CdcEvent, CdcOp, CdcSource, Result};
+use crate::common::{pattern_match, CdcEvent, CdcOp, CdcSource, Result};
 use anyhow::Context;
 use async_trait::async_trait;
 use mysql_async::prelude::*;
@@ -187,16 +187,42 @@ impl MySqlCdcConfig {
 ///
 /// MySQL binlog events don't include column names, only types and values.
 /// This cache stores column names queried from INFORMATION_SCHEMA.
-#[derive(Default)]
+///
+/// Uses simple FIFO eviction when the cache exceeds the maximum size to prevent
+/// unbounded memory growth.
 pub struct SchemaCache {
     /// Map of (schema, table) -> column names in order
     tables: HashMap<(String, String), Vec<String>>,
+    /// Insertion order for FIFO eviction
+    insertion_order: Vec<(String, String)>,
+    /// Maximum number of entries (default: 1000)
+    max_entries: usize,
+}
+
+impl Default for SchemaCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SchemaCache {
+    /// Default maximum cache entries
+    const DEFAULT_MAX_ENTRIES: usize = 1000;
+
     pub fn new() -> Self {
         Self {
             tables: HashMap::new(),
+            insertion_order: Vec::new(),
+            max_entries: Self::DEFAULT_MAX_ENTRIES,
+        }
+    }
+
+    /// Create with custom maximum entries
+    pub fn with_max_entries(max_entries: usize) -> Self {
+        Self {
+            tables: HashMap::new(),
+            insertion_order: Vec::new(),
+            max_entries,
         }
     }
 
@@ -209,14 +235,50 @@ impl SchemaCache {
 
     /// Cache column names for a table
     pub fn set_columns(&mut self, schema: &str, table: &str, columns: Vec<String>) {
-        self.tables
-            .insert((schema.to_string(), table.to_string()), columns);
+        use std::collections::hash_map::Entry;
+
+        let key = (schema.to_string(), table.to_string());
+
+        match self.tables.entry(key.clone()) {
+            Entry::Occupied(mut entry) => {
+                // If already exists, just update value (no change to insertion order)
+                entry.insert(columns);
+            }
+            Entry::Vacant(entry) => {
+                // Add new entry
+                self.insertion_order.push(key);
+                entry.insert(columns);
+
+                // Evict oldest if over limit
+                while self.tables.len() > self.max_entries && !self.insertion_order.is_empty() {
+                    let oldest = self.insertion_order.remove(0);
+                    self.tables.remove(&oldest);
+                    debug!("Evicted schema cache entry for {}.{}", oldest.0, oldest.1);
+                }
+            }
+        }
     }
 
     /// Check if a table is cached
     pub fn has_table(&self, schema: &str, table: &str) -> bool {
         self.tables
             .contains_key(&(schema.to_string(), table.to_string()))
+    }
+
+    /// Get current cache size
+    pub fn len(&self) -> usize {
+        self.tables.len()
+    }
+
+    /// Check if cache is empty
+    pub fn is_empty(&self) -> bool {
+        self.tables.is_empty()
+    }
+
+    /// Clear the cache
+    pub fn clear(&mut self) {
+        self.tables.clear();
+        self.insertion_order.clear();
     }
 }
 
@@ -247,33 +309,6 @@ impl MySqlCdc {
     /// Get the configuration
     pub fn config(&self) -> &MySqlCdcConfig {
         &self.config
-    }
-
-    /// Check if a table should be captured based on include/exclude filters
-    #[allow(dead_code)]
-    fn should_capture_table(&self, schema: &str, table: &str) -> bool {
-        let full_name = format!("{}.{}", schema, table);
-
-        // If exclude list is not empty, check for exclusion first
-        for pattern in &self.config.exclude_tables {
-            if pattern_matches(pattern, &full_name) {
-                return false;
-            }
-        }
-
-        // If include list is empty, include all non-excluded tables
-        if self.config.include_tables.is_empty() {
-            return true;
-        }
-
-        // Check if table matches any include pattern
-        for pattern in &self.config.include_tables {
-            if pattern_matches(pattern, &full_name) {
-                return true;
-            }
-        }
-
-        false
     }
 }
 
@@ -510,7 +545,9 @@ async fn run_mysql_cdc_loop(
 
             BinlogEvent::Gtid(gtid) => {
                 current_gtid = Some(gtid.gtid_string());
-                debug!("GTID: {}", current_gtid.as_ref().unwrap());
+                if let Some(ref gtid_str) = current_gtid {
+                    debug!("GTID: {}", gtid_str);
+                }
             }
 
             BinlogEvent::TableMap(table_map) => {
@@ -523,7 +560,11 @@ async fn run_mysql_cdc_loop(
                 let schema = table_map.schema_name.clone();
                 let table = table_map.table_name.clone();
 
-                if !schema_cache.read().unwrap().has_table(&schema, &table) {
+                if !schema_cache
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .has_table(&schema, &table)
+                {
                     let query = r#"
                         SELECT COLUMN_NAME 
                         FROM INFORMATION_SCHEMA.COLUMNS 
@@ -547,7 +588,7 @@ async fn run_mysql_cdc_loop(
                                     );
                                     schema_cache
                                         .write()
-                                        .unwrap()
+                                        .unwrap_or_else(|e| e.into_inner())
                                         .set_columns(&schema, &table, columns);
                                 }
                                 Err(e) => {
@@ -702,13 +743,12 @@ fn process_row_event(
     buffer: &mut Vec<CdcEvent>,
     schema_cache: &Arc<RwLock<SchemaCache>>,
 ) {
-    // Filter check
-    // Note: MySqlCdc methods aren't available here, so we inline the check
+    // Filter check using common pattern module
     let full_name = format!("{}.{}", table_map.schema_name, table_map.table_name);
 
     // Check exclude patterns
     for pattern in &config.exclude_tables {
-        if pattern_matches(pattern, &full_name) {
+        if pattern_match(pattern, &full_name) {
             return;
         }
     }
@@ -717,7 +757,7 @@ fn process_row_event(
     if !config.include_tables.is_empty() {
         let mut matched = false;
         for pattern in &config.include_tables {
-            if pattern_matches(pattern, &full_name) {
+            if pattern_match(pattern, &full_name) {
                 matched = true;
                 break;
             }
@@ -871,47 +911,9 @@ fn column_value_to_json(value: &ColumnValue) -> serde_json::Value {
     }
 }
 
-/// Simple pattern matching for table filtering
-/// Supports wildcards: * matches any characters
-fn pattern_matches(pattern: &str, value: &str) -> bool {
-    if pattern == "*" || pattern == "*.*" {
-        return true;
-    }
-
-    if !pattern.contains('*') {
-        return pattern == value;
-    }
-
-    // Convert glob pattern to simple matching
-    let parts: Vec<&str> = pattern.split('*').collect();
-
-    if parts.len() == 2 {
-        // Pattern like "schema.*" or "*.table"
-        let (prefix, suffix) = (parts[0], parts[1]);
-        return value.starts_with(prefix) && value.ends_with(suffix);
-    }
-
-    // More complex patterns - use simple contains for now
-    parts.iter().all(|part| value.contains(part))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_pattern_matches() {
-        assert!(pattern_matches("*", "test.users"));
-        assert!(pattern_matches("*.*", "test.users"));
-        assert!(pattern_matches("test.*", "test.users"));
-        assert!(pattern_matches("test.*", "test.orders"));
-        assert!(!pattern_matches("test.*", "prod.users"));
-        assert!(pattern_matches("*.users", "test.users"));
-        assert!(pattern_matches("*.users", "prod.users"));
-        assert!(!pattern_matches("*.users", "test.orders"));
-        assert!(pattern_matches("test.users", "test.users"));
-        assert!(!pattern_matches("test.users", "test.orders"));
-    }
 
     #[test]
     fn test_config_builder() {
@@ -998,5 +1000,85 @@ mod tests {
             debug_output.contains("None"),
             "Debug output should show None for missing password"
         );
+    }
+
+    // ========================================================================
+    // SchemaCache Tests
+    // ========================================================================
+
+    #[test]
+    fn test_schema_cache_basic() {
+        let mut cache = SchemaCache::new();
+
+        // Initially empty
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+
+        // Cache some columns
+        cache.set_columns("mydb", "users", vec!["id".to_string(), "name".to_string()]);
+
+        assert!(!cache.is_empty());
+        assert_eq!(cache.len(), 1);
+        assert!(cache.has_table("mydb", "users"));
+        assert!(!cache.has_table("mydb", "orders"));
+
+        // Retrieve columns
+        let cols = cache.get_columns("mydb", "users").unwrap();
+        assert_eq!(cols, vec!["id", "name"]);
+
+        // Not found
+        assert!(cache.get_columns("mydb", "orders").is_none());
+    }
+
+    #[test]
+    fn test_schema_cache_update_existing() {
+        let mut cache = SchemaCache::new();
+
+        cache.set_columns("mydb", "users", vec!["id".to_string()]);
+        cache.set_columns("mydb", "users", vec!["id".to_string(), "name".to_string()]);
+
+        // Should still be 1 entry (updated, not duplicated)
+        assert_eq!(cache.len(), 1);
+
+        let cols = cache.get_columns("mydb", "users").unwrap();
+        assert_eq!(cols, vec!["id", "name"]);
+    }
+
+    #[test]
+    fn test_schema_cache_eviction() {
+        let mut cache = SchemaCache::with_max_entries(3);
+
+        // Add 4 entries (1 over limit)
+        cache.set_columns("db", "table1", vec!["col1".to_string()]);
+        cache.set_columns("db", "table2", vec!["col2".to_string()]);
+        cache.set_columns("db", "table3", vec!["col3".to_string()]);
+
+        assert_eq!(cache.len(), 3);
+        assert!(cache.has_table("db", "table1"));
+
+        // Add 4th entry - should evict table1 (oldest)
+        cache.set_columns("db", "table4", vec!["col4".to_string()]);
+
+        assert_eq!(cache.len(), 3);
+        assert!(!cache.has_table("db", "table1")); // Evicted
+        assert!(cache.has_table("db", "table2"));
+        assert!(cache.has_table("db", "table3"));
+        assert!(cache.has_table("db", "table4"));
+    }
+
+    #[test]
+    fn test_schema_cache_clear() {
+        let mut cache = SchemaCache::new();
+
+        cache.set_columns("db", "table1", vec!["col1".to_string()]);
+        cache.set_columns("db", "table2", vec!["col2".to_string()]);
+
+        assert_eq!(cache.len(), 2);
+
+        cache.clear();
+
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+        assert!(!cache.has_table("db", "table1"));
     }
 }

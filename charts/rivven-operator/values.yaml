@@ -199,3 +199,25 @@ defaultConnect:
     metrics:
       enabled: false
       port: 9091
+
+# Default values for RivvenSchemaRegistry instances
+defaultSchemaRegistry:
+  version: "0.0.1"
+  image: ghcr.io/hupe1980/rivven-schema:latest
+  replicas: 1
+  server:
+    port: 8081
+    metricsPort: 9090
+  storage:
+    mode: broker
+    topic: "_schemas"
+    replicationFactor: 3
+  compatibility:
+    default: BACKWARD
+  schemas:
+    avro: true
+    jsonSchema: true
+    protobuf: true
+  metrics:
+    enabled: true
+    port: 9090

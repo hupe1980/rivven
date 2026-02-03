@@ -14,9 +14,6 @@
 //! event1.transaction.as_ref().map(|t| &t.id) == event2.transaction.as_ref().map(|t| &t.id)
 //! ```
 
-use crate::common::Result;
-use rivven_core::Message;
-
 /// Transaction metadata for CDC events.
 ///
 /// Enables grouping events by database transaction for atomic processing.
@@ -291,27 +288,12 @@ impl CdcEvent {
             .unwrap_or(false)
     }
 
-    /// Convert to a Rivven Message for topic publishing
-    pub fn to_message(&self) -> Result<Message> {
-        let json_bytes = serde_json::to_vec(self)?;
-
-        let msg = Message::new(bytes::Bytes::from(json_bytes))
-            .add_header(
-                "cdc_source".to_string(),
-                self.source_type.as_bytes().to_vec(),
-            )
-            .add_header(
-                "cdc_database".to_string(),
-                self.database.as_bytes().to_vec(),
-            )
-            .add_header("cdc_schema".to_string(), self.schema.as_bytes().to_vec())
-            .add_header("cdc_table".to_string(), self.table.as_bytes().to_vec())
-            .add_header(
-                "cdc_op".to_string(),
-                format!("{:?}", self.op).as_bytes().to_vec(),
-            );
-
-        Ok(msg)
+    /// Serialize to JSON bytes.
+    ///
+    /// This is a convenience method for serialization. For production use
+    /// with schema registry, use rivven-connect which handles Avro/Protobuf.
+    pub fn to_json_bytes(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(self)
     }
 
     /// Get the topic name for this event
@@ -399,7 +381,7 @@ mod tests {
     }
 
     #[test]
-    fn test_to_message() {
+    fn test_to_json_bytes() {
         let event = CdcEvent::insert(
             "postgres",
             "mydb",
@@ -409,8 +391,11 @@ mod tests {
             1705000000,
         );
 
-        let msg = event.to_message().unwrap();
-        assert!(!msg.value.is_empty());
+        let bytes = event.to_json_bytes().unwrap();
+        assert!(!bytes.is_empty());
+
+        // Verify it's valid JSON
+        let _: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     }
 
     #[test]

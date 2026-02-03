@@ -6,16 +6,16 @@ nav_order: 12
 
 # Rivven Dashboard
 
-The Rivven Dashboard provides a **modern, reactive web interface** for monitoring and managing your Rivven cluster. Built entirely in Rust with Leptos and compiled to WebAssembly, it runs directly in the browser with zero JavaScript dependencies.
+The Rivven Dashboard provides a **lightweight, modern web interface** for monitoring and managing your Rivven cluster. Built as a single static HTML file with vanilla JavaScript, it's embedded directly into the server binary.
 
 ## Features
 
 | Feature | Description |
 |---------|-------------|
-| **100% Rust** | No JavaScript, TypeScript, or npm |
+| **Zero Dependencies** | Single HTML file, no npm/build tools |
 | **Air-Gapped** | No external fonts, CDNs, or API calls |
-| **Real-time Updates** | Automatic 3-second refresh cycle |
-| **Cluster Monitoring** | Raft leader, nodes, terms |
+| **Real-time Updates** | Automatic 5-second refresh cycle |
+| **Cluster Monitoring** | Nodes, leader status, health |
 | **Topic Management** | Browse topics, partitions, messages |
 | **Consumer Groups** | Monitor lag and group membership |
 | **Prometheus Metrics** | Built-in metrics viewer |
@@ -28,43 +28,21 @@ The dashboard is designed for **air-gapped environments**:
 - ✅ **System fonts** — Uses OS font stack (no Google Fonts)
 - ✅ **No CDN** — All assets served from rivvend
 - ✅ **Same-origin API** — No CORS or external calls
-- ✅ **Embedded WASM** — Bundled in server binary
-
-### Configuration Injection
-
-Pass the API URL at startup via meta tags:
-
-```html
-<!-- Server injects these when serving index.html -->
-<meta name="rivven:api-url" content="http://rivven.internal:8080">
-<meta name="rivven:version" content="0.0.4">
-```
-
-Or via JavaScript for reverse proxy setups:
-
-```html
-<script>
-  window.__RIVVEN_CONFIG__ = {
-    api_url: "https://rivven.example.com/api"
-  };
-</script>
-```
-
-**Priority order:**
-1. `<meta name="rivven:api-url">` (highest)
-2. `window.__RIVVEN_CONFIG__.api_url`
-3. Current window origin (default)
+- ✅ **Embedded HTML** — Bundled in server binary via rust-embed
 
 ## Accessing the Dashboard
 
-When running rivvend with the embedded dashboard:
+When running rivvend with the dashboard feature enabled:
 
 ```bash
-# Start server
+# Start server with dashboard (default)
 rivvend --data-dir ./data
 
 # Dashboard available at:
-# http://localhost:8080/
+# http://localhost:9094/
+
+# Disable dashboard
+rivvend --data-dir ./data --no-dashboard
 ```
 
 ## Views
@@ -73,13 +51,11 @@ rivvend --data-dir ./data
 
 The landing page provides cluster health at a glance:
 
-- **Server Status**: Healthy/Unhealthy badge
 - **Topics Count**: Total topics in cluster
-- **Partitions Count**: Aggregate partition count
 - **Consumer Groups**: Active consumer groups
-- **Total Messages**: Messages across all topics
-- **Top Topics**: Quick view of busiest topics
-- **Top Groups**: Consumer groups with highest lag
+- **Active Connections**: Current client connections
+- **Total Requests**: Cumulative request count
+- **Recent Topics**: Quick view of topics with message counts
 
 ### Topics
 
@@ -91,11 +67,6 @@ Detailed topic information:
 | Partitions | Number of partitions |
 | Replication | Replication factor |
 | Messages | Total message count |
-| Offsets | Earliest → Latest offset range |
-
-**Features:**
-- Full-text search across topic names
-- Click to expand partition details
 
 ### Consumer Groups
 
@@ -104,304 +75,132 @@ Monitor consumer group health:
 | Column | Description |
 |--------|-------------|
 | Group ID | Consumer group identifier |
-| State | Stable / Rebalancing / Empty |
-| Members | Active member count |
+| State | Current group state (Stable, Empty, etc.) |
+| Members | Number of active members |
+| Topics | Subscribed topics |
 | Lag | Total lag across all partitions |
-| Topics | Subscribed topic list |
-
-**Lag Indicators:**
-- 🟢 Green: Lag < 100
-- 🟡 Yellow: 100 ≤ Lag < 10,000
-- 🔴 Red: Lag ≥ 10,000
 
 ### Cluster
 
-Raft cluster status and node information:
+View cluster topology:
 
-| Component | Data |
-|-----------|------|
-| Cluster ID | Unique cluster identifier |
-| Leader | Current Raft leader node |
-| Term | Current Raft election term |
-| Node Count | Total nodes in cluster |
-
-**Node Status:**
-- 🟢 Connected: Node is reachable
-- 🔴 Disconnected: Node unreachable
-- 👑 Leader: Current Raft leader
-- ⚙️ Follower: Raft follower node
+- **Node Count**: Total nodes in cluster
+- **Leader**: Current Raft leader node
+- **Node Cards**: Per-node status with address, leader badge, voter/learner role
 
 ### Metrics
 
-Prometheus-compatible metrics display:
+Browse Prometheus metrics organized by prefix:
 
-- Raw metrics text viewer
-- Copy-to-clipboard functionality
-- Metrics endpoint URL for Grafana integration
+- Metrics grouped by category (e.g., `rivven_broker_*`, `rivven_cdc_*`)
+- Real-time values with automatic refresh
 
-## Configuration
+## REST API Endpoints
 
-### Enabling the Dashboard
+The dashboard consumes these JSON endpoints:
 
-```yaml
-# rivven.yaml
-dashboard:
-  enabled: true
-  # Uses same port as API (default: 8080)
-```
+| Endpoint | Description |
+|----------|-------------|
+| `GET /dashboard/data` | Topics, consumer groups, stats |
+| `GET /membership` | Cluster node membership |
+| `GET /metrics/json` | Prometheus metrics as JSON |
+| `GET /health` | Server health check |
 
-### Authentication
+## Security
 
-The dashboard inherits authentication from the server:
+### HTTP Headers
 
-```yaml
-auth:
-  enabled: true
-  type: basic
-  users:
-    - username: admin
-      password_hash: "$argon2id$..."
-
-# Dashboard requires same credentials
-```
-
-### CSP Headers
-
-The dashboard enforces Content Security Policy:
+The dashboard applies security headers automatically:
 
 ```
-Content-Security-Policy: 
-  default-src 'self'; 
-  script-src 'self' 'wasm-unsafe-eval'; 
-  style-src 'self' 'unsafe-inline'; 
-  connect-src 'self'
+Content-Security-Policy: default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; frame-ancestors 'none'
+X-Content-Type-Options: nosniff
+X-Frame-Options: DENY
+Referrer-Policy: strict-origin-when-cross-origin
+Permissions-Policy: geolocation=(), microphone=(), camera=()
 ```
 
-## Building from Source
+### Production Recommendations
 
-### Prerequisites
+1. **Enable TLS** — Use `--tls-cert` and `--tls-key` flags
+2. **Reverse Proxy** — Put nginx/Caddy in front for authentication
+3. **Network Isolation** — Bind dashboard to internal networks only
+4. **mTLS** — Use mutual TLS for zero-trust environments
+
+## Customization
+
+### Modifying the Dashboard
+
+The dashboard source is at `crates/rivvend/dashboard/index.html`. To customize:
 
 ```bash
-# Install trunk (WASM bundler)
-cargo install trunk
+# Edit the HTML file
+vim crates/rivvend/dashboard/index.html
 
-# Add WASM target
-rustup target add wasm32-unknown-unknown
+# Rebuild rivvend (rust-embed recompiles automatically)
+cargo build -p rivvend --release
 ```
 
-### Development Build
+### Disabling the Dashboard
 
 ```bash
-# Start dashboard dev server with hot reload
-cd crates/rivven-dashboard
-trunk serve --port 8081
+# At runtime
+rivvend --no-dashboard
 
-# In another terminal, start rivvend
-cargo run -p rivvend -- --data-dir ./data
-```
-
-### Production Build
-
-```bash
-# Using justfile recipes
-just dashboard-build
-
-# Or manually
-cd crates/rivven-dashboard
-trunk build --release
-
-# Output in dist/
-ls dist/
-# index.html  rivven_dashboard_bg.wasm  rivven_dashboard.js  styles.css
-```
-
-### Embedding in Server
-
-The dashboard assets must be copied to `rivvend/static/` before building the server:
-
-```bash
-# Step 1: Build dashboard
-cd crates/rivven-dashboard
-trunk build --release
-
-# Step 2: Copy assets to server
-cp -r dist/* ../rivvend/static/
-
-# Step 3: Build server with embedded dashboard
-cd ../..
-cargo build -p rivvend --release --features dashboard
-
-# Dashboard is now embedded in the binary
-./target/release/rivvend
-```
-
-The server uses `rust-embed` to compile static files into the binary at build time. This creates a single, self-contained executable with no external dependencies.
-
-**Production deployment:**
-```bash
-# Just run the binary - dashboard is embedded
-./rivvend --data-dir /var/lib/rivven
-# Dashboard available at http://localhost:8080/
-```
-
-## REST API
-
-The dashboard consumes these REST endpoints:
-
-### Health Check
-
-```http
-GET /dashboard/health
-```
-
-```json
-{
-  "status": "healthy",
-  "uptime_secs": 3600,
-  "version": "0.0.4",
-  "node_id": "node-1",
-  "role": "leader"
-}
-```
-
-### Topics
-
-```http
-GET /dashboard/topics
-```
-
-```json
-[
-  {
-    "name": "orders",
-    "partitions": 8,
-    "replication_factor": 3,
-    "message_count": 1500000,
-    "earliest_offset": 0,
-    "latest_offset": 1500000
-  }
-]
-```
-
-### Consumer Groups
-
-```http
-GET /dashboard/groups
-```
-
-```json
-[
-  {
-    "group_id": "order-processor",
-    "state": "Stable",
-    "members": 3,
-    "total_lag": 150,
-    "topics": ["orders"]
-  }
-]
-```
-
-### Cluster
-
-```http
-GET /dashboard/cluster
-```
-
-```json
-{
-  "cluster_id": "rivven-prod",
-  "leader_id": "node-1",
-  "term": 42,
-  "nodes": [...]
-}
+# At compile time (smaller binary)
+cargo build -p rivvend --no-default-features
 ```
 
 ## Troubleshooting
 
 ### Dashboard Not Loading
 
-1. **Check WASM loading**: Open browser DevTools → Console
-2. **Verify CSP**: Look for Content-Security-Policy violations
-3. **Check API**: Ensure `/dashboard/health` returns 200
+1. **Check port**: Dashboard is on the HTTP API port (default: 9094)
+2. **Check feature**: Ensure built with `dashboard` feature (default)
+3. **Check browser console**: Look for JavaScript errors
 
-### API Connection Errors
+### API Errors
 
-```bash
-# Verify server is running
-curl http://localhost:8080/health
+1. **CORS issues**: Dashboard must be served from same origin as API
+2. **Connection refused**: Verify rivvend is running and port is accessible
+3. **Empty data**: Check that topics/consumer groups exist
 
-# Check dashboard endpoints
-curl http://localhost:8080/dashboard/topics
-```
+### Refresh Not Working
 
-### Build Errors
+The dashboard auto-refreshes every 5 seconds. If updates stop:
 
-```bash
-# Missing target
-rustup target add wasm32-unknown-unknown
-
-# Trunk not installed
-cargo install trunk
-
-# Clear build cache
-cd crates/rivven-dashboard
-rm -rf dist/ target/
-trunk build --release
-```
+1. Check browser console for errors
+2. Verify server is still running
+3. Check network connectivity to API endpoints
 
 ## Architecture
 
 ```
-Browser
-├── rivven-dashboard.wasm (Leptos app)
-│   ├── Components
-│   │   ├── primitives.rs    # Reusable UI components
-│   │   ├── icons.rs         # Centralized SVG icons
-│   │   ├── sidebar.rs       # Navigation
-│   │   ├── header.rs        # Top bar
-│   │   ├── overview.rs      # Dashboard home
-│   │   ├── topics.rs        # Topic list
-│   │   ├── consumer_groups.rs
-│   │   ├── cluster.rs       # Raft status
-│   │   └── metrics.rs       # Prometheus viewer
-│   ├── State (Leptos signals)
-│   └── ApiClient (gloo-net HTTP)
-│
-└── HTTP Requests
-    │
-    ▼
-rivvend
-├── Static file serving (WASM, CSS, HTML)
-├── Dashboard REST API (/dashboard/*)
-└── Prometheus metrics (/metrics)
+┌─────────────────────────────────────────────────────┐
+│                     Browser                         │
+├─────────────────────────────────────────────────────┤
+│  dashboard/index.html (embedded in binary)          │
+│  ├── Vanilla JavaScript                             │
+│  ├── CSS (embedded)                                 │
+│  └── fetch() → /dashboard/data, /membership, etc.  │
+└─────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────┐
+│                     rivvend                         │
+├─────────────────────────────────────────────────────┤
+│  rust-embed → serves index.html from memory         │
+│  axum routes → /dashboard/data, /membership, etc.   │
+└─────────────────────────────────────────────────────┘
 ```
 
-### Component Primitives
+## Comparison to Previous WASM Dashboard
 
-The dashboard uses reusable UI primitives for consistency:
-
-| Primitive | Description |
-|-----------|-------------|
-| `LoadingSpinner` | Animated loading indicator |
-| `Skeleton` | Content placeholder during load |
-| `ErrorBoundary` | Error handling wrapper |
-| `EmptyState` | No data message |
-| `Badge` | Status indicators (Info, Success, Warning, Error) |
-| `StatusDot` | Connection status indicator |
-| `LagIndicator` | Consumer lag with color coding |
-| `StatCard` | Metric cards with icon |
-| `SearchInput` | Search with keyboard shortcut |
-
-### SVG Icons
-
-All icons are embedded for air-gapped operation:
-
-- Navigation: `HomeIcon`, `TopicIcon`, `GroupIcon`, `ClusterIcon`, `MetricsIcon`
-- Actions: `RefreshIcon`, `SearchIcon`, `CopyIcon`
-- Status: `WarningIcon`, `ErrorIcon`, `SuccessIcon`, `InfoIcon`
-
-## See Also
-
-- [Architecture Overview](architecture.md)
-- [Getting Started](getting-started.md)
-- [Security](security.md)
+| Aspect | Old (WASM) | New (Static HTML) |
+|--------|------------|-------------------|
+| Build tools | trunk, wasm-opt | None |
+| Rust targets | wasm32-unknown-unknown | Native only |
+| CI complexity | High (WASM build step) | Low |
+| Binary size | +2MB | +30KB |
+| Browser support | WASM required | Universal |
+| Development | Rebuild WASM | Edit HTML |

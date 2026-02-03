@@ -27,54 +27,13 @@ use super::super::traits::registry::{AnySink, SinkFactory};
 use async_trait::async_trait;
 use futures::StreamExt;
 use schemars::JsonSchema;
-use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 use validator::Validate;
 
-/// Wrapper for sensitive configuration values
-///
-/// Prevents accidental logging of secrets while allowing access when needed.
-#[derive(Debug, Clone, JsonSchema)]
-pub struct SensitiveString(#[schemars(with = "String")] SecretString);
-
-impl SensitiveString {
-    /// Create a new sensitive string
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(SecretString::from(value.into()))
-    }
-
-    /// Expose the secret value
-    pub fn expose(&self) -> &str {
-        self.0.expose_secret()
-    }
-}
-
-impl From<String> for SensitiveString {
-    fn from(value: String) -> Self {
-        Self::new(value)
-    }
-}
-
-impl Serialize for SensitiveString {
-    fn serialize<S: serde::Serializer>(
-        &self,
-        serializer: S,
-    ) -> std::result::Result<S::Ok, S::Error> {
-        serializer.serialize_str("***REDACTED***")
-    }
-}
-
-impl<'de> Deserialize<'de> for SensitiveString {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
-        let value = String::deserialize(deserializer)?;
-        Ok(Self::new(value))
-    }
-}
+use crate::types::SensitiveString;
 
 /// HTTP Webhook sink configuration
 #[derive(Debug, Clone, Deserialize, Serialize, Validate, JsonSchema)]
@@ -206,13 +165,23 @@ pub struct HttpWebhookSink {
 
 impl HttpWebhookSink {
     /// Create a new HttpWebhookSink
-    pub fn new() -> Self {
+    ///
+    /// # Errors
+    /// Returns an error if the HTTP client cannot be constructed (e.g., TLS initialization fails)
+    pub fn try_new() -> std::result::Result<Self, reqwest::Error> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
-            .build()
-            .expect("Failed to create HTTP client");
+            .build()?;
 
-        Self { client }
+        Ok(Self { client })
+    }
+
+    /// Create a new HttpWebhookSink, panicking on failure
+    ///
+    /// This is a convenience method for cases where failure is not expected.
+    /// Prefer `try_new()` in production code.
+    pub fn new() -> Self {
+        Self::try_new().expect("Failed to create HTTP client - TLS initialization may have failed")
     }
 
     /// Build a request with auth and headers

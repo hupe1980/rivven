@@ -1,6 +1,6 @@
 # Production RivvenTopic example with full configuration
 # Demonstrates all available options for topic configuration
-apiVersion: rivven.io/v1alpha1
+apiVersion: rivven.hupe1980.github.io/v1alpha1
 kind: RivvenTopic
 metadata:
   name: payment-transactions
@@ -95,7 +95,7 @@ spec:
     compliance: pci-dss
 ---
 # CDC topic with log compaction for materialized views
-apiVersion: rivven.io/v1alpha1
+apiVersion: rivven.hupe1980.github.io/v1alpha1
 kind: RivvenTopic
 metadata:
   name: user-profiles-cdc
@@ -143,7 +143,7 @@ spec:
     type: cdc
 ---
 # High-throughput metrics topic
-apiVersion: rivven.io/v1alpha1
+apiVersion: rivven.hupe1980.github.io/v1alpha1
 kind: RivvenTopic
 metadata:
   name: system-metrics

@@ -12,9 +12,9 @@ categories = ["network-programming"]
 [dependencies]
 bytes = "1"
 serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
 postcard = { version = "1", features = ["alloc"] }
 thiserror = "1"
-rivven-core = { workspace = true }
 
 [features]
 default = []

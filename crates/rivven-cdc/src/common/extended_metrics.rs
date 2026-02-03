@@ -1,28 +1,27 @@
-//! # Extended CDC Metrics (Debezium JMX Parity)
+//! # Extended CDC Metrics
 //!
-//! Production-grade metrics collection matching Debezium's JMX MBean interface.
-//! Provides comprehensive observability for snapshot, streaming, incremental snapshot,
-//! and schema history operations.
+//! Production-grade metrics collection providing comprehensive observability for
+//! snapshot, streaming, incremental snapshot, and schema history operations.
 //!
-//! ## Debezium MBean Categories
+//! ## Metric Categories
 //!
-//! This module implements metrics matching Debezium's MBean structure:
+//! This module implements metrics for CDC operations:
 //!
-//! - **Snapshot MBean** (`debezium.{connector}:type=connector-metrics,context=snapshot`)
+//! - **Snapshot Metrics**
 //!   - `SnapshotRunning`, `SnapshotPaused`, `SnapshotCompleted`, `SnapshotAborted`
 //!   - `SnapshotDurationInSeconds`, `TotalTableCount`, `RemainingTableCount`
 //!   - `RowsScanned` (per table)
 //!
-//! - **Streaming MBean** (`debezium.{connector}:type=connector-metrics,context=streaming`)
+//! - **Streaming Metrics**
 //!   - `Connected`, `MilliSecondsBehindSource`, `TotalNumberOfEventsSeen`
 //!   - `NumberOfCommittedTransactions`, `NumberOfRolledBackTransactions`
 //!   - `SourceEventPosition`, `LastTransactionId`
 //!
-//! - **Incremental Snapshot MBean**
+//! - **Incremental Snapshot Metrics**
 //!   - `IncrementalSnapshotRunning`, `IncrementalSnapshotChunkId`
 //!   - `IncrementalSnapshotWindowOpen`, `MaxQueueSizeInBytes`
 //!
-//! - **Schema History MBean**
+//! - **Schema History Metrics**
 //!   - `SchemaHistoryRecovered`, `SchemaHistoryRecoveryDurationInMs`
 //!   - `ChangesRecovered`, `ChangesApplied`
 //!
@@ -46,16 +45,40 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
 // ============================================================================
-// Extended CDC Metrics (Debezium JMX Parity)
+// Lock Recovery Helpers
 // ============================================================================
 
-/// Extended CDC metrics matching Debezium JMX MBean interface.
+/// Extension trait for RwLock to recover from poisoned locks.
+/// This is safe for metrics because the data remains valid even if a thread panicked.
+trait RwLockExt<T> {
+    /// Acquire read lock, recovering from poisoning.
+    fn read_recovered(&self) -> RwLockReadGuard<'_, T>;
+    /// Acquire write lock, recovering from poisoning.
+    fn write_recovered(&self) -> RwLockWriteGuard<'_, T>;
+}
+
+impl<T> RwLockExt<T> for RwLock<T> {
+    fn read_recovered(&self) -> RwLockReadGuard<'_, T> {
+        self.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn write_recovered(&self) -> RwLockWriteGuard<'_, T> {
+        self.write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+// ============================================================================
+// Extended CDC Metrics
+// ============================================================================
+
+/// Extended CDC metrics for comprehensive observability.
 ///
-/// Provides comprehensive observability for production CDC deployments with
+/// Provides production-grade metrics for CDC deployments with
 /// metrics categorized by operation type: snapshot, streaming, incremental
 /// snapshot, and schema history.
 #[derive(Debug)]
@@ -68,7 +91,7 @@ pub struct ExtendedCdcMetrics {
     connector_name: String,
 
     // ========================================================================
-    // Snapshot Metrics (MBean: context=snapshot)
+    // Snapshot Metrics
     // ========================================================================
     /// Whether a snapshot is currently running
     snapshot_running: AtomicBool,
@@ -96,7 +119,7 @@ pub struct ExtendedCdcMetrics {
     snapshot_phase: RwLock<SnapshotPhase>,
 
     // ========================================================================
-    // Streaming Metrics (MBean: context=streaming)
+    // Streaming Metrics
     // ========================================================================
     /// Whether streaming is connected
     streaming_connected: AtomicBool,
@@ -144,8 +167,7 @@ pub struct ExtendedCdcMetrics {
     incremental_snapshot_tables: RwLock<Vec<String>>,
     /// Chunks processed
     incremental_snapshot_chunks_processed: AtomicU64,
-    /// Total chunks for current table
-    #[allow(dead_code)]
+    /// Total chunks for current table (for progress tracking)
     incremental_snapshot_total_chunks: AtomicU64,
     /// Rows captured in incremental snapshot
     incremental_snapshot_rows_captured: AtomicU64,
@@ -179,6 +201,34 @@ pub struct ExtendedCdcMetrics {
     last_error_timestamp: AtomicU64,
     /// Consecutive errors (for circuit breaker)
     consecutive_errors: AtomicU64,
+
+    // ========================================================================
+    // Health Monitoring Metrics
+    // ========================================================================
+    /// Whether health monitoring is enabled
+    health_monitoring_enabled: AtomicBool,
+    /// Current health state (healthy/unhealthy)
+    health_state_healthy: AtomicBool,
+    /// Current readiness state
+    health_state_ready: AtomicBool,
+    /// Number of health checks performed
+    health_checks_performed: AtomicU64,
+    /// Number of health checks passed
+    health_checks_passed: AtomicU64,
+    /// Number of health checks failed
+    health_checks_failed: AtomicU64,
+    /// Consecutive health failures
+    health_consecutive_failures: AtomicU64,
+    /// Recovery attempts
+    health_recovery_attempts: AtomicU64,
+    /// Successful recoveries
+    health_recoveries_succeeded: AtomicU64,
+    /// Failed recoveries
+    health_recoveries_failed: AtomicU64,
+    /// Time spent in unhealthy state (ms)
+    health_unhealthy_time_ms: AtomicU64,
+    /// Last health check timestamp
+    last_health_check_timestamp: AtomicU64,
 
     // ========================================================================
     // Performance Metrics
@@ -266,6 +316,20 @@ impl ExtendedCdcMetrics {
             last_error_timestamp: AtomicU64::new(0),
             consecutive_errors: AtomicU64::new(0),
 
+            // Health Monitoring
+            health_monitoring_enabled: AtomicBool::new(false),
+            health_state_healthy: AtomicBool::new(false),
+            health_state_ready: AtomicBool::new(false),
+            health_checks_performed: AtomicU64::new(0),
+            health_checks_passed: AtomicU64::new(0),
+            health_checks_failed: AtomicU64::new(0),
+            health_consecutive_failures: AtomicU64::new(0),
+            health_recovery_attempts: AtomicU64::new(0),
+            health_recoveries_succeeded: AtomicU64::new(0),
+            health_recoveries_failed: AtomicU64::new(0),
+            health_unhealthy_time_ms: AtomicU64::new(0),
+            last_health_check_timestamp: AtomicU64::new(0),
+
             // Performance
             processing_time_histogram: RwLock::new(LatencyHistogram::new()),
             capture_to_emit_latency_ms: AtomicU64::new(0),
@@ -288,9 +352,9 @@ impl ExtendedCdcMetrics {
         self.remaining_table_count
             .store(table_count, Ordering::SeqCst);
         self.total_rows_scanned.store(0, Ordering::SeqCst);
-        self.rows_scanned.write().unwrap().clear();
-        *self.snapshot_start_time.write().unwrap() = Some(Instant::now());
-        *self.snapshot_phase.write().unwrap() = SnapshotPhase::Lock;
+        self.rows_scanned.write_recovered().clear();
+        *self.snapshot_start_time.write_recovered() = Some(Instant::now());
+        *self.snapshot_phase.write_recovered() = SnapshotPhase::Lock;
 
         // Emit to metrics facade
         metrics::gauge!(
@@ -311,7 +375,7 @@ impl ExtendedCdcMetrics {
     /// Set the current snapshot phase.
     pub fn set_snapshot_phase(&self, phase: SnapshotPhase) {
         let phase_str = phase.as_str();
-        *self.snapshot_phase.write().unwrap() = phase;
+        *self.snapshot_phase.write_recovered() = phase;
 
         metrics::gauge!(
             "rivven_cdc_snapshot_phase",
@@ -323,19 +387,19 @@ impl ExtendedCdcMetrics {
 
     /// Start snapshotting a specific table.
     pub fn start_table_snapshot(&self, table: &str) {
-        *self.current_snapshot_table.write().unwrap() = Some(table.to_string());
+        *self.current_snapshot_table.write_recovered() = Some(table.to_string());
         self.rows_scanned
             .write()
             .unwrap()
             .entry(table.to_string())
             .or_insert(0);
-        *self.snapshot_phase.write().unwrap() = SnapshotPhase::Read;
+        *self.snapshot_phase.write_recovered() = SnapshotPhase::Read;
     }
 
     /// Record rows scanned for a table.
     pub fn record_rows_scanned(&self, table: &str, rows: u64) {
         {
-            let mut map = self.rows_scanned.write().unwrap();
+            let mut map = self.rows_scanned.write_recovered();
             *map.entry(table.to_string()).or_insert(0) += rows;
         }
         self.total_rows_scanned.fetch_add(rows, Ordering::Relaxed);
@@ -352,7 +416,7 @@ impl ExtendedCdcMetrics {
     pub fn complete_table_snapshot(&self, table: &str, total_rows: u64) {
         self.record_rows_scanned(table, total_rows);
         self.remaining_table_count.fetch_sub(1, Ordering::SeqCst);
-        *self.current_snapshot_table.write().unwrap() = None;
+        *self.current_snapshot_table.write_recovered() = None;
 
         let remaining = self.remaining_table_count.load(Ordering::SeqCst);
         metrics::gauge!(
@@ -386,9 +450,9 @@ impl ExtendedCdcMetrics {
     pub fn complete_snapshot(&self) {
         self.snapshot_running.store(false, Ordering::SeqCst);
         self.snapshot_completed.store(true, Ordering::SeqCst);
-        *self.snapshot_phase.write().unwrap() = SnapshotPhase::Completed;
+        *self.snapshot_phase.write_recovered() = SnapshotPhase::Completed;
 
-        if let Some(start) = *self.snapshot_start_time.read().unwrap() {
+        if let Some(start) = *self.snapshot_start_time.read_recovered() {
             let duration = start.elapsed();
             self.snapshot_duration_ms
                 .store(duration.as_millis() as u64, Ordering::SeqCst);
@@ -419,9 +483,9 @@ impl ExtendedCdcMetrics {
     pub fn abort_snapshot(&self, reason: &str) {
         self.snapshot_running.store(false, Ordering::SeqCst);
         self.snapshot_aborted.store(true, Ordering::SeqCst);
-        *self.snapshot_phase.write().unwrap() = SnapshotPhase::Aborted;
+        *self.snapshot_phase.write_recovered() = SnapshotPhase::Aborted;
 
-        if let Some(start) = *self.snapshot_start_time.read().unwrap() {
+        if let Some(start) = *self.snapshot_start_time.read_recovered() {
             let duration = start.elapsed();
             self.snapshot_duration_ms
                 .store(duration.as_millis() as u64, Ordering::SeqCst);
@@ -453,7 +517,7 @@ impl ExtendedCdcMetrics {
         let was_connected = self.streaming_connected.swap(connected, Ordering::SeqCst);
 
         if connected && !was_connected {
-            *self.streaming_start_time.write().unwrap() = Some(Instant::now());
+            *self.streaming_start_time.write_recovered() = Some(Instant::now());
             self.consecutive_errors.store(0, Ordering::SeqCst);
         }
 
@@ -530,7 +594,7 @@ impl ExtendedCdcMetrics {
             .fetch_add(1, Ordering::Relaxed);
 
         if let Some(txid) = transaction_id {
-            *self.last_transaction_id.write().unwrap() = Some(txid.to_string());
+            *self.last_transaction_id.write_recovered() = Some(txid.to_string());
         }
 
         metrics::counter!(
@@ -554,7 +618,7 @@ impl ExtendedCdcMetrics {
 
     /// Update source event position (LSN, binlog position, etc.).
     pub fn update_source_position(&self, position: &str) {
-        *self.source_event_position.write().unwrap() = position.to_string();
+        *self.source_event_position.write_recovered() = position.to_string();
 
         // Note: Position is typically a string, so we log it rather than gauge it
         tracing::trace!(connector = %self.connector_name, position = %position, "Source position updated");
@@ -607,17 +671,24 @@ impl ExtendedCdcMetrics {
 
     /// Start an incremental snapshot.
     pub fn start_incremental_snapshot(&self, tables: Vec<String>) {
+        self.start_incremental_snapshot_with_chunks(tables, 0)
+    }
+
+    /// Start an incremental snapshot with known total chunk count.
+    pub fn start_incremental_snapshot_with_chunks(&self, tables: Vec<String>, total_chunks: u64) {
         self.incremental_snapshot_running
             .store(true, Ordering::SeqCst);
         self.incremental_snapshot_paused
             .store(false, Ordering::SeqCst);
         self.incremental_snapshot_chunks_processed
             .store(0, Ordering::SeqCst);
+        self.incremental_snapshot_total_chunks
+            .store(total_chunks, Ordering::SeqCst);
         self.incremental_snapshot_rows_captured
             .store(0, Ordering::SeqCst);
         self.incremental_snapshot_events_deduplicated
             .store(0, Ordering::SeqCst);
-        *self.incremental_snapshot_tables.write().unwrap() = tables.clone();
+        *self.incremental_snapshot_tables.write_recovered() = tables.clone();
 
         metrics::gauge!(
             "rivven_cdc_incremental_snapshot_running",
@@ -625,18 +696,41 @@ impl ExtendedCdcMetrics {
         )
         .set(1.0);
 
+        if total_chunks > 0 {
+            metrics::gauge!(
+                "rivven_cdc_incremental_snapshot_total_chunks",
+                "connector" => self.connector_name.clone()
+            )
+            .set(total_chunks as f64);
+        }
+
         tracing::info!(
             connector = %self.connector_name,
             tables = ?tables,
+            total_chunks = total_chunks,
             "Incremental snapshot started"
         );
+    }
+
+    /// Get incremental snapshot progress as percentage (0.0 to 1.0).
+    pub fn incremental_snapshot_progress(&self) -> f64 {
+        let total = self
+            .incremental_snapshot_total_chunks
+            .load(Ordering::Relaxed);
+        if total == 0 {
+            return 0.0;
+        }
+        let processed = self
+            .incremental_snapshot_chunks_processed
+            .load(Ordering::Relaxed);
+        (processed as f64 / total as f64).min(1.0)
     }
 
     /// Open the watermark window.
     pub fn open_incremental_snapshot_window(&self, chunk_id: &str) {
         self.incremental_snapshot_window_open
             .store(true, Ordering::SeqCst);
-        *self.incremental_snapshot_chunk_id.write().unwrap() = chunk_id.to_string();
+        *self.incremental_snapshot_chunk_id.write_recovered() = chunk_id.to_string();
 
         metrics::gauge!(
             "rivven_cdc_incremental_snapshot_window_open",
@@ -799,11 +893,11 @@ impl ExtendedCdcMetrics {
         self.consecutive_errors.fetch_add(1, Ordering::Relaxed);
 
         {
-            let mut map = self.errors_by_category.write().unwrap();
+            let mut map = self.errors_by_category.write_recovered();
             *map.entry(category.to_string()).or_insert(0) += 1;
         }
 
-        *self.last_error_message.write().unwrap() = Some(message.to_string());
+        *self.last_error_message.write_recovered() = Some(message.to_string());
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -881,7 +975,10 @@ impl ExtendedCdcMetrics {
 
     /// Get a complete metrics snapshot.
     pub fn snapshot(&self) -> ExtendedMetricsSnapshot {
-        let latency_percentiles = self.processing_time_histogram.read().unwrap().percentiles();
+        let latency_percentiles = self
+            .processing_time_histogram
+            .read_recovered()
+            .percentiles();
 
         ExtendedMetricsSnapshot {
             connector_name: self.connector_name.clone(),
@@ -897,7 +994,7 @@ impl ExtendedCdcMetrics {
             total_table_count: self.total_table_count.load(Ordering::Relaxed),
             remaining_table_count: self.remaining_table_count.load(Ordering::Relaxed),
             total_rows_scanned: self.total_rows_scanned.load(Ordering::Relaxed),
-            snapshot_phase: self.snapshot_phase.read().unwrap().clone(),
+            snapshot_phase: self.snapshot_phase.read_recovered().clone(),
 
             // Streaming
             streaming_connected: self.streaming_connected.load(Ordering::Relaxed),
@@ -912,8 +1009,8 @@ impl ExtendedCdcMetrics {
             number_of_rolled_back_transactions: self
                 .number_of_rolled_back_transactions
                 .load(Ordering::Relaxed),
-            source_event_position: self.source_event_position.read().unwrap().clone(),
-            last_transaction_id: self.last_transaction_id.read().unwrap().clone(),
+            source_event_position: self.source_event_position.read_recovered().clone(),
+            last_transaction_id: self.last_transaction_id.read_recovered().clone(),
             last_event_timestamp: self.last_event_timestamp.load(Ordering::Relaxed),
             queue_size_in_bytes: self.queue_size_in_bytes.load(Ordering::Relaxed),
             max_queue_size_in_bytes: self.max_queue_size_in_bytes.load(Ordering::Relaxed),
@@ -956,7 +1053,7 @@ impl ExtendedCdcMetrics {
             // Errors
             total_errors: self.total_errors.load(Ordering::Relaxed),
             consecutive_errors: self.consecutive_errors.load(Ordering::Relaxed),
-            last_error_message: self.last_error_message.read().unwrap().clone(),
+            last_error_message: self.last_error_message.read_recovered().clone(),
             last_error_timestamp: self.last_error_timestamp.load(Ordering::Relaxed),
 
             // Performance
@@ -979,6 +1076,166 @@ impl ExtendedCdcMetrics {
         connected && consecutive_errors < 5
     }
 
+    // ========================================================================
+    // Health Monitoring Operations
+    // ========================================================================
+
+    /// Enable health monitoring metrics.
+    pub fn enable_health_monitoring(&self) {
+        self.health_monitoring_enabled.store(true, Ordering::SeqCst);
+        metrics::gauge!(
+            "rivven_cdc_health_monitoring_enabled",
+            "connector" => self.connector_name.clone(),
+            "source" => self.source_type.clone(),
+            "database" => self.database.clone()
+        )
+        .set(1.0);
+    }
+
+    /// Record a health check result.
+    pub fn record_health_check(&self, passed: bool) {
+        self.health_checks_performed.fetch_add(1, Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        self.last_health_check_timestamp
+            .store(now, Ordering::Relaxed);
+
+        if passed {
+            self.health_checks_passed.fetch_add(1, Ordering::Relaxed);
+            self.health_consecutive_failures.store(0, Ordering::Relaxed);
+            metrics::counter!(
+                "rivven_cdc_health_checks_passed_total",
+                "connector" => self.connector_name.clone(),
+                "source" => self.source_type.clone(),
+                "database" => self.database.clone()
+            )
+            .increment(1);
+        } else {
+            self.health_checks_failed.fetch_add(1, Ordering::Relaxed);
+            self.health_consecutive_failures
+                .fetch_add(1, Ordering::Relaxed);
+            metrics::counter!(
+                "rivven_cdc_health_checks_failed_total",
+                "connector" => self.connector_name.clone(),
+                "source" => self.source_type.clone(),
+                "database" => self.database.clone()
+            )
+            .increment(1);
+        }
+    }
+
+    /// Update health state.
+    pub fn set_health_state(&self, healthy: bool, ready: bool) {
+        let was_healthy = self.health_state_healthy.swap(healthy, Ordering::SeqCst);
+        self.health_state_ready.store(ready, Ordering::SeqCst);
+
+        // Track transition to unhealthy state
+        if was_healthy && !healthy {
+            metrics::counter!(
+                "rivven_cdc_health_state_transitions_total",
+                "connector" => self.connector_name.clone(),
+                "source" => self.source_type.clone(),
+                "database" => self.database.clone(),
+                "to" => "unhealthy"
+            )
+            .increment(1);
+        } else if !was_healthy && healthy {
+            metrics::counter!(
+                "rivven_cdc_health_state_transitions_total",
+                "connector" => self.connector_name.clone(),
+                "source" => self.source_type.clone(),
+                "database" => self.database.clone(),
+                "to" => "healthy"
+            )
+            .increment(1);
+        }
+
+        metrics::gauge!(
+            "rivven_cdc_health_state_healthy",
+            "connector" => self.connector_name.clone(),
+            "source" => self.source_type.clone(),
+            "database" => self.database.clone()
+        )
+        .set(if healthy { 1.0 } else { 0.0 });
+
+        metrics::gauge!(
+            "rivven_cdc_health_state_ready",
+            "connector" => self.connector_name.clone(),
+            "source" => self.source_type.clone(),
+            "database" => self.database.clone()
+        )
+        .set(if ready { 1.0 } else { 0.0 });
+    }
+
+    /// Record a recovery attempt.
+    pub fn record_recovery_attempt(&self, success: bool) {
+        self.health_recovery_attempts
+            .fetch_add(1, Ordering::Relaxed);
+
+        if success {
+            self.health_recoveries_succeeded
+                .fetch_add(1, Ordering::Relaxed);
+            metrics::counter!(
+                "rivven_cdc_health_recoveries_succeeded_total",
+                "connector" => self.connector_name.clone(),
+                "source" => self.source_type.clone(),
+                "database" => self.database.clone()
+            )
+            .increment(1);
+        } else {
+            self.health_recoveries_failed
+                .fetch_add(1, Ordering::Relaxed);
+            metrics::counter!(
+                "rivven_cdc_health_recoveries_failed_total",
+                "connector" => self.connector_name.clone(),
+                "source" => self.source_type.clone(),
+                "database" => self.database.clone()
+            )
+            .increment(1);
+        }
+
+        metrics::gauge!(
+            "rivven_cdc_health_recovery_attempts_total",
+            "connector" => self.connector_name.clone(),
+            "source" => self.source_type.clone(),
+            "database" => self.database.clone()
+        )
+        .set(self.health_recovery_attempts.load(Ordering::Relaxed) as f64);
+    }
+
+    /// Get health monitoring snapshot.
+    pub fn health_snapshot(&self) -> HealthMetricsSnapshot {
+        HealthMetricsSnapshot {
+            monitoring_enabled: self.health_monitoring_enabled.load(Ordering::Relaxed),
+            healthy: self.health_state_healthy.load(Ordering::Relaxed),
+            ready: self.health_state_ready.load(Ordering::Relaxed),
+            checks_performed: self.health_checks_performed.load(Ordering::Relaxed),
+            checks_passed: self.health_checks_passed.load(Ordering::Relaxed),
+            checks_failed: self.health_checks_failed.load(Ordering::Relaxed),
+            consecutive_failures: self.health_consecutive_failures.load(Ordering::Relaxed),
+            recovery_attempts: self.health_recovery_attempts.load(Ordering::Relaxed),
+            recoveries_succeeded: self.health_recoveries_succeeded.load(Ordering::Relaxed),
+            recoveries_failed: self.health_recoveries_failed.load(Ordering::Relaxed),
+            unhealthy_time_ms: self.health_unhealthy_time_ms.load(Ordering::Relaxed),
+            last_check_timestamp: self.last_health_check_timestamp.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Record time spent in unhealthy state.
+    pub fn record_unhealthy_duration(&self, duration_ms: u64) {
+        self.health_unhealthy_time_ms
+            .fetch_add(duration_ms, Ordering::Relaxed);
+        metrics::counter!(
+            "rivven_cdc_health_unhealthy_time_ms_total",
+            "connector" => self.connector_name.clone(),
+            "source" => self.source_type.clone(),
+            "database" => self.database.clone()
+        )
+        .increment(duration_ms);
+    }
+
     /// Get rows scanned for a specific table.
     pub fn get_rows_scanned(&self, table: &str) -> u64 {
         self.rows_scanned
@@ -991,7 +1248,7 @@ impl ExtendedCdcMetrics {
 
     /// Get all tables being incrementally snapshotted.
     pub fn get_incremental_snapshot_tables(&self) -> Vec<String> {
-        self.incremental_snapshot_tables.read().unwrap().clone()
+        self.incremental_snapshot_tables.read_recovered().clone()
     }
 
     /// Get error count by category.
@@ -1009,7 +1266,7 @@ impl ExtendedCdcMetrics {
 // Snapshot Phase
 // ============================================================================
 
-/// Snapshot phase states (matching Debezium).
+/// Snapshot phase states.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum SnapshotPhase {
     /// Snapshot not started
@@ -1105,6 +1362,59 @@ struct LatencyPercentiles {
     p95: u64,
     p99: u64,
     max: u64,
+}
+
+// ============================================================================
+// Health Metrics Snapshot
+// ============================================================================
+
+/// Snapshot of health monitoring metrics.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HealthMetricsSnapshot {
+    /// Whether health monitoring is enabled
+    pub monitoring_enabled: bool,
+    /// Current health state
+    pub healthy: bool,
+    /// Current readiness state
+    pub ready: bool,
+    /// Total health checks performed
+    pub checks_performed: u64,
+    /// Health checks that passed
+    pub checks_passed: u64,
+    /// Health checks that failed
+    pub checks_failed: u64,
+    /// Current consecutive failures
+    pub consecutive_failures: u64,
+    /// Total recovery attempts
+    pub recovery_attempts: u64,
+    /// Successful recoveries
+    pub recoveries_succeeded: u64,
+    /// Failed recoveries
+    pub recoveries_failed: u64,
+    /// Total time spent in unhealthy state (ms)
+    pub unhealthy_time_ms: u64,
+    /// Last health check timestamp (ms since epoch)
+    pub last_check_timestamp: u64,
+}
+
+impl HealthMetricsSnapshot {
+    /// Get the success rate as a percentage.
+    pub fn success_rate(&self) -> f64 {
+        if self.checks_performed == 0 {
+            100.0
+        } else {
+            (self.checks_passed as f64 / self.checks_performed as f64) * 100.0
+        }
+    }
+
+    /// Get the recovery success rate.
+    pub fn recovery_success_rate(&self) -> f64 {
+        if self.recovery_attempts == 0 {
+            100.0
+        } else {
+            (self.recoveries_succeeded as f64 / self.recovery_attempts as f64) * 100.0
+        }
+    }
 }
 
 // ============================================================================
@@ -1458,7 +1768,7 @@ mod tests {
             1
         );
         assert_eq!(
-            *metrics.last_transaction_id.read().unwrap(),
+            *metrics.last_transaction_id.read_recovered(),
             Some("txn-124".to_string())
         );
     }
@@ -1485,10 +1795,10 @@ mod tests {
         let metrics = ExtendedCdcMetrics::new("postgres", "testdb");
 
         metrics.update_source_position("0/1234567");
-        assert_eq!(*metrics.source_event_position.read().unwrap(), "0/1234567");
+        assert_eq!(*metrics.source_event_position.read_recovered(), "0/1234567");
 
         metrics.update_source_position("0/1234600");
-        assert_eq!(*metrics.source_event_position.read().unwrap(), "0/1234600");
+        assert_eq!(*metrics.source_event_position.read_recovered(), "0/1234600");
     }
 
     #[test]
@@ -1509,7 +1819,7 @@ mod tests {
             .incremental_snapshot_window_open
             .load(Ordering::Relaxed));
         assert_eq!(
-            *metrics.incremental_snapshot_chunk_id.read().unwrap(),
+            *metrics.incremental_snapshot_chunk_id.read_recovered(),
             "chunk-1"
         );
 
@@ -1591,7 +1901,7 @@ mod tests {
         assert_eq!(metrics.get_errors_by_category("connection"), 2);
         assert_eq!(metrics.get_errors_by_category("decode"), 1);
         assert_eq!(
-            *metrics.last_error_message.read().unwrap(),
+            *metrics.last_error_message.read_recovered(),
             Some("Invalid message format".to_string())
         );
 
@@ -1731,19 +2041,25 @@ mod tests {
         let metrics = ExtendedCdcMetrics::new("postgres", "testdb");
 
         assert_eq!(
-            *metrics.snapshot_phase.read().unwrap(),
+            *metrics.snapshot_phase.read_recovered(),
             SnapshotPhase::NotStarted
         );
 
         metrics.start_snapshot(1);
-        assert_eq!(*metrics.snapshot_phase.read().unwrap(), SnapshotPhase::Lock);
+        assert_eq!(
+            *metrics.snapshot_phase.read_recovered(),
+            SnapshotPhase::Lock
+        );
 
         metrics.set_snapshot_phase(SnapshotPhase::Read);
-        assert_eq!(*metrics.snapshot_phase.read().unwrap(), SnapshotPhase::Read);
+        assert_eq!(
+            *metrics.snapshot_phase.read_recovered(),
+            SnapshotPhase::Read
+        );
 
         metrics.complete_snapshot();
         assert_eq!(
-            *metrics.snapshot_phase.read().unwrap(),
+            *metrics.snapshot_phase.read_recovered(),
             SnapshotPhase::Completed
         );
     }
@@ -1760,5 +2076,102 @@ mod tests {
 
         let metrics2 = new_shared_extended_metrics_with_name("mysql", "mydb", "my-connector");
         assert_eq!(metrics2.connector_name, "my-connector");
+    }
+
+    #[test]
+    fn test_health_monitoring_metrics() {
+        let metrics = ExtendedCdcMetrics::new("postgres", "testdb");
+
+        // Initially disabled
+        assert!(!metrics.health_monitoring_enabled.load(Ordering::Relaxed));
+
+        // Enable health monitoring
+        metrics.enable_health_monitoring();
+        assert!(metrics.health_monitoring_enabled.load(Ordering::Relaxed));
+
+        // Record health checks
+        metrics.record_health_check(true);
+        metrics.record_health_check(true);
+        metrics.record_health_check(false);
+
+        let snapshot = metrics.health_snapshot();
+        assert!(snapshot.monitoring_enabled);
+        assert_eq!(snapshot.checks_performed, 3);
+        assert_eq!(snapshot.checks_passed, 2);
+        assert_eq!(snapshot.checks_failed, 1);
+        assert_eq!(snapshot.consecutive_failures, 1);
+
+        // Successful check resets consecutive failures
+        metrics.record_health_check(true);
+        assert_eq!(
+            metrics.health_consecutive_failures.load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[test]
+    fn test_health_state_tracking() {
+        let metrics = ExtendedCdcMetrics::new("postgres", "testdb");
+
+        // Initially unhealthy
+        assert!(!metrics.health_state_healthy.load(Ordering::Relaxed));
+        assert!(!metrics.health_state_ready.load(Ordering::Relaxed));
+
+        // Mark healthy
+        metrics.set_health_state(true, true);
+        assert!(metrics.health_state_healthy.load(Ordering::Relaxed));
+        assert!(metrics.health_state_ready.load(Ordering::Relaxed));
+
+        // Mark unhealthy
+        metrics.set_health_state(false, false);
+        assert!(!metrics.health_state_healthy.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_health_recovery_tracking() {
+        let metrics = ExtendedCdcMetrics::new("postgres", "testdb");
+
+        // Record recovery attempts
+        metrics.record_recovery_attempt(true);
+        metrics.record_recovery_attempt(false);
+        metrics.record_recovery_attempt(true);
+
+        let snapshot = metrics.health_snapshot();
+        assert_eq!(snapshot.recovery_attempts, 3);
+        assert_eq!(snapshot.recoveries_succeeded, 2);
+        assert_eq!(snapshot.recoveries_failed, 1);
+        assert!((snapshot.recovery_success_rate() - 66.666).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_health_unhealthy_duration() {
+        let metrics = ExtendedCdcMetrics::new("postgres", "testdb");
+
+        metrics.record_unhealthy_duration(1000);
+        metrics.record_unhealthy_duration(500);
+
+        let snapshot = metrics.health_snapshot();
+        assert_eq!(snapshot.unhealthy_time_ms, 1500);
+    }
+
+    #[test]
+    fn test_health_metrics_snapshot_rates() {
+        let snapshot = HealthMetricsSnapshot {
+            monitoring_enabled: true,
+            healthy: true,
+            ready: true,
+            checks_performed: 100,
+            checks_passed: 95,
+            checks_failed: 5,
+            consecutive_failures: 0,
+            recovery_attempts: 10,
+            recoveries_succeeded: 8,
+            recoveries_failed: 2,
+            unhealthy_time_ms: 5000,
+            last_check_timestamp: 1234567890,
+        };
+
+        assert!((snapshot.success_rate() - 95.0).abs() < 0.01);
+        assert!((snapshot.recovery_success_rate() - 80.0).abs() < 0.01);
     }
 }

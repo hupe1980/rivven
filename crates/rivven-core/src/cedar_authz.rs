@@ -799,6 +799,36 @@ mod cedar_impl {
             Ok(())
         }
 
+        /// Add a schema entity
+        pub fn add_schema(&self, name: &str, version: i64) -> CedarResult<()> {
+            let uid = EntityUid::from_type_name_and_id(
+                EntityTypeName::from_str("Rivven::Schema").unwrap(),
+                EntityId::from_str(name).unwrap(),
+            );
+
+            let mut attrs = HashMap::new();
+            attrs.insert(
+                "name".to_string(),
+                cedar_policy::RestrictedExpression::new_string(name.to_string()),
+            );
+            attrs.insert(
+                "version".to_string(),
+                cedar_policy::RestrictedExpression::new_long(version),
+            );
+
+            let entity = Entity::new(uid, attrs, HashSet::new())
+                .map_err(|e| CedarError::Entity(format!("Invalid entity: {:?}", e)))?;
+
+            let mut entities = self.entities.write();
+            let mut all_entities: Vec<Entity> = entities.iter().cloned().collect();
+            all_entities.push(entity);
+            *entities = Entities::from_entities(all_entities, None)
+                .map_err(|e| CedarError::Entity(format!("Invalid entities: {:?}", e)))?;
+
+            debug!("Added schema entity: {} (version {})", name, version);
+            Ok(())
+        }
+
         /// Check if an action is authorized
         pub fn is_authorized(
             &self,

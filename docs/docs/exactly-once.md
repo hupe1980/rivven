@@ -226,10 +226,67 @@ Response::TransactionAborted { txn_id: "order-processing-txn-1".to_string() }
 
 ### Consumer Isolation Levels
 
-| Level | Behavior |
-|-------|----------|
-| `read_uncommitted` | Read all messages, including uncommitted |
-| `read_committed` | Only read committed messages (default) |
+Rivven supports standard isolation levels for consumers:
+
+| Level | Value | Behavior |
+|-------|-------|----------|
+| `read_uncommitted` | 0 | Read all data messages (default for backward compatibility) |
+| `read_committed` | 1 | Only read committed transactional messages |
+
+#### Read Uncommitted (Default)
+
+The default isolation level returns all messages except control records (transaction markers).
+This is backward compatible with non-transactional consumers:
+
+```rust
+// Default consume - read_uncommitted
+let messages = client.consume("topic", 0, 0, 100).await?;
+```
+
+#### Read Committed
+
+For exactly-once semantics, transactional consumers should use `read_committed` isolation.
+This filters out:
+
+1. **Control records** (COMMIT/ABORT transaction markers)
+2. **Messages from aborted transactions**
+
+```rust
+// Explicit read_committed for transactional consumers
+let messages = client.consume_read_committed("topic", 0, 0, 100).await?;
+
+// Or with explicit isolation level parameter
+let messages = client.consume_with_isolation("topic", 0, 0, 100, Some(1)).await?;
+```
+
+#### How Read Committed Filtering Works
+
+```text
+Partition Log:
+┌─────┬─────────────────────────────────────────────┐
+│ Off │ Message                                     │
+├─────┼─────────────────────────────────────────────┤
+│  0  │ [PID=1] "order-1" (TXN started)             │ ← included
+│  1  │ [PID=2] "order-2" (TXN started)             │ ← FILTERED (aborted)
+│  2  │ [PID=1] "order-1-update"                    │ ← included
+│  3  │ [PID=2] ABORT marker                        │ ← FILTERED (control)
+│  4  │ [PID=1] COMMIT marker                       │ ← FILTERED (control)
+│  5  │ [PID=3] "order-3" (non-transactional)       │ ← included
+└─────┴─────────────────────────────────────────────┘
+
+read_uncommitted returns: 0, 1, 2, 5 (all data messages)
+read_committed returns: 0, 2, 5 (filters aborted PID=2 messages)
+```
+
+#### AbortedTransactionIndex
+
+The broker maintains an `AbortedTransactionIndex` per partition that tracks:
+
+- **Producer ID** that aborted
+- **First offset** of the aborted transaction
+
+When a consumer requests `read_committed`, the broker cross-references transactional
+messages against this index to filter out aborted transaction data.
 
 ### Transaction Timeout
 

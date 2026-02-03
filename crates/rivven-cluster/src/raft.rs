@@ -1,16 +1,25 @@
 //! Raft integration for cluster metadata consensus
 //!
 //! This module provides the Raft consensus implementation for cluster metadata.
-//! It uses RocksDB for persistent log storage and wraps our `ClusterMetadata`
+//! It uses **redb** (pure Rust) for persistent log storage and wraps our `ClusterMetadata`
 //! state machine with full openraft integration.
 //!
 //! # Architecture
 //!
 //! - **TypeConfig**: Defines all Raft-related types (node ID, entry, etc.)
-//! - **LogStore**: RocksDB-backed log storage implementing `RaftLogStorage`
+//! - **LogStore**: redb-backed log storage implementing `RaftLogStorage`
 //! - **StateMachine**: Wraps `ClusterMetadata` implementing `RaftStateMachine`
 //! - **NetworkFactory**: Creates HTTP-based network connections for Raft RPCs
 //! - **RaftNode**: High-level API managing the Raft instance
+//!
+//! # Why redb?
+//!
+//! We use redb instead of RocksDB for several benefits:
+//! - **Pure Rust**: Zero C/C++ dependencies, compiles everywhere
+//! - **Fast builds**: ~10s vs 2-5 minutes for RocksDB
+//! - **Cross-compile**: Works with musl, WASM, etc.
+//! - **ACID**: Full transactional guarantees
+//! - **Small binary**: Minimal size impact
 
 // Suppress warnings for large error types from openraft crate
 #![allow(clippy::result_large_err)]
@@ -18,9 +27,10 @@
 use crate::config::ClusterConfig;
 use crate::error::{ClusterError, Result};
 use crate::metadata::{ClusterMetadata, MetadataCommand, MetadataResponse};
+use crate::storage::RedbLogStore;
 use openraft::network::{RPCOption, RaftNetwork, RaftNetworkFactory};
 use openraft::raft::responder::OneshotResponder;
-use openraft::storage::{LogState, RaftLogReader, RaftLogStorage, RaftStateMachine, Snapshot};
+use openraft::storage::{RaftStateMachine, Snapshot};
 use openraft::{
     BasicNode, Entry, EntryPayload, LogId, Membership, RaftTypeConfig, SnapshotMeta, StorageError,
     StorageIOError, StoredMembership, Vote,
@@ -29,11 +39,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::io::Cursor;
-use std::ops::RangeBounds;
-use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
+
+/// Type alias for backward compatibility - uses redb storage
+pub type LogStore = RedbLogStore;
 
 // ============================================================================
 // Error Types
@@ -94,323 +105,6 @@ pub type RaftMembership = Membership<NodeId, BasicNode>;
 pub type RaftStoredMembership = StoredMembership<NodeId, BasicNode>;
 pub type RaftSnapshot = Snapshot<TypeConfig>;
 pub type RaftSnapshotMeta = SnapshotMeta<NodeId, BasicNode>;
-
-// ============================================================================
-// Log Storage Implementation
-// ============================================================================
-
-/// RocksDB-backed Raft log storage
-pub struct LogStore {
-    /// RocksDB instance for persistent storage
-    db: Arc<rocksdb::DB>,
-    /// Cached vote (also persisted)
-    vote: RwLock<Option<RaftVote>>,
-    /// Last purged log ID
-    last_purged: RwLock<Option<RaftLogId>>,
-    /// Committed log ID (optional persistence)
-    committed: RwLock<Option<RaftLogId>>,
-}
-
-impl LogStore {
-    /// Column family for Raft logs
-    const CF_LOGS: &'static str = "raft_logs";
-    /// Column family for Raft state (vote, metadata)
-    const CF_STATE: &'static str = "raft_state";
-
-    /// Keys for state storage
-    const KEY_VOTE: &'static [u8] = b"vote";
-    const KEY_LAST_PURGED: &'static [u8] = b"last_purged";
-    const KEY_COMMITTED: &'static [u8] = b"committed";
-
-    /// Create new log storage
-    pub fn new(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
-        std::fs::create_dir_all(path)
-            .map_err(|e| ClusterError::RaftStorage(format!("Failed to create dir: {}", e)))?;
-
-        let mut opts = rocksdb::Options::default();
-        opts.create_if_missing(true);
-        opts.create_missing_column_families(true);
-
-        // Optimize for Raft workload (small values, sequential keys)
-        opts.set_write_buffer_size(16 * 1024 * 1024); // 16 MB
-        opts.set_max_write_buffer_number(2);
-        opts.set_target_file_size_base(16 * 1024 * 1024);
-        // Enable WAL for durability
-        opts.set_wal_dir(path.join("wal"));
-
-        let cf_descriptors = vec![
-            rocksdb::ColumnFamilyDescriptor::new(Self::CF_LOGS, rocksdb::Options::default()),
-            rocksdb::ColumnFamilyDescriptor::new(Self::CF_STATE, rocksdb::Options::default()),
-        ];
-
-        let db = rocksdb::DB::open_cf_descriptors(&opts, path, cf_descriptors)
-            .map_err(|e| ClusterError::RaftStorage(e.to_string()))?;
-
-        let db = Arc::new(db);
-
-        // Load persisted state
-        let vote = Self::load_state::<RaftVote>(&db, Self::CF_STATE, Self::KEY_VOTE);
-        let last_purged = Self::load_state::<RaftLogId>(&db, Self::CF_STATE, Self::KEY_LAST_PURGED);
-        let committed = Self::load_state::<RaftLogId>(&db, Self::CF_STATE, Self::KEY_COMMITTED);
-
-        info!(?vote, ?last_purged, ?committed, "Opened Raft log storage");
-
-        Ok(Self {
-            db,
-            vote: RwLock::new(vote),
-            last_purged: RwLock::new(last_purged),
-            committed: RwLock::new(committed),
-        })
-    }
-
-    /// Get logs column family
-    fn cf_logs(&self) -> &rocksdb::ColumnFamily {
-        self.db
-            .cf_handle(Self::CF_LOGS)
-            .expect("CF_LOGS must exist")
-    }
-
-    /// Get state column family
-    fn cf_state(&self) -> &rocksdb::ColumnFamily {
-        self.db
-            .cf_handle(Self::CF_STATE)
-            .expect("CF_STATE must exist")
-    }
-
-    /// Load state from RocksDB
-    fn load_state<T: for<'de> Deserialize<'de>>(
-        db: &rocksdb::DB,
-        cf_name: &str,
-        key: &[u8],
-    ) -> Option<T> {
-        let cf = db.cf_handle(cf_name)?;
-        let bytes = db.get_cf(cf, key).ok()??;
-        postcard::from_bytes(&bytes).ok()
-    }
-
-    /// Save state to RocksDB
-    fn save_state<T: Serialize>(
-        &self,
-        key: &[u8],
-        value: &T,
-    ) -> std::result::Result<(), StorageError<NodeId>> {
-        let bytes = postcard::to_allocvec(value).map_err(|e| StorageError::IO {
-            source: StorageIOError::write_logs(openraft::AnyError::new(&e)),
-        })?;
-        self.db
-            .put_cf(self.cf_state(), key, bytes)
-            .map_err(|e| StorageError::IO {
-                source: StorageIOError::write_logs(openraft::AnyError::new(&e)),
-            })
-    }
-
-    /// Encode log index to key (big-endian for proper ordering)
-    fn index_key(index: u64) -> [u8; 8] {
-        index.to_be_bytes()
-    }
-
-    /// Get the last log entry
-    fn last_log(&self) -> std::result::Result<Option<RaftEntry>, StorageError<NodeId>> {
-        let cf = self.cf_logs();
-        let mut iter = self.db.raw_iterator_cf(cf);
-        iter.seek_to_last();
-        if iter.valid() {
-            if let Some(value) = iter.value() {
-                let entry: RaftEntry =
-                    postcard::from_bytes(value).map_err(|e| StorageError::IO {
-                        source: StorageIOError::read_logs(openraft::AnyError::new(&e)),
-                    })?;
-                return Ok(Some(entry));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Get log entry by index
-    fn get_log(&self, index: u64) -> std::result::Result<Option<RaftEntry>, StorageError<NodeId>> {
-        let key = Self::index_key(index);
-        match self.db.get_cf(self.cf_logs(), key) {
-            Ok(Some(bytes)) => {
-                let entry: RaftEntry =
-                    postcard::from_bytes(&bytes).map_err(|e| StorageError::IO {
-                        source: StorageIOError::read_logs(openraft::AnyError::new(&e)),
-                    })?;
-                Ok(Some(entry))
-            }
-            Ok(None) => Ok(None),
-            Err(e) => Err(StorageError::IO {
-                source: StorageIOError::read_logs(openraft::AnyError::new(&e)),
-            }),
-        }
-    }
-
-    /// Append a log entry
-    fn append_log(&self, entry: &RaftEntry) -> std::result::Result<(), StorageError<NodeId>> {
-        let key = Self::index_key(entry.log_id.index);
-        let value = postcard::to_allocvec(entry).map_err(|e| StorageError::IO {
-            source: StorageIOError::write_logs(openraft::AnyError::new(&e)),
-        })?;
-        self.db
-            .put_cf(self.cf_logs(), key, value)
-            .map_err(|e| StorageError::IO {
-                source: StorageIOError::write_logs(openraft::AnyError::new(&e)),
-            })
-    }
-
-    /// Delete log entries in range [start, end)
-    fn delete_logs_range(
-        &self,
-        start: u64,
-        end: u64,
-    ) -> std::result::Result<(), StorageError<NodeId>> {
-        let cf = self.cf_logs();
-        let mut batch = rocksdb::WriteBatch::default();
-        for index in start..end {
-            batch.delete_cf(cf, Self::index_key(index));
-        }
-        self.db.write(batch).map_err(|e| StorageError::IO {
-            source: StorageIOError::write_logs(openraft::AnyError::new(&e)),
-        })
-    }
-}
-
-// Implement RaftLogReader for LogStore
-impl RaftLogReader<TypeConfig> for LogStore {
-    async fn try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + Send>(
-        &mut self,
-        range: RB,
-    ) -> std::result::Result<Vec<RaftEntry>, StorageError<NodeId>> {
-        let start = match range.start_bound() {
-            std::ops::Bound::Included(&n) => n,
-            std::ops::Bound::Excluded(&n) => n + 1,
-            std::ops::Bound::Unbounded => 0,
-        };
-        let end = match range.end_bound() {
-            std::ops::Bound::Included(&n) => n + 1,
-            std::ops::Bound::Excluded(&n) => n,
-            std::ops::Bound::Unbounded => u64::MAX,
-        };
-
-        let mut entries = Vec::new();
-        for index in start..end {
-            match self.get_log(index)? {
-                Some(entry) => entries.push(entry),
-                None => break, // Stop at first missing entry
-            }
-        }
-
-        Ok(entries)
-    }
-}
-
-// Implement RaftLogStorage for LogStore
-impl RaftLogStorage<TypeConfig> for LogStore {
-    type LogReader = Self;
-
-    async fn get_log_state(
-        &mut self,
-    ) -> std::result::Result<LogState<TypeConfig>, StorageError<NodeId>> {
-        let last_purged = *self.last_purged.read().await;
-        let last_log = self.last_log()?;
-
-        let last_log_id = last_log.map(|e| e.log_id).or(last_purged);
-
-        Ok(LogState {
-            last_purged_log_id: last_purged,
-            last_log_id,
-        })
-    }
-
-    async fn get_log_reader(&mut self) -> Self::LogReader {
-        // Return a clone sharing the same DB
-        Self {
-            db: self.db.clone(),
-            vote: RwLock::new(*self.vote.read().await),
-            last_purged: RwLock::new(*self.last_purged.read().await),
-            committed: RwLock::new(*self.committed.read().await),
-        }
-    }
-
-    async fn save_vote(
-        &mut self,
-        vote: &RaftVote,
-    ) -> std::result::Result<(), StorageError<NodeId>> {
-        self.save_state(Self::KEY_VOTE, vote)?;
-        *self.vote.write().await = Some(*vote);
-        debug!(?vote, "Saved vote");
-        Ok(())
-    }
-
-    async fn read_vote(&mut self) -> std::result::Result<Option<RaftVote>, StorageError<NodeId>> {
-        Ok(*self.vote.read().await)
-    }
-
-    async fn save_committed(
-        &mut self,
-        committed: Option<RaftLogId>,
-    ) -> std::result::Result<(), StorageError<NodeId>> {
-        if let Some(ref c) = committed {
-            self.save_state(Self::KEY_COMMITTED, c)?;
-        }
-        *self.committed.write().await = committed;
-        Ok(())
-    }
-
-    async fn read_committed(
-        &mut self,
-    ) -> std::result::Result<Option<RaftLogId>, StorageError<NodeId>> {
-        Ok(*self.committed.read().await)
-    }
-
-    async fn append<I>(
-        &mut self,
-        entries: I,
-        callback: openraft::storage::LogFlushed<TypeConfig>,
-    ) -> std::result::Result<(), StorageError<NodeId>>
-    where
-        I: IntoIterator<Item = RaftEntry> + Send,
-        I::IntoIter: Send,
-    {
-        for entry in entries {
-            self.append_log(&entry)?;
-        }
-        // Sync to ensure durability before callback
-        self.db.flush().map_err(|e| StorageError::IO {
-            source: StorageIOError::write_logs(openraft::AnyError::new(&e)),
-        })?;
-        callback.log_io_completed(Ok(()));
-        Ok(())
-    }
-
-    async fn truncate(
-        &mut self,
-        log_id: RaftLogId,
-    ) -> std::result::Result<(), StorageError<NodeId>> {
-        // Delete all logs after log_id.index
-        let start = log_id.index + 1;
-        let log_state = RaftLogStorage::get_log_state(self).await?;
-        if let Some(last) = log_state.last_log_id {
-            self.delete_logs_range(start, last.index + 1)?;
-        }
-        debug!(?log_id, "Truncated logs");
-        Ok(())
-    }
-
-    async fn purge(&mut self, log_id: RaftLogId) -> std::result::Result<(), StorageError<NodeId>> {
-        // Delete logs up to and including log_id.index
-        let current_purged = *self.last_purged.read().await;
-        let start = current_purged.map(|l| l.index + 1).unwrap_or(0);
-
-        self.delete_logs_range(start, log_id.index + 1)?;
-
-        // Update and persist last_purged
-        self.save_state(Self::KEY_LAST_PURGED, &log_id)?;
-        *self.last_purged.write().await = Some(log_id);
-        debug!(?log_id, "Purged logs");
-        Ok(())
-    }
-}
 
 // ============================================================================
 // State Machine Implementation
@@ -1711,13 +1405,18 @@ pub use openraft::storage::RaftLogStorage as RaftLogStorageTrait;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openraft::storage::RaftLogStorage;
     use tempfile::TempDir;
 
     #[tokio::test]
     async fn test_log_storage_creation() {
         let temp_dir = TempDir::new().unwrap();
-        let storage = LogStore::new(temp_dir.path()).unwrap();
-        assert!(storage.db.path().exists());
+        let path = temp_dir.path().join("raft.redb");
+        let mut storage = LogStore::new(&path).unwrap();
+
+        // Verify storage is functional
+        let state = storage.get_log_state().await.unwrap();
+        assert!(state.last_log_id.is_none());
     }
 
     #[tokio::test]

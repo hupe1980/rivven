@@ -53,7 +53,7 @@ impl<'a> ResourceBuilder<'a> {
     /// Get owner reference for managed resources
     fn owner_reference(&self) -> OwnerReference {
         OwnerReference {
-            api_version: "rivven.io/v1alpha1".to_string(),
+            api_version: "rivven.hupe1980.github.io/v1alpha1".to_string(),
             kind: "RivvenCluster".to_string(),
             name: self.name.clone(),
             uid: self.cluster.metadata.uid.clone().unwrap_or_default(),

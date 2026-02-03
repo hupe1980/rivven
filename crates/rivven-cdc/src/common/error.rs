@@ -60,10 +60,6 @@ pub enum CdcError {
     #[error("Filter error: {0}")]
     Filter(String),
 
-    /// Core error from rivven-core
-    #[error("Core error: {0}")]
-    Core(#[from] rivven_core::Error),
-
     /// Serialization error
     #[error("Serialization error: {0}")]
     Serialization(String),
@@ -213,7 +209,6 @@ impl CdcError {
             | Self::Serialization(_)
             | Self::Json(_)
             | Self::InvalidState(_)
-            | Self::Core(_)
             | Self::Other(_) => false,
         }
     }
@@ -254,7 +249,6 @@ impl CdcError {
             Self::Serialization(_) => ErrorCategory::Serialization,
             Self::Json(_) => ErrorCategory::Serialization,
             Self::DeadlockDetected(_) => ErrorCategory::Database,
-            Self::Core(_) => ErrorCategory::Other,
             Self::InvalidState(_) => ErrorCategory::Other,
             Self::Other(_) => ErrorCategory::Other,
         }
@@ -280,7 +274,6 @@ impl CdcError {
             Self::Serialization(_) => "serialization_error",
             Self::Json(_) => "json_error",
             Self::DeadlockDetected(_) => "deadlock",
-            Self::Core(_) => "core_error",
             Self::InvalidState(_) => "invalid_state",
             Self::Other(_) => "unknown",
         }

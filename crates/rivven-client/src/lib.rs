@@ -1,6 +1,6 @@
 //! # rivven-client
 //!
-//! Native async Rust client library for [Rivven](https://hupe1980.github.io/rivven/),
+//! Native async Rust client library for [Rivven](https://rivven.hupe1980.github.io/rivven/),
 //! the high-performance, single-binary event streaming platform.
 //!
 //! ## Features
@@ -82,16 +82,48 @@
 //! # }
 //! ```
 //!
+//! ## Request Pipelining
+//!
+//! For maximum throughput, use [`PipelinedClient`] which allows multiple
+//! in-flight requests over a single connection:
+//!
+//! ```rust,ignore
+//! use rivven_client::{PipelinedClient, PipelineConfig};
+//!
+//! # async fn example() -> rivven_client::Result<()> {
+//! // High-throughput configuration
+//! let config = PipelineConfig::high_throughput();
+//! let client = PipelinedClient::connect("127.0.0.1:9092", config).await?;
+//!
+//! // Send 1000 requests concurrently
+//! let handles: Vec<_> = (0..1000)
+//!     .map(|i| {
+//!         let client = client.clone();
+//!         tokio::spawn(async move {
+//!             client.publish("topic", format!("msg-{}", i)).await
+//!         })
+//!     })
+//!     .collect();
+//!
+//! for handle in handles {
+//!     handle.await??;
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! ## Feature Flags
 //!
 //! - `tls` - Enable TLS support via rustls
 
 pub mod client;
 pub mod error;
+pub mod pipeline;
 pub mod resilient;
 
-pub use client::{AuthSession, Client};
+pub use client::{AlterTopicConfigResult, AuthSession, Client, DeleteRecordsResult, ProducerState};
 pub use error::{Error, Result};
+pub use pipeline::{PipelineConfig, PipelineConfigBuilder, PipelineStatsSnapshot, PipelinedClient};
 pub use resilient::{ResilientClient, ResilientClientConfig, ResilientClientConfigBuilder};
 
 // Re-export TLS configuration when available
@@ -100,6 +132,6 @@ pub use rivven_core::tls::TlsConfig;
 
 // Re-export protocol types from rivven-protocol
 pub use rivven_protocol::{
-    BrokerInfo, MessageData, PartitionMetadata, Request, Response, TopicMetadata, MAX_MESSAGE_SIZE,
-    PROTOCOL_VERSION,
+    BrokerInfo, MessageData, PartitionMetadata, Request, Response, SchemaType, TopicConfigEntry,
+    TopicMetadata, MAX_MESSAGE_SIZE, PROTOCOL_VERSION,
 };

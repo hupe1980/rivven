@@ -228,7 +228,7 @@ struct BatcherState {
     batch_start: Instant,
     sequence: u64,
     in_transaction: bool,
-    #[allow(dead_code)] // Reserved for transaction-aware batching
+    /// Current transaction ID for transaction-aware batching
     transaction_id: Option<String>,
 }
 
@@ -336,11 +336,19 @@ impl EventBatcher {
         let events = std::mem::take(&mut state.events);
         let bytes = state.bytes;
 
+        // Collect transaction IDs from this batch
+        let transaction_ids = if let Some(ref txn_id) = state.transaction_id {
+            vec![txn_id.clone()]
+        } else {
+            Vec::new()
+        };
+
         state.events = Vec::with_capacity(self.config.max_events);
         state.bytes = 0;
         state.batch_start = Instant::now();
         state.sequence += 1;
         state.in_transaction = false;
+        state.transaction_id = None;
 
         EventBatch {
             events,
@@ -348,7 +356,7 @@ impl EventBatcher {
             created_at: state.batch_start,
             flushed_at: Instant::now(),
             sequence: state.sequence,
-            transaction_ids: Vec::new(),
+            transaction_ids,
         }
     }
 }

@@ -20,7 +20,7 @@ Programmatic cluster management API.
 
 ## Overview
 
-Rivven provides a comprehensive Admin API for programmatic cluster management, matching Kafka's administrative capabilities. These operations enable DevOps automation, infrastructure-as-code workflows, and dynamic cluster reconfiguration.
+Rivven provides a comprehensive Admin API for programmatic cluster management. These operations enable DevOps automation, infrastructure-as-code workflows, and dynamic cluster reconfiguration.
 
 | Operation | Description | Authorization |
 |-----------|-------------|---------------|

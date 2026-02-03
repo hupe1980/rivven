@@ -1115,6 +1115,87 @@ impl AuthManager {
         session
     }
 
+    /// Create a session for an API key authentication
+    ///
+    /// Creates a synthetic session for API key-based authentication.
+    /// The session inherits permissions from the specified roles.
+    pub fn create_api_key_session(&self, principal_name: &str, roles: &[String]) -> AuthSession {
+        // Resolve permissions from roles
+        let mut permissions = HashSet::new();
+        {
+            let roles_map = self.roles.read();
+            for role_name in roles {
+                if let Some(role) = roles_map.get(role_name) {
+                    permissions.extend(role.permissions.iter().cloned());
+                }
+            }
+        }
+
+        let mut session_id = vec![0u8; 32];
+        self.rng.fill(&mut session_id).expect("RNG failed");
+        let session_id = hex::encode(&session_id);
+
+        let now = Instant::now();
+        let session = AuthSession {
+            id: session_id.clone(),
+            principal_name: principal_name.to_string(),
+            principal_type: PrincipalType::ServiceAccount,
+            permissions,
+            created_at: now,
+            expires_at: now + self.config.session_timeout,
+            client_ip: "api-key".to_string(),
+        };
+
+        self.sessions.write().insert(session_id, session.clone());
+        debug!(principal = %principal_name, "Created API key session");
+        session
+    }
+
+    /// Create a session for JWT/OIDC authentication
+    ///
+    /// Creates a synthetic session for JWT-authenticated users.
+    /// The session inherits permissions from the specified groups/roles.
+    pub fn create_jwt_session(&self, principal_name: &str, groups: &[String]) -> AuthSession {
+        // Resolve permissions from groups (treated as roles)
+        let mut permissions = HashSet::new();
+        {
+            let roles_map = self.roles.read();
+            for group in groups {
+                if let Some(role) = roles_map.get(group) {
+                    permissions.extend(role.permissions.iter().cloned());
+                }
+            }
+        }
+
+        let mut session_id = vec![0u8; 32];
+        self.rng.fill(&mut session_id).expect("RNG failed");
+        let session_id = hex::encode(&session_id);
+
+        let now = Instant::now();
+        let session = AuthSession {
+            id: session_id.clone(),
+            principal_name: principal_name.to_string(),
+            principal_type: PrincipalType::User,
+            permissions,
+            created_at: now,
+            expires_at: now + self.config.session_timeout,
+            client_ip: "jwt".to_string(),
+        };
+
+        self.sessions.write().insert(session_id, session.clone());
+        debug!(principal = %principal_name, groups = ?groups, "Created JWT session");
+        session
+    }
+
+    /// Get a session by principal name (for API key validation)
+    pub fn get_session_by_principal(&self, principal_name: &str) -> Option<AuthSession> {
+        let sessions = self.sessions.read();
+        sessions
+            .values()
+            .find(|s| s.principal_name == principal_name && !s.is_expired())
+            .cloned()
+    }
+
     // ========================================================================
     // Authorization
     // ========================================================================

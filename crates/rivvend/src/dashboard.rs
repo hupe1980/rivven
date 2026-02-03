@@ -1,26 +1,23 @@
 //! Web Dashboard for Rivven
 //!
-//! Provides a production-grade web UI for monitoring and managing Rivven clusters.
-//! The dashboard is served from embedded static assets and communicates with the
-//! server via REST API endpoints.
+//! Provides a lightweight static HTML web UI for monitoring Rivven clusters.
+//! The dashboard is served from a single embedded HTML file with vanilla JavaScript.
 //!
 //! ## Features
 //!
-//! - Real-time cluster overview
+//! - Real-time cluster overview (auto-refresh every 5s)
 //! - Topic management and monitoring
 //! - Consumer group status
-//! - Raft consensus visualization
-//! - Prometheus metrics integration
+//! - Cluster node visualization
+//! - Prometheus metrics display
 //!
 //! ## Security Considerations
 //!
 //! - Dashboard is disabled by default (opt-in via `--dashboard`)
 //! - Static assets are compiled into the binary (no external dependencies)
-//! - CORS headers restrict cross-origin requests
 //! - Content Security Policy prevents XSS attacks
 //! - X-Content-Type-Options prevents MIME sniffing
 //! - X-Frame-Options prevents clickjacking
-//! - Rate limiting prevents DoS (when tower-governor is enabled)
 //! - **IMPORTANT**: In production, enable authentication via reverse proxy or mTLS
 
 #[cfg(feature = "dashboard")]
@@ -50,12 +47,11 @@ use crate::raft_api::RaftApiState;
 // Embedded Static Assets
 // ============================================================================
 
-/// Embedded static files for the dashboard
-/// Built automatically by build.rs from dashboard/ source directory
-/// Assets are in dashboard/dist/ after trunk build
+/// Embedded static HTML dashboard
+/// Simple vanilla JS dashboard - no WASM build required
 #[cfg(feature = "dashboard")]
 #[derive(RustEmbed)]
-#[folder = "dashboard/dist/"]
+#[folder = "dashboard/"]
 struct DashboardAssets;
 
 // ============================================================================
@@ -163,16 +159,15 @@ async fn security_headers_middleware(request: Request<Body>, next: Next) -> Resp
     // Prevent clickjacking
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
 
-    // Content Security Policy for air-gapped Leptos WASM dashboard
-    // - 'unsafe-inline' needed for trunk-generated WASM init script
-    // - 'wasm-unsafe-eval' allows WebAssembly compilation
+    // Content Security Policy for static HTML dashboard
+    // - 'unsafe-inline' needed for embedded <script> and <style> tags
     // - connect-src allows fetch() to same-origin API endpoints
-    // - No external resources (fonts, CDNs) - fully self-contained
+    // - No external resources - fully self-contained single HTML file
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
             "default-src 'self'; \
-             script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; \
+             script-src 'self' 'unsafe-inline'; \
              style-src 'self' 'unsafe-inline'; \
              img-src 'self' data:; \
              connect-src 'self'; \
@@ -222,8 +217,12 @@ pub fn create_dashboard_router(state: DashboardState) -> Router {
 async fn static_handler(uri: Uri) -> impl IntoResponse {
     let path = uri.path().trim_start_matches('/');
 
-    // Default to index.html for root path
-    let path = if path.is_empty() { "index.html" } else { path };
+    // Default to index.html for root path or any non-file path
+    let path = if path.is_empty() || !path.contains('.') {
+        "index.html"
+    } else {
+        path
+    };
 
     match DashboardAssets::get(path) {
         Some(content) => {
@@ -247,25 +246,11 @@ async fn static_handler(uri: Uri) -> impl IntoResponse {
                 .body(Body::from(content.data.into_owned()))
                 .unwrap()
         }
-        None => {
-            // For SPA routing, serve index.html for non-existent paths
-            if !path.contains('.') {
-                if let Some(content) = DashboardAssets::get("index.html") {
-                    return Response::builder()
-                        .status(StatusCode::OK)
-                        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-                        .header(header::CACHE_CONTROL, "no-cache, no-store, must-revalidate")
-                        .body(Body::from(content.data.into_owned()))
-                        .unwrap();
-                }
-            }
-
-            Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .header(header::CONTENT_TYPE, "text/plain")
-                .body(Body::from("Not Found"))
-                .unwrap()
-        }
+        None => Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(header::CONTENT_TYPE, "text/plain")
+            .body(Body::from("Not Found"))
+            .unwrap(),
     }
 }
 

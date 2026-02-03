@@ -4,6 +4,7 @@
 //! custom resources. It watches for changes and reconciles topic state with
 //! the Rivven cluster.
 
+use crate::cluster_client::ClusterClient;
 use crate::crd::{ClusterReference, PartitionInfo, RivvenTopic, RivvenTopicStatus, TopicCondition};
 use crate::error::{OperatorError, Result};
 use chrono::Utc;
@@ -19,7 +20,7 @@ use tracing::{debug, error, info, instrument, warn};
 use validator::Validate;
 
 /// Finalizer name for topic cleanup
-pub const TOPIC_FINALIZER: &str = "rivven.io/topic-finalizer";
+pub const TOPIC_FINALIZER: &str = "rivven.hupe1980.github.io/topic-finalizer";
 
 /// Default requeue interval for successful reconciliations
 const DEFAULT_REQUEUE_SECONDS: u64 = 120; // 2 minutes
@@ -31,6 +32,8 @@ const ERROR_REQUEUE_SECONDS: u64 = 30;
 pub struct TopicControllerContext {
     /// Kubernetes client
     pub client: Client,
+    /// Rivven cluster client for topic operations
+    pub cluster_client: ClusterClient,
     /// Metrics recorder
     pub metrics: Option<TopicControllerMetrics>,
 }
@@ -75,6 +78,7 @@ pub async fn run_topic_controller(client: Client, namespace: Option<String>) -> 
 
     let ctx = Arc::new(TopicControllerContext {
         client: client.clone(),
+        cluster_client: ClusterClient::new(),
         metrics: Some(TopicControllerMetrics::new()),
     });
 
@@ -190,8 +194,9 @@ async fn apply_topic(topic: Arc<RivvenTopic>, ctx: Arc<TopicControllerContext>) 
         return Ok(Action::requeue(Duration::from_secs(30)));
     }
 
-    // Reconcile the topic with Rivven cluster
-    let topic_result = reconcile_topic_with_cluster(&topic, &broker_endpoints).await;
+    // Reconcile the topic with Rivven cluster using the real cluster client
+    let topic_result =
+        reconcile_topic_with_cluster(&topic, &broker_endpoints, &ctx.cluster_client).await;
 
     match topic_result {
         Ok(topic_info) => {
@@ -258,19 +263,10 @@ struct TopicInfo {
 async fn reconcile_topic_with_cluster(
     topic: &RivvenTopic,
     broker_endpoints: &[String],
+    cluster_client: &ClusterClient,
 ) -> Result<TopicInfo> {
     let topic_name = topic.name_any();
     let spec = &topic.spec;
-
-    // In a real implementation, this would use the Rivven client to:
-    // 1. Check if topic exists
-    // 2. Create topic if it doesn't exist
-    // 3. Update topic config if it exists and config changed
-    // 4. Update ACLs
-    // 5. Return current topic state
-
-    // For now, simulate successful topic creation/verification
-    // TODO: Integrate with rivven-client when admin API is available
 
     info!(
         topic = %topic_name,
@@ -280,20 +276,33 @@ async fn reconcile_topic_with_cluster(
         "Reconciling topic with cluster"
     );
 
-    // Simulate topic info - in production, this would come from the cluster
-    let partition_info: Vec<PartitionInfo> = (0..spec.partitions)
+    // Use the real cluster client to ensure the topic exists
+    let cluster_topic_info = cluster_client
+        .ensure_topic(broker_endpoints, &topic_name, spec.partitions as u32)
+        .await?;
+
+    // Build partition info based on the actual partition count
+    // Note: In production, this would come from describe_topic API
+    let partition_info: Vec<PartitionInfo> = (0..cluster_topic_info.partitions as i32)
         .map(|i| PartitionInfo {
             partition: i,
-            leader: (i % 3), // Simulated leader distribution
+            leader: (i % 3), // Distribution across brokers
             replicas: (0..spec.replication_factor).collect(),
             isr: (0..spec.replication_factor).collect(),
         })
         .collect();
 
+    info!(
+        topic = %topic_name,
+        partitions = cluster_topic_info.partitions,
+        existed = cluster_topic_info.existed,
+        "Topic reconciliation successful"
+    );
+
     Ok(TopicInfo {
-        partitions: spec.partitions,
+        partitions: cluster_topic_info.partitions as i32,
         replication_factor: spec.replication_factor,
-        existed: false, // Would be true if topic already existed
+        existed: cluster_topic_info.existed,
         partition_info,
     })
 }
@@ -490,8 +499,10 @@ async fn cleanup_topic(
             Ok(cluster) => {
                 let endpoints = get_cluster_endpoints(&cluster);
                 if !endpoints.is_empty() {
-                    // Delete topic from cluster
-                    if let Err(e) = delete_topic_from_cluster(&name, &endpoints).await {
+                    // Delete topic from cluster using real cluster client
+                    if let Err(e) =
+                        delete_topic_from_cluster(&name, &endpoints, &ctx.cluster_client).await
+                    {
                         warn!(
                             name = %name,
                             error = %e,
@@ -521,10 +532,15 @@ async fn cleanup_topic(
 }
 
 /// Delete a topic from the Rivven cluster
-async fn delete_topic_from_cluster(topic_name: &str, _broker_endpoints: &[String]) -> Result<()> {
-    // TODO: Integrate with rivven-client admin API
-    info!(topic = %topic_name, "Would delete topic from cluster");
-    Ok(())
+async fn delete_topic_from_cluster(
+    topic_name: &str,
+    broker_endpoints: &[String],
+    cluster_client: &ClusterClient,
+) -> Result<()> {
+    info!(topic = %topic_name, "Deleting topic from cluster");
+    cluster_client
+        .delete_topic(broker_endpoints, topic_name)
+        .await
 }
 
 /// Error policy for the topic controller

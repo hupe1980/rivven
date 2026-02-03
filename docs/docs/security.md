@@ -25,8 +25,9 @@ Rivven implements **31 security features** to protect your data:
 | Category | Features |
 |:---------|:---------|
 | **Transport** | TLS 1.3, mTLS, QUIC encryption |
-| **Authentication** | mTLS client certs, API tokens, SCRAM-SHA-256 |
-| **Authorization** | RBAC, ACLs, topic-level permissions |
+| **Broker Auth** | mTLS client certs, API tokens, SCRAM-SHA-256 |
+| **Schema Registry Auth** | Basic Auth, Bearer Token, JWT/OIDC, API Keys |
+| **Authorization** | RBAC, ACLs, Cedar policy-as-code |
 | **Data Protection** | Encryption at rest, field-level masking |
 | **Input Validation** | Size limits, rate limiting, injection prevention |
 
@@ -450,8 +451,8 @@ audit:
     - type: file
       path: /var/log/rivven/audit.log
     
-    - type: kafka
-      bootstrap_servers: kafka:9092
+    - type: stream
+      bootstrap_servers: rivven:9292
       topic: security-audit
     
     - type: syslog

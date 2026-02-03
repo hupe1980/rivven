@@ -69,7 +69,7 @@ impl Default for HeartbeatConfig {
             topic: None,
             max_lag: Duration::from_secs(300), // 5 minutes
             emit_events: false,
-            action_prefix: "__debezium-heartbeat".to_string(),
+            action_prefix: "__rivven-heartbeat".to_string(),
             action_query: None,
             action_query_databases: Vec::new(),
         }

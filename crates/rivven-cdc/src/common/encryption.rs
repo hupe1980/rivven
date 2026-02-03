@@ -27,8 +27,11 @@
 //! ```
 
 use crate::common::{CdcError, CdcEvent, Result};
-use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
-use ring::rand::{SecureRandom, SystemRandom};
+use aes_gcm::{
+    aead::{Aead, KeyInit, Payload},
+    Aes256Gcm, Nonce,
+};
+use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -243,20 +246,17 @@ impl EncryptionKey {
         })
     }
 
-    /// Generate a random key.
+    /// Generate a random key using secure random.
     pub fn generate(id: impl Into<String>) -> Result<Self> {
-        let rng = SystemRandom::new();
         let mut key_material = vec![0u8; 32];
-        rng.fill(&mut key_material)
-            .map_err(|_| CdcError::replication("Failed to generate random key"))?;
+        OsRng.fill_bytes(&mut key_material);
         Self::new(id, key_material)
     }
 
-    /// Create an AEAD key.
-    fn to_aead_key(&self) -> Result<LessSafeKey> {
-        let unbound = UnboundKey::new(&AES_256_GCM, &self.key_material)
-            .map_err(|_| CdcError::replication("Invalid key material"))?;
-        Ok(LessSafeKey::new(unbound))
+    /// Create an AEAD cipher.
+    fn to_cipher(&self) -> Result<Aes256Gcm> {
+        Aes256Gcm::new_from_slice(&self.key_material)
+            .map_err(|_| CdcError::replication("Invalid key material"))
     }
 }
 
@@ -418,7 +418,6 @@ pub struct FieldEncryptor<P: KeyProvider> {
     config: EncryptionConfig,
     key_provider: Arc<P>,
     stats: EncryptionStats,
-    rng: SystemRandom,
 }
 
 impl<P: KeyProvider> FieldEncryptor<P> {
@@ -428,7 +427,6 @@ impl<P: KeyProvider> FieldEncryptor<P> {
             config,
             key_provider: Arc::new(key_provider),
             stats: EncryptionStats::new(),
-            rng: SystemRandom::new(),
         }
     }
 
@@ -447,7 +445,7 @@ impl<P: KeyProvider> FieldEncryptor<P> {
         }
 
         let key = self.key_provider.get_active_key().await?;
-        let aead_key = key.to_aead_key()?;
+        let cipher = key.to_cipher()?;
 
         // Encrypt 'after' fields
         if let Some(ref mut after) = result.after {
@@ -456,7 +454,7 @@ impl<P: KeyProvider> FieldEncryptor<P> {
                 for field in &fields_to_encrypt {
                     if let Some(value) = obj.get(field) {
                         let plaintext = value.to_string();
-                        match self.encrypt_value(&aead_key, &plaintext, &key.id) {
+                        match self.encrypt_value(&cipher, &plaintext, &key.id) {
                             Ok(ciphertext) => {
                                 obj.insert(
                                     field.clone(),
@@ -487,7 +485,7 @@ impl<P: KeyProvider> FieldEncryptor<P> {
                 for field in &fields_to_encrypt {
                     if let Some(value) = obj.get(field) {
                         let plaintext = value.to_string();
-                        match self.encrypt_value(&aead_key, &plaintext, &key.id) {
+                        match self.encrypt_value(&cipher, &plaintext, &key.id) {
                             Ok(ciphertext) => {
                                 obj.insert(
                                     field.clone(),
@@ -602,26 +600,27 @@ impl<P: KeyProvider> FieldEncryptor<P> {
     }
 
     /// Encrypt a single value.
-    fn encrypt_value(&self, key: &LessSafeKey, plaintext: &str, key_id: &str) -> Result<String> {
+    fn encrypt_value(&self, cipher: &Aes256Gcm, plaintext: &str, key_id: &str) -> Result<String> {
         // Generate random nonce
         let mut nonce_bytes = [0u8; 12];
-        self.rng
-            .fill(&mut nonce_bytes)
-            .map_err(|_| CdcError::replication("Failed to generate nonce"))?;
-        let nonce = Nonce::assume_unique_for_key(nonce_bytes);
+        OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
 
         // AAD includes key_id for additional authentication
         let aad = format!("{}:{}", self.config.aad_prefix, key_id);
-        let aad = Aad::from(aad.as_bytes());
 
-        // Encrypt
-        let mut in_out = plaintext.as_bytes().to_vec();
-        key.seal_in_place_append_tag(nonce, aad, &mut in_out)
+        // Encrypt with AAD (Additional Authenticated Data)
+        let payload = Payload {
+            msg: plaintext.as_bytes(),
+            aad: aad.as_bytes(),
+        };
+        let ciphertext = cipher
+            .encrypt(nonce, payload)
             .map_err(|_| CdcError::replication("Encryption failed"))?;
 
         // Prepend nonce to ciphertext
         let mut result = nonce_bytes.to_vec();
-        result.extend(in_out);
+        result.extend(ciphertext);
 
         // Base64 encode
         Ok(base64_encode(&result))
@@ -634,7 +633,7 @@ impl<P: KeyProvider> FieldEncryptor<P> {
             .get_key(key_id)
             .await?
             .ok_or_else(|| CdcError::replication(format!("Key not found: {}", key_id)))?;
-        let aead_key = key.to_aead_key()?;
+        let cipher = key.to_cipher()?;
 
         // Base64 decode
         let data = base64_decode(ciphertext)?;
@@ -647,19 +646,22 @@ impl<P: KeyProvider> FieldEncryptor<P> {
         let nonce_bytes: [u8; 12] = data[..12]
             .try_into()
             .map_err(|_| CdcError::replication("Invalid nonce"))?;
-        let nonce = Nonce::assume_unique_for_key(nonce_bytes);
-        let mut ciphertext_data = data[12..].to_vec();
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let ciphertext_data = &data[12..];
 
-        // AAD
+        // AAD must match what was used during encryption
         let aad = format!("{}:{}", self.config.aad_prefix, key_id);
-        let aad = Aad::from(aad.as_bytes());
 
-        // Decrypt
-        let plaintext = aead_key
-            .open_in_place(nonce, aad, &mut ciphertext_data)
+        // Decrypt with AAD verification
+        let payload = Payload {
+            msg: ciphertext_data,
+            aad: aad.as_bytes(),
+        };
+        let plaintext = cipher
+            .decrypt(nonce, payload)
             .map_err(|_| CdcError::replication("Decryption failed"))?;
 
-        String::from_utf8(plaintext.to_vec()).map_err(|_| CdcError::replication("Invalid UTF-8"))
+        String::from_utf8(plaintext).map_err(|_| CdcError::replication("Invalid UTF-8"))
     }
 
     /// Get statistics.

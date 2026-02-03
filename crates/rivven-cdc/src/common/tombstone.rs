@@ -8,10 +8,9 @@
 //! same key but null payload. They signal to Kafka log compaction that the
 //! key should be removed from the compacted log.
 //!
-//! ## Debezium Compatibility
+//! ## Behavior
 //!
-//! This implementation is compatible with Debezium's tombstone behavior:
-//! - `tombstones.on.delete` = true (default)
+//! - Tombstone is emitted after each DELETE event
 //! - Tombstone has same key as DELETE event
 //! - Tombstone has null value (before and after are null)
 //!
@@ -34,6 +33,8 @@
 //! assert_eq!(events.len(), 2);
 //! ```
 
+use super::pattern::pattern_match;
+
 use crate::common::{CdcEvent, CdcOp};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -45,8 +46,6 @@ pub struct TombstoneConfig {
     /// When enabled (default), each DELETE event is followed by a tombstone
     /// event with the same key but null payload. This is required for Kafka
     /// log compaction to properly remove deleted records.
-    ///
-    /// Debezium equivalent: `tombstones.on.delete`
     pub emit_tombstones: bool,
 
     /// Include key data in the tombstone's `before` field.
@@ -97,8 +96,8 @@ impl TombstoneConfig {
     pub fn is_excluded(&self, schema: &str, table: &str) -> bool {
         let qualified = format!("{}.{}", schema, table);
         self.exclude_tables.iter().any(|pattern| {
-            if pattern.contains('*') {
-                glob_match(pattern, &qualified)
+            if pattern.contains('*') || pattern.contains('?') {
+                pattern_match(pattern, &qualified)
             } else {
                 pattern == &qualified
             }
@@ -273,40 +272,6 @@ impl Default for TombstoneEmitter {
     }
 }
 
-/// Simple glob pattern matching.
-fn glob_match(pattern: &str, text: &str) -> bool {
-    let pattern_chars: Vec<char> = pattern.chars().collect();
-    let text_chars: Vec<char> = text.chars().collect();
-
-    fn match_impl(pattern: &[char], text: &[char]) -> bool {
-        if pattern.is_empty() {
-            return text.is_empty();
-        }
-
-        if pattern[0] == '*' {
-            // Try matching zero or more characters
-            for i in 0..=text.len() {
-                if match_impl(&pattern[1..], &text[i..]) {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        if text.is_empty() {
-            return false;
-        }
-
-        if pattern[0] == '?' || pattern[0] == text[0] {
-            return match_impl(&pattern[1..], &text[1..]);
-        }
-
-        false
-    }
-
-    match_impl(&pattern_chars, &text_chars)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,16 +390,6 @@ mod tests {
         assert_eq!(result[1].op, CdcOp::Delete);
         assert_eq!(result[2].op, CdcOp::Tombstone);
         assert_eq!(result[3].op, CdcOp::Update);
-    }
-
-    #[test]
-    fn test_glob_match() {
-        assert!(glob_match("audit.*", "audit.log"));
-        assert!(glob_match("audit.*", "audit.events"));
-        assert!(!glob_match("audit.*", "users.audit"));
-        assert!(glob_match("*.audit", "db.audit"));
-        assert!(glob_match("*", "anything"));
-        assert!(glob_match("ab?d", "abcd"));
     }
 
     #[test]

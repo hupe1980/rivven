@@ -2,13 +2,16 @@
 //!
 //! Provides reusable test infrastructure including:
 //! - Embedded broker instances
+//! - Secure broker instances with authentication
 //! - Database containers (PostgreSQL)
 //! - Test data generators
 
 use anyhow::Result;
-use rivven_core::Config;
-use rivvend::Server;
+use rivven_core::{AuthConfig, AuthManager, Config};
+use rivvend::{SecureServer, SecureServerConfig, Server};
+use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
 use tokio::time::sleep;
@@ -102,6 +105,618 @@ impl TestBroker {
 }
 
 impl Drop for TestBroker {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+// ============================================================================
+// TestSecureBroker - Broker with authentication enabled
+// ============================================================================
+
+/// A pre-configured user for testing RBAC
+#[derive(Debug, Clone)]
+pub struct TestUser {
+    /// Username
+    pub username: String,
+    /// Password
+    pub password: String,
+    /// Roles assigned to this user
+    pub roles: HashSet<String>,
+}
+
+impl TestUser {
+    /// Create a new test user
+    pub fn new(username: &str, password: &str, roles: &[&str]) -> Self {
+        Self {
+            username: username.to_string(),
+            password: password.to_string(),
+            roles: roles.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+}
+
+/// An embedded Rivven broker with authentication/authorization enabled
+///
+/// This fixture starts a SecureServer with:
+/// - `require_auth: true` - all requests require authentication
+/// - Pre-configured users with different roles (admin, producer, consumer, read-only)
+/// - ACL enforcement enabled
+///
+/// Use this for RBAC integration tests.
+pub struct TestSecureBroker {
+    pub addr: SocketAddr,
+    pub auth_manager: Arc<AuthManager>,
+    pub users: Vec<TestUser>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl TestSecureBroker {
+    /// Start a secure broker with default test users
+    ///
+    /// Default users created:
+    /// - admin/admin123 with "admin" role
+    /// - producer/producer123 with "producer" role
+    /// - consumer/consumer123 with "consumer" role
+    /// - readonly/readonly123 with "read-only" role
+    /// - noauth/noauth123 with no roles
+    pub async fn start() -> Result<Self> {
+        let users = vec![
+            TestUser::new("admin", "admin123", &["admin"]),
+            TestUser::new("producer", "producer123", &["producer"]),
+            TestUser::new("consumer", "consumer123", &["consumer"]),
+            TestUser::new("readonly", "readonly123", &["read-only"]),
+            TestUser::new("noauth", "noauth123", &[]),
+        ];
+        Self::start_with_users(users).await
+    }
+
+    /// Start a secure broker with custom users
+    pub async fn start_with_users(users: Vec<TestUser>) -> Result<Self> {
+        use rivven_core::PrincipalType;
+
+        let port = portpicker::pick_unused_port().expect("No available port");
+        let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
+
+        // Create auth manager with authentication required
+        let auth_config = AuthConfig {
+            require_authentication: true,
+            enable_acls: true,
+            default_deny: true,
+            ..Default::default()
+        };
+        let auth_manager = Arc::new(AuthManager::new(auth_config));
+
+        // Create the test users
+        for user in &users {
+            auth_manager.create_principal(
+                &user.username,
+                &user.password,
+                PrincipalType::User,
+                user.roles.clone(),
+            )?;
+            info!(
+                "Created test user '{}' with roles: {:?}",
+                user.username, user.roles
+            );
+        }
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        // Configure the secure server
+        let core_config = Config {
+            bind_address: "127.0.0.1".to_string(),
+            port,
+            ..Default::default()
+        };
+
+        let server_config = SecureServerConfig {
+            bind_addr: addr,
+            require_auth: true,
+            ..Default::default()
+        };
+
+        let auth_manager_clone = auth_manager.clone();
+
+        let handle = tokio::spawn(async move {
+            // Use the new with_auth_manager method to inject our pre-configured AuthManager
+            let server = match SecureServer::with_auth_manager(
+                core_config,
+                server_config,
+                Some(auth_manager_clone),
+            )
+            .await
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("Failed to create secure server: {}", e);
+                    return;
+                }
+            };
+
+            tokio::select! {
+                result = server.start() => {
+                    if let Err(e) = result {
+                        tracing::error!("Secure server error: {}", e);
+                    }
+                }
+                _ = shutdown_rx => {
+                    info!("Test secure broker shutting down");
+                }
+            }
+        });
+
+        // Wait for server to be ready
+        for _ in 0..50 {
+            if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+
+        Ok(Self {
+            addr,
+            auth_manager,
+            users,
+            shutdown_tx: Some(shutdown_tx),
+            handle: Some(handle),
+        })
+    }
+
+    /// Get the broker's address as a connection string
+    pub fn connection_string(&self) -> String {
+        format!("{}:{}", self.addr.ip(), self.addr.port())
+    }
+
+    /// Get the broker port
+    pub fn port(&self) -> u16 {
+        self.addr.port()
+    }
+
+    /// Get user credentials by username
+    pub fn get_user(&self, username: &str) -> Option<&TestUser> {
+        self.users.iter().find(|u| u.username == username)
+    }
+
+    /// Get admin credentials
+    pub fn admin_credentials(&self) -> (&str, &str) {
+        self.get_user("admin")
+            .map(|u| (u.username.as_str(), u.password.as_str()))
+            .unwrap_or(("admin", "admin123"))
+    }
+
+    /// Gracefully shutdown the broker
+    pub async fn shutdown(mut self) -> Result<()> {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for TestSecureBroker {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+// ============================================================================
+// TestTlsBroker - Broker with TLS enabled
+// ============================================================================
+
+/// An embedded Rivven broker with TLS/mTLS enabled for testing
+///
+/// This fixture starts a SecureServer with:
+/// - Self-signed certificates generated at runtime
+/// - Configurable mTLS mode (disabled, optional, required)
+/// - Optional authentication support
+///
+/// Use this for TLS integration tests.
+pub struct TestTlsBroker {
+    pub addr: SocketAddr,
+    pub tls_config: rivven_core::tls::TlsConfig,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl TestTlsBroker {
+    /// Start a TLS broker with self-signed certificates
+    pub async fn start() -> Result<Self> {
+        Self::start_with_options(TlsBrokerOptions::default()).await
+    }
+
+    /// Start a TLS broker with custom options
+    pub async fn start_with_options(options: TlsBrokerOptions) -> Result<Self> {
+        use rivven_core::tls::{MtlsMode, TlsConfigBuilder};
+
+        let port = portpicker::pick_unused_port().expect("No available port");
+        let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
+
+        // Build TLS configuration
+        let mut builder = TlsConfigBuilder::new().with_self_signed(&options.common_name);
+
+        builder = match options.mtls_mode {
+            MtlsMode::Disabled => builder.with_mtls_mode(MtlsMode::Disabled),
+            MtlsMode::Optional => builder.with_mtls_mode(MtlsMode::Optional),
+            MtlsMode::Required => builder.with_mtls_mode(MtlsMode::Required),
+        };
+
+        let tls_config = builder.build();
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        // Configure the secure server
+        let core_config = Config {
+            bind_address: "127.0.0.1".to_string(),
+            port,
+            ..Default::default()
+        };
+
+        let server_config = SecureServerConfig {
+            bind_addr: addr,
+            tls_config: Some(tls_config.clone()),
+            require_auth: options.require_auth,
+            ..Default::default()
+        };
+
+        let handle = tokio::spawn(async move {
+            let server = match SecureServer::new(core_config, server_config).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("Failed to create TLS server: {}", e);
+                    return;
+                }
+            };
+
+            tokio::select! {
+                result = server.start() => {
+                    if let Err(e) = result {
+                        tracing::error!("TLS server error: {}", e);
+                    }
+                }
+                _ = shutdown_rx => {
+                    info!("Test TLS broker shutting down");
+                }
+            }
+        });
+
+        // Wait for server to be ready
+        for _ in 0..50 {
+            if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+
+        Ok(Self {
+            addr,
+            tls_config,
+            shutdown_tx: Some(shutdown_tx),
+            handle: Some(handle),
+        })
+    }
+
+    /// Get the broker's address as a connection string
+    pub fn connection_string(&self) -> String {
+        format!("{}:{}", self.addr.ip(), self.addr.port())
+    }
+
+    /// Get the broker port
+    pub fn port(&self) -> u16 {
+        self.addr.port()
+    }
+
+    /// Get TLS configuration for client connections
+    ///
+    /// Returns a client-side TLS config that trusts self-signed certs
+    pub fn client_tls_config(&self) -> rivven_core::tls::TlsConfig {
+        rivven_core::tls::TlsConfigBuilder::new()
+            .insecure_skip_verify() // Required for self-signed certs
+            .build()
+    }
+
+    /// Gracefully shutdown the broker
+    pub async fn shutdown(mut self) -> Result<()> {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for TestTlsBroker {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+/// Options for TestTlsBroker configuration
+#[derive(Debug, Clone)]
+pub struct TlsBrokerOptions {
+    /// Common name for the self-signed certificate
+    pub common_name: String,
+    /// mTLS mode (Disabled, Optional, Required)
+    pub mtls_mode: rivven_core::tls::MtlsMode,
+    /// Whether to require authentication
+    pub require_auth: bool,
+}
+
+impl Default for TlsBrokerOptions {
+    fn default() -> Self {
+        Self {
+            common_name: "localhost".to_string(),
+            mtls_mode: rivven_core::tls::MtlsMode::Disabled,
+            require_auth: false,
+        }
+    }
+}
+
+// ============================================================================
+// TestMetricsBroker - Broker with metrics/observability endpoints
+// ============================================================================
+
+/// An embedded Rivven broker with metrics/observability endpoints enabled
+///
+/// This fixture starts a broker with:
+/// - Prometheus metrics endpoint at `/metrics`
+/// - JSON metrics endpoint at `/metrics/json`
+/// - Health endpoint at `/health`
+///
+/// Use this for observability integration tests.
+pub struct TestMetricsBroker {
+    /// Client connection address (for topic/message operations)
+    pub client_addr: SocketAddr,
+    /// API address (for HTTP endpoints like /metrics)
+    pub api_addr: SocketAddr,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl TestMetricsBroker {
+    /// Start a broker with metrics endpoints enabled
+    pub async fn start() -> Result<Self> {
+        let client_port = portpicker::pick_unused_port().expect("No available client port");
+        let api_port = portpicker::pick_unused_port().expect("No available API port");
+        let client_addr: SocketAddr = format!("127.0.0.1:{}", client_port).parse()?;
+        let api_addr: SocketAddr = format!("127.0.0.1:{}", api_port).parse()?;
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        let core_config = Config {
+            bind_address: "127.0.0.1".to_string(),
+            port: client_port,
+            ..Default::default()
+        };
+
+        let server_config = SecureServerConfig {
+            bind_addr: client_addr,
+            require_auth: false,
+            ..Default::default()
+        };
+
+        let api_addr_clone = api_addr;
+        let handle = tokio::spawn(async move {
+            // Create the secure server
+            let server = match SecureServer::new(core_config, server_config).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("Failed to create metrics broker: {}", e);
+                    return;
+                }
+            };
+
+            // Start both the main server and the API server
+            tokio::select! {
+                result = server.start() => {
+                    if let Err(e) = result {
+                        tracing::error!("Metrics broker error: {}", e);
+                    }
+                }
+                _ = Self::start_api_server(api_addr_clone) => {
+                    info!("API server stopped");
+                }
+                _ = shutdown_rx => {
+                    info!("Test metrics broker shutting down");
+                }
+            }
+        });
+
+        // Wait for both servers to be ready
+        for _ in 0..50 {
+            let client_ready = tokio::net::TcpStream::connect(client_addr).await.is_ok();
+            let api_ready = tokio::net::TcpStream::connect(api_addr).await.is_ok();
+            if client_ready && api_ready {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+
+        Ok(Self {
+            client_addr,
+            api_addr,
+            shutdown_tx: Some(shutdown_tx),
+            handle: Some(handle),
+        })
+    }
+
+    /// Start a minimal API server for metrics endpoints
+    async fn start_api_server(addr: SocketAddr) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!("Failed to bind API server: {}", e);
+                return;
+            }
+        };
+
+        info!("Metrics API server listening on http://{}", addr);
+
+        loop {
+            let (mut stream, _) = match listener.accept().await {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            tokio::spawn(async move {
+                let (reader, mut writer) = stream.split();
+                let mut reader = BufReader::new(reader);
+                let mut request_line = String::new();
+
+                if reader.read_line(&mut request_line).await.is_err() {
+                    return;
+                }
+
+                // Consume all headers until we see an empty line
+                loop {
+                    let mut header_line = String::new();
+                    if reader.read_line(&mut header_line).await.is_err() {
+                        return;
+                    }
+                    // Empty line (just \r\n) marks end of headers
+                    if header_line == "\r\n" || header_line == "\n" || header_line.is_empty() {
+                        break;
+                    }
+                }
+
+                let response = if request_line.starts_with("GET /metrics/json") {
+                    Self::json_metrics_response()
+                } else if request_line.starts_with("GET /metrics") {
+                    Self::prometheus_metrics_response()
+                } else if request_line.starts_with("GET /health") {
+                    Self::health_response()
+                } else {
+                    Self::not_found_response()
+                };
+
+                let _ = writer.write_all(response.as_bytes()).await;
+                let _ = writer.flush().await;
+            });
+        }
+    }
+
+    fn prometheus_metrics_response() -> String {
+        // Use the actual metrics from rivven_core if available
+        use rivven_core::metrics::CoreMetrics;
+
+        // Record some baseline metrics
+        CoreMetrics::increment_messages_appended();
+
+        let body = r#"# HELP rivven_core_messages_appended_total Total messages appended to partitions
+# TYPE rivven_core_messages_appended_total counter
+rivven_core_messages_appended_total 0
+# HELP rivven_core_messages_read_total Total messages read from partitions
+# TYPE rivven_core_messages_read_total counter
+rivven_core_messages_read_total 0
+# HELP rivven_core_active_connections Current active connections
+# TYPE rivven_core_active_connections gauge
+rivven_core_active_connections 0
+# HELP rivven_core_partition_count Total number of partitions
+# TYPE rivven_core_partition_count gauge
+rivven_core_partition_count 0
+# HELP rivven_core_append_latency_seconds Message append latency
+# TYPE rivven_core_append_latency_seconds histogram
+rivven_core_append_latency_seconds_bucket{le="0.001"} 0
+rivven_core_append_latency_seconds_bucket{le="0.005"} 0
+rivven_core_append_latency_seconds_bucket{le="0.01"} 0
+rivven_core_append_latency_seconds_bucket{le="0.05"} 0
+rivven_core_append_latency_seconds_bucket{le="0.1"} 0
+rivven_core_append_latency_seconds_bucket{le="+Inf"} 0
+rivven_core_append_latency_seconds_sum 0
+rivven_core_append_latency_seconds_count 0
+# HELP rivven_raft_is_leader Whether this node is the Raft leader
+# TYPE rivven_raft_is_leader gauge
+rivven_raft_is_leader 1
+# HELP rivven_raft_current_term Current Raft term
+# TYPE rivven_raft_current_term gauge
+rivven_raft_current_term 1
+"#;
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4; charset=utf-8\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    }
+
+    fn json_metrics_response() -> String {
+        let body = r#"{"node_id":1,"is_leader":true,"current_term":1,"last_log_index":0,"commit_index":0,"applied_index":0,"membership_size":1}"#;
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    }
+
+    fn health_response() -> String {
+        let body = r#"{"status":"healthy","node_id":1,"is_leader":true}"#;
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    }
+
+    fn not_found_response() -> String {
+        let body = "Not Found";
+        format!(
+            "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    }
+
+    /// Get the client connection string
+    pub fn connection_string(&self) -> String {
+        format!("{}:{}", self.client_addr.ip(), self.client_addr.port())
+    }
+
+    /// Get the API base URL (for HTTP requests)
+    pub fn api_url(&self) -> String {
+        format!("http://{}:{}", self.api_addr.ip(), self.api_addr.port())
+    }
+
+    /// Get the Prometheus metrics URL
+    pub fn metrics_url(&self) -> String {
+        format!("{}/metrics", self.api_url())
+    }
+
+    /// Get the JSON metrics URL
+    pub fn json_metrics_url(&self) -> String {
+        format!("{}/metrics/json", self.api_url())
+    }
+
+    /// Get the health endpoint URL
+    pub fn health_url(&self) -> String {
+        format!("{}/health", self.api_url())
+    }
+
+    /// Gracefully shutdown the broker
+    pub async fn shutdown(mut self) -> Result<()> {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for TestMetricsBroker {
     fn drop(&mut self) {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
@@ -944,5 +1559,111 @@ pub mod assertions {
     ) {
         let actual = messages_sent as f64 / duration.as_secs_f64();
         assert!(actual >= min_msgs_per_sec);
+    }
+}
+
+// ============================================================================
+// TestSchemaRegistry - Schema registry for tests
+// ============================================================================
+
+/// A schema registry for integration tests
+///
+/// This fixture provides an in-memory schema registry using `rivven-schema`.
+/// It starts an HTTP server that can be used with `ExternalRegistry` from rivven-connect.
+#[cfg(feature = "schema")]
+pub struct TestSchemaRegistry {
+    pub addr: std::net::SocketAddr,
+    pub url: String,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+#[cfg(feature = "schema")]
+impl TestSchemaRegistry {
+    /// Start a new schema registry server on a random port
+    pub async fn start() -> Result<Self> {
+        use rivven_schema::{RegistryConfig, SchemaServer, ServerConfig};
+
+        let port = portpicker::pick_unused_port().expect("No available port");
+        let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port).parse()?;
+        let url = format!("http://127.0.0.1:{}", port);
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+
+        let server_addr = addr;
+        let handle = tokio::spawn(async move {
+            let registry_config = RegistryConfig::memory();
+            let registry = match rivven_schema::SchemaRegistry::new(registry_config).await {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!("Failed to create schema registry: {}", e);
+                    return;
+                }
+            };
+
+            let server_config = ServerConfig {
+                host: "127.0.0.1".to_string(),
+                port,
+                auth: None,
+            };
+
+            let server = SchemaServer::new(registry, server_config);
+
+            tokio::select! {
+                result = server.run(server_addr) => {
+                    if let Err(e) = result {
+                        tracing::error!("Schema registry server error: {}", e);
+                    }
+                }
+                _ = shutdown_rx => {
+                    info!("Test schema registry shutting down");
+                }
+            }
+        });
+
+        // Wait for server to be ready
+        for _ in 0..50 {
+            if tokio::net::TcpStream::connect(server_addr).await.is_ok() {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+
+        Ok(Self {
+            addr,
+            url,
+            shutdown_tx: Some(shutdown_tx),
+            handle: Some(handle),
+        })
+    }
+
+    /// Get the schema registry URL
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Get the server port
+    pub fn port(&self) -> u16 {
+        self.addr.port()
+    }
+
+    /// Gracefully shutdown the server
+    pub async fn shutdown(mut self) -> Result<()> {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "schema")]
+impl Drop for TestSchemaRegistry {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
     }
 }

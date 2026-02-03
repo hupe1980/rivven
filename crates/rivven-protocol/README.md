@@ -1,24 +1,26 @@
 # rivven-protocol
 
-Wire protocol types for Rivven, the distributed event streaming platform.
+> Wire protocol types for the Rivven distributed event streaming platform.
 
 ## Overview
 
-This crate provides the canonical definitions for all wire protocol types used in client-server communication. Both `rivven-client` and `rivvend` depend on this crate to ensure wire compatibility.
+This crate defines canonical wire protocol types for client-server communication. Both `rivven-client` and `rivvend` depend on this crate to ensure wire compatibility.
 
 ## Features
 
-- **Request/Response enums** — All 20+ request and response types
-- **Metadata types** — `BrokerInfo`, `TopicMetadata`, `PartitionMetadata`
-- **Message types** — `MessageData` with key/value/headers
-- **Serialization** — postcard-based wire format with size validation
+| Category | Types |
+|:---------|:------|
+| **Requests** | Produce, Consume, CreateTopic, DeleteTopic, Metadata, etc. |
+| **Responses** | ProduceResponse, ConsumeResponse, MetadataResponse, etc. |
+| **Messages** | `MessageData` with key, value, headers, timestamp |
+| **Metadata** | `BrokerInfo`, `TopicMetadata`, `PartitionMetadata` |
 
 ## Protocol Constants
 
 | Constant | Value | Description |
-|----------|-------|-------------|
+|:---------|:------|:------------|
 | `PROTOCOL_VERSION` | 1 | Current wire protocol version |
-| `MAX_MESSAGE_SIZE` | 64MB | Maximum serialized message size |
+| `MAX_MESSAGE_SIZE` | 64 MB | Maximum serialized message size |
 
 ## Usage
 
@@ -46,9 +48,9 @@ Messages are serialized using [postcard](https://docs.rs/postcard/) with the fol
 
 - Compact binary encoding with COBS framing support
 - Variable-length integer encoding (varint)
-- #[no_std] compatible
+- `#[no_std]` compatible
 - Maximum message size enforced before deserialization
 
 ## License
 
-Licensed under either of Apache License, Version 2.0 or MIT license at your option.
+Apache-2.0. See [LICENSE](../../LICENSE).

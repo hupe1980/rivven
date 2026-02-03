@@ -37,8 +37,7 @@ use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
 use rivven_core::{
-    schema_registry::EmbeddedSchemaRegistry, AuthManager, Config, OffsetManager, ServiceAuthConfig,
-    ServiceAuthManager, TopicManager,
+    AuthManager, Config, OffsetManager, ServiceAuthConfig, ServiceAuthManager, TopicManager,
 };
 
 #[cfg(feature = "tls")]
@@ -171,7 +170,6 @@ pub struct SecureServer {
     config: SecureServerConfig,
     topic_manager: TopicManager,
     offset_manager: OffsetManager,
-    schema_registry: Arc<EmbeddedSchemaRegistry>,
     auth_manager: Arc<AuthManager>,
     /// Service auth for mTLS certificate-based authentication (enabled via config)
     #[allow(dead_code)]
@@ -190,10 +188,30 @@ impl SecureServer {
         core_config: Config,
         server_config: SecureServerConfig,
     ) -> anyhow::Result<Self> {
+        Self::with_auth_manager(core_config, server_config, None).await
+    }
+
+    /// Create a secure server with a custom AuthManager
+    ///
+    /// This allows injecting a pre-configured AuthManager with users and roles,
+    /// useful for testing RBAC without needing to create users via the protocol.
+    pub async fn with_auth_manager(
+        core_config: Config,
+        server_config: SecureServerConfig,
+        auth_manager: Option<Arc<AuthManager>>,
+    ) -> anyhow::Result<Self> {
         let topic_manager = TopicManager::new(core_config.clone());
+
+        // Recover persisted topics from disk
+        if let Err(e) = topic_manager.recover().await {
+            tracing::warn!("Failed to recover topics from disk: {}", e);
+        }
+
         let offset_manager = OffsetManager::new();
-        let schema_registry = Arc::new(EmbeddedSchemaRegistry::new(&core_config).await?);
-        let auth_manager = Arc::new(AuthManager::new(Default::default()));
+
+        // Use provided AuthManager or create a new one with default config
+        let auth_manager =
+            auth_manager.unwrap_or_else(|| Arc::new(AuthManager::new(Default::default())));
 
         // Initialize service auth if configured
         let service_auth_manager = if server_config.enable_service_auth {
@@ -220,7 +238,6 @@ impl SecureServer {
             config: server_config,
             topic_manager,
             offset_manager,
-            schema_registry,
             auth_manager,
             service_auth_manager,
             #[cfg(feature = "tls")]
@@ -263,11 +280,8 @@ impl SecureServer {
         );
 
         // Create handler for the AuthenticatedHandler
-        let auth_handler_inner = RequestHandler::new(
-            self.topic_manager.clone(),
-            self.offset_manager.clone(),
-            self.schema_registry.clone(),
-        );
+        let auth_handler_inner =
+            RequestHandler::new(self.topic_manager.clone(), self.offset_manager.clone());
 
         let auth_handler = Arc::new(AuthenticatedHandler::new(
             auth_handler_inner,

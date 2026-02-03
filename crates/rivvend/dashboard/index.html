@@ -3,20 +3,879 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Rivven Event Streaming Dashboard">
     <title>Rivven Dashboard</title>
-    <!-- Configuration injected by server (air-gapped, no external requests) -->
-    <meta name="rivven:api-url" content="">
-    <meta name="rivven:version" content="">
-    <!-- No external fonts - uses system font stack for air-gapped environments -->
-    <link data-trunk rel="css" href="styles.css">
-    <link data-trunk rel="rust" href="Cargo.toml" data-wasm-opt="z"/>
+    <style>
+        :root {
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-card: #334155;
+            --text-primary: #f1f5f9;
+            --text-secondary: #94a3b8;
+            --accent: #3b82f6;
+            --accent-hover: #2563eb;
+            --success: #22c55e;
+            --warning: #f59e0b;
+            --error: #ef4444;
+            --border: #475569;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+        }
+        
+        .container {
+            display: flex;
+            min-height: 100vh;
+        }
+        
+        /* Sidebar */
+        .sidebar {
+            width: 220px;
+            background: var(--bg-secondary);
+            padding: 1.5rem;
+            border-right: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+        
+        .logo {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: var(--accent);
+            margin-bottom: 2rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .logo svg {
+            width: 28px;
+            height: 28px;
+        }
+        
+        .nav-item {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.75rem 1rem;
+            margin-bottom: 0.25rem;
+            border-radius: 0.5rem;
+            color: var(--text-secondary);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .nav-item:hover {
+            background: var(--bg-card);
+            color: var(--text-primary);
+        }
+        
+        .nav-item.active {
+            background: var(--accent);
+            color: white;
+        }
+        
+        .nav-item svg {
+            width: 20px;
+            height: 20px;
+        }
+        
+        /* Main Content */
+        .main {
+            flex: 1;
+            padding: 2rem;
+            overflow-y: auto;
+        }
+        
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+        }
+        
+        .header h1 {
+            font-size: 1.75rem;
+            font-weight: 600;
+        }
+        
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            background: var(--bg-secondary);
+            border-radius: 9999px;
+            font-size: 0.875rem;
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--success);
+        }
+        
+        .status-dot.disconnected {
+            background: var(--error);
+        }
+        
+        /* View containers */
+        .view {
+            display: none;
+        }
+        
+        .view.active {
+            display: block;
+        }
+        
+        /* Stats Grid */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+        
+        .stat-card {
+            background: var(--bg-secondary);
+            padding: 1.5rem;
+            border-radius: 0.75rem;
+            border: 1px solid var(--border);
+        }
+        
+        .stat-label {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+            margin-bottom: 0.5rem;
+        }
+        
+        .stat-value {
+            font-size: 2rem;
+            font-weight: 600;
+        }
+        
+        .stat-value.success { color: var(--success); }
+        .stat-value.warning { color: var(--warning); }
+        .stat-value.error { color: var(--error); }
+        
+        /* Cards */
+        .card {
+            background: var(--bg-secondary);
+            border-radius: 0.75rem;
+            border: 1px solid var(--border);
+            margin-bottom: 1.5rem;
+        }
+        
+        .card-header {
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid var(--border);
+            font-weight: 600;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .card-body {
+            padding: 1.5rem;
+        }
+        
+        /* Tables */
+        .table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        .table th,
+        .table td {
+            padding: 0.75rem 1rem;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+        
+        .table th {
+            color: var(--text-secondary);
+            font-weight: 500;
+            font-size: 0.875rem;
+        }
+        
+        .table tr:last-child td {
+            border-bottom: none;
+        }
+        
+        .table tr:hover {
+            background: var(--bg-card);
+        }
+        
+        /* Badge */
+        .badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+        
+        .badge.success {
+            background: rgba(34, 197, 94, 0.2);
+            color: var(--success);
+        }
+        
+        .badge.warning {
+            background: rgba(245, 158, 11, 0.2);
+            color: var(--warning);
+        }
+        
+        .badge.error {
+            background: rgba(239, 68, 68, 0.2);
+            color: var(--error);
+        }
+        
+        .badge.info {
+            background: rgba(59, 130, 246, 0.2);
+            color: var(--accent);
+        }
+        
+        /* Cluster nodes */
+        .node-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 1rem;
+        }
+        
+        .node-card {
+            background: var(--bg-card);
+            padding: 1.25rem;
+            border-radius: 0.5rem;
+            border: 1px solid var(--border);
+        }
+        
+        .node-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+        
+        .node-id {
+            font-weight: 600;
+            font-size: 1.125rem;
+        }
+        
+        .node-info {
+            font-size: 0.875rem;
+            color: var(--text-secondary);
+        }
+        
+        /* Metrics */
+        .metric-group {
+            margin-bottom: 1.5rem;
+        }
+        
+        .metric-group-title {
+            font-weight: 600;
+            margin-bottom: 1rem;
+            color: var(--text-secondary);
+            font-size: 0.875rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        
+        .metric-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid var(--border);
+        }
+        
+        .metric-item:last-child {
+            border-bottom: none;
+        }
+        
+        .metric-name {
+            color: var(--text-secondary);
+            font-family: monospace;
+            font-size: 0.875rem;
+        }
+        
+        .metric-value {
+            font-family: monospace;
+            font-weight: 500;
+        }
+        
+        /* Empty state */
+        .empty-state {
+            text-align: center;
+            padding: 3rem;
+            color: var(--text-secondary);
+        }
+        
+        .empty-state svg {
+            width: 48px;
+            height: 48px;
+            margin-bottom: 1rem;
+            opacity: 0.5;
+        }
+        
+        /* Loading */
+        .loading {
+            text-align: center;
+            padding: 2rem;
+            color: var(--text-secondary);
+        }
+        
+        .spinner {
+            display: inline-block;
+            width: 24px;
+            height: 24px;
+            border: 2px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        
+        /* Responsive */
+        @media (max-width: 768px) {
+            .sidebar {
+                position: fixed;
+                left: -220px;
+                top: 0;
+                bottom: 0;
+                z-index: 1000;
+                transition: left 0.3s;
+            }
+            
+            .sidebar.open {
+                left: 0;
+            }
+            
+            .main {
+                padding: 1rem;
+            }
+            
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+    </style>
 </head>
 <body>
-    <noscript>
-        <div style="padding: 2rem; text-align: center; font-family: sans-serif;">
-            <h1>Rivven Dashboard</h1>
-            <p>This dashboard requires JavaScript/WebAssembly to be enabled.</p>
-        </div>
-    </noscript>
+    <div class="container">
+        <!-- Sidebar -->
+        <nav class="sidebar">
+            <div class="logo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+                </svg>
+                Rivven
+            </div>
+            
+            <div class="nav-item active" data-view="overview">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="3" y="3" width="7" height="7"/>
+                    <rect x="14" y="3" width="7" height="7"/>
+                    <rect x="14" y="14" width="7" height="7"/>
+                    <rect x="3" y="14" width="7" height="7"/>
+                </svg>
+                Overview
+            </div>
+            
+            <div class="nav-item" data-view="topics">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                    <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                </svg>
+                Topics
+            </div>
+            
+            <div class="nav-item" data-view="consumers">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+                    <circle cx="9" cy="7" r="4"/>
+                    <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
+                    <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+                </svg>
+                Consumers
+            </div>
+            
+            <div class="nav-item" data-view="cluster">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="3"/>
+                    <circle cx="19" cy="5" r="2"/>
+                    <circle cx="5" cy="5" r="2"/>
+                    <circle cx="19" cy="19" r="2"/>
+                    <circle cx="5" cy="19" r="2"/>
+                    <line x1="12" y1="9" x2="12" y2="5"/>
+                    <line x1="15" y1="12" x2="19" y2="12"/>
+                    <line x1="12" y1="15" x2="12" y2="19"/>
+                    <line x1="9" y1="12" x2="5" y2="12"/>
+                </svg>
+                Cluster
+            </div>
+            
+            <div class="nav-item" data-view="metrics">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="18" y1="20" x2="18" y2="10"/>
+                    <line x1="12" y1="20" x2="12" y2="4"/>
+                    <line x1="6" y1="20" x2="6" y2="14"/>
+                </svg>
+                Metrics
+            </div>
+        </nav>
+        
+        <!-- Main Content -->
+        <main class="main">
+            <div class="header">
+                <h1 id="page-title">Overview</h1>
+                <div class="status-badge">
+                    <span class="status-dot" id="status-dot"></span>
+                    <span id="status-text">Connecting...</span>
+                </div>
+            </div>
+            
+            <!-- Overview View -->
+            <div id="view-overview" class="view active">
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-label">Topics</div>
+                        <div class="stat-value" id="stat-topics">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Consumer Groups</div>
+                        <div class="stat-value" id="stat-consumers">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Active Connections</div>
+                        <div class="stat-value" id="stat-connections">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Total Requests</div>
+                        <div class="stat-value" id="stat-requests">-</div>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <div class="card-header">Recent Topics</div>
+                    <div class="card-body" id="recent-topics">
+                        <div class="loading"><div class="spinner"></div></div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Topics View -->
+            <div id="view-topics" class="view">
+                <div class="card">
+                    <div class="card-header">
+                        All Topics
+                        <span class="badge info" id="topics-count">0</span>
+                    </div>
+                    <div class="card-body" id="topics-list">
+                        <div class="loading"><div class="spinner"></div></div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Consumers View -->
+            <div id="view-consumers" class="view">
+                <div class="card">
+                    <div class="card-header">
+                        Consumer Groups
+                        <span class="badge info" id="consumers-count">0</span>
+                    </div>
+                    <div class="card-body" id="consumers-list">
+                        <div class="loading"><div class="spinner"></div></div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Cluster View -->
+            <div id="view-cluster" class="view">
+                <div class="stats-grid" id="cluster-stats">
+                    <div class="stat-card">
+                        <div class="stat-label">Nodes</div>
+                        <div class="stat-value" id="stat-nodes">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Leader</div>
+                        <div class="stat-value" id="stat-leader">-</div>
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <div class="card-header">Cluster Nodes</div>
+                    <div class="card-body">
+                        <div class="node-grid" id="nodes-list">
+                            <div class="loading"><div class="spinner"></div></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Metrics View -->
+            <div id="view-metrics" class="view">
+                <div class="card">
+                    <div class="card-header">Prometheus Metrics</div>
+                    <div class="card-body" id="metrics-list">
+                        <div class="loading"><div class="spinner"></div></div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        // Dashboard Application
+        const Dashboard = {
+            state: {
+                connected: false,
+                currentView: 'overview',
+                data: null,
+                membership: null,
+                metrics: null
+            },
+            
+            // Initialize dashboard
+            init() {
+                this.setupNavigation();
+                this.fetchAll();
+                // Auto-refresh every 5 seconds
+                setInterval(() => this.fetchAll(), 5000);
+            },
+            
+            // Setup navigation click handlers
+            setupNavigation() {
+                document.querySelectorAll('.nav-item').forEach(item => {
+                    item.addEventListener('click', () => {
+                        const view = item.dataset.view;
+                        this.switchView(view);
+                    });
+                });
+            },
+            
+            // Switch active view
+            switchView(view) {
+                // Update nav
+                document.querySelectorAll('.nav-item').forEach(item => {
+                    item.classList.toggle('active', item.dataset.view === view);
+                });
+                
+                // Update views
+                document.querySelectorAll('.view').forEach(v => {
+                    v.classList.toggle('active', v.id === `view-${view}`);
+                });
+                
+                // Update title
+                const titles = {
+                    overview: 'Overview',
+                    topics: 'Topics',
+                    consumers: 'Consumer Groups',
+                    cluster: 'Cluster',
+                    metrics: 'Metrics'
+                };
+                document.getElementById('page-title').textContent = titles[view] || view;
+                
+                this.state.currentView = view;
+            },
+            
+            // Fetch all data
+            async fetchAll() {
+                await Promise.all([
+                    this.fetchDashboardData(),
+                    this.fetchMembership(),
+                    this.fetchMetrics()
+                ]);
+            },
+            
+            // Fetch main dashboard data
+            async fetchDashboardData() {
+                try {
+                    const resp = await fetch('/dashboard/data');
+                    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                    this.state.data = await resp.json();
+                    this.setConnected(true);
+                    this.renderOverview();
+                    this.renderTopics();
+                    this.renderConsumers();
+                } catch (e) {
+                    console.error('Failed to fetch dashboard data:', e);
+                    this.setConnected(false);
+                }
+            },
+            
+            // Fetch cluster membership
+            async fetchMembership() {
+                try {
+                    const resp = await fetch('/membership');
+                    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                    this.state.membership = await resp.json();
+                    this.renderCluster();
+                } catch (e) {
+                    console.error('Failed to fetch membership:', e);
+                }
+            },
+            
+            // Fetch metrics
+            async fetchMetrics() {
+                try {
+                    const resp = await fetch('/metrics/json');
+                    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                    this.state.metrics = await resp.json();
+                    this.renderMetrics();
+                } catch (e) {
+                    console.error('Failed to fetch metrics:', e);
+                }
+            },
+            
+            // Update connection status
+            setConnected(connected) {
+                this.state.connected = connected;
+                const dot = document.getElementById('status-dot');
+                const text = document.getElementById('status-text');
+                dot.classList.toggle('disconnected', !connected);
+                text.textContent = connected ? 'Connected' : 'Disconnected';
+            },
+            
+            // Render overview
+            renderOverview() {
+                const data = this.state.data;
+                if (!data) return;
+                
+                document.getElementById('stat-topics').textContent = data.topics?.length || 0;
+                document.getElementById('stat-consumers').textContent = data.consumer_groups?.length || 0;
+                document.getElementById('stat-connections').textContent = data.active_connections || 0;
+                document.getElementById('stat-requests').textContent = this.formatNumber(data.total_requests || 0);
+                
+                // Recent topics table
+                const container = document.getElementById('recent-topics');
+                if (!data.topics || data.topics.length === 0) {
+                    container.innerHTML = this.emptyState('No topics yet');
+                    return;
+                }
+                
+                const topics = data.topics.slice(0, 5);
+                container.innerHTML = `
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Partitions</th>
+                                <th>Messages</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${topics.map(t => `
+                                <tr>
+                                    <td>${this.escape(t.name)}</td>
+                                    <td>${t.partitions}</td>
+                                    <td>${this.formatNumber(t.message_count)}</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                `;
+            },
+            
+            // Render topics list
+            renderTopics() {
+                const data = this.state.data;
+                if (!data) return;
+                
+                document.getElementById('topics-count').textContent = data.topics?.length || 0;
+                
+                const container = document.getElementById('topics-list');
+                if (!data.topics || data.topics.length === 0) {
+                    container.innerHTML = this.emptyState('No topics created yet');
+                    return;
+                }
+                
+                container.innerHTML = `
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Name</th>
+                                <th>Partitions</th>
+                                <th>Replication</th>
+                                <th>Messages</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${data.topics.map(t => `
+                                <tr>
+                                    <td><strong>${this.escape(t.name)}</strong></td>
+                                    <td>${t.partitions}</td>
+                                    <td>${t.replication_factor}</td>
+                                    <td>${this.formatNumber(t.message_count)}</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                `;
+            },
+            
+            // Render consumer groups
+            renderConsumers() {
+                const data = this.state.data;
+                if (!data) return;
+                
+                document.getElementById('consumers-count').textContent = data.consumer_groups?.length || 0;
+                
+                const container = document.getElementById('consumers-list');
+                if (!data.consumer_groups || data.consumer_groups.length === 0) {
+                    container.innerHTML = this.emptyState('No consumer groups');
+                    return;
+                }
+                
+                container.innerHTML = `
+                    <table class="table">
+                        <thead>
+                            <tr>
+                                <th>Group ID</th>
+                                <th>State</th>
+                                <th>Members</th>
+                                <th>Topics</th>
+                                <th>Lag</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${data.consumer_groups.map(g => `
+                                <tr>
+                                    <td><strong>${this.escape(g.group_id)}</strong></td>
+                                    <td><span class="badge ${this.stateClass(g.state)}">${g.state}</span></td>
+                                    <td>${g.member_count}</td>
+                                    <td>${g.topics?.join(', ') || '-'}</td>
+                                    <td>${this.formatNumber(g.total_lag)}</td>
+                                </tr>
+                            `).join('')}
+                        </tbody>
+                    </table>
+                `;
+            },
+            
+            // Render cluster view
+            renderCluster() {
+                const membership = this.state.membership;
+                if (!membership) return;
+                
+                const nodes = membership.nodes || [];
+                const leader = nodes.find(n => n.is_leader);
+                
+                document.getElementById('stat-nodes').textContent = nodes.length;
+                document.getElementById('stat-leader').textContent = leader ? `Node ${leader.node_id}` : '-';
+                
+                const container = document.getElementById('nodes-list');
+                if (nodes.length === 0) {
+                    container.innerHTML = this.emptyState('No cluster nodes');
+                    return;
+                }
+                
+                container.innerHTML = nodes.map(n => `
+                    <div class="node-card">
+                        <div class="node-header">
+                            <span class="node-id">Node ${n.node_id}</span>
+                            ${n.is_leader ? '<span class="badge success">Leader</span>' : ''}
+                            ${n.is_voter ? '<span class="badge info">Voter</span>' : '<span class="badge warning">Learner</span>'}
+                        </div>
+                        <div class="node-info">${this.escape(n.addr)}</div>
+                    </div>
+                `).join('');
+            },
+            
+            // Render metrics
+            renderMetrics() {
+                const metrics = this.state.metrics;
+                if (!metrics) return;
+                
+                const container = document.getElementById('metrics-list');
+                const entries = Object.entries(metrics);
+                
+                if (entries.length === 0) {
+                    container.innerHTML = this.emptyState('No metrics available');
+                    return;
+                }
+                
+                // Group metrics by prefix
+                const groups = {};
+                entries.forEach(([key, value]) => {
+                    const prefix = key.split('_').slice(0, 2).join('_');
+                    if (!groups[prefix]) groups[prefix] = [];
+                    groups[prefix].push({ key, value });
+                });
+                
+                container.innerHTML = Object.entries(groups).map(([prefix, items]) => `
+                    <div class="metric-group">
+                        <div class="metric-group-title">${prefix}</div>
+                        ${items.map(({ key, value }) => `
+                            <div class="metric-item">
+                                <span class="metric-name">${this.escape(key)}</span>
+                                <span class="metric-value">${this.formatMetricValue(value)}</span>
+                            </div>
+                        `).join('')}
+                    </div>
+                `).join('');
+            },
+            
+            // Helpers
+            formatNumber(n) {
+                if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+                if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+                if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+                return String(n);
+            },
+            
+            formatMetricValue(v) {
+                if (typeof v === 'number') {
+                    return Number.isInteger(v) ? String(v) : v.toFixed(2);
+                }
+                if (typeof v === 'object') {
+                    return JSON.stringify(v);
+                }
+                return String(v);
+            },
+            
+            stateClass(state) {
+                const s = (state || '').toLowerCase();
+                if (s === 'stable' || s === 'active') return 'success';
+                if (s === 'empty' || s === 'dead') return 'warning';
+                if (s === 'error') return 'error';
+                return 'info';
+            },
+            
+            escape(str) {
+                const div = document.createElement('div');
+                div.textContent = str || '';
+                return div.innerHTML;
+            },
+            
+            emptyState(message) {
+                return `
+                    <div class="empty-state">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="10"/>
+                            <path d="M16 16s-1.5-2-4-2-4 2-4 2"/>
+                            <line x1="9" y1="9" x2="9.01" y2="9"/>
+                            <line x1="15" y1="9" x2="15.01" y2="9"/>
+                        </svg>
+                        <p>${message}</p>
+                    </div>
+                `;
+            }
+        };
+        
+        // Start dashboard
+        document.addEventListener('DOMContentLoaded', () => Dashboard.init());
+    </script>
 </body>
 </html>

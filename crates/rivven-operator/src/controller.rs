@@ -23,7 +23,7 @@ use tracing::{debug, error, info, instrument, warn};
 use validator::Validate;
 
 /// Finalizer name for cleanup operations
-pub const FINALIZER_NAME: &str = "rivven.io/cluster-finalizer";
+pub const FINALIZER_NAME: &str = "rivven.hupe1980.github.io/cluster-finalizer";
 
 /// Default requeue interval for successful reconciliations
 const DEFAULT_REQUEUE_SECONDS: u64 = 300; // 5 minutes

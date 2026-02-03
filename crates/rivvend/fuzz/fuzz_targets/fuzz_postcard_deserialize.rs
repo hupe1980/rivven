@@ -18,9 +18,6 @@ struct FuzzRequest {
     offset: u64,
     max_messages: usize,
     consumer_group: String,
-    subject: String,
-    schema: String,
-    id: i32,
     username: String,
     password: String,
     key_data: Vec<u8>,
@@ -31,7 +28,7 @@ struct FuzzRequest {
 
 fuzz_target!(|input: FuzzRequest| {
     // Generate different request types based on variant
-    let request = match input.variant % 12 {
+    let request = match input.variant % 11 {
         0 => Request::Authenticate {
             username: input.username,
             password: input.password,
@@ -51,6 +48,7 @@ fuzz_target!(|input: FuzzRequest| {
             partition: input.partition.unwrap_or(0),
             offset: input.offset,
             max_messages: input.max_messages,
+            isolation_level: None,
         },
         4 => Request::CreateTopic {
             name: input.topic,
@@ -61,22 +59,18 @@ fuzz_target!(|input: FuzzRequest| {
             name: input.topic,
         },
         7 => Request::CommitOffset {
-            consumer_group: input.consumer_group,
-            topic: input.topic,
+            consumer_group: input.consumer_group.clone(),
+            topic: input.topic.clone(),
             partition: input.partition.unwrap_or(0),
             offset: input.offset,
         },
         8 => Request::GetOffset {
-            consumer_group: input.consumer_group,
-            topic: input.topic,
+            consumer_group: input.consumer_group.clone(),
+            topic: input.topic.clone(),
             partition: input.partition.unwrap_or(0),
         },
         9 => Request::GetMetadata {
             topic: input.topic,
-        },
-        10 => Request::RegisterSchema {
-            subject: input.subject,
-            schema: input.schema,
         },
         _ => Request::Ping,
     };

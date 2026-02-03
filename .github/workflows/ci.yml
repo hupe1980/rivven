@@ -28,10 +28,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
-      
-      - name: Install trunk
-        uses: taiki-e/install-action@trunk
       
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -60,11 +56,6 @@ jobs:
       
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-      
-      - name: Install trunk
-        uses: taiki-e/install-action@trunk
       
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -85,11 +76,6 @@ jobs:
       
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-      
-      - name: Install trunk
-        uses: taiki-e/install-action@trunk
       
       # Cache only registry/index, NOT target directory (avoids incremental bloat)
       - name: Cache cargo registry
@@ -141,11 +127,6 @@ jobs:
       
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-      
-      - name: Install trunk
-        uses: taiki-e/install-action@trunk
       
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -178,11 +159,6 @@ jobs:
       
       - name: Install Rust 1.89 (MSRV)
         uses: dtolnay/rust-toolchain@1.89.0
-        with:
-          targets: wasm32-unknown-unknown
-      
-      - name: Install trunk
-        uses: taiki-e/install-action@trunk
       
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

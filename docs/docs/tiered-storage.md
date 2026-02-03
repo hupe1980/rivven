@@ -131,6 +131,59 @@ storage:
       max_age_secs: 86400        # 1 day
 ```
 
+### Programmatic Configuration (Rust API)
+
+Configure tiered storage programmatically using the builder pattern:
+
+```rust
+use rivven_core::{Config, storage::{TieredStorageConfig, ColdStorageConfig}};
+
+// Enable with default settings
+let config = Config::new()
+    .with_tiered_storage_enabled();
+
+// Use a preset configuration
+let config = Config::new()
+    .with_tiered_storage(TieredStorageConfig::high_performance());
+
+let config = Config::new()
+    .with_tiered_storage(TieredStorageConfig::cost_optimized());
+
+// Custom configuration
+let tiered_config = TieredStorageConfig {
+    enabled: true,
+    hot_tier_max_bytes: 8 * 1024 * 1024 * 1024, // 8 GB
+    hot_tier_max_age_secs: 7200,                 // 2 hours
+    warm_tier_max_bytes: 500 * 1024 * 1024 * 1024, // 500 GB
+    warm_tier_max_age_secs: 604800,              // 7 days
+    warm_tier_path: "/var/lib/rivven/warm".to_string(),
+    cold_storage: ColdStorageConfig::S3 {
+        endpoint: None,
+        bucket: "rivven-archive".to_string(),
+        region: "us-east-1".to_string(),
+        access_key: None,  // Uses IAM role
+        secret_key: None,
+        use_path_style: false,
+    },
+    migration_interval_secs: 60,
+    migration_concurrency: 4,
+    enable_promotion: true,
+    promotion_threshold: 100,
+    compaction_threshold: 0.5,
+};
+
+let config = Config::new()
+    .with_tiered_storage(tiered_config);
+```
+
+#### Configuration Presets
+
+| Preset | Hot Tier | Migration Interval | Promotion | Use Case |
+|:-------|:---------|:-------------------|:----------|:---------|
+| `high_performance()` | 8 GB, 2 hours | 30s | Enabled | Low-latency workloads |
+| `cost_optimized()` | 256 MB, 5 min | 60s | Disabled | Archival, cost-sensitive |
+| `testing()` | 1 MB, 5 sec | 1s | Enabled | Integration tests |
+
 ---
 
 ## Cold Storage Backends
@@ -380,3 +433,140 @@ Ensure migrations keep up with data ingestion:
 1. Reduce `warm_tier.max_bytes`
 2. Increase migration concurrency
 3. Add disk space or move to larger volume
+
+---
+
+## Broker Integration
+
+### How It Works
+
+When tiered storage is enabled, the Rivven broker automatically:
+
+1. **Server Initialization**: Creates a shared `TieredStorage` instance
+2. **TopicManager Wiring**: Passes tiered storage to all topics
+3. **Partition Integration**: Each partition writes to both log and tiered storage
+4. **Transparent Reads**: Data is read from the appropriate tier automatically
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     RIVVEN BROKER                                │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   Server::new(config)                                           │
+│       │                                                         │
+│       ├──► TieredStorage::new(config.tiered_storage)           │
+│       │          │                                              │
+│       │          └──► Arc<TieredStorage> (shared)              │
+│       │                      │                                  │
+│       └──► TopicManager::new_with_tiered_storage(config, ts)   │
+│                      │                                          │
+│                      └──► Topic::create() ──► Partition        │
+│                                                   │             │
+│                                      Partition::new_with_tiered_storage()
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Verify Broker Integration
+
+Check broker logs for tiered storage initialization:
+
+```
+INFO rivvend::server: Initializing tiered storage with config: TieredStorageConfig { enabled: true, ... }
+INFO rivven_core::topic: Creating TopicManager with 3 default partitions (tiered_storage: enabled)
+INFO rivven_core::partition: Creating partition 0 for topic my-topic (tiered_storage: true)
+```
+
+### Client Usage
+
+Tiered storage is transparent to clients—no code changes needed:
+
+```rust
+use rivven_client::Client;
+
+let mut client = Client::connect("127.0.0.1:9092").await?;
+
+// Create topic (will use tiered storage if enabled on broker)
+client.create_topic("events", Some(3)).await?;
+
+// Publish messages (automatically written to hot tier)
+for i in 0..1000 {
+    client.publish("events", format!("event-{}", i)).await?;
+}
+
+// Consume messages (reads from appropriate tier)
+let messages = client.consume("events", 0, 0, 100).await?;
+```
+
+---
+
+## Testing
+
+### Integration Tests
+
+Rivven includes **26 comprehensive integration tests** for tiered storage:
+
+```bash
+# Run all tiered storage integration tests
+cargo test -p rivven-integration-tests --test tiered_storage
+
+# Test categories:
+# ├── Configuration (6 tests)
+# │   ├── test_tiered_storage_config_serialization
+# │   ├── test_cold_storage_config_variants
+# │   ├── test_tiered_storage_config_presets
+# │   ├── test_config_tiered_storage_field
+# │   ├── test_config_serialization_with_tiered_storage
+# │   └── test_config_from_yaml_style_json
+# │
+# ├── Component-Level (13 tests)
+# │   ├── test_tiered_storage_write_read
+# │   ├── test_tiered_storage_statistics
+# │   ├── test_partition_with_tiered_storage
+# │   ├── test_partition_batch_with_tiered_storage
+# │   ├── test_partition_flush_with_tiered_storage
+# │   ├── test_topic_manager_with_tiered_storage
+# │   ├── test_multiple_topics_shared_tiered_storage
+# │   ├── test_tier_migration_with_testing_preset
+# │   ├── test_concurrent_partition_access
+# │   ├── test_large_data_volume
+# │   ├── test_tiered_storage_disabled
+# │   ├── test_all_cold_storage_backends
+# │   └── test_tiered_storage_config_helpers
+# │
+# └── Broker End-to-End (7 tests)
+#     ├── test_broker_with_tiered_storage_enabled
+#     ├── test_broker_tiered_storage_multiple_messages
+#     ├── test_broker_tiered_storage_multiple_topics
+#     ├── test_broker_tiered_storage_large_payloads
+#     ├── test_broker_without_tiered_storage
+#     ├── test_broker_tiered_storage_high_performance_preset
+#     └── test_broker_tiered_storage_cost_optimized_preset
+```
+
+### Unit Tests
+
+```bash
+# Run 12 tiered storage unit tests
+cargo test -p rivven-core tiered
+
+# Tests cover:
+# - Hot/warm/cold tier operations
+# - LRU eviction
+# - Path traversal protection
+# - Compaction thresholds
+```
+
+### Testing Preset
+
+Use `TieredStorageConfig::testing()` for fast integration tests:
+
+```rust
+use rivven_core::storage::TieredStorageConfig;
+
+// Fast migration, small tiers for testing
+let config = TieredStorageConfig::testing();
+// - 1 MB hot tier
+// - 5 second max age
+// - 1 second migration interval
+```

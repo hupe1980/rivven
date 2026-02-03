@@ -2,12 +2,26 @@
 
 use anyhow::Result;
 use std::future::Future;
+use std::sync::Once;
 use std::time::Duration;
 use tokio::time::{sleep, timeout};
 use tracing::debug;
 
+static CRYPTO_PROVIDER_INIT: Once = Once::new();
+
+/// Initialize the rustls crypto provider (call before any TLS operations)
+pub fn init_crypto_provider() {
+    CRYPTO_PROVIDER_INIT.call_once(|| {
+        // Install aws-lc-rs as the default crypto provider for rustls
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    });
+}
+
 /// Initialize tracing for tests (call once at start of test)
 pub fn init_tracing() {
+    // Also initialize crypto provider when initializing tracing
+    init_crypto_provider();
+
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()

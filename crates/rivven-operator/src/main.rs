@@ -4,6 +4,7 @@
 //! automatically deploying and managing Rivven distributed streaming clusters.
 
 mod controller;
+#[allow(dead_code)] // CRD types are API types deserialized by Kubernetes, not constructed directly
 mod crd;
 mod error;
 mod resources;

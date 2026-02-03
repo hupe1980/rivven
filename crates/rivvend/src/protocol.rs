@@ -38,6 +38,7 @@ mod protocol_tests {
                 partition: 0,
                 offset: 100,
                 max_messages: 10,
+                isolation_level: None,
             },
             Request::CreateTopic {
                 name: "new-topic".to_string(),

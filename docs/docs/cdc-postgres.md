@@ -35,18 +35,19 @@ Rivven CDC for PostgreSQL uses **logical replication** via the `pgoutput` plugin
 
 ### PostgreSQL Version
 
-PostgreSQL **10+** is required (logical replication support).
+PostgreSQL **14+** is recommended. Versions 10-13 reached end-of-life.
 
-| Version | Support | Notes |
-|:--------|:--------|:------|
-| 9.x | ❌ | No logical replication |
-| 10.x | ✅ | Basic pgoutput |
-| 11.x | ✅ | Truncate events added |
-| 12.x | ✅ | Binary protocol optimization |
-| 13.x | ✅ | Logical decoding on standby |
-| 14.x | ✅ | Streaming large transactions |
-| 15.x | ✅ | Row filters, column lists |
-| 16.x | ✅ | Parallel apply |
+| Version | Support | EOL | Notes |
+|:--------|:--------|:----|:------|
+| 9.x | ❌ | - | No logical replication |
+| 10.x-13.x | ⚠️ | EOL | Not recommended (unsupported) |
+| 14.x | ✅ | Nov 2026 | Streaming large transactions |
+| 15.x | ✅ | Nov 2027 | Row filters, column lists |
+| 16.x | ✅ | Nov 2028 | Parallel apply (**recommended**) |
+| 17.x | ✅ | Nov 2029 | Enhanced logical replication (latest) |
+
+{: .note }
+> We test against PostgreSQL 14, 15, 16, and 17 in CI. PostgreSQL 16 is our recommended version for production deployments.
 
 ### Database Configuration
 
@@ -297,14 +298,14 @@ Control CDC connectors at runtime without restarts.
 
 ```sql
 -- Create signal table
-CREATE TABLE public.debezium_signal (
+CREATE TABLE public.rivven_signal (
     id VARCHAR(64) PRIMARY KEY,
     type VARCHAR(32) NOT NULL,
     data JSONB
 );
 
 -- Grant permissions
-GRANT SELECT, INSERT, DELETE ON public.debezium_signal TO rivven;
+GRANT SELECT, INSERT, DELETE ON public.rivven_signal TO rivven;
 ```
 
 ### Configuration
@@ -313,7 +314,7 @@ GRANT SELECT, INSERT, DELETE ON public.debezium_signal TO rivven;
 config:
   signal_config:
     enabled: true
-    data_collection: public.debezium_signal
+    data_collection: public.rivven_signal
     channels:
       - source  # Read from database
       - topic   # Read from Rivven topic
@@ -332,7 +333,7 @@ config:
 ### Example: Trigger Snapshot
 
 ```sql
-INSERT INTO public.debezium_signal (id, type, data)
+INSERT INTO public.rivven_signal (id, type, data)
 VALUES (
     'signal-001',
     'execute-snapshot',
@@ -354,13 +355,13 @@ config:
     enabled: true
     chunk_size: 10000        # Rows per chunk
     watermark_strategy: insert_delete  # or insert_insert
-    signal_data_collection: public.debezium_signal
+    signal_data_collection: public.rivven_signal
 ```
 
 ### Trigger via Signal
 
 ```sql
-INSERT INTO public.debezium_signal (id, type, data)
+INSERT INTO public.rivven_signal (id, type, data)
 VALUES (
     'incr-snap-001',
     'execute-snapshot',

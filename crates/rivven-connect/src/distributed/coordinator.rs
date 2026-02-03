@@ -715,17 +715,193 @@ impl ConnectCoordinator {
     }
 
     // =========================================================================
+    // Connector Lifecycle (Start/Pause/Resume)
+    // =========================================================================
+
+    /// Start a connector
+    pub fn start_connector(&mut self, id: &ConnectorId) -> CoordinatorResult<()> {
+        let connector = self
+            .connectors
+            .get_mut(id)
+            .ok_or_else(|| ConnectError::Config(format!("Connector '{}' not found", id.0)))?;
+
+        match connector.state {
+            ConnectorState::Registered | ConnectorState::Paused => {
+                connector.state = ConnectorState::Starting;
+                info!(connector = %id.0, "Starting connector");
+                // Transition to Running (in real implementation, this would wait for task startup)
+                connector.state = ConnectorState::Running;
+                Ok(())
+            }
+            ConnectorState::Running => Ok(()), // Already running
+            _ => Err(ConnectError::Config(format!(
+                "Connector '{}' cannot be started from state {:?}",
+                id.0, connector.state
+            ))),
+        }
+    }
+
+    /// Pause a connector
+    pub fn pause_connector(&mut self, id: &ConnectorId) -> CoordinatorResult<()> {
+        let connector = self
+            .connectors
+            .get_mut(id)
+            .ok_or_else(|| ConnectError::Config(format!("Connector '{}' not found", id.0)))?;
+
+        match connector.state {
+            ConnectorState::Running => {
+                connector.state = ConnectorState::Paused;
+                info!(connector = %id.0, "Pausing connector");
+                Ok(())
+            }
+            ConnectorState::Paused => Ok(()), // Already paused
+            _ => Err(ConnectError::Config(format!(
+                "Connector '{}' cannot be paused from state {:?}",
+                id.0, connector.state
+            ))),
+        }
+    }
+
+    /// Resume a connector
+    pub fn resume_connector(&mut self, id: &ConnectorId) -> CoordinatorResult<()> {
+        let connector = self
+            .connectors
+            .get_mut(id)
+            .ok_or_else(|| ConnectError::Config(format!("Connector '{}' not found", id.0)))?;
+
+        match connector.state {
+            ConnectorState::Paused => {
+                connector.state = ConnectorState::Running;
+                info!(connector = %id.0, "Resuming connector");
+                Ok(())
+            }
+            ConnectorState::Running => Ok(()), // Already running
+            _ => Err(ConnectError::Config(format!(
+                "Connector '{}' cannot be resumed from state {:?}",
+                id.0, connector.state
+            ))),
+        }
+    }
+
+    // =========================================================================
+    // Member Management (Direct API)
+    // =========================================================================
+
+    /// Add a member directly (for testing or simple deployments)
+    pub fn add_member(&mut self, node_id: NodeId) -> CoordinatorResult<()> {
+        info!(node = %node_id.0, "Adding member");
+        self.membership.add_member(node_id.clone());
+
+        // Add default load entry
+        let load = NodeLoad {
+            node: node_id,
+            max_tasks: 10,
+            current_tasks: 0,
+            cpu_usage: 0.0,
+            memory_usage: 0.0,
+            is_healthy: true,
+            rack: None,
+        };
+        self.assigner.update_node_load(load);
+        self.increment_epoch();
+        Ok(())
+    }
+
+    /// Remove a member directly
+    pub fn remove_member(&mut self, node_id: &NodeId) -> CoordinatorResult<()> {
+        info!(node = %node_id.0, "Removing member");
+        self.remove_node(node_id);
+        self.increment_epoch();
+        Ok(())
+    }
+
+    // =========================================================================
+    // Rebalance API
+    // =========================================================================
+
+    /// Trigger an immediate rebalance
+    pub fn rebalance(&mut self) -> CoordinatorResult<()> {
+        self.rebalance_pending = true;
+        self.execute_rebalance();
+        Ok(())
+    }
+
+    /// Get current task assignments as (TaskId, NodeId) pairs
+    pub fn get_task_assignments(&self) -> Vec<(TaskId, NodeId)> {
+        self.tasks
+            .values()
+            .filter_map(|task| {
+                task.assigned_node()
+                    .map(|node| (task.id.clone(), node.clone()))
+            })
+            .collect()
+    }
+
+    // =========================================================================
+    // Heartbeat API
+    // =========================================================================
+
+    /// Process a heartbeat from a worker node
+    pub fn process_heartbeat(
+        &mut self,
+        node_id: &NodeId,
+        task_statuses: Vec<TaskStatusSummary>,
+    ) -> CoordinatorResult<HeartbeatResponse> {
+        let heartbeat = HeartbeatMessage {
+            node_id: node_id.clone(),
+            epoch: self.epoch,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64,
+            load: NodeLoadInfo {
+                cpu_usage: 0.0,
+                memory_usage: 0.0,
+                task_count: task_statuses.len() as u32,
+                events_per_second: 0.0,
+                bytes_per_second: 0.0,
+            },
+            task_statuses,
+        };
+        Ok(self.handle_heartbeat(heartbeat))
+    }
+
+    /// Check for nodes that have timed out (no heartbeat received)
+    pub fn check_heartbeat_timeouts(&mut self) -> Vec<NodeId> {
+        let stale = self.membership.stale_members(self.config.heartbeat_timeout);
+        let mut timed_out = Vec::new();
+
+        for node_id in stale {
+            warn!(node = %node_id.0, "Node heartbeat timeout, removing from cluster");
+            self.remove_node(&node_id);
+            timed_out.push(node_id);
+        }
+
+        if !timed_out.is_empty() {
+            self.schedule_rebalance();
+        }
+
+        timed_out
+    }
+
+    // =========================================================================
     // Status and Metrics
     // =========================================================================
 
     /// Get coordinator status
     pub fn status(&self) -> CoordinatorStatus {
+        let assigned_tasks = self
+            .tasks
+            .values()
+            .filter(|t| t.assigned_node().is_some())
+            .count();
         CoordinatorStatus {
             node_id: self.config.node_id.clone(),
             epoch: self.epoch,
             member_count: self.membership.member_count(),
             connector_count: self.connectors.len(),
-            task_count: self.tasks.len(),
+            total_tasks: self.tasks.len(),
+            assigned_tasks,
             rebalance_pending: self.rebalance_pending,
         }
     }
@@ -738,7 +914,8 @@ pub struct CoordinatorStatus {
     pub epoch: Epoch,
     pub member_count: usize,
     pub connector_count: usize,
-    pub task_count: usize,
+    pub total_tasks: usize,
+    pub assigned_tasks: usize,
     pub rebalance_pending: bool,
 }
 

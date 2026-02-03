@@ -4,19 +4,39 @@ use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
 use std::fmt;
 
-/// Rivven error type exposed to Python
-///
-/// This exception is raised for all Rivven-related errors including:
-/// - Connection errors
-/// - Server errors  
-/// - Timeout errors
-/// - Invalid configuration
-#[pyclass(extends=PyException)]
-#[derive(Debug, Clone)]
-pub struct RivvenError {
-    message: String,
-    error_type: ErrorType,
-}
+// Create custom exception types using the create_exception! macro
+// This is the correct approach for PyO3 0.27+ and works with ABI3
+pyo3::create_exception!(
+    rivven,
+    RivvenException,
+    PyException,
+    "Base exception for Rivven errors"
+);
+pyo3::create_exception!(
+    rivven,
+    ConnectionException,
+    RivvenException,
+    "Connection-related errors"
+);
+pyo3::create_exception!(
+    rivven,
+    ServerException,
+    RivvenException,
+    "Server-related errors"
+);
+pyo3::create_exception!(rivven, TimeoutException, RivvenException, "Timeout errors");
+pyo3::create_exception!(
+    rivven,
+    SerializationException,
+    RivvenException,
+    "Serialization errors"
+);
+pyo3::create_exception!(
+    rivven,
+    ConfigException,
+    RivvenException,
+    "Configuration errors"
+);
 
 /// Error classification for better Python exception handling
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,27 +64,30 @@ impl fmt::Display for ErrorType {
     }
 }
 
-#[pymethods]
+/// Internal Rust error type for Rivven operations
+#[derive(Debug, Clone)]
+pub struct RivvenError {
+    message: String,
+    error_type: ErrorType,
+}
+
 impl RivvenError {
     /// Create a new RivvenError
-    #[new]
-    pub fn new(message: String) -> Self {
+    pub fn new(message: impl Into<String>) -> Self {
         Self {
-            message,
+            message: message.into(),
             error_type: ErrorType::Server,
         }
     }
 
     /// Get the error message
-    #[getter]
     pub fn message(&self) -> &str {
         &self.message
     }
 
-    /// Get the error type as a string
-    #[getter]
-    pub fn error_type(&self) -> String {
-        self.error_type.to_string()
+    /// Get the error type
+    pub fn error_type(&self) -> ErrorType {
+        self.error_type
     }
 
     /// Check if this is a connection error
@@ -82,20 +105,6 @@ impl RivvenError {
         self.error_type == ErrorType::Timeout
     }
 
-    fn __str__(&self) -> String {
-        format!("{}: {}", self.error_type, self.message)
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "RivvenError({:?}, {:?})",
-            self.error_type.to_string(),
-            self.message
-        )
-    }
-}
-
-impl RivvenError {
     /// Create a connection error
     pub fn connection(msg: impl Into<String>) -> Self {
         Self {
@@ -174,7 +183,10 @@ impl From<rivven_client::Error> for RivvenError {
             rivven_client::Error::AllServersUnavailable => {
                 Self::connection("All servers unavailable")
             }
-            rivven_client::Error::Timeout(msg) => Self::connection(format!("Timeout: {}", msg)),
+            rivven_client::Error::Timeout => Self::connection("Request timeout".to_string()),
+            rivven_client::Error::TimeoutWithMessage(msg) => {
+                Self::connection(format!("Timeout: {}", msg))
+            }
             rivven_client::Error::AuthenticationFailed(msg) => {
                 Self::server(format!("Authentication failed: {}", msg))
             }
@@ -185,7 +197,17 @@ impl From<rivven_client::Error> for RivvenError {
 
 impl From<RivvenError> for PyErr {
     fn from(err: RivvenError) -> PyErr {
-        PyErr::new::<RivvenError, _>(err.__str__())
+        let msg = format!("{}: {}", err.error_type, err.message);
+        match err.error_type {
+            ErrorType::Connection => ConnectionException::new_err(msg),
+            ErrorType::Server => ServerException::new_err(msg),
+            ErrorType::Timeout => TimeoutException::new_err(msg),
+            ErrorType::Serialization | ErrorType::InvalidResponse => {
+                SerializationException::new_err(msg)
+            }
+            ErrorType::Io => ConnectionException::new_err(msg),
+            ErrorType::InvalidConfig => ConfigException::new_err(msg),
+        }
     }
 }
 
@@ -206,4 +228,21 @@ impl fmt::Display for RivvenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}: {}", self.error_type, self.message)
     }
+}
+
+/// Register exception types in the Python module
+pub fn register_exceptions(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add("RivvenException", m.py().get_type::<RivvenException>())?;
+    m.add(
+        "ConnectionException",
+        m.py().get_type::<ConnectionException>(),
+    )?;
+    m.add("ServerException", m.py().get_type::<ServerException>())?;
+    m.add("TimeoutException", m.py().get_type::<TimeoutException>())?;
+    m.add(
+        "SerializationException",
+        m.py().get_type::<SerializationException>(),
+    )?;
+    m.add("ConfigException", m.py().get_type::<ConfigException>())?;
+    Ok(())
 }

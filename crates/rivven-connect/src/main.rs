@@ -899,7 +899,7 @@ async fn check_sink_config(_name: &str, sink: &config::SinkConfig) -> Result<Str
             }
         }
         // For external sinks (snowflake, s3), use registry lookup
-        // These must be enabled via rivven-warehouse or rivven-storage crates
+        // These are enabled via feature flags (e.g., features = ["snowflake", "s3"])
         other => Ok(format!(
             "connector '{}' - check not available (built-in connectors only)",
             other
@@ -1027,51 +1027,161 @@ fn show_schema(connector: &str, format: &str) -> Result<()> {
 
 /// List available connector types
 fn list_connectors() -> Result<()> {
-    use crate::connectors::{create_sink_registry, create_source_registry};
+    use crate::connectors::{
+        create_connector_inventory, ConnectorCategory, ConnectorType, SupportLevel,
+    };
 
-    println!("Available Connector Types\n");
+    let inventory = create_connector_inventory();
 
-    println!("SOURCES:");
-    let source_registry = create_source_registry();
-    for (name, spec) in source_registry.list() {
-        let desc = spec.description.as_deref().unwrap_or("No description");
-        println!("  {:<16}{}", name, desc);
-        if spec.supports_incremental {
-            println!("                  Features: incremental, discover");
+    println!("╭─────────────────────────────────────────────────────────────────────╮");
+    println!("│               Rivven Connect - Connector Catalog                     │");
+    println!("╰─────────────────────────────────────────────────────────────────────╯\n");
+
+    println!(
+        "📊 Total: {} connectors ({} sources, {} sinks)\n",
+        inventory.total_count(),
+        inventory.source_count(),
+        inventory.sink_count()
+    );
+
+    // Group by parent category
+    let categories = [
+        (
+            "📁 DATABASE",
+            vec![
+                ConnectorCategory::DatabaseCdc,
+                ConnectorCategory::DatabaseBatch,
+                ConnectorCategory::DatabaseNosql,
+            ],
+        ),
+        (
+            "📨 MESSAGING",
+            vec![
+                ConnectorCategory::MessagingKafka,
+                ConnectorCategory::MessagingMqtt,
+                ConnectorCategory::MessagingCloud,
+            ],
+        ),
+        (
+            "📦 STORAGE",
+            vec![
+                ConnectorCategory::StorageObject,
+                ConnectorCategory::StorageFile,
+            ],
+        ),
+        ("🏢 WAREHOUSE", vec![ConnectorCategory::Warehouse]),
+        (
+            "🤖 AI/ML",
+            vec![ConnectorCategory::AiLlm, ConnectorCategory::AiVector],
+        ),
+        ("🌐 HTTP/API", vec![ConnectorCategory::HttpApi]),
+        (
+            "🔧 UTILITY",
+            vec![
+                ConnectorCategory::UtilityGenerate,
+                ConnectorCategory::UtilityDebug,
+            ],
+        ),
+    ];
+
+    for (parent_name, cats) in categories {
+        let mut connectors: Vec<_> = cats
+            .iter()
+            .flat_map(|cat| inventory.by_category(*cat))
+            .collect();
+
+        if connectors.is_empty() {
+            continue;
         }
-        println!("                  Status: ✓ compiled in");
-        println!("                  Schema: rivven-connect schema {}", name);
+
+        connectors.sort_by_key(|m| &m.name);
+        connectors.dedup_by_key(|m| &m.name);
+
+        println!("{}", parent_name);
+        println!("─────────────────────────────────────────────────────────────────────");
+        println!(
+            "{:<18} {:<10} {:<12} Description",
+            "Name", "Type", "Support"
+        );
+        println!("─────────────────────────────────────────────────────────────────────");
+
+        for meta in connectors {
+            let types: Vec<_> = meta
+                .types
+                .iter()
+                .map(|t| match t {
+                    ConnectorType::Source => "Source",
+                    ConnectorType::Sink => "Sink",
+                    ConnectorType::Processor => "Proc",
+                    ConnectorType::Cache => "Cache",
+                    ConnectorType::Scanner => "Scan",
+                })
+                .collect();
+            let types_str = types.join(",");
+
+            let support = match meta.support {
+                SupportLevel::Certified => "✅ Cert",
+                SupportLevel::Community => "🌐 Comm",
+                SupportLevel::Experimental => "🧪 Exp",
+                SupportLevel::Enterprise => "🏢 Ent",
+                SupportLevel::Deprecated => "⚠️ Dep",
+            };
+
+            // Truncate description if too long
+            let desc = if meta.description.len() > 35 {
+                format!("{}...", &meta.description[..32])
+            } else {
+                meta.description.clone()
+            };
+
+            println!(
+                "{:<18} {:<10} {:<12} {}",
+                meta.name, types_str, support, desc
+            );
+        }
+        println!();
     }
-    if source_registry.is_empty() {
-        println!("  (no sources compiled - enable 'postgres' or 'mysql' features)");
+
+    // Show feature flag status
+    println!("🏷️  FEATURE FLAGS");
+    println!("─────────────────────────────────────────────────────────────────────");
+
+    let features = [
+        (
+            "postgres",
+            cfg!(feature = "postgres"),
+            "PostgreSQL CDC source",
+        ),
+        ("mysql", cfg!(feature = "mysql"), "MySQL/MariaDB CDC source"),
+        ("http", cfg!(feature = "http"), "HTTP webhook sink"),
+        ("kafka", cfg!(feature = "kafka"), "Kafka source & sink"),
+        ("mqtt", cfg!(feature = "mqtt"), "MQTT source"),
+        ("sqs", cfg!(feature = "sqs"), "AWS SQS source"),
+        ("pubsub", cfg!(feature = "pubsub"), "Google Pub/Sub source"),
+        ("s3", cfg!(feature = "s3"), "Amazon S3 sink"),
+        ("gcs", cfg!(feature = "gcs"), "Google Cloud Storage sink"),
+        ("azure", cfg!(feature = "azure"), "Azure Blob Storage sink"),
+        ("snowflake", cfg!(feature = "snowflake"), "Snowflake sink"),
+        (
+            "bigquery",
+            cfg!(feature = "bigquery"),
+            "Google BigQuery sink",
+        ),
+        (
+            "redshift",
+            cfg!(feature = "redshift"),
+            "Amazon Redshift sink",
+        ),
+    ];
+
+    for (name, enabled, desc) in features {
+        let status = if enabled { "✓" } else { "✗" };
+        println!("  {} {:<14} {}", status, name, desc);
     }
+
     println!();
-
-    println!("SINKS:");
-    let sink_registry = create_sink_registry();
-    for (name, spec) in sink_registry.list() {
-        let desc = spec.description.as_deref().unwrap_or("No description");
-        println!("  {:<16}{}", name, desc);
-        println!("                  Status: ✓ available");
-        println!("                  Schema: rivven-connect schema {}", name);
-    }
-    if sink_registry.is_empty() {
-        println!("  (no sinks compiled)");
-    }
-
-    // Show available but not compiled features
-    println!();
-    println!("FEATURE FLAGS:");
-
-    #[cfg(feature = "http")]
-    println!("  http            ✓ enabled");
-    #[cfg(not(feature = "http"))]
-    println!("  http            ✗ disabled (enable with --features http)");
-
-    println!();
-    println!("EXTERNAL ADAPTERS (add as dependencies to enable):");
-    println!("  rivven-storage    S3, GCS, Azure Blob sinks");
-    println!("  rivven-warehouse  Snowflake, BigQuery, Redshift sinks");
+    println!("💡 TIP: Use 'rivven-connect schema <connector>' to see config options");
+    println!("💡 TIP: Use 'rivven-connect discover <source>' to discover streams");
 
     Ok(())
 }

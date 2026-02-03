@@ -1,0 +1,94 @@
+[package]
+name = "rivven-schema"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Schema Registry for Rivven - Confluent-compatible schema management"
+keywords = ["schema-registry", "avro", "protobuf", "json-schema", "kafka"]
+
+[[bin]]
+name = "rivven-schema"
+path = "src/main.rs"
+
+[lib]
+name = "rivven_schema"
+path = "src/lib.rs"
+
+[features]
+default = ["server", "avro", "json-schema", "cli"]
+# Types only - minimal feature for other crates to depend on (no heavy deps)
+types = []
+# CLI features
+cli = ["dep:reqwest", "dep:tracing-subscriber"]
+# Schema formats
+avro = ["dep:apache-avro"]
+json-schema = ["dep:jsonschema"]
+# Server features
+server = ["dep:axum", "dep:tower", "dep:tower-http"]
+# Authentication support (Basic Auth + simple RBAC)
+auth = ["dep:rivven-core"]
+# JWT/OIDC token validation (requires auth)
+jwt = ["auth", "dep:jsonwebtoken"]
+# Cedar policy-based authorization (fine-grained RBAC)
+cedar = ["auth", "rivven-core/cedar"]
+# Broker-backed storage (store schemas in rivven topics for durability)
+broker = ["dep:rivven-client"]
+# Prometheus metrics
+metrics = ["dep:prometheus"]
+
+[dependencies]
+# Core
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+async-trait = "0.1"
+parking_lot = "0.12"
+dashmap = "6.1"
+
+# Wire protocol types (SchemaType)
+rivven-protocol = { workspace = true }
+
+# CLI
+clap = { workspace = true }
+reqwest = { version = "0.12", features = ["json"], optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+
+# Schema formats
+apache-avro = { version = "0.16", optional = true }
+jsonschema = { version = "0.18", optional = true }
+
+# HTTP Server
+axum = { workspace = true, optional = true }
+tower = { workspace = true, optional = true, features = ["util"] }
+tower-http = { workspace = true, optional = true, features = ["cors", "trace", "compression-gzip"] }
+
+# Authentication (optional - for standalone server)
+rivven-core = { workspace = true, optional = true }
+
+# JWT validation for OAuth2/OIDC (optional)
+jsonwebtoken = { version = "9", optional = true }
+
+# Broker-backed storage (optional)
+rivven-client = { workspace = true, optional = true }
+
+# Prometheus metrics (optional)
+prometheus = { workspace = true, optional = true }
+
+# Utilities
+base64 = "0.22"
+sha2 = "0.10"
+md5 = "0.7"
+hex = "0.4"
+regex = "1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+tempfile = "3"
+reqwest = { version = "0.12", features = ["json"] }
+tracing-subscriber = { workspace = true }

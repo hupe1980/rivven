@@ -1502,7 +1502,8 @@ mod tests {
     #[tokio::test]
     async fn test_tls_server_client_handshake() {
         // Install crypto provider (required by rustls 0.23+)
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        // Use aws_lc_rs which is the default in rustls 0.23+
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
         // Use SelfSigned source which generates at runtime
         let server_config = TlsConfig {
@@ -1580,7 +1581,8 @@ mod tests {
         use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyUsagePurpose};
 
         // Install crypto provider (required by rustls 0.23+)
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        // Use aws_lc_rs which is the default in rustls 0.23+
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
         // Generate a shared CA certificate
         let mut ca_params = CertificateParams::default();

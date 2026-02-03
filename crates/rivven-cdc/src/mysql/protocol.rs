@@ -29,8 +29,8 @@
 
 use anyhow::{bail, Context, Result};
 use bytes::{BufMut, Bytes, BytesMut};
-use ring::rand::SystemRandom;
-use ring::rsa::PublicKeyComponents;
+use rand::rngs::OsRng;
+use rsa::{BigUint, Pkcs1v15Encrypt, RsaPublicKey};
 use sha1::{Digest, Sha1};
 use sha2::Sha256;
 use std::io::Read;
@@ -56,9 +56,11 @@ const PACKET_HEADER_SIZE: usize = 4;
 /// Maximum packet payload
 const MAX_PACKET_SIZE: usize = 16_777_215;
 
-/// MySQL capability flags
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
+/// MySQL capability flags for protocol negotiation.
+///
+/// These flags are exchanged during the handshake to negotiate
+/// protocol features between client and server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CapabilityFlags(u32);
 
 impl CapabilityFlags {
@@ -90,12 +92,67 @@ impl CapabilityFlags {
         Self(flags)
     }
 
+    /// Check if a capability flag is set.
     pub fn has(&self, flag: u32) -> bool {
         (self.0 & flag) != 0
     }
 
+    /// Get the raw capability flags value.
     pub fn value(&self) -> u32 {
         self.0
+    }
+
+    /// Set a capability flag.
+    pub fn set(&mut self, flag: u32) {
+        self.0 |= flag;
+    }
+
+    /// Clear a capability flag.
+    pub fn clear(&mut self, flag: u32) {
+        self.0 &= !flag;
+    }
+
+    /// Compute intersection with another set of flags.
+    pub fn intersect(&self, other: &Self) -> Self {
+        Self(self.0 & other.0)
+    }
+
+    /// Check if SSL/TLS is supported.
+    pub fn supports_ssl(&self) -> bool {
+        self.has(Self::CLIENT_SSL)
+    }
+
+    /// Check if plugin authentication is supported.
+    pub fn supports_plugin_auth(&self) -> bool {
+        self.has(Self::CLIENT_PLUGIN_AUTH)
+    }
+
+    /// Check if secure connection (MySQL 4.1+) is supported.
+    pub fn supports_secure_connection(&self) -> bool {
+        self.has(Self::CLIENT_SECURE_CONNECTION)
+    }
+
+    /// Check if protocol 4.1 is supported.
+    pub fn supports_protocol_41(&self) -> bool {
+        self.has(Self::CLIENT_PROTOCOL_41)
+    }
+
+    /// Check if connection attributes are supported.
+    pub fn supports_connect_attrs(&self) -> bool {
+        self.has(Self::CLIENT_CONNECT_ATTRS)
+    }
+
+    /// Get default client capabilities for CDC connections.
+    pub fn default_client() -> Self {
+        Self(
+            Self::CLIENT_LONG_PASSWORD
+                | Self::CLIENT_LONG_FLAG
+                | Self::CLIENT_PROTOCOL_41
+                | Self::CLIENT_TRANSACTIONS
+                | Self::CLIENT_SECURE_CONNECTION
+                | Self::CLIENT_PLUGIN_AUTH
+                | Self::CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA,
+        )
     }
 }
 
@@ -912,7 +969,7 @@ impl MySqlBinlogClient {
     /// Encrypt password using RSA public key for caching_sha2_password
     ///
     /// The password is XORed with the nonce (to prevent replay attacks),
-    /// then encrypted with the server's RSA public key using OAEP padding.
+    /// then encrypted with the server's RSA public key using PKCS#1 v1.5 padding.
     fn rsa_encrypt_password(&self, password: &str, nonce: &[u8], pem: &str) -> Result<Vec<u8>> {
         // Parse PEM public key
         let der = Self::parse_pem_public_key(pem)?;
@@ -929,16 +986,17 @@ impl MySqlBinlogClient {
         // Parse the RSA public key components from DER
         let (n, e) = Self::parse_rsa_public_key_der(&der)?;
 
-        // Use RSA encryption with PKCS#1 v1.5 padding (MySQL compatible)
-        let public_key = PublicKeyComponents {
-            n: n.as_slice(),
-            e: e.as_slice(),
-        };
-        let rng = SystemRandom::new();
+        // Create RSA public key using the rsa crate
+        let n_bigint = BigUint::from_bytes_be(&n);
+        let e_bigint = BigUint::from_bytes_be(&e);
+        let public_key = RsaPublicKey::new(n_bigint, e_bigint)
+            .map_err(|e| anyhow::anyhow!("Invalid RSA public key: {}", e))?;
 
-        // ring doesn't have direct RSA encryption API for arbitrary data,
-        // so we use a simple PKCS#1 v1.5 implementation for MySQL compatibility
-        let encrypted = Self::rsa_oaep_encrypt(&public_key, &pwd_bytes, &rng)?;
+        // Encrypt using PKCS#1 v1.5 padding (MySQL compatible)
+        let mut rng = OsRng;
+        let encrypted = public_key
+            .encrypt(&mut rng, Pkcs1v15Encrypt, &pwd_bytes)
+            .map_err(|e| anyhow::anyhow!("RSA encryption failed: {}", e))?;
 
         Ok(encrypted)
     }
@@ -1087,183 +1145,6 @@ impl MySqlBinlogClient {
         }
     }
 
-    /// RSA PKCS#1 v1.5 encryption for caching_sha2_password
-    ///
-    /// MySQL accepts PKCS#1 v1.5 padding for caching_sha2_password full auth.
-    fn rsa_oaep_encrypt(
-        public_key: &PublicKeyComponents<&[u8]>,
-        message: &[u8],
-        rng: &SystemRandom,
-    ) -> Result<Vec<u8>> {
-        // This is a basic PKCS#1 v1.5 type 2 encryption
-        let k = public_key.n.len(); // Key size in bytes
-
-        if message.len() > k - 11 {
-            bail!(
-                "Message too long for RSA key: {} > {}",
-                message.len(),
-                k - 11
-            );
-        }
-
-        // PKCS#1 v1.5 type 2 padding: 0x00 || 0x02 || PS || 0x00 || M
-        let ps_len = k - message.len() - 3;
-        let mut padded = Vec::with_capacity(k);
-        padded.push(0x00);
-        padded.push(0x02);
-
-        // Generate random non-zero padding using ring's SecureRandom
-        use ring::rand::SecureRandom;
-        let mut ps = vec![0u8; ps_len];
-        rng.fill(&mut ps)
-            .map_err(|_| anyhow::anyhow!("Failed to generate random padding"))?;
-
-        // Ensure no zero bytes in padding (PKCS#1 requirement)
-        for byte in &mut ps {
-            while *byte == 0 {
-                let mut b = [0u8; 1];
-                rng.fill(&mut b)
-                    .map_err(|_| anyhow::anyhow!("Failed to generate random byte"))?;
-                *byte = b[0];
-            }
-        }
-        padded.extend_from_slice(&ps);
-        padded.push(0x00);
-        padded.extend_from_slice(message);
-
-        // Perform RSA encryption: c = m^e mod n
-        let encrypted = Self::modular_exponentiation(&padded, public_key.e, public_key.n);
-
-        Ok(encrypted)
-    }
-
-    /// Modular exponentiation for RSA: base^exp mod modulus
-    ///
-    /// Uses square-and-multiply algorithm. For production use, you'd want
-    /// a constant-time implementation, but this is sufficient for client-side
-    /// password encryption.
-    fn modular_exponentiation(base: &[u8], exp: &[u8], modulus: &[u8]) -> Vec<u8> {
-        // Convert bytes to big integers (big-endian)
-        fn bytes_to_bigint(bytes: &[u8]) -> Vec<u32> {
-            let mut result = Vec::new();
-            let mut acc = 0u32;
-            let mut bits = 0;
-
-            for &byte in bytes.iter().rev() {
-                acc |= (byte as u32) << bits;
-                bits += 8;
-                if bits >= 32 {
-                    result.push(acc);
-                    acc = (byte as u32) >> (8 - (bits - 32));
-                    bits -= 32;
-                }
-            }
-            if bits > 0 || result.is_empty() {
-                result.push(acc);
-            }
-            // Trim leading zeros
-            while result.len() > 1 && result.last() == Some(&0) {
-                result.pop();
-            }
-            result
-        }
-
-        fn bigint_to_bytes(bigint: &[u32], len: usize) -> Vec<u8> {
-            let mut result = Vec::with_capacity(len);
-            for &word in bigint.iter() {
-                result.push((word & 0xFF) as u8);
-                result.push(((word >> 8) & 0xFF) as u8);
-                result.push(((word >> 16) & 0xFF) as u8);
-                result.push(((word >> 24) & 0xFF) as u8);
-            }
-            result.truncate(len);
-            result.reverse();
-            // Pad with leading zeros if needed
-            while result.len() < len {
-                result.insert(0, 0);
-            }
-            result
-        }
-
-        fn mul_mod(a: &[u32], b: &[u32], m: &[u32]) -> Vec<u32> {
-            // Multiply a * b
-            let mut product = vec![0u64; a.len() + b.len()];
-            for (i, &ai) in a.iter().enumerate() {
-                let mut carry = 0u64;
-                for (j, &bj) in b.iter().enumerate() {
-                    let tmp = product[i + j] + (ai as u64) * (bj as u64) + carry;
-                    product[i + j] = tmp & 0xFFFFFFFF;
-                    carry = tmp >> 32;
-                }
-                product[i + b.len()] = carry;
-            }
-
-            // Convert to u32 and reduce mod m
-            let mut result: Vec<u32> = product.iter().map(|&x| x as u32).collect();
-            while result.len() > 1 && result.last() == Some(&0) {
-                result.pop();
-            }
-
-            // Simple modular reduction by repeated subtraction
-            // This is not efficient but correct for our use case
-            while cmp_bigint(&result, m) >= 0 {
-                result = sub_bigint(&result, m);
-            }
-            result
-        }
-
-        fn cmp_bigint(a: &[u32], b: &[u32]) -> i32 {
-            if a.len() != b.len() {
-                return (a.len() as i32) - (b.len() as i32);
-            }
-            for i in (0..a.len()).rev() {
-                if a[i] != b[i] {
-                    return if a[i] > b[i] { 1 } else { -1 };
-                }
-            }
-            0
-        }
-
-        fn sub_bigint(a: &[u32], b: &[u32]) -> Vec<u32> {
-            let mut result = a.to_vec();
-            let mut borrow = 0i64;
-            for i in 0..a.len() {
-                let bi = if i < b.len() { b[i] as i64 } else { 0 };
-                let diff = (a[i] as i64) - bi - borrow;
-                if diff < 0 {
-                    result[i] = (diff + 0x100000000) as u32;
-                    borrow = 1;
-                } else {
-                    result[i] = diff as u32;
-                    borrow = 0;
-                }
-            }
-            while result.len() > 1 && result.last() == Some(&0) {
-                result.pop();
-            }
-            result
-        }
-
-        let base_int = bytes_to_bigint(base);
-        let exp_int = bytes_to_bigint(exp);
-        let mod_int = bytes_to_bigint(modulus);
-
-        // Square-and-multiply
-        let mut result = vec![1u32];
-        let mut base_pow = base_int;
-
-        for &word in &exp_int {
-            for bit in 0..32 {
-                if (word >> bit) & 1 == 1 {
-                    result = mul_mod(&result, &base_pow, &mod_int);
-                }
-                base_pow = mul_mod(&base_pow, &base_pow, &mod_int);
-            }
-        }
-
-        bigint_to_bytes(&result, modulus.len())
-    }
-
     /// mysql_native_password authentication
     fn mysql_native_password(password: Option<&str>, salt: &[u8]) -> Vec<u8> {
         match password {
@@ -1333,8 +1214,8 @@ impl MySqlBinlogClient {
             Some(pwd) => {
                 // Derive Ed25519 seed from password using SHA-512
                 // MariaDB uses SHA-512 of the password as the Ed25519 seed
-                use ring::signature::Ed25519KeyPair;
-                use sha2::Sha512;
+                use ed25519_dalek::{Signer, SigningKey};
+                use sha2::{Digest, Sha512};
 
                 // Hash password with SHA-512 to get 64 bytes
                 let mut hasher = Sha512::new();
@@ -1347,19 +1228,12 @@ impl MySqlBinlogClient {
                     Err(_) => return vec![],
                 };
 
-                // Create Ed25519 keypair from seed using ring's unchecked API
-                // This directly uses the seed without PKCS#8 wrapping
-                match Ed25519KeyPair::from_seed_unchecked(&seed) {
-                    Ok(key_pair) => {
-                        // Sign the nonce
-                        let signature = key_pair.sign(nonce);
-                        signature.as_ref().to_vec()
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to create Ed25519 keypair: {}", e);
-                        vec![]
-                    }
-                }
+                // Create Ed25519 signing key from seed
+                let signing_key = SigningKey::from_bytes(&seed);
+
+                // Sign the nonce
+                let signature = signing_key.sign(nonce);
+                signature.to_bytes().to_vec()
             }
         }
     }
@@ -1719,19 +1593,6 @@ mwIDAQAB
         let (len, bytes_read) = MySqlBinlogClient::parse_der_length(&data).unwrap();
         assert_eq!(len, 256);
         assert_eq!(bytes_read, 3);
-    }
-
-    #[test]
-    fn test_modular_exponentiation_simple() {
-        // Test: 2^3 mod 5 = 3
-        let base = [2u8];
-        let exp = [3u8];
-        let modulus = [5u8];
-
-        let result = MySqlBinlogClient::modular_exponentiation(&base, &exp, &modulus);
-        // Result should be 3 (single byte, but may be padded)
-        assert!(!result.is_empty());
-        assert_eq!(*result.last().unwrap(), 3);
     }
 
     #[test]

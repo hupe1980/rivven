@@ -8,6 +8,7 @@
 #   docker build -t ghcr.io/hupe1980/rivvend:latest .
 #   docker build --build-arg BINARY=rivven-connect -t ghcr.io/hupe1980/rivven-connect:latest .
 #   docker build --build-arg BINARY=rivven-operator -t ghcr.io/hupe1980/rivven-operator:latest .
+#   docker build --build-arg BINARY=rivven-schema -t ghcr.io/hupe1980/rivven-schema:latest .
 #
 # Multi-arch build (uses native compilation on each platform via QEMU):
 #   docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/hupe1980/rivvend:latest .
@@ -29,15 +30,15 @@ WORKDIR /build
 # Detect target architecture for musl cross-compilation
 ARG TARGETARCH
 
-# Install build dependencies (no OpenSSL needed - we use rustls)
+# Install build dependencies
+# - aws-lc-rs v1.15.3+ only needs a C compiler (no cmake/clang required)
+# - No OpenSSL needed (using rustls for TLS)
+# - No RocksDB (using redb - pure Rust)
+# - No WASM build tools (dashboard is static HTML)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
     perl \
-    make \
-    cmake \
-    clang \
-    llvm \
     musl-tools \
     musl-dev \
     gcc-aarch64-linux-gnu \
@@ -45,12 +46,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Add musl targets for static linking
 RUN rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
-
-# Add wasm32 target for dashboard
-RUN rustup target add wasm32-unknown-unknown
-
-# Install trunk for dashboard build
-RUN cargo install trunk --locked
 
 # Copy workspace files
 COPY Cargo.toml Cargo.lock ./
@@ -76,11 +71,13 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
        --package rivven \
        --package rivven-connect \
        --package rivven-operator \
+       --package rivven-schema \
     && mkdir -p /out \
     && cp target/$TARGET/release/rivvend /out/ \
     && cp target/$TARGET/release/rivven /out/ \
     && cp target/$TARGET/release/rivven-connect /out/ \
     && cp target/$TARGET/release/rivven-operator /out/ \
+    && cp target/$TARGET/release/rivven-schema /out/ \
     && file /out/rivvend
 
 # ============================================================================
@@ -106,6 +103,7 @@ VOLUME ["/data"]
 #   rivvend:         9092 (broker), 9093 (cluster), 9090 (metrics), 9094 (HTTP API/dashboard)
 #   rivven-connect:  8080 (health), 9091 (metrics)
 #   rivven-operator: 8080 (metrics), 8081 (health)
+#   rivven-schema:   8081 (API), 9090 (metrics)
 # Note: EXPOSE is documentation only - actual port mapping at runtime via -p
 EXPOSE 8080 8081 9090 9091 9092 9093 9094
 

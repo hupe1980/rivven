@@ -16,13 +16,17 @@ path = "src/lib.rs"
 # All internal crates as dependencies (can use workspace versions)
 [dependencies]
 # Core crates
-rivven-core = { workspace = true }
+rivven-core = { workspace = true, features = ["cedar", "tls"] }
 rivven-protocol = { workspace = true }
 rivven-cluster = { workspace = true }
 rivven-cdc = { workspace = true, features = ["postgres", "mysql", "mariadb"] }
-rivven-client = { workspace = true }
+rivven-client = { workspace = true, features = ["tls"] }
 rivven-connect = { workspace = true }
-rivvend = { workspace = true }
+rivven-schema = { workspace = true, features = ["server", "avro", "auth"] }
+rivvend = { workspace = true, features = ["tls"] }
+
+# TLS crypto provider - needed for runtime initialization
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
 
 # Async runtime
 tokio = { workspace = true, features = ["full", "test-util"] }
@@ -51,12 +55,17 @@ mysql_async = { version = "0.34", default-features = false }
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 # Note: rdkafka removed - requires cmake and librdkafka; add if needed for Kafka comparison tests
 
+# HTTP client for API testing
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
 # Utilities
 chrono = { workspace = true }
 uuid = { version = "1.0", features = ["v4"] }
 rand = "0.8"
 tempfile = "3.10"
 portpicker = "0.1"
+schemars = "0.8"
+validator = { version = "0.20", features = ["derive"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
@@ -64,6 +73,10 @@ proptest = "1.4"
 quickcheck = "1.0"
 quickcheck_macros = "1.0"
 fake = { version = "2.9", features = ["derive"] }
+
+[features]
+default = ["schema"]
+schema = []
 
 [[test]]
 name = "e2e_pipeline"
@@ -96,3 +109,39 @@ path = "tests/cdc_mysql.rs"
 [[test]]
 name = "cdc_mariadb"
 path = "tests/cdc_mariadb.rs"
+
+[[test]]
+name = "schema_avro"
+path = "tests/schema_avro.rs"
+
+[[test]]
+name = "stress"
+path = "tests/stress.rs"
+
+[[test]]
+name = "consumer_groups"
+path = "tests/consumer_groups.rs"
+
+[[test]]
+name = "connect_e2e"
+path = "tests/connect_e2e.rs"
+
+[[test]]
+name = "rbac"
+path = "tests/rbac.rs"
+
+[[test]]
+name = "tls"
+path = "tests/tls.rs"
+
+[[test]]
+name = "observability"
+path = "tests/observability.rs"
+
+[[test]]
+name = "compression"
+path = "tests/compression.rs"
+
+[[test]]
+name = "tiered_storage"
+path = "tests/tiered_storage.rs"

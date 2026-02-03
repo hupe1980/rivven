@@ -413,11 +413,24 @@ impl ReplicationStream {
 // Secure Replication Client (with TLS support)
 // ============================================================================
 
-/// Secure replication client with TLS, circuit breaker, and rate limiting
-#[allow(dead_code)]
+/// Secure replication client with TLS, circuit breaker, and rate limiting.
+///
+/// This client wraps the basic replication protocol with production-ready features:
+/// - Circuit breaker for fault tolerance
+/// - Rate limiting to prevent overwhelming the server
+/// - Optional TLS encryption
+///
+/// # Connection Metadata
+///
+/// The `user` and `database` fields store the connection parameters for:
+/// - Reconnection logic (future feature)
+/// - Connection pool identification
+/// - Diagnostic logging
 pub struct SecureReplicationClient {
     stream: StreamWrapper,
+    /// Username used for this connection (for reconnection and diagnostics)
     user: String,
+    /// Database name for this connection (for reconnection and diagnostics)
     database: String,
     circuit_breaker: Arc<CircuitBreaker>,
     rate_limiter: Arc<RateLimiter>,
@@ -548,6 +561,20 @@ impl SecureReplicationClient {
     /// Check if the connection is using TLS
     pub fn is_tls(&self) -> bool {
         self.is_tls
+    }
+
+    /// Get the username for this connection.
+    ///
+    /// Useful for connection pooling, diagnostics, and reconnection logic.
+    pub fn user(&self) -> &str {
+        &self.user
+    }
+
+    /// Get the database name for this connection.
+    ///
+    /// Useful for connection pooling, diagnostics, and reconnection logic.
+    pub fn database(&self) -> &str {
+        &self.database
     }
 
     /// Establish TCP connection with timeout

@@ -31,7 +31,7 @@ use rivven_cluster::{
     hash_node_id, ClusterCoordinator, ClusterHealth, CoordinatorState, RaftNode, TopicState,
     Transport, TransportConfig,
 };
-use rivven_core::{schema_registry::EmbeddedSchemaRegistry, OffsetManager, TopicManager};
+use rivven_core::{OffsetManager, TopicManager};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -110,8 +110,6 @@ pub struct ClusterServer {
     topic_manager: TopicManager,
     /// Offset manager
     offset_manager: OffsetManager,
-    /// Schema registry
-    schema_registry: Arc<EmbeddedSchemaRegistry>,
     /// Cluster coordinator (None in standalone mode)
     coordinator: Option<Arc<RwLock<ClusterCoordinator>>>,
     /// Cluster transport (None in standalone mode)  
@@ -161,8 +159,13 @@ impl ClusterServer {
 
         // Initialize core components
         let topic_manager = TopicManager::new(core_config.clone());
+
+        // Recover persisted topics from disk
+        if let Err(e) = topic_manager.recover().await {
+            tracing::warn!("Failed to recover topics from disk: {}", e);
+        }
+
         let offset_manager = OffsetManager::new();
-        let schema_registry = Arc::new(EmbeddedSchemaRegistry::new(&core_config).await?);
 
         let (shutdown_tx, _) = broadcast::channel(1);
 
@@ -276,7 +279,6 @@ impl ClusterServer {
             cli,
             topic_manager,
             offset_manager,
-            schema_registry,
             coordinator,
             transport,
             raft_node,
@@ -439,7 +441,6 @@ impl ClusterServer {
         let handler = Arc::new(RequestHandler::with_partitioner_config(
             self.topic_manager.clone(),
             self.offset_manager.clone(),
-            self.schema_registry.clone(),
             partitioner_config,
         ));
 
@@ -975,8 +976,6 @@ impl RequestRouter {
             | Request::CommitOffset { .. }
             | Request::GetMetadata { .. }
             | Request::Ping
-            | Request::RegisterSchema { .. }
-            | Request::GetSchema { .. }
             | Request::GetClusterMetadata { .. }
             | Request::ListGroups
             | Request::DescribeGroup { .. }

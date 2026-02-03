@@ -616,8 +616,7 @@ pub struct SegmentedCompactor {
     active_segment: RwLock<Compactor>,
     /// Sealed segments (immutable, compacted)
     sealed_segments: RwLock<Vec<Arc<Compactor>>>,
-    /// Global stats
-    #[allow(dead_code)]
+    /// Global stats tracking across all segments
     stats: CompactionStats,
 }
 
@@ -743,6 +742,20 @@ impl SegmentedCompactor {
     /// Get segment count.
     pub async fn segment_count(&self) -> usize {
         self.sealed_segments.read().await.len() + 1 // +1 for active
+    }
+
+    /// Get aggregated statistics across all segments.
+    pub fn stats(&self) -> CompactionStatsSnapshot {
+        self.stats.snapshot()
+    }
+
+    /// Record a compaction event in the global stats.
+    pub fn record_compaction(&self, result: &CompactionResult) {
+        self.stats.record_compacted(result.entries_removed as u64);
+        self.stats.record_removed(result.entries_removed as u64);
+        self.stats
+            .record_tombstone_expired(result.tombstones_expired as u64);
+        self.stats.record_compaction_run(result.duration);
     }
 }
 

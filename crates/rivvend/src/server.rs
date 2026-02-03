@@ -1,7 +1,7 @@
 use crate::handler::RequestHandler;
 use crate::protocol::Request;
 use bytes::BytesMut;
-use rivven_core::{schema_registry::EmbeddedSchemaRegistry, Config, OffsetManager, TopicManager};
+use rivven_core::{storage::TieredStorage, Config, OffsetManager, TopicManager};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -14,16 +14,39 @@ pub struct Server {
     config: Config,
     topic_manager: TopicManager,
     offset_manager: OffsetManager,
-    schema_registry: Arc<EmbeddedSchemaRegistry>,
     listener: Option<TcpListener>,
+    #[allow(dead_code)]
+    tiered_storage: Option<Arc<TieredStorage>>,
 }
 
 impl Server {
     /// Create a new server with the given configuration
     pub async fn new(config: Config) -> anyhow::Result<Self> {
-        let topic_manager = TopicManager::new(config.clone());
+        // Initialize tiered storage if enabled
+        let tiered_storage = if config.tiered_storage.enabled {
+            info!(
+                "Initializing tiered storage with config: {:?}",
+                config.tiered_storage
+            );
+            let ts = TieredStorage::new(config.tiered_storage.clone()).await?;
+            Some(ts)
+        } else {
+            None
+        };
+
+        // Create TopicManager with or without tiered storage
+        let topic_manager = if let Some(ref ts) = tiered_storage {
+            TopicManager::new_with_tiered_storage(config.clone(), ts.clone())
+        } else {
+            TopicManager::new(config.clone())
+        };
+
+        // Recover persisted topics from disk
+        if let Err(e) = topic_manager.recover().await {
+            warn!("Failed to recover topics from disk: {}", e);
+        }
+
         let offset_manager = OffsetManager::new();
-        let schema_registry = Arc::new(EmbeddedSchemaRegistry::new(&config).await?);
 
         // Pre-bind the listener so we can report the actual address
         let addr = config.server_address();
@@ -33,8 +56,8 @@ impl Server {
             config,
             topic_manager,
             offset_manager,
-            schema_registry,
             listener: Some(listener),
+            tiered_storage,
         })
     }
 
@@ -63,7 +86,6 @@ impl Server {
         let handler = Arc::new(RequestHandler::new(
             self.topic_manager.clone(),
             self.offset_manager.clone(),
-            self.schema_registry.clone(),
         ));
 
         loop {

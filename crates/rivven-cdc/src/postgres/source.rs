@@ -240,7 +240,7 @@ impl PostgresCdcConfigBuilder {
     ///     .publication_name("my_publication")
     ///     .signal_config(
     ///         SignalConfig::builder()
-    ///             .signal_data_collection("public.debezium_signal")
+    ///             .signal_data_collection("public.rivven_signal")
     ///             .build()
     ///     )
     ///     .build()?;

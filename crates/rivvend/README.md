@@ -1,43 +1,52 @@
 # rivvend
 
-The Rivven broker server daemon.
+> The Rivven message broker daemon — a high-performance, single-binary event streaming server.
+
+## Overview
+
+`rivvend` is the core message broker that handles storage, replication, authentication, and message routing. It's designed to be schema-agnostic, handling raw bytes while delegating schema management to `rivven-schema`.
 
 ## Features
 
-- **Native Protocol** - High-performance binary protocol
-- **HTTP Gateway** - REST API for management
-- **Sticky Partitioner** - Kafka 2.4+ style partitioning for optimal throughput
-- **Replication** - Multi-node replication with Raft consensus
-- **Authentication** - SCRAM-SHA-256, mTLS, API keys
-- **Authorization** - Cedar policy engine
-- **Dashboard** - Leptos/WASM web UI (embedded when built with `--features dashboard`)
+| Category | Features |
+|:---------|:---------|
+| **Performance** | Lock-free I/O, zero-copy reads, sticky partitioning |
+| **Protocol** | Native binary protocol, HTTP REST API |
+| **Storage** | Append-only log, tiered storage, log compaction |
+| **Clustering** | Raft consensus, multi-node replication |
+| **Security** | SCRAM-SHA-256, mTLS, API keys, Cedar RBAC |
+| **Observability** | Prometheus metrics, web dashboard |
 
-## Installation
+## Quick Start
 
 ```bash
-# Build from source (without dashboard)
-cargo build -p rivvend --release
+# Install
+cargo install rivvend
 
-# Build with embedded dashboard
-# First, build the dashboard assets:
-cd crates/rivven-dashboard
-trunk build --release
-cp -r dist/* ../rivvend/static/
-cd ../..
+# Start with defaults
+rivvend --data-dir ./data
 
-# Then build the server with dashboard feature:
-cargo build -p rivvend --release --features dashboard
-
-# Run the server
-./target/release/rivvend --data-dir ./data
+# Start with dashboard
+rivvend --data-dir ./data --dashboard
 # Dashboard available at http://localhost:8080/
 ```
 
-**Note**: The dashboard requires building with the `dashboard` feature, which embeds the WASM assets compiled by trunk. See [rivven-dashboard README](../rivven-dashboard/README.md) for details.
+## Building from Source
+
+```bash
+# Standard build
+cargo build -p rivvend --release
+
+# Build with embedded dashboard (requires trunk)
+cd crates/rivven-dashboard && trunk build --release
+cp -r dist/* ../rivvend/static/
+cd ../..
+cargo build -p rivvend --release --features dashboard
+```
 
 ## Message Partitioning
 
-Rivven uses **sticky partitioning** (Kafka 2.4+ compatible):
+Rivven uses **sticky partitioning** for optimal throughput:
 
 | Message Type | Strategy | Behavior |
 |:-------------|:---------|:---------|
@@ -45,13 +54,11 @@ Rivven uses **sticky partitioning** (Kafka 2.4+ compatible):
 | Without key | Sticky batching | Batches to one partition, rotates periodically |
 | Explicit partition | Direct | Uses specified partition |
 
-Configure via CLI:
+Configure via CLI or environment:
 ```bash
 rivvend --partitioner-batch-size 16384 --partitioner-linger-ms 100
-```
 
-Or environment variables:
-```bash
+# Or via environment
 export RIVVEN_PARTITIONER_BATCH_SIZE=16384
 export RIVVEN_PARTITIONER_LINGER_MS=100
 ```
@@ -59,7 +66,7 @@ export RIVVEN_PARTITIONER_LINGER_MS=100
 ## Configuration
 
 ```yaml
-# rivven.yaml
+# rivvend.yaml
 server:
   bind_address: "0.0.0.0:9092"
   http_port: 8080
@@ -84,30 +91,41 @@ tls:
   key_file: /etc/rivven/server.key
 ```
 
-## CLI Options
+## CLI Reference
 
-```bash
-rivvend --help
-
-USAGE:
-    rivvend [OPTIONS]
+```
+rivvend [OPTIONS]
 
 OPTIONS:
-    -c, --config <FILE>    Configuration file path
-    -d, --data-dir <DIR>   Data directory
-    -b, --bind <ADDR>      Bind address [default: 0.0.0.0:9092]
-    -h, --help             Print help
-    -V, --version          Print version
+    -c, --config <FILE>           Configuration file path
+    -d, --data-dir <DIR>          Data directory [default: ./data]
+    -b, --bind <ADDR>             Bind address [default: 0.0.0.0:9092]
+        --dashboard               Enable web dashboard
+        --http-port <PORT>        HTTP port [default: 8080]
+    -h, --help                    Print help
+    -V, --version                 Print version
 ```
 
 ## Metrics
 
-The server exposes Prometheus metrics on the HTTP port:
+Prometheus metrics are exposed on the HTTP port:
 
 ```bash
 curl http://localhost:8080/metrics
 ```
 
+Key metrics include:
+- `rivven_messages_received_total` — Total messages received
+- `rivven_messages_sent_total` — Total messages sent
+- `rivven_storage_bytes` — Storage size by topic
+- `rivven_replication_lag_ms` — Replication lag
+
+## Documentation
+
+- [Architecture](https://rivven.hupe1980.github.io/rivven/docs/architecture)
+- [Security](https://rivven.hupe1980.github.io/rivven/docs/security)
+- [Kubernetes](https://rivven.hupe1980.github.io/rivven/docs/kubernetes)
+
 ## License
 
-See root [LICENSE](../../LICENSE) file.
+Apache-2.0. See [LICENSE](../../LICENSE).

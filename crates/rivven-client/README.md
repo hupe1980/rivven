@@ -1,17 +1,19 @@
 # rivven-client
 
-Native Rust client library for Rivven.
+> Native Rust client library for the Rivven event streaming platform.
+
+## Overview
+
+`rivven-client` is a production-grade async client with connection pooling, automatic failover, circuit breakers, and exactly-once semantics.
 
 ## Features
 
-- **Async/Await** - Built on Tokio for high-performance async I/O
-- **Connection Pooling** - Efficient connection management with configurable pool sizes
-- **Automatic Failover** - Bootstrap server failover and reconnection
-- **Circuit Breaker** - Fault tolerance with automatic recovery
-- **Retry with Exponential Backoff** - Automatic retry with jitter for transient failures
-- **Health Monitoring** - Real-time statistics and health checks
-- **TLS Support** - Secure connections with rustls
-- **SCRAM-SHA-256 Authentication** - Secure challenge-response authentication
+| Category | Features |
+|:---------|:---------|
+| **Connectivity** | Connection pooling, request pipelining, automatic failover |
+| **Resilience** | Circuit breaker, exponential backoff, health monitoring |
+| **Security** | TLS/mTLS, SCRAM-SHA-256 authentication |
+| **Semantics** | Transactions, idempotent producer, exactly-once delivery |
 
 ## Installation
 
@@ -148,6 +150,52 @@ let config = ResilientClientConfig::builder()
     .build();
 ```
 
+### High-Throughput Pipelined Client
+
+For maximum throughput, use `PipelinedClient` which allows multiple in-flight requests over a single connection:
+
+```rust
+use rivven_client::{PipelinedClient, PipelineConfig};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // High-throughput configuration
+    let config = PipelineConfig::high_throughput();
+    let client = PipelinedClient::connect("localhost:9092", config).await?;
+    
+    // Send 1000 requests concurrently - all pipelined over single connection
+    let handles: Vec<_> = (0..1000)
+        .map(|i| {
+            let client = client.clone();
+            tokio::spawn(async move {
+                client.publish("topic", format!("msg-{}", i)).await
+            })
+        })
+        .collect();
+    
+    for handle in handles {
+        handle.await??;
+    }
+    
+    // Check pipeline statistics
+    let stats = client.stats();
+    println!("Requests sent: {}", stats.requests_sent);
+    println!("Responses received: {}", stats.responses_received);
+    println!("Success rate: {:.1}%", stats.success_rate() * 100.0);
+    
+    Ok(())
+}
+```
+
+### Pipeline Configuration
+
+| Config | Default | High-Throughput | Low-Latency |
+|--------|---------|-----------------|-------------|
+| `max_in_flight` | 100 | 1000 | 32 |
+| `batch_linger_us` | 1000 | 5000 | 0 |
+| `max_batch_size` | 64 | 256 | 1 |
+| `request_timeout` | 30s | 60s | 10s |
+
 ### Health Monitoring
 
 Monitor client and server health in real-time:
@@ -172,14 +220,14 @@ for server in &stats.servers {
 ### Admin Operations
 
 ```rust
-use rivven_client::ResilientClient;
+use rivven_client::Client;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let client = ResilientClient::new(config);
+    let mut client = Client::connect("localhost:9092").await?;
     
     // Create topic
-    client.create_topic("my-topic", 3, 2).await?;
+    client.create_topic("my-topic", Some(3)).await?;
     
     // List topics
     let topics = client.list_topics().await?;
@@ -187,13 +235,210 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Topic: {}", topic);
     }
     
-    // Get topic info
-    let info = client.get_topic_info("my-topic").await?;
-    
     // Delete topic
     client.delete_topic("my-topic").await?;
     
     Ok(())
+}
+```
+
+### Advanced Admin API
+
+Rivven supports advanced admin operations for topic configuration management:
+
+```rust
+use rivven_client::Client;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = Client::connect("localhost:9092").await?;
+    
+    // Create topic
+    client.create_topic("events", Some(3)).await?;
+    
+    // Describe topic configurations
+    let configs = client.describe_topic_configs(&["events"]).await?;
+    for (topic, config) in &configs {
+        println!("Topic '{}' configuration:", topic);
+        for (key, value) in config {
+            println!("  {}: {}", key, value);
+        }
+    }
+    
+    // Alter topic configuration
+    let result = client.alter_topic_config("events", &[
+        ("retention.ms", Some("86400000")),    // 1 day retention
+        ("cleanup.policy", Some("compact")),   // Log compaction
+        ("max.message.bytes", Some("2097152")), // 2 MB max message
+    ]).await?;
+    println!("Changed {} config entries", result.changed_count);
+    
+    // Reset configuration to default
+    client.alter_topic_config("events", &[
+        ("retention.ms", None),  // Reset to broker default
+    ]).await?;
+    
+    // Increase partition count
+    let new_count = client.create_partitions("events", 6).await?;
+    println!("Topic now has {} partitions", new_count);
+    
+    // Delete records before offset (log truncation)
+    let results = client.delete_records("events", &[
+        (0, 1000),  // Delete records before offset 1000 in partition 0
+        (1, 500),   // Delete records before offset 500 in partition 1
+    ]).await?;
+    for result in results {
+        println!("Partition {}: low watermark now {}", 
+            result.partition, result.low_watermark);
+    }
+    
+    Ok(())
+}
+```
+
+#### Supported Topic Configurations
+
+| Configuration | Description | Example |
+|---------------|-------------|---------|
+| `retention.ms` | Message retention time | `86400000` (1 day) |
+| `retention.bytes` | Max partition size | `1073741824` (1 GB) |
+| `max.message.bytes` | Max message size | `2097152` (2 MB) |
+| `segment.bytes` | Segment file size | `536870912` (512 MB) |
+| `segment.ms` | Segment rotation time | `604800000` (7 days) |
+| `cleanup.policy` | `delete` or `compact` | `compact` |
+| `min.insync.replicas` | Min ISR for acks=all | `2` |
+| `compression.type` | `lz4`, `zstd`, `snappy`, `gzip` | `lz4` |
+```
+
+### Transactions & Idempotent Producer
+
+Rivven supports native transactions and idempotent producers for exactly-once semantics:
+
+#### Idempotent Producer
+
+Automatic message deduplication using producer IDs and sequence numbers:
+
+```rust
+use rivven_client::Client;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = Client::connect("localhost:9092").await?;
+    
+    // Initialize idempotent producer (assigns producer_id and epoch)
+    let mut producer = client.init_producer_id(None).await?;
+    println!("Producer ID: {}, Epoch: {}", producer.producer_id, producer.producer_epoch);
+    
+    // Publish with deduplication
+    let (offset, partition, was_duplicate) = client
+        .publish_idempotent("orders", None::<Vec<u8>>, b"order-data".to_vec(), &mut producer)
+        .await?;
+    
+    if was_duplicate {
+        println!("Message was a duplicate (already delivered)");
+    } else {
+        println!("Published to partition {} at offset {}", partition, offset);
+    }
+    
+    Ok(())
+}
+```
+
+#### Transactions
+
+Atomic, all-or-nothing message delivery across partitions and topics:
+
+```rust
+use rivven_client::Client;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = Client::connect("localhost:9092").await?;
+    
+    // Initialize transactional producer
+    let mut producer = client.init_producer_id(None).await?;
+    
+    // Begin transaction
+    let txn_id = "payment-processor";
+    client.begin_transaction(txn_id, &producer, None).await?;
+    
+    // Register partitions before writing
+    client.add_partitions_to_txn(txn_id, &producer, &[
+        ("orders", 0),
+        ("payments", 0),
+    ]).await?;
+    
+    // Atomic writes across multiple topics
+    client.publish_transactional(txn_id, "orders", None::<Vec<u8>>, b"order-created".to_vec(), &mut producer).await?;
+    client.publish_transactional(txn_id, "payments", None::<Vec<u8>>, b"payment-processed".to_vec(), &mut producer).await?;
+    
+    // Commit (all-or-nothing)
+    client.commit_transaction(txn_id, &producer).await?;
+    println!("Transaction committed atomically!");
+    
+    Ok(())
+}
+```
+
+#### Exactly-Once Consume-Transform-Produce
+
+For stream processing with exactly-once semantics:
+
+```rust
+use rivven_client::Client;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = Client::connect("localhost:9092").await?;
+    let mut producer = client.init_producer_id(None).await?;
+    
+    let txn_id = "stream-processor";
+    let consumer_group = "processor-group";
+    
+    // Begin transaction
+    client.begin_transaction(txn_id, &producer, None).await?;
+    
+    // Add output partition to transaction
+    client.add_partitions_to_txn(txn_id, &producer, &[("output-topic", 0)]).await?;
+    
+    // Consume input
+    let messages = client.consume("input-topic", 0, 0, 100).await?;
+    
+    // Transform and produce
+    for msg in &messages {
+        let transformed = format!("processed: {:?}", msg.value);
+        client.publish_transactional(
+            txn_id, "output-topic", None::<Vec<u8>>, 
+            transformed.into_bytes(), &mut producer
+        ).await?;
+    }
+    
+    // Commit consumer offsets as part of transaction
+    client.add_offsets_to_txn(
+        txn_id, &producer, consumer_group,
+        &[("input-topic", 0, messages.len() as i64)]
+    ).await?;
+    
+    // Atomic commit (output messages + consumed offsets)
+    client.commit_transaction(txn_id, &producer).await?;
+    
+    Ok(())
+}
+```
+
+#### Transaction Error Handling
+
+```rust
+use rivven_client::{Client, Error};
+
+// On error, abort the transaction
+match client.commit_transaction(txn_id, &producer).await {
+    Ok(()) => println!("Committed successfully"),
+    Err(e) => {
+        eprintln!("Commit failed: {}", e);
+        // Abort to discard all writes
+        client.abort_transaction(txn_id, &producer).await?;
+    }
 }
 ```
 
@@ -256,8 +501,12 @@ let tls_config = TlsConfig::builder()
 let client = Client::connect_with_tls("localhost:9093", tls_config).await?;
 ```
 
+## Documentation
+
+- [Getting Started](https://rivven.hupe1980.github.io/rivven/docs/getting-started)
+- [Security](https://rivven.hupe1980.github.io/rivven/docs/security)
+- [Exactly-Once Semantics](https://rivven.hupe1980.github.io/rivven/docs/exactly-once)
+
 ## License
 
-Licensed under either of Apache License, Version 2.0 or MIT license at your option.
-
-See root [LICENSE](../../LICENSE) file.
+Apache-2.0. See [LICENSE](../../LICENSE).

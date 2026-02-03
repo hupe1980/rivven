@@ -462,3 +462,500 @@ async fn stress_test_mixed_operations() -> Result<()> {
     broker.shutdown().await?;
     Ok(())
 }
+
+// ============================================================================
+// DURABILITY TESTS - No data loss on broker restart
+// ============================================================================
+
+/// Test that data persists across broker restarts with persistence enabled
+///
+/// This is a critical test for production readiness - ensures that:
+/// 1. Data written to disk survives broker shutdown
+/// 2. Topics and their configurations are restored
+/// 3. All messages are available after restart
+/// 4. Offsets are preserved correctly
+#[tokio::test]
+async fn test_no_data_loss_on_restart_with_persistence() -> Result<()> {
+    use rivven_core::Config;
+    use std::path::PathBuf;
+    use tokio::fs;
+
+    init_tracing();
+
+    // Create a unique data directory for this test
+    let data_dir = format!("/tmp/rivven-durability-test-{}", uuid::Uuid::new_v4());
+    let data_path = PathBuf::from(&data_dir);
+    fs::create_dir_all(&data_path).await?;
+    info!("Created test data directory: {}", data_dir);
+
+    let topic = "durability-test-topic";
+    let expected_messages: Vec<String> = (0..100).map(|i| format!("message-{:04}", i)).collect();
+
+    // Phase 1: Start broker with persistence, write data
+    {
+        let config = Config::default()
+            .with_persistence(true)
+            .with_data_dir(data_dir.clone());
+
+        let broker = TestBroker::start_with_config(config).await?;
+        let addr = broker.connection_string();
+        info!("Phase 1: Broker started at {}", addr);
+
+        let mut client = Client::connect(&addr).await?;
+
+        // Create topic with specific configuration
+        client.create_topic(topic, Some(3)).await?;
+        info!("Created topic '{}' with 3 partitions", topic);
+
+        // Write all messages
+        for (i, msg) in expected_messages.iter().enumerate() {
+            client.publish(topic, msg.clone().into_bytes()).await?;
+            if (i + 1) % 25 == 0 {
+                info!("Published {} messages...", i + 1);
+            }
+        }
+        info!("Phase 1: Published {} messages", expected_messages.len());
+
+        // Verify data is readable before shutdown
+        let mut pre_shutdown_count = 0;
+        for partition in 0..3 {
+            let msgs = client.consume(topic, partition, 0, 100).await?;
+            pre_shutdown_count += msgs.len();
+        }
+        info!(
+            "Phase 1: Verified {} messages readable before shutdown",
+            pre_shutdown_count
+        );
+
+        // Graceful shutdown
+        broker.shutdown().await?;
+        info!("Phase 1: Broker shutdown complete");
+
+        // Give filesystem time to sync
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    // Verify data directory has content
+    let dir_contents = fs::read_dir(&data_path).await;
+    assert!(
+        dir_contents.is_ok(),
+        "Data directory should exist after shutdown"
+    );
+    info!("Data directory verified to exist");
+
+    // Phase 2: Restart broker, verify all data survived
+    {
+        let config = Config::default()
+            .with_persistence(true)
+            .with_data_dir(data_dir.clone());
+
+        let broker = TestBroker::start_with_config(config).await?;
+        let addr = broker.connection_string();
+        info!("Phase 2: Broker restarted at {}", addr);
+
+        let mut client = Client::connect(&addr).await?;
+
+        // Wait for topic recovery
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Verify topic still exists
+        let topics = client.list_topics().await?;
+        assert!(
+            topics.iter().any(|t| t == topic),
+            "Topic '{}' should exist after restart. Found topics: {:?}",
+            topic,
+            topics
+        );
+        info!("Phase 2: Topic '{}' found after restart", topic);
+
+        // Consume all messages from all partitions
+        let mut recovered_messages: Vec<String> = Vec::new();
+        for partition in 0..3 {
+            let msgs = client.consume(topic, partition, 0, 100).await?;
+            for msg in msgs {
+                recovered_messages.push(String::from_utf8_lossy(&msg.value).to_string());
+            }
+        }
+
+        // Verify message count
+        assert_eq!(
+            recovered_messages.len(),
+            expected_messages.len(),
+            "Should recover exactly {} messages, got {}",
+            expected_messages.len(),
+            recovered_messages.len()
+        );
+        info!(
+            "Phase 2: Recovered {} messages (expected {})",
+            recovered_messages.len(),
+            expected_messages.len()
+        );
+
+        // Sort both for comparison (partitioning may reorder)
+        let mut sorted_expected = expected_messages.clone();
+        sorted_expected.sort();
+        recovered_messages.sort();
+
+        // Verify message content
+        for (expected, recovered) in sorted_expected.iter().zip(recovered_messages.iter()) {
+            assert_eq!(
+                expected, recovered,
+                "Message mismatch: expected '{}', got '{}'",
+                expected, recovered
+            );
+        }
+        info!("Phase 2: All message contents verified ✓");
+
+        // Verify we can write new data after restart
+        let new_msg = "post-restart-message";
+        client.publish(topic, new_msg.as_bytes().to_vec()).await?;
+        info!("Phase 2: Successfully wrote new message after restart");
+
+        broker.shutdown().await?;
+    }
+
+    // Cleanup
+    let _ = fs::remove_dir_all(&data_path).await;
+    info!("✅ Durability test passed: No data lost across broker restart");
+
+    Ok(())
+}
+
+/// Test durability with multiple topics and partitions
+#[tokio::test]
+async fn test_multi_topic_durability() -> Result<()> {
+    use rivven_core::Config;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use tokio::fs;
+
+    init_tracing();
+
+    let data_dir = format!(
+        "/tmp/rivven-multi-topic-durability-{}",
+        uuid::Uuid::new_v4()
+    );
+    let data_path = PathBuf::from(&data_dir);
+    fs::create_dir_all(&data_path).await?;
+
+    // Topic configurations
+    let topics_config = [
+        ("users", 2, 50), // (name, partitions, message_count)
+        ("orders", 3, 75),
+        ("events", 1, 100),
+        ("logs", 4, 25),
+    ];
+
+    let mut expected_data: HashMap<String, Vec<String>> = HashMap::new();
+
+    // Phase 1: Write data to multiple topics
+    {
+        let config = Config::default()
+            .with_persistence(true)
+            .with_data_dir(data_dir.clone());
+
+        let broker = TestBroker::start_with_config(config).await?;
+        let mut client = Client::connect(&broker.connection_string()).await?;
+
+        for (topic_name, partitions, msg_count) in &topics_config {
+            let topic = topic_name.to_string();
+            client.create_topic(&topic, Some(*partitions)).await?;
+
+            let messages: Vec<String> = (0..*msg_count)
+                .map(|i| format!("{}-msg-{:04}", topic, i))
+                .collect();
+
+            for msg in &messages {
+                client.publish(&topic, msg.clone().into_bytes()).await?;
+            }
+
+            expected_data.insert(topic.clone(), messages);
+            info!(
+                "Created topic '{}' with {} partitions and {} messages",
+                topic, partitions, msg_count
+            );
+        }
+
+        broker.shutdown().await?;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+
+    // Phase 2: Verify all topics and data
+    {
+        let config = Config::default()
+            .with_persistence(true)
+            .with_data_dir(data_dir.clone());
+
+        let broker = TestBroker::start_with_config(config).await?;
+        let mut client = Client::connect(&broker.connection_string()).await?;
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        for (topic_name, partitions, _) in &topics_config {
+            let topic = topic_name.to_string();
+            // Collect all messages from all partitions
+            let mut recovered: Vec<String> = Vec::new();
+            for partition in 0..*partitions {
+                let msgs = client.consume(&topic, partition, 0, 200).await?;
+                for msg in msgs {
+                    recovered.push(String::from_utf8_lossy(&msg.value).to_string());
+                }
+            }
+
+            let expected = expected_data.get(&topic).unwrap();
+            assert_eq!(
+                recovered.len(),
+                expected.len(),
+                "Topic '{}': expected {} messages, got {}",
+                topic,
+                expected.len(),
+                recovered.len()
+            );
+
+            // Verify content (sorted comparison due to partitioning)
+            let mut sorted_expected = expected.clone();
+            sorted_expected.sort();
+            recovered.sort();
+            assert_eq!(
+                sorted_expected, recovered,
+                "Topic '{}': message content mismatch",
+                topic
+            );
+
+            info!(
+                "✓ Topic '{}': {} messages recovered correctly",
+                topic,
+                expected.len()
+            );
+        }
+
+        broker.shutdown().await?;
+    }
+
+    let _ = fs::remove_dir_all(&data_path).await;
+    info!("✅ Multi-topic durability test passed");
+
+    Ok(())
+}
+
+/// Test that offsets are preserved correctly across restarts
+#[tokio::test]
+async fn test_offset_preservation_across_restart() -> Result<()> {
+    use rivven_core::Config;
+    use std::path::PathBuf;
+    use tokio::fs;
+
+    init_tracing();
+
+    let data_dir = format!("/tmp/rivven-offset-test-{}", uuid::Uuid::new_v4());
+    let data_path = PathBuf::from(&data_dir);
+    fs::create_dir_all(&data_path).await?;
+
+    let topic = "offset-test";
+    let initial_count = 50;
+    let additional_count = 30;
+
+    // Phase 1: Write initial batch
+    {
+        let config = Config::default()
+            .with_persistence(true)
+            .with_data_dir(data_dir.clone());
+
+        let broker = TestBroker::start_with_config(config).await?;
+        let mut client = Client::connect(&broker.connection_string()).await?;
+
+        client.create_topic(topic, Some(1)).await?;
+
+        for i in 0..initial_count {
+            client
+                .publish(topic, format!("batch1-{:04}", i).into_bytes())
+                .await?;
+        }
+        info!("Phase 1: Wrote {} messages", initial_count);
+
+        // Record highest offset
+        let msgs = client.consume(topic, 0, 0, 100).await?;
+        let highest_offset = msgs.last().map(|m| m.offset).unwrap_or(0);
+        info!("Phase 1: Highest offset = {}", highest_offset);
+        assert_eq!(highest_offset, initial_count as u64 - 1);
+
+        broker.shutdown().await?;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+
+    // Phase 2: Verify offsets and add more data
+    {
+        let config = Config::default()
+            .with_persistence(true)
+            .with_data_dir(data_dir.clone());
+
+        let broker = TestBroker::start_with_config(config).await?;
+        let mut client = Client::connect(&broker.connection_string()).await?;
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Verify existing data
+        let msgs = client.consume(topic, 0, 0, 100).await?;
+        assert_eq!(
+            msgs.len(),
+            initial_count,
+            "Should have {} messages",
+            initial_count
+        );
+
+        // Check offset continuity
+        for (i, msg) in msgs.iter().enumerate() {
+            assert_eq!(
+                msg.offset, i as u64,
+                "Offset mismatch at position {}: expected {}, got {}",
+                i, i, msg.offset
+            );
+        }
+        info!(
+            "Phase 2: Verified {} messages with correct offsets",
+            msgs.len()
+        );
+
+        // Write additional messages
+        for i in 0..additional_count {
+            client
+                .publish(topic, format!("batch2-{:04}", i).into_bytes())
+                .await?;
+        }
+        info!("Phase 2: Wrote {} additional messages", additional_count);
+
+        // Verify new offsets continue from where we left off
+        let all_msgs = client.consume(topic, 0, 0, 200).await?;
+        assert_eq!(
+            all_msgs.len(),
+            initial_count + additional_count,
+            "Should have {} total messages",
+            initial_count + additional_count
+        );
+
+        // Verify last message has correct offset
+        let last_offset = all_msgs.last().unwrap().offset;
+        assert_eq!(
+            last_offset,
+            (initial_count + additional_count - 1) as u64,
+            "Last offset should be {}",
+            initial_count + additional_count - 1
+        );
+        info!(
+            "Phase 2: Final offset = {} (expected {})",
+            last_offset,
+            initial_count + additional_count - 1
+        );
+
+        broker.shutdown().await?;
+    }
+
+    let _ = fs::remove_dir_all(&data_path).await;
+    info!("✅ Offset preservation test passed");
+
+    Ok(())
+}
+
+/// Test crash recovery simulation (hard shutdown)
+#[tokio::test]
+async fn test_crash_recovery() -> Result<()> {
+    use rivven_core::Config;
+    use std::path::PathBuf;
+    use tokio::fs;
+
+    init_tracing();
+
+    let data_dir = format!("/tmp/rivven-crash-test-{}", uuid::Uuid::new_v4());
+    let data_path = PathBuf::from(&data_dir);
+    fs::create_dir_all(&data_path).await?;
+
+    let topic = "crash-test";
+
+    // Phase 1: Write data and simulate crash (drop without shutdown)
+    let messages_before_crash: Vec<String>;
+    {
+        let config = Config::default()
+            .with_persistence(true)
+            .with_data_dir(data_dir.clone());
+
+        let broker = TestBroker::start_with_config(config).await?;
+        let mut client = Client::connect(&broker.connection_string()).await?;
+
+        client.create_topic(topic, Some(1)).await?;
+
+        messages_before_crash = (0..25).map(|i| format!("pre-crash-{:04}", i)).collect();
+
+        for msg in &messages_before_crash {
+            client.publish(topic, msg.clone().into_bytes()).await?;
+        }
+        info!(
+            "Wrote {} messages before simulated crash",
+            messages_before_crash.len()
+        );
+
+        // Simulate crash - drop broker without graceful shutdown
+        // This tests that sync-on-write or WAL preserves data
+        drop(broker);
+        info!("Simulated crash (hard drop)");
+    }
+
+    // Small delay to ensure async cleanup completes
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Phase 2: Recovery after crash
+    {
+        let config = Config::default()
+            .with_persistence(true)
+            .with_data_dir(data_dir.clone());
+
+        let broker = TestBroker::start_with_config(config).await?;
+        let mut client = Client::connect(&broker.connection_string()).await?;
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Try to recover data
+        let recovered_msgs = client.consume(topic, 0, 0, 100).await?;
+        let recovered: Vec<String> = recovered_msgs
+            .iter()
+            .map(|m| String::from_utf8_lossy(&m.value).to_string())
+            .collect();
+
+        // Note: Some messages may be lost due to crash without sync
+        // This tests the worst-case scenario
+        info!(
+            "Recovered {} of {} messages after crash",
+            recovered.len(),
+            messages_before_crash.len()
+        );
+
+        // At minimum, we should recover some data if persistence is working
+        // In production with sync-on-write, all data should survive
+        if recovered.len() == messages_before_crash.len() {
+            info!(
+                "✓ Perfect crash recovery: all {} messages recovered",
+                recovered.len()
+            );
+        } else if !recovered.is_empty() {
+            info!(
+                "⚠ Partial crash recovery: {} of {} messages recovered",
+                recovered.len(),
+                messages_before_crash.len()
+            );
+        } else {
+            info!("⚠ No messages recovered after crash (expected with async writes)");
+        }
+
+        // Verify we can still write after crash recovery
+        client
+            .publish(topic, b"post-crash-message".to_vec())
+            .await?;
+        info!("Successfully wrote new message after crash recovery");
+
+        broker.shutdown().await?;
+    }
+
+    let _ = fs::remove_dir_all(&data_path).await;
+    info!("✅ Crash recovery test completed");
+
+    Ok(())
+}

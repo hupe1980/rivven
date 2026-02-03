@@ -14,7 +14,7 @@ A Helm chart for deploying the Rivven Kubernetes Operator.
 
 ```bash
 # Add the Rivven Helm repository (if published)
-helm repo add rivven https://hupe1980.github.io/rivven
+helm repo add rivven https://rivven.hupe1980.github.io/rivven
 helm repo update
 
 # Install the operator
@@ -100,7 +100,7 @@ affinity:
 Once the operator is installed, create a RivvenCluster resource:
 
 ```yaml
-apiVersion: rivven.io/v1alpha1
+apiVersion: rivven.hupe1980.github.io/v1alpha1
 kind: RivvenCluster
 metadata:
   name: my-cluster
@@ -127,7 +127,7 @@ kubectl apply -f my-cluster.yaml
 Create a RivvenConnect resource to deploy connectors:
 
 ```yaml
-apiVersion: rivven.io/v1alpha1
+apiVersion: rivven.hupe1980.github.io/v1alpha1
 kind: RivvenConnect
 metadata:
   name: my-pipeline
@@ -178,15 +178,87 @@ spec:
 kubectl apply -f my-pipeline.yaml
 ```
 
+## Creating a RivvenSchemaRegistry
+
+Create a RivvenSchemaRegistry resource to deploy a high-performance schema registry:
+
+```yaml
+apiVersion: rivven.hupe1980.github.io/v1alpha1
+kind: RivvenSchemaRegistry
+metadata:
+  name: production-registry
+spec:
+  clusterRef:
+    name: my-cluster
+  replicas: 3
+  
+  # Storage configuration (broker-backed for production)
+  storage:
+    mode: broker
+    topic: _schemas
+    replicationFactor: 3
+  
+  # Compatibility settings
+  compatibility:
+    default: BACKWARD
+    allowOverride: true
+  
+  # Schema format support
+  schemas:
+    avro: true
+    jsonSchema: true
+    protobuf: true
+  
+  # Multi-tenant contexts
+  contexts:
+    enabled: true
+    defaultContext: default
+  
+  # Authentication
+  auth:
+    enabled: true
+    mode: basic
+    secretRef: schema-registry-auth
+  
+  # TLS configuration
+  tls:
+    enabled: true
+    certSecretName: schema-registry-tls
+  
+  # Prometheus metrics
+  metrics:
+    enabled: true
+    port: 9090
+  
+  # Resources
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  
+  # High availability
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+```
+
+```bash
+kubectl apply -f production-registry.yaml
+```
+
 ## Uninstallation
 
 ```bash
 # Uninstall the operator
 helm uninstall rivven-operator -n rivven-system
 
-# Optional: Remove CRDs (WARNING: this will delete all RivvenCluster and RivvenConnect resources)
-kubectl delete crd rivvenclusters.rivven.io
-kubectl delete crd rivvenconnects.rivven.io
+# Optional: Remove CRDs (WARNING: this will delete all RivvenCluster, RivvenConnect, and RivvenSchemaRegistry resources)
+kubectl delete crd rivvenclusters.rivven.hupe1980.github.io
+kubectl delete crd rivvenconnects.rivven.hupe1980.github.io
+kubectl delete crd rivvenschemaregistries.rivven.hupe1980.github.io
 
 # Optional: Remove namespace
 kubectl delete namespace rivven-system
@@ -216,8 +288,9 @@ kubectl get pods -n rivven-system
 kubectl logs -n rivven-system -l app.kubernetes.io/name=rivven-operator
 
 # Check CRD installation
-kubectl get crd rivvenclusters.rivven.io
-kubectl get crd rivvenconnects.rivven.io
+kubectl get crd rivvenclusters.rivven.hupe1980.github.io
+kubectl get crd rivvenconnects.rivven.hupe1980.github.io
+kubectl get crd rivvenschemaregistries.rivven.hupe1980.github.io
 ```
 
 ### Check Cluster Status
@@ -244,4 +317,20 @@ kubectl describe rivvenconnect my-pipeline
 
 # Check connect events
 kubectl get events --field-selector involvedObject.name=my-pipeline
+```
+
+### Check Schema Registry Status
+
+```bash
+# List all schema registries
+kubectl get rivvenschemaregistries -A
+
+# Or use the short name
+kubectl get rsr -A
+
+# Describe a specific registry
+kubectl describe rsr production-registry
+
+# Check registry events
+kubectl get events --field-selector involvedObject.name=production-registry
 ```

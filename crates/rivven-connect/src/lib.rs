@@ -7,18 +7,17 @@
 //!
 //! ```text
 //! ┌─────────────────────────────────────────────────────────────────┐
-//! │                    rivven-connect (SDK)                         │
+//! │                    rivven-connect (SDK + Runtime)               │
 //! │  Source, Sink, Transform, Event, Registry, State, Catalog       │
-//! └─────────────────────────────────────────────────────────────────┘
-//!         ↑ implement
-//! ┌─────────────────┬─────────────────┬─────────────────────────────┐
-//! │ rivven-cdc      │ rivven-storage  │ rivven-warehouse            │
-//! │ (CDC sources)   │ (S3/GCS sinks)  │ (Snowflake sinks)           │
-//! └─────────────────┴─────────────────┴─────────────────────────────┘
-//!         ↑ compose
-//! ┌─────────────────────────────────────────────────────────────────┐
-//! │                    rivven-connect (CLI)                         │
-//! │  Composes connectors, runs pipelines, config-driven             │
+//! ├─────────────────────────────────────────────────────────────────┤
+//! │                    Built-in Connectors                          │
+//! │  ├── Database CDC (postgres, mysql)                             │
+//! │  ├── Messaging (kafka, mqtt, sqs, pubsub)                       │
+//! │  ├── Storage (s3, gcs, azure)                                   │
+//! │  └── Warehouse (snowflake, bigquery, redshift)                  │
+//! ├─────────────────────────────────────────────────────────────────┤
+//! │                    External Crates                              │
+//! │  └── rivven-cdc (optional, reusable CDC primitives)             │
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -61,6 +60,9 @@
 // Core SDK traits (merged from rivven-connect-sdk)
 pub mod traits;
 
+// Common types (SensitiveString, etc.)
+pub mod types;
+
 // Error types
 pub mod error;
 
@@ -81,8 +83,11 @@ pub mod distributed;
 // Schema registry
 pub mod schema;
 
-// WASM plugin support
-pub mod plugin;
+// Output format writers (JSON, JSONL, Parquet, Avro)
+pub mod format;
+
+// Re-export SensitiveString at crate root for convenience
+pub use types::SensitiveString;
 
 // Re-export core traits at crate root for ergonomic use
 pub use traits::{

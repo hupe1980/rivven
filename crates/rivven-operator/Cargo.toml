@@ -12,6 +12,9 @@ name = "rivven-operator"
 path = "src/main.rs"
 
 [dependencies]
+# Rivven client for cluster communication
+rivven-client = { path = "../rivven-client" }
+
 # Kubernetes client and controller runtime
 kube = { version = "0.98", features = ["runtime", "derive"] }
 k8s-openapi = { version = "0.24", features = ["v1_32", "schemars"] }

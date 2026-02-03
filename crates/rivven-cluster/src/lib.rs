@@ -62,6 +62,8 @@ pub mod protocol;
 pub mod quic_transport;
 pub mod raft;
 pub mod replication;
+#[cfg(feature = "raft")]
+pub mod storage;
 pub mod transport;
 
 // Re-export main types
@@ -85,6 +87,8 @@ pub use raft::{
     RaftNodeConfig, RaftNodeId, StateMachine as MetadataStateMachine, TypeConfig as RaftTypeConfig,
 };
 pub use replication::{PartitionReplication, ReplicationManager};
+#[cfg(feature = "raft")]
+pub use storage::RedbLogStore;
 pub use transport::{Transport, TransportConfig};
 
 /// Re-export common types

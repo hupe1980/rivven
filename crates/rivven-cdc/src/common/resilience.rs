@@ -65,12 +65,10 @@ impl RetriableErrorType {
 
 /// Configuration for retry behavior.
 ///
-/// Compatible with Debezium's `errors.*` configuration options.
-///
 /// # Example
 ///
 /// ```rust
-/// use rivven_cdc::{RetryConfig, RetriableErrorType};
+/// use rivven_cdc::common::{RetryConfig, RetriableErrorType};
 /// use std::time::Duration;
 ///
 /// let config = RetryConfig::builder()
@@ -292,7 +290,7 @@ pub enum GuardrailAction {
 /// # Example
 ///
 /// ```rust
-/// use rivven_cdc::{GuardrailsConfig, GuardrailAction};
+/// use rivven_cdc::common::{GuardrailsConfig, GuardrailAction};
 /// use std::time::Duration;
 ///
 /// let config = GuardrailsConfig::builder()
@@ -568,7 +566,7 @@ impl GuardrailsConfigBuilder {
 /// # Example
 ///
 /// ```rust
-/// use rivven_cdc::RateLimiter;
+/// use rivven_cdc::common::RateLimiter;
 ///
 /// # tokio_test::block_on(async {
 /// let limiter = RateLimiter::new(100, 1000); // 100 burst, 1000/sec refill
@@ -685,7 +683,7 @@ pub enum CircuitState {
 /// # Example
 ///
 /// ```rust
-/// use rivven_cdc::CircuitBreaker;
+/// use rivven_cdc::common::CircuitBreaker;
 /// use std::time::Duration;
 ///
 /// # tokio_test::block_on(async {

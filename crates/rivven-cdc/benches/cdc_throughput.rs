@@ -1,79 +1,15 @@
 //! CDC Throughput Benchmarks
 //!
 //! Measures CDC performance characteristics:
-//! - Schema inference throughput
-//! - Event parsing throughput
+//! - Event serialization throughput
 //! - Filter evaluation throughput
+//! - Batch processing throughput
 //!
 //! Run with: cargo bench -p rivven-cdc
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use rivven_cdc::postgres::PostgresTypeMapper;
 use rivven_cdc::{CdcEvent, CdcFilter, CdcFilterConfig, CdcOp};
 use serde_json::json;
-
-fn benchmark_schema_inference(c: &mut Criterion) {
-    let mut group = c.benchmark_group("schema_inference");
-
-    // Various table sizes
-    for column_count in [5, 10, 20, 50, 100].iter() {
-        let columns: Vec<(String, i32, String)> = (0..*column_count)
-            .map(|i| {
-                let type_oid = match i % 5 {
-                    0 => 23,   // int4
-                    1 => 25,   // text
-                    2 => 1043, // varchar
-                    3 => 16,   // bool
-                    _ => 1114, // timestamp
-                };
-                (format!("col_{}", i), type_oid, format!("type_{}", type_oid))
-            })
-            .collect();
-
-        group.throughput(Throughput::Elements(*column_count as u64));
-        group.bench_with_input(
-            BenchmarkId::new("generate_avro_schema", column_count),
-            &columns,
-            |b, cols| {
-                b.iter(|| {
-                    PostgresTypeMapper::generate_avro_schema(
-                        black_box("public"),
-                        black_box("test_table"),
-                        black_box(cols),
-                    )
-                })
-            },
-        );
-    }
-
-    group.finish();
-}
-
-fn benchmark_type_mapping(c: &mut Criterion) {
-    let mut group = c.benchmark_group("type_mapping");
-
-    let test_cases = vec![
-        (23, "int4"),
-        (25, "text"),
-        (1043, "varchar"),
-        (16, "bool"),
-        (1114, "timestamp"),
-        (3802, "jsonb"),
-        (2950, "uuid"),
-    ];
-
-    for (oid, name) in test_cases {
-        group.bench_with_input(
-            BenchmarkId::new("pg_type_to_avro", name),
-            &(oid, name),
-            |b, &(oid, name)| {
-                b.iter(|| PostgresTypeMapper::pg_type_to_avro(black_box(oid), black_box(name)))
-            },
-        );
-    }
-
-    group.finish();
-}
 
 fn benchmark_event_serialization(c: &mut Criterion) {
     let mut group = c.benchmark_group("event_serialization");
@@ -108,12 +44,12 @@ fn benchmark_event_serialization(c: &mut Criterion) {
         transaction: None,
     };
 
-    group.bench_function("to_message_small", |b| {
-        b.iter(|| black_box(&small_event).to_message())
+    group.bench_function("to_json_small", |b| {
+        b.iter(|| black_box(&small_event).to_json_bytes())
     });
 
-    group.bench_function("to_message_large", |b| {
-        b.iter(|| black_box(&large_event).to_message())
+    group.bench_function("to_json_large", |b| {
+        b.iter(|| black_box(&large_event).to_json_bytes())
     });
 
     // Deserialize
@@ -266,13 +202,38 @@ fn benchmark_batch_processing(c: &mut Criterion) {
     group.finish();
 }
 
+fn benchmark_event_operations(c: &mut Criterion) {
+    let mut group = c.benchmark_group("event_operations");
+
+    let event = CdcEvent {
+        source_type: "postgres".to_string(),
+        database: "testdb".to_string(),
+        schema: "public".to_string(),
+        table: "users".to_string(),
+        op: CdcOp::Delete,
+        before: Some(json!({"id": 1, "name": "Alice", "email": "alice@example.com"})),
+        after: None,
+        timestamp: 1234567890,
+        transaction: None,
+    };
+
+    group.bench_function("to_tombstone", |b| {
+        b.iter(|| black_box(&event).to_tombstone())
+    });
+
+    group.bench_function("clone_event", |b| b.iter(|| black_box(event.clone())));
+
+    group.bench_function("is_dml", |b| b.iter(|| black_box(event.is_dml())));
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
-    benchmark_schema_inference,
-    benchmark_type_mapping,
     benchmark_event_serialization,
     benchmark_filter_evaluation,
     benchmark_batch_processing,
+    benchmark_event_operations,
 );
 
 criterion_main!(benches);

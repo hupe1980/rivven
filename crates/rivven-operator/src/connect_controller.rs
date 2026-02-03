@@ -25,7 +25,7 @@ use tracing::{debug, error, info, instrument, warn};
 use validator::Validate;
 
 /// Finalizer name for cleanup operations
-pub const CONNECT_FINALIZER: &str = "rivven.io/connect-finalizer";
+pub const CONNECT_FINALIZER: &str = "rivven.hupe1980.github.io/connect-finalizer";
 
 /// Default requeue interval for successful reconciliations
 const DEFAULT_REQUEUE_SECONDS: u64 = 60; // 1 minute
@@ -956,14 +956,6 @@ mod tests {
                     topic: "test-topic".to_string(),
                     topic_routing: None,
                     enabled: true,
-                    postgres_cdc: None,
-                    mysql_cdc: None,
-                    http: None,
-                    datagen: None,
-                    kafka: None,
-                    mqtt: None,
-                    sqs: None,
-                    pubsub: None,
                     config: serde_json::Value::Null,
                     config_secret_ref: None,
                     topic_config: SourceTopicConfigSpec::default(),
@@ -975,15 +967,6 @@ mod tests {
                     consumer_group: "test-group".to_string(),
                     enabled: true,
                     start_offset: "latest".to_string(),
-                    s3: None,
-                    http: None,
-                    stdout: None,
-                    kafka: None,
-                    gcs: None,
-                    azure_blob: None,
-                    snowflake: None,
-                    bigquery: None,
-                    redshift: None,
                     config: serde_json::Value::Null,
                     config_secret_ref: None,
                     rate_limit: RateLimitSpec::default(),

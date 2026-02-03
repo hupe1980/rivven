@@ -1,32 +1,49 @@
 # rivven-cluster
 
-Distributed cluster coordination for Rivven.
+> Distributed cluster coordination for the Rivven event streaming platform.
+
+## Overview
+
+`rivven-cluster` provides the distributed coordination layer for Rivven, including leader election, failure detection, and partition assignment.
 
 ## Features
 
-- **Raft Consensus** - Leader election and log replication using OpenRaft
-- **SWIM Gossip** - Failure detection and membership management
-- **Partitioning** - Consistent hashing for partition assignment
-- **QUIC Transport** - Efficient, secure node-to-node communication
+| Feature | Description |
+|:--------|:------------|
+| **Raft Consensus** | Leader election and log replication using OpenRaft |
+| **redb Storage** | Pure Rust persistent storage (zero C dependencies) |
+| **SWIM Gossip** | Failure detection and membership management |
+| **Partitioning** | Consistent hashing for partition assignment |
+| **QUIC Transport** | Efficient, secure node-to-node communication |
+
+## Why redb?
+
+Rivven uses **redb** instead of RocksDB for Raft log storage:
+
+| Aspect | redb | RocksDB |
+|:-------|:-----|:--------|
+| **Build time** | ~10s | 2-5 min |
+| **Binary size** | Minimal | +10-15 MB |
+| **Cross-compile** | ✅ Works everywhere | ❌ Needs C++ toolchain |
+| **Docker musl** | ✅ Works | ❌ Needs musl-g++ |
+| **ACID** | ✅ Full | ✅ Full |
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        rivven-cluster                            │
+│                        rivven-cluster                           │
 ├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐       │
 │  │    Raft      │    │    SWIM      │    │  Partition   │       │
 │  │  Consensus   │    │   Gossip     │    │  Manager     │       │
 │  └──────────────┘    └──────────────┘    └──────────────┘       │
 │         │                   │                   │               │
 │         └───────────────────┼───────────────────┘               │
-│                             │                                    │
+│                             │                                   │
 │                    ┌────────────────┐                           │
 │                    │ QUIC Transport │                           │
 │                    └────────────────┘                           │
-│                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -105,6 +122,11 @@ cluster:
     replication_factor: 3
 ```
 
+## Documentation
+
+- [Distributed Architecture](https://rivven.hupe1980.github.io/rivven/docs/architecture)
+- [Kubernetes Deployment](https://rivven.hupe1980.github.io/rivven/docs/kubernetes)
+
 ## License
 
-See root [LICENSE](../../LICENSE) file.
+Apache-2.0. See [LICENSE](../../LICENSE).

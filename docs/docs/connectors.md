@@ -7,7 +7,7 @@ nav_order: 5
 # Connectors
 {: .no_toc }
 
-Airbyte-compatible source and sink connectors.
+Scalable connector framework designed for 300+ connectors.
 {: .fs-6 .fw-300 }
 
 ## Table of contents
@@ -20,11 +20,76 @@ Airbyte-compatible source and sink connectors.
 
 ## Overview
 
-Rivven provides a **native connector framework** that's Airbyte-compatible, allowing you to:
+Rivven provides a **native connector framework** that scales to 300+ connectors:
 
-- Use existing Airbyte connectors
-- Build custom connectors with the Plugin SDK
-- Run connectors as WASM modules for isolation
+- **Hierarchical Categories**: Database, Messaging, Storage, Warehouse, AI/ML, Utility
+- **Rich Metadata**: Tags, support levels, and search capabilities
+- **Connector Inventory**: Auto-registration with metadata indexing
+- **Feature Gating**: Compile only the connectors you need
+
+### Connector Categories
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                 Connector Inventory (Scalable)                   │
+├─────────────────────────────────────────────────────────────────┤
+│  Database                                                        │
+│  ├── CDC (postgres_cdc, mysql_cdc, mongodb_cdc, ...)            │
+│  ├── Batch (sql_select, sql_insert, ...)                        │
+│  └── NoSQL (redis, cassandra, ...)                              │
+│                                                                  │
+│  Messaging                                                       │
+│  ├── Queues (external, ...)                                     │
+│  ├── MQTT (mqtt, rabbitmq, ...)                                 │
+│  └── Cloud (sqs, pubsub, azure_queue, ...)                      │
+│                                                                  │
+│  Storage                                                         │
+│  ├── Object (s3, gcs, azure_blob, minio, ...)                   │
+│  └── File (file, sftp, hdfs, ...)                               │
+│                                                                  │
+│  Warehouse                                                       │
+│  └── (snowflake, bigquery, redshift, clickhouse, ...)           │
+│                                                                  │
+│  AI/ML                                                           │
+│  ├── LLM (openai, anthropic, ollama, bedrock, ...)              │
+│  └── Vector (pinecone, qdrant, weaviate, ...)                   │
+│                                                                  │
+│  Utility                                                         │
+│  ├── Generate (datagen, faker, ...)                             │
+│  └── Debug (stdout, log, drop, ...)                             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Listing Available Connectors
+
+```bash
+# Show all available connectors with categories
+rivven-connect connectors
+
+# Output:
+# ╭─────────────────────────────────────────────────────────────────────╮
+# │               Rivven Connect - Connector Catalog                     │
+# ╰─────────────────────────────────────────────────────────────────────╯
+#
+# 📊 Total: 15 connectors (7 sources, 8 sinks)
+#
+# 📁 DATABASE
+# ─────────────────────────────────────────────────────────────────────
+# Name               Type       Support      Description
+# ─────────────────────────────────────────────────────────────────────
+# postgres-cdc       Source     ✅ Cert      Change Data Capture from PostgreSQL...
+# mysql-cdc          Source     ✅ Cert      Change Data Capture from MySQL/MariaDB...
+```
+
+### Support Levels
+
+| Level | Badge | Description |
+|-------|-------|-------------|
+| Certified | ✅ | Production-ready with full support |
+| Community | 🌐 | Community-supported, may have limitations |
+| Experimental | 🧪 | Alpha quality - API may change |
+| Enterprise | 🏢 | Enterprise license required |
+| Deprecated | ⚠️ | Will be removed in future versions |
 
 ---
 
@@ -248,17 +313,17 @@ sources:
 | `users` | User profiles | user_id, name, email, created_at |
 | `pageviews` | Web analytics | page_url, user_id, timestamp, referrer |
 
-### Kafka Source
+### External Queue Source
 
-Consume events from Apache Kafka (migration path from Kafka).
+Consume events from external message queues (for migration or hybrid deployments).
 
 ```yaml
 sources:
-  kafka:
-    connector: kafka
+  external-queue:
+    connector: external-queue
     topic: rivven-events
     config:
-      bootstrap_servers: kafka:9092
+      bootstrap_servers: queue-broker:9092
       source_topics:
         - upstream-topic-1
         - upstream-topic-2
@@ -267,13 +332,13 @@ sources:
       security:
         protocol: SASL_SSL
         mechanism: SCRAM-SHA-512
-        username: ${KAFKA_USER}
-        password: ${KAFKA_PASSWORD}
+        username: ${QUEUE_USER}
+        password: ${QUEUE_PASSWORD}
 ```
 
 | Parameter | Required | Default | Description |
 |:----------|:---------|:--------|:------------|
-| `bootstrap_servers` | ✓ | - | Kafka broker addresses |
+| `bootstrap_servers` | ✓ | - | Broker addresses |
 | `source_topics` | ✓ | - | Topics to consume |
 | `consumer_group` | ✓ | - | Consumer group ID |
 | `auto_offset_reset` | | `latest` | Offset reset policy |
@@ -313,111 +378,108 @@ sources:
 
 ## Sinks
 
-### S3
+### Unified Object Storage
 
-Write events to Amazon S3 or compatible storage.
+All object storage connectors (S3, GCS, Azure Blob) use a unified implementation
+powered by the `object_store` crate. This provides:
+
+- **Consistent API** across all cloud providers
+- **Local filesystem support** for testing
+- **S3-compatible storage** (MinIO, R2, DigitalOcean Spaces)
+- **Reduced dependencies** - single unified crate instead of separate SDKs
 
 ```yaml
 sinks:
-  s3:
-    connector: s3
+  events:
+    connector: object-storage
     topics: [events, logs]
-    consumer_group: s3-sink
+    consumer_group: storage-sink
     config:
+      provider: s3              # s3 | gcs | azure | local
       bucket: my-data-lake
       prefix: events
-      region: us-east-1
-      format: jsonl
-      partition_by: day
-      compression: gzip
+      format: jsonl             # json | jsonl | avro | csv
+      compression: gzip         # none | gzip
+      partitioning: day         # none | day | hour
       batch_size: 1000
-      batch_timeout_secs: 60
+      flush_interval_secs: 60
+      
+      # Provider-specific configuration
+      s3:
+        region: us-east-1
+        # Optional for S3-compatible storage:
+        # endpoint: https://minio.local:9000
+        # force_path_style: true
+        # access_key_id: ${AWS_ACCESS_KEY_ID}
+        # secret_access_key: ${AWS_SECRET_ACCESS_KEY}
 ```
 
 | Parameter | Required | Default | Description |
 |:----------|:---------|:--------|:------------|
-| `bucket` | ✓ | - | S3 bucket name |
+| `provider` | ✓ | `s3` | Storage provider: s3, gcs, azure, local |
+| `bucket` | ✓ | - | Bucket/container name |
 | `prefix` | | - | Object key prefix |
-| `region` | ✓ | - | AWS region |
-| `format` | | `jsonl` | Output format |
-| `partition_by` | | - | Partitioning (hour, day, month) |
-| `compression` | | `none` | Compression (gzip, zstd, snappy) |
+| `format` | | `json` | Output format (json, jsonl, avro, csv) |
+| `compression` | | `none` | Compression (none, gzip) |
+| `partitioning` | | `none` | Time partitioning (none, day, hour) |
 | `batch_size` | | `1000` | Events per batch |
-| `batch_timeout_secs` | | `60` | Max wait time |
+| `flush_interval_secs` | | `60` | Max wait before flush |
 
-**S3-Compatible Storage:**
+#### S3 Configuration
 
 ```yaml
 config:
-  endpoint: https://minio.local:9000
-  force_path_style: true
-  access_key_id: ${MINIO_ACCESS_KEY}
-  secret_access_key: ${MINIO_SECRET_KEY}
+  provider: s3
+  bucket: my-bucket
+  s3:
+    region: us-east-1
+    endpoint: https://s3.us-east-1.amazonaws.com  # Optional custom endpoint
+    force_path_style: false                        # Set true for MinIO/R2
+    access_key_id: ${AWS_ACCESS_KEY_ID}            # Optional (uses IAM role if not set)
+    secret_access_key: ${AWS_SECRET_ACCESS_KEY}
 ```
 
-### Google Cloud Storage (GCS)
-
-Write events to Google Cloud Storage.
+#### GCS Configuration
 
 ```yaml
-sinks:
+config:
+  provider: gcs
+  bucket: my-gcs-bucket
   gcs:
-    connector: gcs
-    topics: [events]
-    consumer_group: gcs-sink
-    config:
-      bucket: my-data-lake
-      prefix: events
-      project_id: my-gcp-project
-      format: jsonl
-      partition_by: day
-      compression: gzip
-      batch_size: 1000
-      # Authentication: ADC (default), service account key, or workload identity
-      credentials_path: /secrets/gcp-key.json  # Optional
+    service_account_path: /path/to/sa.json  # Optional
+    use_adc: true                            # Use Application Default Credentials
 ```
 
-| Parameter | Required | Default | Description |
-|:----------|:---------|:--------|:------------|
-| `bucket` | ✓ | - | GCS bucket name |
-| `prefix` | | - | Object key prefix |
-| `project_id` | ✓ | - | GCP project ID |
-| `format` | | `jsonl` | Output format (json, jsonl) |
-| `credentials_path` | | ADC | Path to service account key |
-
-### Azure Blob Storage
-
-Write events to Azure Blob Storage.
+#### Azure Blob Configuration
 
 ```yaml
-sinks:
+config:
+  provider: azure
+  bucket: my-container
   azure:
-    connector: azure-blob
-    topics: [events]
-    consumer_group: azure-sink
-    config:
-      container: data-lake
-      prefix: events
-      account_name: mystorageaccount
-      format: jsonl
-      partition_by: day
-      # Authentication options
-      connection_string: ${AZURE_STORAGE_CONNECTION_STRING}
-      # Or use account key
-      # account_key: ${AZURE_STORAGE_KEY}
-      # Or use SAS token
-      # sas_token: ${AZURE_SAS_TOKEN}
+    account: mystorageaccount
+    access_key: ${AZURE_STORAGE_KEY}         # Or use connection_string
+    # connection_string: ${AZURE_CONNECTION_STRING}
+    # sas_token: ${AZURE_SAS_TOKEN}
+    # use_managed_identity: true
 ```
 
-| Parameter | Required | Default | Description |
-|:----------|:---------|:--------|:------------|
-| `container` | ✓ | - | Blob container name |
-| `account_name` | ✓ | - | Storage account name |
-| `connection_string` | * | - | Full connection string |
-| `account_key` | * | - | Account access key |
-| `sas_token` | * | - | SAS token |
+#### Local Filesystem (Testing)
 
-*One of `connection_string`, `account_key`, or `sas_token` is required.
+```yaml
+config:
+  provider: local
+  bucket: test-bucket
+  prefix: events/
+  local:
+    root: /tmp/test-storage
+```
+
+### Legacy S3/GCS/Azure Connectors
+
+For backward compatibility, the legacy connector names (`s3`, `gcs`, `azure-blob`) still work
+and map to the unified object-storage connector. Update your configs to use `object-storage`
+with the `provider` field for new deployments.
 
 ### Snowflake
 
@@ -519,26 +581,26 @@ sinks:
         max_age_hours: 24
 ```
 
-### Kafka Sink
+### External Queue Sink
 
-Forward events to Apache Kafka.
+Forward events to external message queues.
 
 ```yaml
 sinks:
-  kafka:
-    connector: kafka
+  external-queue:
+    connector: external-queue
     topics: [events]
-    consumer_group: kafka-sink
+    consumer_group: queue-sink
     config:
-      bootstrap_servers: kafka:9092
+      bootstrap_servers: queue-broker:9092
       target_topic: downstream-events
       acks: all
       compression: lz4
       security:
         protocol: SASL_SSL
         mechanism: SCRAM-SHA-512
-        username: ${KAFKA_USER}
-        password: ${KAFKA_PASSWORD}
+        username: ${QUEUE_USER}
+        password: ${QUEUE_PASSWORD}
 ```
 
 ---
@@ -557,6 +619,313 @@ sinks:
     config:
       url: https://api.example.com/ingest
 ```
+
+---
+
+## Output Formats
+
+Storage sinks (S3, GCS, Azure Blob) support multiple output formats. The format determines **how** data is serialized, while the storage connector determines **where** it is written.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Storage Connectors                           │
+│  S3Sink, GcsSink, AzureBlobSink, LocalFileSink                  │
+│                    (WHERE to write)                             │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │ uses
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    Format Writers                               │
+│  JsonWriter, JsonlWriter, ParquetWriter, AvroWriter, CsvWriter  │
+│                    (HOW to serialize)                           │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Available Formats
+
+| Format | Extension | MIME Type | Use Case | Compression | Append |
+|--------|-----------|-----------|----------|-------------|--------|
+| `json` | `.json` | `application/json` | Human-readable, debugging | gzip | ❌ |
+| `jsonl` | `.jsonl` | `application/x-ndjson` | Streaming, log files | gzip | ✅ |
+| `parquet` | `.parquet` | `application/vnd.apache.parquet` | Analytics, data lakes | snappy, zstd | ❌ |
+| `avro` | `.avro` | `application/avro` | Schema Registry | deflate | ❌ |
+| `csv` | `.csv` | `text/csv` | Spreadsheets, exports | gzip | ✅ |
+
+### JSON Lines (JSONL)
+
+Default format for most use cases. Each event is written as a separate line.
+
+```yaml
+config:
+  format: jsonl
+  compression: gzip
+```
+
+**Output:**
+```json
+{"id":1,"event":"order.created","timestamp":"2024-01-15T10:30:00Z"}
+{"id":2,"event":"order.shipped","timestamp":"2024-01-15T11:00:00Z"}
+```
+
+**Advantages:**
+- Streamable (can be processed line by line)
+- Easy to append to existing files
+- Simple to parse with standard tools (`jq`, `grep`)
+
+### JSON
+
+Single JSON array containing all events.
+
+```yaml
+config:
+  format: json
+```
+
+**Output:**
+```json
+[
+  {"id":1,"event":"order.created","timestamp":"2024-01-15T10:30:00Z"},
+  {"id":2,"event":"order.shipped","timestamp":"2024-01-15T11:00:00Z"}
+]
+```
+
+### Parquet
+
+Apache Parquet columnar format for analytics workloads.
+
+```yaml
+config:
+  format: parquet
+  parquet:
+    compression: snappy  # Options: none, snappy, gzip, lz4, zstd, brotli
+    row_group_size: 10000
+    enable_statistics: true
+```
+
+| Parameter | Default | Description |
+|:----------|:--------|:------------|
+| `compression` | `snappy` | Compression codec |
+| `row_group_size` | `10000` | Rows per row group |
+| `enable_statistics` | `true` | Write column statistics in footer |
+| `data_page_size` | `1048576` | Data page size in bytes |
+| `dictionary_page_size` | `1048576` | Dictionary page size limit |
+
+**Compression Comparison:**
+
+| Codec | Speed | Ratio | CPU Usage | Use Case |
+|-------|-------|-------|-----------|----------|
+| `none` | ⚡⚡⚡ | - | Low | Testing, already compressed data |
+| `snappy` | ⚡⚡⚡ | Good | Low | **Default** - balanced |
+| `lz4` | ⚡⚡⚡ | Good | Low | High throughput |
+| `zstd` | ⚡⚡ | Better | Medium | Cold storage, archives |
+| `gzip` | ⚡ | Better | High | Maximum compatibility |
+| `brotli` | ⚡ | Best | High | Maximum compression |
+
+**Schema Inference:**
+
+Parquet requires a schema. Rivven automatically infers the Arrow schema from JSON events:
+
+```json
+{"name": "Alice", "age": 30, "active": true}
+```
+
+Becomes:
+```
+name: Utf8 (nullable)
+age: Int64 (nullable)
+active: Boolean (nullable)
+```
+
+**Type Promotion:**
+
+When types are mixed across records, Rivven promotes to the wider type:
+
+| Type A | Type B | Result |
+|--------|--------|--------|
+| Int64 | Float64 | Float64 |
+| Int64 | Utf8 | Utf8 |
+| Null | Any | Any (nullable) |
+
+### Avro
+
+Apache Avro binary format with Object Container File (OCF) support. Ideal for Schema Registry integration.
+
+```yaml
+config:
+  format: avro
+  # Optional: provide explicit schema (otherwise inferred from data)
+  # avro:
+  #   schema: '{"type":"record","name":"Event","fields":[...]}'
+  #   compression: deflate  # Options: none, deflate
+  #   wire_format: true  # Add schema ID header
+  #   schema_id: 12345
+```
+
+| Parameter | Default | Description |
+|:----------|:--------|:------------|
+| `schema` | (inferred) | Explicit Avro schema JSON string |
+| `compression` | `none` | Compression codec (`none`, `deflate`) |
+| `wire_format` | `false` | Add magic byte + schema ID prefix |
+| `schema_id` | - | Schema ID for wire format |
+| `namespace` | `rivven.events` | Namespace for inferred schemas |
+| `record_name` | `Event` | Record name for inferred schemas |
+
+**Automatic Schema Inference:**
+
+```json
+{"id": 1, "name": "Alice", "active": true}
+```
+
+Becomes:
+```json
+{
+  "type": "record",
+  "name": "Event",
+  "namespace": "rivven.events",
+  "fields": [
+    {"name": "active", "type": "boolean"},
+    {"name": "id", "type": "long"},
+    {"name": "name", "type": "string"}
+  ]
+}
+```
+
+**Use Cases:**
+- Integration with Schema Registry
+- Schema evolution with backward/forward compatibility
+- Compact binary format with schema ID reference (wire format)
+- Enterprise platform integration
+
+### CSV
+
+Comma-Separated Values format for spreadsheet exports and legacy system integration.
+
+```yaml
+config:
+  format: csv
+  compression: gzip
+  # csv:
+  #   delimiter: ","      # Options: ",", "\t", ";", "|"
+  #   include_header: true
+  #   quote_char: '"'
+  #   null_value: "NULL"
+```
+
+| Parameter | Default | Description |
+|:----------|:--------|:------------|
+| `delimiter` | `,` | Field delimiter (`,`, `\t`, `;`, `\|`) |
+| `include_header` | `true` | Include header row with column names |
+| `quote_char` | `"` | Quote character for escaping |
+| `always_quote` | `false` | Always quote all fields |
+| `line_ending` | `lf` | Line ending style (`lf`, `crlf`) |
+| `null_value` | `NULL` | Representation for null values |
+| `columns` | (auto) | Explicit column order |
+
+**Output Example:**
+```csv
+active,id,name
+true,1,Alice
+false,2,Bob
+```
+
+**Nested Object Handling:**
+
+Nested JSON objects are serialized as JSON strings with escaped quotes:
+
+```json
+{"id": 1, "data": {"nested": "value"}}
+```
+
+Becomes:
+```csv
+data,id
+"{""nested"":""value""}",1
+```
+
+**Use Cases:**
+- Excel/spreadsheet exports
+- Legacy system integration
+- Simple data exchange
+- Human-readable tabular data
+
+### Format Selection Guide
+
+```
+                      ┌─────────────────────┐
+                      │   What's your use   │
+                      │       case?         │
+                      └─────────┬───────────┘
+                                │
+       ┌────────────────┬───────┼───────┬────────────────┐
+       │                │       │       │                │
+       ▼                ▼       ▼       ▼                ▼
+┌───────────┐   ┌───────────┐ ┌─────┐ ┌───────────┐ ┌───────────┐
+│  Analytics│   │  Streaming│ │Schema │  │  Debugging│ │Spreadsheet│
+│  Data Lake│   │  Real-time│ │Reg.  │  │  Logs     │ │  Export   │
+└─────┬─────┘   └─────┬─────┘ └──┬──┘  └─────┬─────┘ └─────┬─────┘
+      ▼               ▼          ▼          ▼             ▼
+┌───────────┐   ┌───────────┐ ┌─────┐ ┌───────────┐ ┌───────────┐
+│  Parquet  │   │   JSONL   │ │Avro │ │   JSON    │ │   CSV     │
+│  +zstd    │   │   +gzip   │ │     │ │  (pretty) │ │  +gzip    │
+└───────────┘   └───────────┘ └─────┘ └───────────┘ └───────────┘
+```
+
+### Output Compression
+
+Text-based formats (JSON, JSONL, CSV) can have an additional compression layer applied to the output file. This is separate from format-internal compression (Parquet and Avro have their own built-in compression).
+
+```yaml
+config:
+  format: jsonl
+  compression: gzip  # Apply gzip compression to the output file
+```
+
+**Available Compression Algorithms:**
+
+| Algorithm | Extension | Speed | Ratio | Use Case |
+|-----------|-----------|-------|-------|----------|
+| `none` | - | N/A | 1x | No compression |
+| `gzip` | `.gz` | Medium | Good | Universal compatibility |
+| `zstd` | `.zst` | Fast | Excellent | Modern systems, best balance |
+| `snappy` | `.snappy` | Very Fast | Moderate | Interoperability |
+| `lz4` | `.lz4` | Fastest | Moderate | Real-time streaming |
+
+**Example: Gzip-compressed JSONL to S3:**
+
+```yaml
+sinks:
+  s3:
+    connector: s3
+    config:
+      bucket: my-bucket
+      prefix: events/
+      format: jsonl
+      compression: gzip  # Output files: events/2024/01/15/events_001.jsonl.gz
+```
+
+**Example: Snappy-compressed Parquet:**
+
+```yaml
+sinks:
+  s3:
+    connector: s3
+    config:
+      bucket: analytics-lake
+      format: parquet
+      parquet:
+        compression: snappy  # Built-in Parquet compression (not output_compression)
+```
+
+**Compression Type Summary:**
+
+| Format | Internal Compression | Output Compression |
+|--------|---------------------|-------------------|
+| JSON/JSONL | ❌ | ✅ gzip, zstd, snappy, lz4 |
+| CSV/TSV | ❌ | ✅ gzip, zstd, snappy, lz4 |
+| Parquet | ✅ snappy, zstd, lz4, gzip, brotli | ❌ (use internal) |
+| Avro | ✅ deflate, snappy | ❌ (use internal) |
 
 ---
 
@@ -639,24 +1008,6 @@ impl SourceConnector for MyConnector {
         Ok(vec![])
     }
 }
-```
-
-### WASM Modules
-
-Run connectors in isolated WASM sandboxes:
-
-```yaml
-sources:
-  custom:
-    connector: wasm
-    topic: custom-events
-    config:
-      module_path: /plugins/my-connector.wasm
-      memory_limit_mb: 256
-      timeout_secs: 30
-      plugin_config:
-        # Passed to WASM module
-        api_url: https://api.example.com
 ```
 
 ### Airbyte Compatibility

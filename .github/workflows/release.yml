@@ -25,10 +25,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
-      
-      - name: Install trunk
-        uses: taiki-e/install-action@trunk
       
       # Cache only registry, not target (avoids incremental bloat)
       - name: Cache cargo registry
@@ -62,11 +58,6 @@ jobs:
       
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
-      
-      - name: Install trunk
-        uses: taiki-e/install-action@trunk
       
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -108,14 +99,14 @@ jobs:
         run: cargo publish -p rivven-client --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
       
+      - name: Publish rivven-schema
+        run: cargo publish -p rivven-schema --token ${{ secrets.CRATES_IO_TOKEN }}
+        continue-on-error: true
+      
       - name: Wait for crates.io index
         run: sleep 30
       
       # Layer 4: rivvend depends on core, protocol, cluster
-      # build.rs will automatically build the dashboard from dashboard/ source
-      - name: Pre-build rivvend (builds dashboard via build.rs)
-        run: cargo build -p rivvend --release
-      
       - name: Publish rivvend
         run: cargo publish -p rivvend --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
@@ -292,24 +283,21 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }},wasm32-unknown-unknown
-      
-      - name: Install trunk
-        uses: taiki-e/install-action@trunk
+          targets: ${{ matrix.target }}
       
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
       
-      # Dashboard is built automatically by rivvend's build.rs
       - name: Build binaries
         run: |
           cargo build --release --target ${{ matrix.target }} \
             --package rivvend \
             --package rivven \
             --package rivven-connect \
-            --package rivven-operator
+            --package rivven-operator \
+            --package rivven-schema
       
       - name: Extract version
         id: version
@@ -321,7 +309,7 @@ jobs:
           cd target/${{ matrix.target }}/release
           
           # Package each binary
-          for bin in rivvend rivven rivven-connect rivven-operator; do
+          for bin in rivvend rivven rivven-connect rivven-operator rivven-schema; do
             if [ -f "$bin" ]; then
               tar -czvf ../../../dist/${bin}-${{ steps.version.outputs.VERSION }}-${{ matrix.suffix }}.tar.gz $bin
             fi
@@ -398,5 +386,18 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository_owner }}/rivven-operator:latest
             ghcr.io/${{ github.repository_owner }}/rivven-operator:${{ steps.version.outputs.VERSION }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      - name: Build and push rivven-schema
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: BINARY=rivven-schema
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/rivven-schema:latest
+            ghcr.io/${{ github.repository_owner }}/rivven-schema:${{ steps.version.outputs.VERSION }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

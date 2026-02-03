@@ -1,6 +1,6 @@
 # rivven-python
 
-Python bindings for Rivven using PyO3.
+> Python bindings for the Rivven event streaming platform.
 
 ## Installation
 
@@ -104,6 +104,30 @@ config = ClientConfig(
 client = Client.connect_with_config(config)
 ```
 
+## Exception Handling
+
+Rivven provides a hierarchy of exception types for granular error handling:
+
+```python
+from rivven import (
+    RivvenException,        # Base exception for all Rivven errors
+    ConnectionException,    # Connection-related errors
+    ServerException,        # Server-side errors
+    TimeoutException,       # Request timeouts
+    SerializationException, # Serialization/deserialization errors
+    ConfigException,        # Configuration errors
+)
+
+try:
+    client = await rivven.connect("localhost:9092")
+except ConnectionException as e:
+    print(f"Failed to connect: {e}")
+except TimeoutException as e:
+    print(f"Connection timed out: {e}")
+except RivvenException as e:
+    print(f"General Rivven error: {e}")
+```
+
 ## Building from Source
 
 ```bash
@@ -118,6 +142,11 @@ maturin build --release
 pip install target/wheels/rivven-*.whl
 ```
 
+## Documentation
+
+- [Getting Started](https://rivven.hupe1980.github.io/rivven/docs/getting-started)
+- [Python Examples](https://rivven.hupe1980.github.io/rivven/docs/getting-started#python-client)
+
 ## License
 
-See root [LICENSE](../../LICENSE) file.
+Apache-2.0. See [LICENSE](../../LICENSE).

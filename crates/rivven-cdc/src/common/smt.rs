@@ -1,6 +1,6 @@
 //! # Single Message Transforms (SMTs)
 //!
-//! Debezium-compatible message transformations for CDC events.
+//! Message transformations for CDC events.
 //!
 //! ## Built-in Transforms (17 total)
 //!
@@ -50,13 +50,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tracing::warn;
 
-/// Convert CdcOp to Debezium-style operation code.
+/// Convert CdcOp to standard operation code.
 fn op_to_code(op: &CdcOp) -> &'static str {
     match op {
         CdcOp::Insert => "c",    // create
         CdcOp::Update => "u",    // update
         CdcOp::Delete => "d",    // delete
-        CdcOp::Tombstone => "d", // tombstone (Debezium treats as delete)
+        CdcOp::Tombstone => "d", // tombstone (treated as delete)
         CdcOp::Truncate => "t",  // truncate
         CdcOp::Snapshot => "r",  // read (snapshot)
         CdcOp::Schema => "s",    // schema change (DDL)
@@ -134,7 +134,7 @@ impl SmtChain {
 
 /// Extract new record state - adds envelope fields to the data.
 ///
-/// Debezium events have an envelope with "before", "after", "op", etc.
+/// CDC events have an envelope with "before", "after", "op", etc.
 /// This transform can add envelope fields to the "after" data for downstream processing.
 ///
 /// # Options
@@ -555,10 +555,10 @@ impl MaskField {
                 }
             }
             MaskStrategy::Hash => {
-                use ring::digest::{digest, SHA256};
+                use sha2::{Digest, Sha256};
                 let bytes = serde_json::to_vec(value).unwrap_or_default();
-                let hash = digest(&SHA256, &bytes);
-                Value::String(hex::encode(hash.as_ref()))
+                let hash = Sha256::digest(&bytes);
+                Value::String(hex::encode(hash))
             }
             MaskStrategy::PartialMask {
                 keep_first,
@@ -1268,7 +1268,7 @@ impl Smt for RegexRouter {
 
 /// Predicate for conditionally applying transforms.
 ///
-/// Debezium-style predicates allow transforms to be applied only when
+/// Predicates allow transforms to be applied only when
 /// certain conditions are met.
 pub enum Predicate {
     /// Apply only to specific tables
@@ -1700,8 +1700,6 @@ impl Smt for SetNull {
 // ============================================================================
 
 /// Convert timestamp fields from one timezone to another.
-///
-/// Debezium-compatible timezone conversion SMT.
 ///
 /// # Example
 /// ```rust,ignore
@@ -2370,7 +2368,7 @@ impl ComputeField {
                 Some(Value::String(result))
             }
             ComputeOp::Hash(fields) => {
-                use ring::digest::{digest, SHA256};
+                use sha2::{Digest, Sha256};
                 let mut data = Vec::new();
                 for field in fields {
                     if let Some(v) = obj.get(field) {
@@ -2379,8 +2377,8 @@ impl ComputeField {
                         );
                     }
                 }
-                let hash = digest(&SHA256, &data);
-                Some(Value::String(hex::encode(hash.as_ref())))
+                let hash = Sha256::digest(&data);
+                Some(Value::String(hex::encode(hash)))
             }
             ComputeOp::Coalesce(fields) => {
                 for field in fields {
@@ -2436,25 +2434,8 @@ impl ComputeField {
             }
             ComputeOp::CurrentTimestamp => Some(Value::String(Utc::now().to_rfc3339())),
             ComputeOp::Uuid => {
-                // Generate a simple UUID v4
-                use ring::rand::{SecureRandom, SystemRandom};
-                let rng = SystemRandom::new();
-                let mut bytes = [0u8; 16];
-                if rng.fill(&mut bytes).is_ok() {
-                    // Set version and variant
-                    bytes[6] = (bytes[6] & 0x0f) | 0x40; // Version 4
-                    bytes[8] = (bytes[8] & 0x3f) | 0x80; // Variant
-                    Some(Value::String(format!(
-                        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                        bytes[0], bytes[1], bytes[2], bytes[3],
-                        bytes[4], bytes[5],
-                        bytes[6], bytes[7],
-                        bytes[8], bytes[9],
-                        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
-                    )))
-                } else {
-                    None
-                }
+                // Generate UUID v4 using the uuid crate
+                Some(Value::String(uuid::Uuid::new_v4().to_string()))
             }
             ComputeOp::JsonPath(field, path) => {
                 // Simple JSON path: "nested.field.value"

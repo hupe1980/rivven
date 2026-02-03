@@ -5,7 +5,13 @@ from rivven._rivven import (
     Message,
     Consumer,
     Producer,
-    RivvenError,
+    # Exception types
+    RivvenException,
+    ConnectionException,
+    ServerException,
+    TimeoutException,
+    SerializationException,
+    ConfigException,
     connect,
     version,
 )
@@ -15,7 +21,13 @@ __all__ = [
     "Message",
     "Consumer",
     "Producer",
-    "RivvenError",
+    # Exceptions
+    "RivvenException",
+    "ConnectionException",
+    "ServerException",
+    "TimeoutException",
+    "SerializationException",
+    "ConfigException",
     "connect",
     "version",
 ]

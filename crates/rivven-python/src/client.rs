@@ -430,60 +430,6 @@ impl RivvenClient {
     }
 
     // ========================================================================
-    // Schema Registry
-    // ========================================================================
-
-    /// Register a schema
-    ///
-    /// Args:
-    ///     subject (str): Schema subject (e.g., "events-value")
-    ///     schema (str): Schema definition (JSON string)
-    ///
-    /// Returns:
-    ///     int: Schema ID
-    ///
-    /// Example:
-    ///     >>> schema_id = await client.register_schema(
-    ///     ...     "events-value",
-    ///     ...     '{"type": "record", "name": "Event", ...}'
-    ///     ... )
-    pub fn register_schema<'py>(
-        &self,
-        py: Python<'py>,
-        subject: String,
-        schema: String,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let client = Arc::clone(&self.client);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut guard = client.lock().await;
-            let id = guard
-                .register_schema(&subject, &schema)
-                .await
-                .into_py_err()?;
-            Ok(id)
-        })
-    }
-
-    /// Get a schema by ID
-    ///
-    /// Args:
-    ///     schema_id (int): Schema ID
-    ///
-    /// Returns:
-    ///     str: Schema definition
-    ///
-    /// Example:
-    ///     >>> schema = await client.get_schema(1)
-    pub fn get_schema<'py>(&self, py: Python<'py>, schema_id: i32) -> PyResult<Bound<'py, PyAny>> {
-        let client = Arc::clone(&self.client);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut guard = client.lock().await;
-            let schema = guard.get_schema(schema_id).await.into_py_err()?;
-            Ok(schema)
-        })
-    }
-
-    // ========================================================================
     // Health / Utilities
     // ========================================================================
 

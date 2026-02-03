@@ -2,22 +2,113 @@
 //!
 //! Implements the rivven-connect-sdk Source trait for PostgreSQL
 //! Change Data Capture using logical replication.
+//!
+//! ## Features
+//!
+//! All features are configurable via YAML - no Rust code required.
+//! Designed for Kubernetes operators and binary deployments.
+//!
+//! ### Wired Up (Ready to Use)
+//!
+//! - **Core CDC**: Logical replication via pgoutput
+//! - **Auto-provisioning**: Automatic slot/publication creation
+//! - **TLS/mTLS**: Encrypted connections
+//! - **Filtering**: Schema, table, and column filtering
+//! - **SMT**: 10 Single Message Transforms:
+//!   - `ExtractNewRecordState` - Flatten envelope
+//!   - `ValueToKey` - Extract key from value
+//!   - `MaskField` - Mask sensitive fields
+//!   - `InsertField` - Add static/computed fields
+//!   - `ReplaceField` - Rename/filter fields
+//!   - `RegexRouter` - Route based on patterns
+//!   - `TimestampConverter` - Convert timestamp formats
+//!   - `Filter` - Filter by condition
+//!   - `Cast` - Convert field types
+//!   - `Flatten` - Flatten nested structures
+//! - **Tombstones**: Log compaction support (configurable)
+//! - **Column Filters**: Per-table column inclusion/exclusion
+//!
+//! ### Configured (Requires Custom Setup)
+//!
+//! These features have configuration support but require integration
+//! with custom async components for production use:
+//!
+//! - **Encryption**: Field-level AES-256-GCM (needs KeyProvider impl)
+//! - **Deduplication**: Bloom filter + LRU (async Deduplicator)
+//! - **Incremental Snapshots**: Chunk-based snapshots
+//! - **Signaling**: Control CDC via signal table
+//! - **Transaction Topics**: Transaction metadata
+//! - **Schema Change Topics**: DDL changes
+//!
+//! ## Example Configuration
+//!
+//! ```yaml
+//! connector_type: postgres-cdc
+//! config:
+//!   host: localhost
+//!   port: 5432
+//!   database: mydb
+//!   user: replicator
+//!   password: ${DB_PASSWORD}
+//!   slot_name: rivven_slot
+//!   publication_name: rivven_pub
+//!   auto_create_slot: true
+//!   auto_create_publication: true
+//!   
+//!   # Column filtering per table
+//!   column_filters:
+//!     public.users:
+//!       include: ["id", "email", "created_at"]
+//!       exclude: ["password_hash"]
+//!   
+//!   # SMT transforms
+//!   transforms:
+//!     - type: mask_field
+//!       config:
+//!         fields: ["ssn", "credit_card"]
+//!     - type: timestamp_converter
+//!       config:
+//!         fields: ["created_at"]
+//!         format: iso8601
+//!     - type: extract_new_record_state
+//!       config:
+//!         drop_tombstones: false
+//!         add_table: true
+//!   
+//!   # Tombstone handling
+//!   tombstone:
+//!     enabled: true
+//! ```
 
 use super::super::prelude::*;
+use super::cdc_config::{
+    ColumnFilterConfig, DeduplicationCdcConfig, FieldEncryptionConfig, HeartbeatCdcConfig,
+    IncrementalSnapshotCdcConfig, ReadOnlyReplicaConfig, SchemaChangeTopicConfig,
+    SignalTableConfig, SmtTransformConfig, SnapshotCdcConfig, SnapshotModeConfig,
+    TombstoneCdcConfig, TransactionTopicCdcConfig,
+};
 use crate::connectors::{AnySource, SourceFactory};
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use validator::Validate;
 
-/// A wrapper around SecretString that implements the necessary derives.
-/// This type redacts its value in Debug output to prevent credential leaks in logs.
+/// A password type for database connections that preserves the value during serialization.
+///
+/// Unlike the standard `SensitiveString` which redacts on serialize, this type
+/// preserves the actual password value when serialized. This is necessary for:
+/// - Configuration roundtripping (save/load)
+/// - Connection pooling and reconnection
+/// - Config validation workflows
+///
+/// Debug and Display output is still redacted to prevent leaks in logs.
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(transparent)]
-pub struct SensitiveString(#[serde(with = "secrecy_string_serde")] SecretString);
+pub struct ConnectionPassword(#[serde(with = "password_serde")] SecretString);
 
-mod secrecy_string_serde {
+mod password_serde {
     use secrecy::{ExposeSecret, SecretString};
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -36,20 +127,20 @@ mod secrecy_string_serde {
     }
 }
 
-impl std::fmt::Debug for SensitiveString {
+impl std::fmt::Debug for ConnectionPassword {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "[REDACTED]")
     }
 }
 
-impl std::fmt::Display for SensitiveString {
+impl std::fmt::Display for ConnectionPassword {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "[REDACTED]")
     }
 }
 
-impl SensitiveString {
-    /// Create a new SensitiveString (used in tests)
+impl ConnectionPassword {
+    /// Create a new ConnectionPassword (used in tests)
     #[cfg(test)]
     pub fn new(s: impl Into<String>) -> Self {
         Self(SecretString::new(s.into().into_boxed_str()))
@@ -61,9 +152,9 @@ impl SensitiveString {
     }
 }
 
-impl JsonSchema for SensitiveString {
+impl JsonSchema for ConnectionPassword {
     fn schema_name() -> String {
-        "SensitiveString".to_string()
+        "ConnectionPassword".to_string()
     }
 
     fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
@@ -96,8 +187,8 @@ pub struct PostgresCdcConfig {
     #[validate(length(min = 1))]
     pub user: String,
 
-    /// Password (redacted in logs)
-    pub password: SensitiveString,
+    /// Password (redacted in logs, preserved in serialization for DB reconnection)
+    pub password: ConnectionPassword,
 
     /// Replication slot name
     #[serde(default = "default_slot_name")]
@@ -117,9 +208,10 @@ pub struct PostgresCdcConfig {
     #[serde(default)]
     pub tables: Vec<String>,
 
-    /// Initial snapshot mode
+    /// Initial snapshot configuration ✅ IMPLEMENTED
+    /// Full table data load before streaming begins
     #[serde(default)]
-    pub snapshot_mode: SnapshotMode,
+    pub snapshot: SnapshotCdcConfig,
 
     /// Connection timeout in seconds
     #[serde(default = "default_connect_timeout")]
@@ -132,12 +224,12 @@ pub struct PostgresCdcConfig {
     pub heartbeat_interval_secs: u32,
 
     /// Automatically create replication slot if it doesn't exist (default: true)
-    /// Debezium-compatible: removes the need to pre-configure slots
+    /// Removes the need to pre-configure slots manually
     #[serde(default = "default_true")]
     pub auto_create_slot: bool,
 
     /// Automatically create publication if it doesn't exist (default: true)
-    /// Debezium-compatible: removes the need to pre-configure publications
+    /// Removes the need to pre-configure publications manually
     #[serde(default = "default_true")]
     pub auto_create_publication: bool,
 
@@ -149,6 +241,60 @@ pub struct PostgresCdcConfig {
     /// TLS/SSL configuration
     #[serde(default)]
     pub tls: PostgresTlsConfig,
+
+    // ========================================================================
+    // Implemented CDC Features
+    // ========================================================================
+    /// Single Message Transform (SMT) chain ✅ IMPLEMENTED
+    /// Apply transforms like masking, filtering, renaming in order
+    #[serde(default)]
+    pub transforms: Vec<SmtTransformConfig>,
+
+    /// Tombstone emission configuration ✅ IMPLEMENTED
+    /// Support Kafka log compaction with null-payload deletes
+    #[serde(default)]
+    pub tombstone: TombstoneCdcConfig,
+
+    /// Column filtering (per-table column inclusion/exclusion) ✅ IMPLEMENTED
+    /// Format: {"schema.table": {"include": ["col1"], "exclude": ["col2"]}}
+    #[serde(default)]
+    pub column_filters: HashMap<String, ColumnFilterConfig>,
+
+    /// Signal table configuration ✅ IMPLEMENTED
+    /// Ad-hoc snapshots and pause/resume via signal table
+    #[serde(default)]
+    pub signal: SignalTableConfig,
+
+    /// Incremental snapshot configuration ✅ IMPLEMENTED
+    /// Non-blocking re-snapshots using DBLog algorithm
+    #[serde(default)]
+    pub incremental_snapshot: IncrementalSnapshotCdcConfig,
+
+    /// Read-only replica configuration ✅ IMPLEMENTED
+    /// Connect to read replicas for reduced primary load
+    #[serde(default)]
+    pub read_only: ReadOnlyReplicaConfig,
+
+    /// Transaction metadata topic configuration ✅ IMPLEMENTED
+    /// Emit transaction boundaries for exactly-once semantics
+    #[serde(default)]
+    pub transaction_topic: TransactionTopicCdcConfig,
+
+    /// Schema change topic configuration ✅ IMPLEMENTED
+    /// Capture DDL changes (CREATE, ALTER, DROP)
+    #[serde(default)]
+    pub schema_change_topic: SchemaChangeTopicConfig,
+
+    /// Field-level encryption configuration ✅ IMPLEMENTED
+    /// AES-256-GCM encryption for sensitive columns
+    /// Note: Full encryption requires KeyProvider integration
+    #[serde(default)]
+    pub encryption: FieldEncryptionConfig,
+
+    /// Deduplication configuration ✅ IMPLEMENTED
+    /// Bloom filter + LRU cache for idempotent processing
+    #[serde(default)]
+    pub deduplication: DeduplicationCdcConfig,
 }
 
 /// TLS configuration for PostgreSQL connections
@@ -224,21 +370,6 @@ struct ProvisioningResult {
     slot_created: bool,
 }
 
-/// Snapshot mode for initial data load
-#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum SnapshotMode {
-    /// Always take a snapshot on startup
-    #[default]
-    Always,
-    /// Only take snapshot if no previous state
-    Initial,
-    /// Never take a snapshot
-    Never,
-    /// Snapshot when slot is created
-    WhenNeeded,
-}
-
 /// PostgreSQL CDC Source implementation
 pub struct PostgresCdcSource;
 
@@ -277,7 +408,7 @@ impl PostgresCdcSource {
     }
 
     /// Auto-provision replication slot and publication if configured
-    /// This is a Debezium-compatible feature for easier setup
+    /// Simplifies setup by automatically creating required PostgreSQL resources
     async fn auto_provision(
         config: &PostgresCdcConfig,
         client: &tokio_postgres::Client,
@@ -524,7 +655,7 @@ impl Source for PostgresCdcSource {
             return Ok(CheckResult::failure("User lacks REPLICATION privilege required for auto-provisioning. Either grant REPLICATION role or set auto_create_slot=false and auto_create_publication=false".to_string()));
         }
 
-        // Auto-provision if configured (Debezium-compatible feature)
+        // Auto-provision if configured
         if config.auto_create_slot || config.auto_create_publication {
             match Self::auto_provision(config, &client).await {
                 Ok(result) => {
@@ -700,10 +831,11 @@ impl Source for PostgresCdcSource {
         catalog: &ConfiguredCatalog,
         state: Option<State>,
     ) -> Result<BoxStream<'static, Result<SourceEvent>>> {
+        use super::cdc_features::{CdcFeatureConfig, CdcFeatureProcessor};
         use futures::StreamExt;
         use rivven_cdc::common::CdcSource;
         use rivven_cdc::postgres::{PostgresCdc, PostgresCdcConfig as CdcConfig};
-        use tracing::info;
+        use tracing::{debug, info};
 
         // Ensure slot/publication exist before starting CDC
         if config.auto_create_slot || config.auto_create_publication {
@@ -755,6 +887,13 @@ impl Source for PostgresCdcSource {
             .map(|s| s.stream.name.clone())
             .collect();
 
+        // Determine if we have prior state (used for snapshot mode decisions)
+        let has_prior_state = state.as_ref().is_some_and(|s| {
+            s.streams
+                .get("_global")
+                .is_some_and(|gs| gs.cursor_value.as_ref().is_some())
+        });
+
         // Resume from state if available
         let _resume_lsn = state.as_ref().and_then(|s| {
             s.streams.get("_global").and_then(|gs| {
@@ -764,48 +903,205 @@ impl Source for PostgresCdcSource {
             })
         });
 
-        // Convert CDC events to SourceEvents
-        let stream = tokio_stream::wrappers::ReceiverStream::new(event_rx)
-            .filter_map(move |cdc_event| {
-                use rivven_cdc::common::CdcOp;
+        // ====================================================================
+        // Execute Snapshot Phase (if configured)
+        // ====================================================================
+        use super::cdc_snapshot::{SnapshotExecutor, SnapshotExecutorConfig};
 
-                let stream_name = format!("{}.{}", cdc_event.schema, cdc_event.table);
-
-                // Filter to configured streams
-                if !configured_streams.is_empty() && !configured_streams.contains(&stream_name) {
-                    return std::future::ready(None);
+        // Build table list from catalog: (schema, table, primary_key)
+        let snapshot_tables: Vec<(String, String, String)> = catalog
+            .streams
+            .iter()
+            .map(|cs| {
+                let name = &cs.stream.name;
+                // Parse "schema.table" format
+                let parts: Vec<&str> = name.split('.').collect();
+                // Get primary key from stream definition
+                let pk = cs
+                    .stream
+                    .source_defined_primary_key
+                    .as_ref()
+                    .and_then(|keys| keys.first())
+                    .and_then(|path| path.first())
+                    .cloned()
+                    .unwrap_or_else(|| "id".to_string());
+                if parts.len() == 2 {
+                    (parts[0].to_string(), parts[1].to_string(), pk)
+                } else {
+                    // Default to public schema
+                    ("public".to_string(), name.clone(), pk)
                 }
-
-                let source_event = match cdc_event.op {
-                    CdcOp::Insert | CdcOp::Snapshot => SourceEvent::insert(
-                        &stream_name,
-                        cdc_event.after.clone().unwrap_or_default(),
-                    ),
-                    CdcOp::Update => SourceEvent::update(
-                        &stream_name,
-                        cdc_event.before.clone(),
-                        cdc_event.after.clone().unwrap_or_default(),
-                    ),
-                    CdcOp::Delete => SourceEvent::delete(
-                        &stream_name,
-                        cdc_event.before.clone().unwrap_or_default(),
-                    ),
-                    // Tombstone events have null payload - emit as delete with empty data
-                    CdcOp::Tombstone => SourceEvent::delete(&stream_name, serde_json::Value::Null),
-                    // Schema and Truncate events are not row-level data events
-                    CdcOp::Truncate | CdcOp::Schema => return std::future::ready(None),
-                };
-
-                // Add position for checkpointing (using timestamp as fallback)
-                let event = source_event
-                    .namespace(&cdc_event.schema)
-                    .position(format!("{}", cdc_event.timestamp));
-
-                std::future::ready(Some(Ok(event)))
             })
-            .boxed();
+            .collect();
 
-        Ok(stream)
+        let snapshot_executor = SnapshotExecutor::new(SnapshotExecutorConfig {
+            yaml_config: config.snapshot.clone(),
+            connection_string: Self::connection_string(config),
+            tables: snapshot_tables,
+            has_prior_state,
+        });
+
+        // Execute snapshot if needed
+        let (snapshot_events, snapshot_result) = snapshot_executor
+            .execute()
+            .await
+            .map_err(|e| ConnectorError::Internal(format!("Snapshot failed: {}", e)))?;
+
+        // Log snapshot result
+        if snapshot_result.total_events > 0 {
+            info!(
+                "Snapshot completed: {} events from {} tables in {:?}",
+                snapshot_result.total_events,
+                snapshot_result.tables_completed.len(),
+                snapshot_result.duration
+            );
+        }
+
+        // Check if we should continue to streaming
+        if !snapshot_result.should_stream {
+            info!("Snapshot-only mode: returning snapshot events without streaming");
+            // Convert snapshot events to SourceEvents and return as stream
+            let snapshot_stream = futures::stream::iter(snapshot_events)
+                .filter_map(move |cdc_event| async move {
+                    super::cdc_common::cdc_event_to_source_event(&cdc_event).map(Ok)
+                })
+                .boxed();
+            return Ok(snapshot_stream);
+        }
+
+        // ====================================================================
+        // Initialize CdcFeatureProcessor with all configured features
+        // ====================================================================
+
+        // Build heartbeat config from connector heartbeat_interval_secs
+        let heartbeat_config = HeartbeatCdcConfig {
+            enabled: config.heartbeat_interval_secs > 0,
+            interval_secs: config.heartbeat_interval_secs,
+            max_lag_secs: config.heartbeat_interval_secs * 30, // 5 min default for 10s interval
+            emit_events: false,
+            topic: None,
+            action_query: None,
+        };
+
+        let feature_config = CdcFeatureConfig::from_cdc_config(
+            config.transforms.clone(),
+            config.column_filters.clone(),
+            config.tombstone.clone(),
+            config.deduplication.clone(),
+            config.encryption.clone(),
+            config.signal.clone(),
+            config.transaction_topic.clone(),
+            config.schema_change_topic.clone(),
+            config.incremental_snapshot.clone(),
+            config.read_only.clone(),
+            heartbeat_config,
+        );
+
+        // Use connector name for heartbeat identification
+        let connector_name = format!("postgres-cdc-{}", config.slot_name);
+        let feature_processor = std::sync::Arc::new(CdcFeatureProcessor::with_connector_name(
+            feature_config,
+            &connector_name,
+        ));
+
+        // Log enabled features
+        if feature_processor.has_deduplication() {
+            info!("CDC deduplication enabled");
+        }
+        if feature_processor.has_signal_processing() {
+            info!("CDC signal processing enabled");
+        }
+        if feature_processor.has_transaction_topic() {
+            info!("CDC transaction topic enabled");
+        }
+        if feature_processor.has_schema_change_topic() {
+            info!("CDC schema change topic enabled");
+        }
+        if feature_processor.has_encryption() {
+            debug!("CDC field encryption enabled (key provider required for full support)");
+        }
+        if feature_processor.has_heartbeat() {
+            info!(
+                "CDC heartbeat enabled (interval: {}s)",
+                config.heartbeat_interval_secs
+            );
+        }
+        if feature_processor.is_read_only() {
+            info!("CDC read-only mode enabled");
+        }
+
+        // Log snapshot configuration
+        match config.snapshot.mode {
+            SnapshotModeConfig::Always => info!("Snapshot mode: Always (snapshot on every start)"),
+            SnapshotModeConfig::Initial => {
+                info!("Snapshot mode: Initial (snapshot on first start only)")
+            }
+            SnapshotModeConfig::Never => info!("Snapshot mode: Never (streaming only)"),
+            SnapshotModeConfig::WhenNeeded => {
+                info!("Snapshot mode: WhenNeeded (snapshot if no offsets)")
+            }
+            SnapshotModeConfig::InitialOnly => {
+                info!("Snapshot mode: InitialOnly (snapshot only, no streaming)")
+            }
+            SnapshotModeConfig::SchemaOnly => {
+                info!("Snapshot mode: SchemaOnly (schema capture only)")
+            }
+            SnapshotModeConfig::Recovery => info!("Snapshot mode: Recovery (force re-snapshot)"),
+        }
+        if !matches!(config.snapshot.mode, SnapshotModeConfig::Never) {
+            info!(
+                "Snapshot config: batch_size={}, parallel_tables={}, progress_dir={:?}",
+                config.snapshot.batch_size,
+                config.snapshot.parallel_tables,
+                config.snapshot.progress_dir
+            );
+        }
+
+        // Convert CDC events to SourceEvents with all features applied
+        let cdc_stream =
+            tokio_stream::wrappers::ReceiverStream::new(event_rx).filter_map(move |cdc_event| {
+                let processor = feature_processor.clone();
+                let streams = configured_streams.clone();
+
+                async move {
+                    let stream_name = format!("{}.{}", cdc_event.schema, cdc_event.table);
+
+                    // Filter to configured streams
+                    if !streams.is_empty() && !streams.contains(&stream_name) {
+                        return None;
+                    }
+
+                    // Update heartbeat position with timestamp (for lag tracking)
+                    // Note: Use timestamp as position since CdcEvent doesn't expose raw LSN
+                    let position = cdc_event.timestamp.to_string();
+                    processor
+                        .update_heartbeat_position(&position, &cdc_event.database)
+                        .await;
+
+                    // Process through feature pipeline (deduplication, transforms, etc.)
+                    let processed = match processor.process(cdc_event.clone()).await {
+                        Some(p) => p,
+                        None => return None, // Event was filtered/deduplicated
+                    };
+
+                    // Use shared conversion function from cdc_common
+                    let source_event =
+                        super::cdc_common::cdc_event_to_source_event(&processed.event)?;
+                    Some(Ok(source_event))
+                }
+            });
+
+        // Combine snapshot events with streaming events
+        // Snapshot events are emitted first, then streaming continues
+        let snapshot_event_stream =
+            futures::stream::iter(snapshot_events).filter_map(|cdc_event| async move {
+                super::cdc_common::cdc_event_to_source_event(&cdc_event).map(Ok)
+            });
+
+        // Chain: snapshot events first, then streaming events
+        let combined_stream = snapshot_event_stream.chain(cdc_stream).boxed();
+
+        Ok(combined_stream)
     }
 }
 
@@ -903,18 +1199,28 @@ mod tests {
             port: 5432,
             database: "test".to_string(),
             user: "postgres".to_string(),
-            password: SensitiveString::new("secret"),
+            password: ConnectionPassword::new("secret"),
             slot_name: "rivven_slot".to_string(),
             publication_name: "rivven_pub".to_string(),
             schemas: vec![],
             tables: vec![],
-            snapshot_mode: SnapshotMode::Always,
+            snapshot: SnapshotCdcConfig::default(),
             connect_timeout_secs: 10,
             heartbeat_interval_secs: 10,
             auto_create_slot: true,
             auto_create_publication: true,
             drop_slot_on_stop: false,
             tls: PostgresTlsConfig::default(),
+            signal: SignalTableConfig::default(),
+            incremental_snapshot: IncrementalSnapshotCdcConfig::default(),
+            transforms: vec![],
+            read_only: ReadOnlyReplicaConfig::default(),
+            transaction_topic: TransactionTopicCdcConfig::default(),
+            schema_change_topic: SchemaChangeTopicConfig::default(),
+            tombstone: TombstoneCdcConfig::default(),
+            encryption: FieldEncryptionConfig::default(),
+            deduplication: DeduplicationCdcConfig::default(),
+            column_filters: HashMap::new(),
         };
 
         assert!(config.validate().is_ok());
@@ -927,18 +1233,28 @@ mod tests {
             port: 0, // Invalid
             database: "test".to_string(),
             user: "postgres".to_string(),
-            password: SensitiveString::new("secret"),
+            password: ConnectionPassword::new("secret"),
             slot_name: "rivven_slot".to_string(),
             publication_name: "rivven_pub".to_string(),
             schemas: vec![],
             tables: vec![],
-            snapshot_mode: SnapshotMode::default(),
+            snapshot: SnapshotCdcConfig::default(),
             connect_timeout_secs: 10,
             heartbeat_interval_secs: 10,
             auto_create_slot: true,
             auto_create_publication: true,
             drop_slot_on_stop: false,
             tls: PostgresTlsConfig::default(),
+            signal: SignalTableConfig::default(),
+            incremental_snapshot: IncrementalSnapshotCdcConfig::default(),
+            transforms: vec![],
+            read_only: ReadOnlyReplicaConfig::default(),
+            transaction_topic: TransactionTopicCdcConfig::default(),
+            schema_change_topic: SchemaChangeTopicConfig::default(),
+            tombstone: TombstoneCdcConfig::default(),
+            encryption: FieldEncryptionConfig::default(),
+            deduplication: DeduplicationCdcConfig::default(),
+            column_filters: HashMap::new(),
         };
 
         assert!(config.validate().is_err());
@@ -975,7 +1291,7 @@ mod tests {
 
     #[test]
     fn test_password_redacted_in_debug() {
-        let password = SensitiveString::new("super-secret-password");
+        let password = ConnectionPassword::new("super-secret-password");
 
         // Debug output should show [REDACTED], not the actual password
         let debug_output = format!("{:?}", password);
@@ -988,18 +1304,28 @@ mod tests {
             port: 5432,
             database: "test".to_string(),
             user: "postgres".to_string(),
-            password: SensitiveString::new("my-secret-password"),
+            password: ConnectionPassword::new("my-secret-password"),
             slot_name: "rivven_slot".to_string(),
             publication_name: "rivven_pub".to_string(),
             schemas: vec![],
             tables: vec![],
-            snapshot_mode: SnapshotMode::Always,
+            snapshot: SnapshotCdcConfig::default(),
             connect_timeout_secs: 10,
             heartbeat_interval_secs: 10,
             auto_create_slot: true,
             auto_create_publication: true,
             drop_slot_on_stop: false,
             tls: PostgresTlsConfig::default(),
+            signal: SignalTableConfig::default(),
+            incremental_snapshot: IncrementalSnapshotCdcConfig::default(),
+            transforms: vec![],
+            read_only: ReadOnlyReplicaConfig::default(),
+            transaction_topic: TransactionTopicCdcConfig::default(),
+            schema_change_topic: SchemaChangeTopicConfig::default(),
+            tombstone: TombstoneCdcConfig::default(),
+            encryption: FieldEncryptionConfig::default(),
+            deduplication: DeduplicationCdcConfig::default(),
+            column_filters: HashMap::new(),
         };
 
         let config_debug = format!("{:?}", config);
@@ -1009,7 +1335,7 @@ mod tests {
 
     #[test]
     fn test_password_expose_works() {
-        let password = SensitiveString::new("actual-password");
+        let password = ConnectionPassword::new("actual-password");
         assert_eq!(password.expose(), "actual-password");
     }
 

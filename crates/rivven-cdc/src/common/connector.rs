@@ -1,132 +1,111 @@
 //! # CDC Connector
 //!
-//! Database-agnostic connector for routing CDC events to Rivven topics.
+//! Database-agnostic connector for routing CDC events to topics.
 //!
-//! The connector handles:
-//! - Schema caching and management
-//! - Topic/partition routing
-//! - Integration with schema registry
-//! - Batch event processing
+//! ## Design Philosophy
+//!
+//! The CDC connector is intentionally simple and format-agnostic:
+//! - It captures database changes and routes them as `CdcEvent` objects
+//! - Serialization format (Avro, Protobuf, JSON) is decided by the consumer (rivven-connect)
+//! - Schema registry integration is handled by rivven-connect, not here
+//!
+//! This separation of concerns allows:
+//! - Using CDC events without any schema registry
+//! - Choosing serialization format at the connector level, not CDC level
+//! - Simpler CDC library with fewer dependencies
 //!
 //! ## Architecture
 //!
 //! ```text
-//! CDC Source → CdcConnector → Schema Registry (optional)
-//!                    ↓
-//!              Topic/Partition
+//! rivven-cdc                          rivven-connect
+//! ┌──────────────────┐                ┌──────────────────────┐
+//! │ Database         │                │ CDC Source Connector │
+//! │    ↓             │                │    ↓                 │
+//! │ CdcSource        │ ──CdcEvent──►  │ Schema Inference     │
+//! │    ↓             │                │    ↓                 │
+//! │ CdcConnector     │                │ Schema Registry      │
+//! │    ↓             │                │    ↓                 │
+//! │ Topic Routing    │                │ Serialization        │
+//! └──────────────────┘                └──────────────────────┘
 //! ```
 
 use crate::common::{CdcError, CdcEvent, Result};
-use apache_avro::Schema as AvroSchema;
-use rivven_core::{schema_registry::SchemaRegistry, Partition};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-/// Schema generator function type for database-specific Avro schema generation
-pub type SchemaGenerator =
-    Box<dyn Fn(&str, &str, &[(String, i32, String)]) -> Result<AvroSchema> + Send + Sync>;
-
-/// CDC Connector that routes database events to Rivven topics.
+/// Trait for receiving CDC events.
 ///
-/// This connector is database-agnostic - it uses a pluggable schema generator
-/// to support different database types (PostgreSQL, MySQL, MariaDB).
+/// This trait allows CDC to work standalone without requiring the full broker.
+/// Implementations can write to Rivven partitions, Kafka, files, etc.
+#[async_trait::async_trait]
+pub trait EventSink: Send + Sync + std::fmt::Debug {
+    /// Append an event to the sink, returning the offset
+    async fn append(&self, event: &CdcEvent) -> Result<u64>;
+}
+
+/// CDC Connector that routes database events to topics.
+///
+/// This connector is database-agnostic and format-agnostic. It simply
+/// routes CDC events to registered event sinks (topics/partitions).
 ///
 /// # Example
 ///
 /// ```ignore
 /// use rivven_cdc::common::CdcConnector;
 ///
-/// let connector = CdcConnector::new()
-///     .with_schema_generator(|schema, table, columns| {
-///         // Generate Avro schema from table metadata
-///         generate_avro_schema(schema, table, columns)
-///     });
+/// let connector = CdcConnector::new("postgres");
 ///
-/// // Register a topic
-/// connector.register_topic("cdc.mydb.public.users".into(), partition).await;
+/// // Register event sinks for topics
+/// connector.register_sink("cdc.mydb.public.users", sink).await;
 ///
 /// // Route events
 /// connector.route_event(&event).await?;
 /// ```
 pub struct CdcConnector {
-    /// Schema cache: (namespace.table) -> Avro Schema
-    schema_cache: Arc<RwLock<HashMap<String, AvroSchema>>>,
-
-    /// Topic/Partition mapping
-    partitions: Arc<RwLock<HashMap<String, Arc<Partition>>>>,
-
-    /// Schema registry reference
-    schema_registry: Option<Arc<dyn SchemaRegistry>>,
-
-    /// Database-specific schema generator
-    schema_generator: Option<SchemaGenerator>,
+    /// Topic -> EventSink mapping
+    sinks: Arc<RwLock<HashMap<String, Arc<dyn EventSink>>>>,
 
     /// Source type identifier (postgres, mysql, mariadb)
     source_type: String,
+
+    /// Database name (for topic naming)
+    database: Option<String>,
 }
 
 impl CdcConnector {
     /// Create a new CDC connector.
-    pub fn new() -> Self {
+    ///
+    /// # Arguments
+    ///
+    /// * `source_type` - The database type (postgres, mysql, mariadb)
+    pub fn new(source_type: impl Into<String>) -> Self {
         Self {
-            schema_cache: Arc::new(RwLock::new(HashMap::new())),
-            partitions: Arc::new(RwLock::new(HashMap::new())),
-            schema_registry: None,
-            schema_generator: None,
-            source_type: "unknown".into(),
+            sinks: Arc::new(RwLock::new(HashMap::new())),
+            source_type: source_type.into(),
+            database: None,
         }
     }
 
     /// Create a new CDC connector for PostgreSQL.
-    #[cfg(feature = "postgres")]
-    pub fn for_postgres() -> Self {
-        use crate::postgres::PostgresTypeMapper;
-
-        Self::new()
-            .with_source_type("postgres")
-            .with_schema_generator(Box::new(|schema, table, columns| {
-                PostgresTypeMapper::generate_avro_schema(schema, table, columns)
-                    .map_err(|e| CdcError::Schema(e.to_string()))
-            }))
+    pub fn postgres() -> Self {
+        Self::new("postgres")
     }
 
     /// Create a new CDC connector for MySQL.
-    #[cfg(feature = "mysql")]
-    pub fn for_mysql() -> Self {
-        use crate::mysql::MySqlTypeMapper;
-
-        Self::new()
-            .with_source_type("mysql")
-            .with_schema_generator(Box::new(|schema, table, columns| {
-                MySqlTypeMapper::generate_avro_schema(schema, table, columns)
-                    .map_err(|e| CdcError::Schema(e.to_string()))
-            }))
+    pub fn mysql() -> Self {
+        Self::new("mysql")
     }
 
     /// Create a new CDC connector for MariaDB.
-    #[cfg(feature = "mariadb")]
-    pub fn for_mariadb() -> Self {
-        // MariaDB uses MySQL-compatible binlog format
-        Self::for_mysql().with_source_type("mariadb")
+    pub fn mariadb() -> Self {
+        Self::new("mariadb")
     }
 
-    /// Set the source type identifier.
-    pub fn with_source_type(mut self, source_type: &str) -> Self {
-        self.source_type = source_type.into();
-        self
-    }
-
-    /// Set the schema registry for schema management.
-    pub fn with_schema_registry(mut self, registry: Arc<dyn SchemaRegistry>) -> Self {
-        self.schema_registry = Some(registry);
-        self
-    }
-
-    /// Set the schema generator function.
-    pub fn with_schema_generator(mut self, generator: SchemaGenerator) -> Self {
-        self.schema_generator = Some(generator);
+    /// Set the database name for topic naming.
+    pub fn with_database(mut self, database: impl Into<String>) -> Self {
+        self.database = Some(database.into());
         self
     }
 
@@ -135,137 +114,67 @@ impl CdcConnector {
         &self.source_type
     }
 
-    /// Register a topic partition for CDC events.
+    /// Get the database name.
+    pub fn database(&self) -> Option<&str> {
+        self.database.as_deref()
+    }
+
+    /// Register an event sink for a topic.
     ///
     /// # Arguments
     ///
     /// * `topic` - The topic name (e.g., "cdc.mydb.public.users")
-    /// * `partition` - The partition to route events to
-    pub async fn register_topic(&self, topic: String, partition: Arc<Partition>) {
-        let mut partitions = self.partitions.write().await;
-        partitions.insert(topic.clone(), partition);
-        info!("Registered CDC topic: {}", topic);
+    /// * `sink` - The event sink to route events to
+    pub async fn register_sink(&self, topic: impl Into<String>, sink: Arc<dyn EventSink>) {
+        let topic = topic.into();
+        let mut sinks = self.sinks.write().await;
+        sinks.insert(topic.clone(), sink);
+        info!("Registered CDC sink for topic: {}", topic);
     }
 
-    /// Unregister a topic.
-    pub async fn unregister_topic(&self, topic: &str) -> Option<Arc<Partition>> {
-        let mut partitions = self.partitions.write().await;
-        let result = partitions.remove(topic);
+    /// Unregister an event sink.
+    pub async fn unregister_sink(&self, topic: &str) -> Option<Arc<dyn EventSink>> {
+        let mut sinks = self.sinks.write().await;
+        let result = sinks.remove(topic);
         if result.is_some() {
-            info!("Unregistered CDC topic: {}", topic);
+            info!("Unregistered CDC sink for topic: {}", topic);
         }
         result
     }
 
     /// Get registered topic names.
     pub async fn topics(&self) -> Vec<String> {
-        let partitions = self.partitions.read().await;
-        partitions.keys().cloned().collect()
+        let sinks = self.sinks.read().await;
+        sinks.keys().cloned().collect()
     }
 
-    /// Get or create Avro schema for a table.
-    ///
-    /// This method:
-    /// 1. Checks the local cache for an existing schema
-    /// 2. If not found, generates a new schema using the schema generator
-    /// 3. Optionally registers the schema with the schema registry
-    /// 4. Caches the schema for future use
-    ///
-    /// # Arguments
-    ///
-    /// * `database` - Database name
-    /// * `schema` - Schema/namespace name
-    /// * `table` - Table name
-    /// * `columns` - Column metadata: (name, type_oid, type_name)
-    pub async fn get_or_infer_schema(
-        &self,
-        database: &str,
-        schema: &str,
-        table: &str,
-        columns: &[(String, i32, String)],
-    ) -> Result<AvroSchema> {
-        let cache_key = format!("{}.{}", schema, table);
-
-        // Check cache first
-        {
-            let cache = self.schema_cache.read().await;
-            if let Some(avro_schema) = cache.get(&cache_key) {
-                return Ok(avro_schema.clone());
-            }
-        }
-
-        // Generate new schema
-        info!(
-            "Inferring Avro schema for {}.{}.{} ({})",
-            database, schema, table, self.source_type
-        );
-
-        let avro_schema = match &self.schema_generator {
-            Some(generator) => generator(schema, table, columns)?,
-            None => {
-                return Err(CdcError::Schema("No schema generator configured".into()));
-            }
-        };
-
-        // Register with schema registry if available
-        if let Some(registry) = &self.schema_registry {
-            let subject = format!("cdc.{}.{}.{}", database, schema, table);
-            let schema_str = avro_schema.canonical_form();
-
-            match registry.register(&subject, &schema_str).await {
-                Ok(schema_id) => {
-                    info!("Registered schema {} with ID {}", subject, schema_id);
-                }
-                Err(e) => {
-                    warn!("Failed to register schema {}: {}", subject, e);
-                }
-            }
-        }
-
-        // Cache it
-        let mut cache = self.schema_cache.write().await;
-        cache.insert(cache_key, avro_schema.clone());
-
-        Ok(avro_schema)
+    /// Check if a topic has a registered sink.
+    pub async fn has_sink(&self, topic: &str) -> bool {
+        let sinks = self.sinks.read().await;
+        sinks.contains_key(topic)
     }
 
-    /// Check if a schema is cached for a table.
-    pub async fn has_schema(&self, schema: &str, table: &str) -> bool {
-        let cache_key = format!("{}.{}", schema, table);
-        let cache = self.schema_cache.read().await;
-        cache.contains_key(&cache_key)
-    }
-
-    /// Clear the schema cache.
-    pub async fn clear_schema_cache(&self) {
-        let mut cache = self.schema_cache.write().await;
-        cache.clear();
-        info!("Cleared schema cache");
+    /// Generate the topic name for a CDC event.
+    ///
+    /// Topic naming convention: `cdc.{database}.{schema}.{table}`
+    pub fn topic_name(&self, event: &CdcEvent) -> String {
+        format!("cdc.{}.{}.{}", event.database, event.schema, event.table)
     }
 
     /// Route a CDC event to the appropriate topic.
     ///
     /// Topic naming convention: `cdc.{database}.{schema}.{table}`
     pub async fn route_event(&self, event: &CdcEvent) -> Result<u64> {
-        // Topic naming: cdc.{database}.{schema}.{table}
-        let topic_name = format!("cdc.{}.{}.{}", event.database, event.schema, event.table);
+        let topic_name = self.topic_name(event);
 
-        // Get partition
-        let partitions = self.partitions.read().await;
-        let partition = partitions.get(&topic_name).ok_or_else(|| {
-            CdcError::Topic(format!("No partition registered for topic: {}", topic_name))
+        // Get sink
+        let sinks = self.sinks.read().await;
+        let sink = sinks.get(&topic_name).ok_or_else(|| {
+            CdcError::Topic(format!("No sink registered for topic: {}", topic_name))
         })?;
 
-        // Convert to Message
-        let message = event
-            .to_message()
-            .map_err(|e| CdcError::Serialization(e.to_string()))?;
-
-        // Append to partition
-        let offset = partition
-            .append(message)
-            .await
-            .map_err(|e| CdcError::Io(std::io::Error::other(e.to_string())))?;
+        // Append to sink
+        let offset = sink.append(event).await?;
 
         debug!(
             "Routed {:?} event for {}.{} to topic {} at offset {}",
@@ -278,11 +187,11 @@ impl CdcConnector {
     /// Process a batch of CDC events.
     ///
     /// Returns the number of successfully routed events.
-    pub async fn process_events(&self, events: Vec<CdcEvent>) -> Result<usize> {
+    pub async fn process_events(&self, events: &[CdcEvent]) -> Result<usize> {
         let mut success_count = 0;
 
         for event in events {
-            match self.route_event(&event).await {
+            match self.route_event(event).await {
                 Ok(_) => success_count += 1,
                 Err(e) => {
                     warn!("Failed to route event: {}", e);
@@ -296,7 +205,7 @@ impl CdcConnector {
     /// Process events with a callback for each event.
     pub async fn process_events_with_callback<F>(
         &self,
-        events: Vec<CdcEvent>,
+        events: &[CdcEvent],
         mut callback: F,
     ) -> Result<usize>
     where
@@ -305,13 +214,13 @@ impl CdcConnector {
         let mut success_count = 0;
 
         for event in events {
-            match self.route_event(&event).await {
+            match self.route_event(event).await {
                 Ok(offset) => {
-                    callback(&event, Ok(offset));
+                    callback(event, Ok(offset));
                     success_count += 1;
                 }
                 Err(e) => {
-                    callback(&event, Err(&e));
+                    callback(event, Err(&e));
                     warn!("Failed to route event: {}", e);
                 }
             }
@@ -323,7 +232,7 @@ impl CdcConnector {
 
 impl Default for CdcConnector {
     fn default() -> Self {
-        Self::new()
+        Self::new("unknown")
     }
 }
 
@@ -331,8 +240,7 @@ impl std::fmt::Debug for CdcConnector {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CdcConnector")
             .field("source_type", &self.source_type)
-            .field("has_schema_registry", &self.schema_registry.is_some())
-            .field("has_schema_generator", &self.schema_generator.is_some())
+            .field("database", &self.database)
             .finish()
     }
 }
@@ -342,8 +250,33 @@ mod tests {
     use super::*;
     use crate::common::CdcOp;
 
+    /// Mock event sink for testing
+    #[derive(Debug)]
+    struct MockSink {
+        offset: std::sync::atomic::AtomicU64,
+    }
+
+    impl MockSink {
+        fn new() -> Self {
+            Self {
+                offset: std::sync::atomic::AtomicU64::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl EventSink for MockSink {
+        async fn append(&self, _event: &CdcEvent) -> Result<u64> {
+            let offset = self
+                .offset
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(offset)
+        }
+    }
+
     #[test]
     fn test_topic_naming() {
+        let connector = CdcConnector::postgres();
         let event = CdcEvent {
             source_type: "postgres".into(),
             database: "mydb".into(),
@@ -356,53 +289,128 @@ mod tests {
             transaction: None,
         };
 
-        let topic_name = format!("cdc.{}.{}.{}", event.database, event.schema, event.table);
-        assert_eq!(topic_name, "cdc.mydb.public.users");
+        assert_eq!(connector.topic_name(&event), "cdc.mydb.public.users");
     }
 
     #[test]
     fn test_connector_creation() {
-        let connector = CdcConnector::new();
-        assert_eq!(connector.source_type(), "unknown");
-    }
-
-    #[test]
-    fn test_connector_with_source_type() {
-        let connector = CdcConnector::new().with_source_type("postgres");
+        let connector = CdcConnector::new("postgres");
         assert_eq!(connector.source_type(), "postgres");
     }
 
-    #[cfg(feature = "postgres")]
     #[test]
-    fn test_postgres_connector() {
-        let connector = CdcConnector::for_postgres();
-        assert_eq!(connector.source_type(), "postgres");
-        assert!(connector.schema_generator.is_some());
+    fn test_connector_helpers() {
+        assert_eq!(CdcConnector::postgres().source_type(), "postgres");
+        assert_eq!(CdcConnector::mysql().source_type(), "mysql");
+        assert_eq!(CdcConnector::mariadb().source_type(), "mariadb");
     }
 
-    #[cfg(feature = "mysql")]
     #[test]
-    fn test_mysql_connector() {
-        let connector = CdcConnector::for_mysql();
-        assert_eq!(connector.source_type(), "mysql");
-        assert!(connector.schema_generator.is_some());
+    fn test_connector_with_database() {
+        let connector = CdcConnector::postgres().with_database("mydb");
+        assert_eq!(connector.database(), Some("mydb"));
     }
 
     #[tokio::test]
-    async fn test_schema_cache_operations() {
-        let connector = CdcConnector::new();
+    async fn test_sink_registration() {
+        let connector = CdcConnector::postgres();
 
-        assert!(!connector.has_schema("public", "users").await);
-
-        // Clear should work even when empty
-        connector.clear_schema_cache().await;
-    }
-
-    #[tokio::test]
-    async fn test_topic_registration() {
-        let connector = CdcConnector::new();
-
-        // Initially no topics
+        // Initially no sinks
         assert!(connector.topics().await.is_empty());
+
+        // Register a sink
+        let sink = Arc::new(MockSink::new());
+        connector.register_sink("cdc.mydb.public.users", sink).await;
+
+        // Verify sink is registered
+        assert!(connector.has_sink("cdc.mydb.public.users").await);
+        assert_eq!(connector.topics().await.len(), 1);
+
+        // Unregister
+        connector.unregister_sink("cdc.mydb.public.users").await;
+        assert!(!connector.has_sink("cdc.mydb.public.users").await);
+    }
+
+    #[tokio::test]
+    async fn test_route_event() {
+        let connector = CdcConnector::postgres();
+        let sink = Arc::new(MockSink::new());
+        connector.register_sink("cdc.mydb.public.users", sink).await;
+
+        let event = CdcEvent {
+            source_type: "postgres".into(),
+            database: "mydb".into(),
+            schema: "public".into(),
+            table: "users".into(),
+            op: CdcOp::Insert,
+            before: None,
+            after: Some(serde_json::json!({"id": 1, "name": "Alice"})),
+            timestamp: 0,
+            transaction: None,
+        };
+
+        // Route event
+        let offset = connector.route_event(&event).await.unwrap();
+        assert_eq!(offset, 0);
+
+        // Route another event
+        let offset = connector.route_event(&event).await.unwrap();
+        assert_eq!(offset, 1);
+    }
+
+    #[tokio::test]
+    async fn test_route_event_no_sink() {
+        let connector = CdcConnector::postgres();
+
+        let event = CdcEvent {
+            source_type: "postgres".into(),
+            database: "mydb".into(),
+            schema: "public".into(),
+            table: "users".into(),
+            op: CdcOp::Insert,
+            before: None,
+            after: Some(serde_json::json!({"id": 1})),
+            timestamp: 0,
+            transaction: None,
+        };
+
+        // Should fail - no sink registered
+        let result = connector.route_event(&event).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_process_events() {
+        let connector = CdcConnector::postgres();
+        let sink = Arc::new(MockSink::new());
+        connector.register_sink("cdc.mydb.public.users", sink).await;
+
+        let events = vec![
+            CdcEvent {
+                source_type: "postgres".into(),
+                database: "mydb".into(),
+                schema: "public".into(),
+                table: "users".into(),
+                op: CdcOp::Insert,
+                before: None,
+                after: Some(serde_json::json!({"id": 1})),
+                timestamp: 0,
+                transaction: None,
+            },
+            CdcEvent {
+                source_type: "postgres".into(),
+                database: "mydb".into(),
+                schema: "public".into(),
+                table: "users".into(),
+                op: CdcOp::Insert,
+                before: None,
+                after: Some(serde_json::json!({"id": 2})),
+                timestamp: 0,
+                transaction: None,
+            },
+        ];
+
+        let count = connector.process_events(&events).await.unwrap();
+        assert_eq!(count, 2);
     }
 }

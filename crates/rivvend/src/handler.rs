@@ -5,7 +5,6 @@ use crate::protocol::{
 };
 use bytes::Bytes;
 use rivven_core::{
-    schema_registry::{EmbeddedSchemaRegistry, SchemaRegistry},
     IdempotentProducerManager, Message, OffsetManager, QuotaConfig, QuotaEntity, QuotaManager,
     QuotaResult, SequenceResult, TopicConfigManager, TopicManager, TransactionCoordinator,
     TransactionPartition, TransactionResult, Validator,
@@ -19,7 +18,6 @@ use tracing::{debug, error, info, warn};
 pub struct RequestHandler {
     topic_manager: TopicManager,
     offset_manager: OffsetManager,
-    schema_registry: Arc<EmbeddedSchemaRegistry>,
     partitioner: StickyPartitioner,
     /// Idempotent producer state manager (KIP-98)
     idempotent_manager: Arc<IdempotentProducerManager>,
@@ -33,15 +31,10 @@ pub struct RequestHandler {
 
 impl RequestHandler {
     /// Create a new request handler with default partitioner settings
-    pub fn new(
-        topic_manager: TopicManager,
-        offset_manager: OffsetManager,
-        schema_registry: Arc<EmbeddedSchemaRegistry>,
-    ) -> Self {
+    pub fn new(topic_manager: TopicManager, offset_manager: OffsetManager) -> Self {
         Self {
             topic_manager,
             offset_manager,
-            schema_registry,
             partitioner: StickyPartitioner::new(),
             idempotent_manager: Arc::new(IdempotentProducerManager::new()),
             transaction_coordinator: Arc::new(TransactionCoordinator::new()),
@@ -54,13 +47,11 @@ impl RequestHandler {
     pub fn with_partitioner_config(
         topic_manager: TopicManager,
         offset_manager: OffsetManager,
-        schema_registry: Arc<EmbeddedSchemaRegistry>,
         partitioner_config: StickyPartitionerConfig,
     ) -> Self {
         Self {
             topic_manager,
             offset_manager,
-            schema_registry,
             partitioner: StickyPartitioner::with_config(partitioner_config),
             idempotent_manager: Arc::new(IdempotentProducerManager::new()),
             transaction_coordinator: Arc::new(TransactionCoordinator::new()),
@@ -73,13 +64,11 @@ impl RequestHandler {
     pub fn with_quota_manager(
         topic_manager: TopicManager,
         offset_manager: OffsetManager,
-        schema_registry: Arc<EmbeddedSchemaRegistry>,
         quota_manager: Arc<QuotaManager>,
     ) -> Self {
         Self {
             topic_manager,
             offset_manager,
-            schema_registry,
             partitioner: StickyPartitioner::new(),
             idempotent_manager: Arc::new(IdempotentProducerManager::new()),
             transaction_coordinator: Arc::new(TransactionCoordinator::new()),
@@ -121,8 +110,9 @@ impl RequestHandler {
                 partition,
                 offset,
                 max_messages,
+                isolation_level,
             } => {
-                self.handle_consume(topic, partition, offset, max_messages)
+                self.handle_consume(topic, partition, offset, max_messages, isolation_level)
                     .await
             }
 
@@ -168,12 +158,6 @@ impl RequestHandler {
             }
 
             Request::Ping => Response::Pong,
-
-            Request::RegisterSchema { subject, schema } => {
-                self.handle_register_schema(subject, schema).await
-            }
-
-            Request::GetSchema { id } => self.handle_get_schema(id).await,
 
             Request::ListGroups => self.handle_list_groups().await,
 
@@ -405,6 +389,7 @@ impl RequestHandler {
         partition: u32,
         offset: u64,
         max_messages: usize,
+        isolation_level: Option<u8>,
     ) -> Response {
         // Validate topic name
         if let Err(e) = Validator::validate_topic_name(&topic_name) {
@@ -420,6 +405,9 @@ impl RequestHandler {
 
         // Enforce reasonable limits on max_messages
         let max_messages = max_messages.min(10_000); // Cap at 10k messages per request
+
+        // Parse isolation level (0 = read_uncommitted, 1 = read_committed)
+        let read_committed = isolation_level.map(|l| l == 1).unwrap_or(false);
 
         let topic = match self.topic_manager.get_topic(&topic_name).await {
             Ok(t) => t,
@@ -439,7 +427,41 @@ impl RequestHandler {
 
         match topic.read(partition, offset, max_messages).await {
             Ok(messages) => {
-                let message_data: Vec<MessageData> = messages
+                // Filter messages based on isolation level
+                let filtered_messages: Vec<_> = if read_committed {
+                    // For read_committed, filter out:
+                    // 1. Messages from aborted transactions
+                    // 2. Uncommitted transactional messages (beyond LSO)
+                    // 3. Control records (transaction markers)
+                    messages
+                        .into_iter()
+                        .filter(|msg| {
+                            // Skip control records (markers)
+                            if msg.is_control_record() {
+                                return false;
+                            }
+                            // Non-transactional messages pass through
+                            if !msg.is_transactional {
+                                return true;
+                            }
+                            // Check if the transactional message is committed
+                            // For now, we check the aborted transaction index
+                            if let Some(pid) = msg.producer_id {
+                                !self.transaction_coordinator.is_aborted(pid, msg.offset)
+                            } else {
+                                true
+                            }
+                        })
+                        .collect()
+                } else {
+                    // read_uncommitted: return all data messages (skip control records only)
+                    messages
+                        .into_iter()
+                        .filter(|msg| !msg.is_control_record())
+                        .collect()
+                };
+
+                let message_data: Vec<MessageData> = filtered_messages
                     .into_iter()
                     .map(|msg| MessageData {
                         offset: msg.offset,
@@ -627,34 +649,6 @@ impl RequestHandler {
             },
             Err(e) => Response::Error {
                 message: e.to_string(),
-            },
-        }
-    }
-
-    async fn handle_register_schema(&self, subject: String, schema: String) -> Response {
-        match self.schema_registry.register(&subject, &schema).await {
-            Ok(id) => Response::SchemaRegistered { id },
-            Err(e) => Response::Error {
-                message: format!("Failed to register schema: {}", e),
-            },
-        }
-    }
-
-    async fn handle_get_schema(&self, id: i32) -> Response {
-        match self.schema_registry.get_schema(id).await {
-            Ok(schema) => {
-                // Return schema as JSON string (Apache Avro schema's default serialization)
-                // Assuming we want the canonical form or just the JSON representation.
-                // apache_avro::Schema doesn't impl Display directly in a way that gives JSON always,
-                // but we can use canonical_form() or just format if it implements it.
-                // Let's assume canonical_form() is best for "schema string".
-                Response::Schema {
-                    id,
-                    schema: schema.canonical_form(),
-                }
-            }
-            Err(e) => Response::Error {
-                message: format!("Failed to get schema: {}", e),
             },
         }
     }
@@ -1080,11 +1074,11 @@ impl RequestHandler {
 
         match validation_result {
             SequenceResult::Valid => {
-                // Append message
+                // Append transactional message with producer metadata
                 let message = if let Some(k) = key {
-                    Message::with_key(k, value)
+                    Message::transactional_with_key(k, value, producer_id, producer_epoch)
                 } else {
-                    Message::new(value)
+                    Message::transactional(value, producer_id, producer_epoch)
                 };
 
                 match topic.append(partition_id, message).await {

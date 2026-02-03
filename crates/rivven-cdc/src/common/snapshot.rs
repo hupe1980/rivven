@@ -4,7 +4,7 @@
 //!
 //! ## Features
 //!
-//! - Multiple snapshot modes (Debezium-compatible)
+//! - Multiple snapshot modes
 //! - Chunked reads with configurable batch size
 //! - Progress tracking and resumability
 //! - Watermark-based consistency
@@ -52,9 +52,6 @@ use tokio::sync::RwLock;
 
 /// Snapshot mode determines when and how snapshots are taken.
 ///
-/// These modes align with Debezium's snapshot.mode configuration for
-/// compatibility and familiar behavior.
-///
 /// # Examples
 ///
 /// ```rust
@@ -95,7 +92,6 @@ pub enum SnapshotMode {
     ///
     /// The connector captures table structures but does not snapshot data.
     /// Only changes occurring after connector start are captured.
-    /// Alias: `no_data` (Debezium naming)
     SchemaOnly,
 
     /// Perform a snapshot only if offsets are unavailable.
@@ -183,8 +179,8 @@ impl SnapshotMode {
         }
     }
 
-    /// Parse from Debezium-compatible string.
-    pub fn from_str_debezium(s: &str) -> Option<Self> {
+    /// Parse snapshot mode from string representation.
+    pub fn from_str_value(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "always" => Some(Self::Always),
             "initial" => Some(Self::Initial),
@@ -320,9 +316,9 @@ impl SnapshotProgress {
 pub struct SnapshotConfig {
     /// Snapshot mode (when to snapshot)
     pub mode: SnapshotMode,
-    /// Rows per batch (Debezium: snapshot.fetch.size)
+    /// Rows per batch
     pub batch_size: usize,
-    /// Number of tables to snapshot in parallel (Debezium: snapshot.max.threads)
+    /// Number of tables to snapshot in parallel
     pub parallel_tables: usize,
     /// Query timeout
     pub query_timeout: Duration,
@@ -336,11 +332,11 @@ pub struct SnapshotConfig {
     pub max_retries: u32,
     /// Throttle delay between batches
     pub throttle_delay: Option<Duration>,
-    /// Delay before starting snapshot (Debezium: snapshot.delay.ms)
+    /// Delay before starting snapshot
     pub snapshot_delay: Option<Duration>,
-    /// Delay before streaming after snapshot (Debezium: streaming.delay.ms)
+    /// Delay before streaming after snapshot
     pub streaming_delay: Option<Duration>,
-    /// Lock timeout for acquiring table locks (Debezium: snapshot.lock.timeout.ms)
+    /// Lock timeout for acquiring table locks
     pub lock_timeout: Option<Duration>,
 }
 

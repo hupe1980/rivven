@@ -2,7 +2,7 @@
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
-  name: rivvenclusters.rivven.io
+  name: rivvenclusters.rivven.hupe1980.github.io
   labels:
     {{- include "rivven-operator.labels" . | nindent 4 }}
   {{- if .Values.crds.keep }}
@@ -16,7 +16,7 @@ metadata:
     {{- toYaml .Values.crds.annotations | nindent 4 }}
   {{- end }}
 spec:
-  group: rivven.io
+  group: rivven.hupe1980.github.io
   names:
     kind: RivvenCluster
     listKind: RivvenClusterList
