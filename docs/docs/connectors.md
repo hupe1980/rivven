@@ -483,7 +483,37 @@ with the `provider` field for new deployments.
 
 ### Snowflake
 
-Load data into Snowflake data warehouse.
+Load data into Snowflake data warehouse using **Snowpipe Streaming API** with JWT authentication.
+
+#### Authentication Setup
+
+Snowflake uses RSA key-pair authentication with JWT tokens. Generate a key pair:
+
+```bash
+# Generate RSA private key (unencrypted PKCS#8 format)
+openssl genrsa 2048 | openssl pkcs8 -topk8 -nocrypt -out rsa_key.p8
+
+# Extract public key
+openssl rsa -in rsa_key.p8 -pubout -out rsa_key.pub
+
+# Get public key fingerprint (for Snowflake user assignment)
+openssl rsa -in rsa_key.p8 -pubout -outform DER | openssl dgst -sha256 -binary | openssl enc -base64
+```
+
+Register the public key in Snowflake:
+
+```sql
+-- As ACCOUNTADMIN
+ALTER USER RIVVEN_USER SET RSA_PUBLIC_KEY='MIIBIjANBgkqhki...';
+
+-- Grant necessary privileges
+GRANT USAGE ON DATABASE ANALYTICS TO ROLE RIVVEN_ROLE;
+GRANT USAGE ON SCHEMA ANALYTICS.CDC TO ROLE RIVVEN_ROLE;
+GRANT INSERT, SELECT ON TABLE ANALYTICS.CDC.ORDERS TO ROLE RIVVEN_ROLE;
+GRANT USAGE ON WAREHOUSE COMPUTE_WH TO ROLE RIVVEN_ROLE;
+```
+
+#### Configuration
 
 ```yaml
 sinks:
@@ -492,28 +522,104 @@ sinks:
     topics: [cdc.orders]
     consumer_group: snowflake-sink
     config:
+      # Account and authentication
       account: myorg-account123
       user: RIVVEN_USER
       private_key_path: /secrets/rsa_key.p8
+      role: RIVVEN_ROLE              # Optional: role to assume
+      
+      # Target location
       database: ANALYTICS
       schema: CDC
       table: ORDERS
       warehouse: COMPUTE_WH
-      batch_size: 5000
-      auto_create_table: true
+      
+      # Batching and performance
+      batch_size: 5000               # Rows per Snowpipe insert
+      flush_interval_secs: 10        # Max seconds before flush
+      request_timeout_secs: 30       # HTTP request timeout
+      
+      # Compression (recommended for large batches)
+      compression_enabled: true      # Enable gzip compression
+      compression_threshold_bytes: 8192  # Compress if payload > 8KB
+      
+      # Retry configuration (exponential backoff with jitter)
+      retry:
+        max_retries: 3               # Maximum retry attempts
+        initial_backoff_ms: 1000     # Initial backoff (1 second)
+        max_backoff_ms: 30000        # Maximum backoff (30 seconds)
+        backoff_multiplier: 2.0      # Exponential multiplier
+        jitter_factor: 0.1           # 10% randomization to prevent thundering herd
+      
+      # Circuit breaker (protects against cascading failures)
+      circuit_breaker:
+        enabled: true                # Enable circuit breaker
+        failure_threshold: 5         # Consecutive failures to open circuit
+        reset_timeout_secs: 30       # Seconds before testing if service recovered
+        success_threshold: 2         # Successes needed to close circuit
 ```
 
 | Parameter | Required | Default | Description |
 |:----------|:---------|:--------|:------------|
-| `account` | ✓ | - | Snowflake account identifier |
-| `user` | ✓ | - | Username |
-| `private_key_path` | ✓ | - | Path to RSA private key |
+| `account` | ✓ | - | Snowflake account identifier (e.g., `myorg-account123`) |
+| `user` | ✓ | - | Snowflake username |
+| `private_key_path` | ✓ | - | Path to RSA private key (PKCS#8 PEM format, unencrypted) |
+| `role` | | - | Role to assume after authentication |
 | `database` | ✓ | - | Target database |
 | `schema` | ✓ | - | Target schema |
 | `table` | ✓ | - | Target table |
 | `warehouse` | | - | Compute warehouse |
-| `batch_size` | | `1000` | Events per batch |
-| `auto_create_table` | | `false` | Auto-create table |
+| `batch_size` | | `1000` | Rows per Snowpipe Streaming insert |
+| `flush_interval_secs` | | `1` | Maximum seconds between flushes |
+| `request_timeout_secs` | | `30` | HTTP request timeout |
+| `compression_enabled` | | `true` | Enable gzip compression for large payloads |
+| `compression_threshold_bytes` | | `8192` | Minimum payload size to trigger compression |
+| `retry.max_retries` | | `3` | Maximum retry attempts for transient errors |
+| `retry.initial_backoff_ms` | | `1000` | Initial backoff duration |
+| `retry.max_backoff_ms` | | `30000` | Maximum backoff duration |
+| `retry.backoff_multiplier` | | `2.0` | Exponential backoff multiplier |
+| `retry.jitter_factor` | | `0.1` | Randomization factor (0.0-1.0) to prevent thundering herd |
+| `circuit_breaker.enabled` | | `true` | Enable circuit breaker pattern |
+| `circuit_breaker.failure_threshold` | | `5` | Consecutive failures before circuit opens |
+| `circuit_breaker.reset_timeout_secs` | | `30` | Seconds before allowing test request |
+| `circuit_breaker.success_threshold` | | `2` | Successes needed to close circuit |
+
+#### Retry Behavior
+
+The Snowflake connector automatically retries transient failures with exponential backoff and jitter:
+
+- **Retryable errors**: 408 (timeout), 429 (rate limit), 500-504 (server errors), network errors
+- **Non-retryable errors**: 400 (bad request), 401 (auth), 403 (forbidden), 404 (not found)
+- **Jitter**: Adds randomization to backoff timing to prevent thundering herd
+- **Retry-After**: Respects `Retry-After` header from Snowflake for 429 responses
+
+Each retry includes a unique `X-Request-ID` header for end-to-end tracing.
+
+#### Circuit Breaker
+
+The connector implements a circuit breaker pattern to prevent cascading failures:
+
+| State | Description |
+|:------|:------------|
+| **Closed** | Normal operation - requests go through |
+| **Open** | After consecutive failures - requests fail fast with "circuit breaker is open" error |
+| **Half-Open** | After reset timeout - allows one test request to check if service recovered |
+
+#### Observability
+
+The connector exports the following metrics:
+
+| Metric | Type | Description |
+|:-------|:-----|:------------|
+| `snowflake.requests.success` | Counter | Successful API requests |
+| `snowflake.requests.failed` | Counter | Failed API requests (after retries) |
+| `snowflake.requests.retried` | Counter | Retried requests |
+| `snowflake.request.duration_ms` | Histogram | Request latency in milliseconds |
+| `snowflake.batch.size` | Gauge | Rows in current batch |
+| `snowflake.circuit_breaker.rejected` | Counter | Requests rejected by open circuit |
+
+{: .note }
+> **Key Format**: The private key must be in **unencrypted PKCS#8 PEM format** (begins with `-----BEGIN PRIVATE KEY-----`). Encrypted keys (PKCS#5) are not supported. Use `openssl pkcs8 -topk8 -nocrypt` to convert.
 
 ### HTTP Webhook
 

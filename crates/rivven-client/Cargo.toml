@@ -16,11 +16,8 @@ rivven-core = { workspace = true }
 rivven-protocol = { workspace = true }
 tokio = { workspace = true }
 bytes = { workspace = true }
-serde = { workspace = true }
-serde_bytes = { workspace = true }
 postcard = { workspace = true }
 thiserror = { workspace = true }
-anyhow = { workspace = true }
 tracing = { workspace = true }
 rand = { workspace = true }
 sha2 = "0.10"

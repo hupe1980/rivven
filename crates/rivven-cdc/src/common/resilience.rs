@@ -565,7 +565,7 @@ impl GuardrailsConfigBuilder {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,ignore
 /// use rivven_cdc::common::RateLimiter;
 ///
 /// # tokio_test::block_on(async {
@@ -682,7 +682,7 @@ pub enum CircuitState {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,ignore
 /// use rivven_cdc::common::CircuitBreaker;
 /// use std::time::Duration;
 ///

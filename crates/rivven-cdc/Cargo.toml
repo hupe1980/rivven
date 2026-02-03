@@ -8,13 +8,16 @@ repository.workspace = true
 description = "Change Data Capture for Rivven - PostgreSQL, MySQL, MariaDB"
 keywords = ["cdc", "postgres", "mysql", "mariadb", "replication"]
 
+[package.metadata.cargo-machete]
+# flate2: Required by mysql_async for compression support
+ignored = ["flate2"]
+
 [features]
 default = ["postgres", "mysql"]
 # PostgreSQL CDC via logical replication (pgoutput)
 postgres = [
     "dep:tokio-postgres",
     "dep:postgres-protocol",
-    "dep:postgres-types",
     "dep:md-5",
     "dep:hmac",
     "dep:pbkdf2",
@@ -60,7 +63,6 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
-tokio-util = { workspace = true }
 url = { workspace = true }
 async-trait = { workspace = true }
 regex = "1.10"
@@ -73,7 +75,6 @@ metrics = { workspace = true }
 # PostgreSQL-specific dependencies
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"], optional = true }
 postgres-protocol = { version = "0.6", optional = true }
-postgres-types = { version = "0.2", features = ["derive"], optional = true }
 md-5 = { version = "0.10", optional = true }
 fallible-iterator = { version = "0.2", optional = true }
 
@@ -88,6 +89,7 @@ tokio-rustls = { version = "0.26", optional = true }
 sha1 = { version = "0.10", optional = true }
 base64 = { version = "0.22", optional = true }
 mysql_async = { version = "0.34", optional = true, default-features = false }
+# flate2 required by mysql_async for compression support
 flate2 = { version = "1.1", optional = true, default-features = false, features = ["rust_backend"] }
 
 # SCRAM authentication (PostgreSQL SCRAM-SHA-256)
@@ -116,14 +118,10 @@ uuid = { version = "1.6", features = ["v4"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres", "mysql", "mariadb"] }
-tokio-test = "0.4"
 pretty_assertions = "1.4"
 criterion = { version = "0.5", features = ["async_tokio"] }
-proptest = "1.5"
 fake = { version = "3.0", features = ["derive", "chrono"] }
 serial_test = "3.2"
-rstest = "0.24"
-parking_lot = "0.12"
 tempfile = "3.10"
 paste = "1.0"
 

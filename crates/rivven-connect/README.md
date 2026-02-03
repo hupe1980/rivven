@@ -444,6 +444,99 @@ CREATE PUBLICATION rivven_pub FOR ALL TABLES;
 
 The replication slot is created automatically on first run.
 
+## Snowflake Sink Setup
+
+The Snowflake sink uses **Snowpipe Streaming API** with JWT (RSA key-pair) authentication and production-grade resilience features:
+
+- **Exponential backoff retry** with configurable jitter and Retry-After support
+- **Circuit breaker pattern** to prevent cascading failures
+- **Request tracing** with unique `X-Request-ID` headers for end-to-end debugging
+- **Metrics integration** for observability (success/failed/retried counts, latencies)
+- **Compression support** for large payloads (gzip)
+
+### Generate RSA Key Pair
+
+```bash
+# Generate RSA private key (unencrypted PKCS#8 format)
+openssl genrsa 2048 | openssl pkcs8 -topk8 -nocrypt -out rsa_key.p8
+
+# Extract public key for Snowflake
+openssl rsa -in rsa_key.p8 -pubout -out rsa_key.pub
+```
+
+### Configure Snowflake User
+
+```sql
+-- As ACCOUNTADMIN
+ALTER USER RIVVEN_USER SET RSA_PUBLIC_KEY='MIIBIjANBgkqhki...';
+
+-- Grant privileges
+GRANT USAGE ON DATABASE ANALYTICS TO ROLE RIVVEN_ROLE;
+GRANT INSERT, SELECT ON TABLE ANALYTICS.CDC.EVENTS TO ROLE RIVVEN_ROLE;
+```
+
+### Example Configuration
+
+```yaml
+sinks:
+  snowflake:
+    connector: snowflake
+    topics: [cdc.orders]
+    config:
+      account: myorg-account123
+      user: RIVVEN_USER
+      private_key_path: /secrets/rsa_key.p8
+      role: RIVVEN_ROLE
+      database: ANALYTICS
+      schema: CDC
+      table: ORDERS
+      warehouse: COMPUTE_WH
+      batch_size: 5000
+      
+      # Compression (recommended for large batches)
+      compression_enabled: true
+      compression_threshold_bytes: 8192
+      
+      # Retry configuration (optional)
+      retry:
+        max_retries: 3
+        initial_backoff_ms: 1000
+        max_backoff_ms: 30000
+        jitter_factor: 0.1          # 10% randomization
+      
+      # Circuit breaker (optional)
+      circuit_breaker:
+        enabled: true
+        failure_threshold: 5        # Failures before opening circuit
+        reset_timeout_secs: 30      # Seconds before testing recovery
+```
+
+> **Note**: Private key must be **unencrypted PKCS#8 PEM format** (begins with `-----BEGIN PRIVATE KEY-----`).
+
+### Retry Behavior
+
+Transient failures are automatically retried with exponential backoff and jitter:
+- **Retryable**: 408, 429, 500-504, network errors
+- **Non-retryable**: 400, 401, 403, 404
+- **Jitter**: Adds randomization to prevent thundering herd
+- **Retry-After**: Respects Snowflake's `Retry-After` header for 429 responses
+
+### Circuit Breaker
+
+The circuit breaker prevents cascading failures when Snowflake is unavailable:
+- **Closed**: Normal operation
+- **Open**: After 5 consecutive failures, requests fail fast
+- **Half-Open**: After 30 seconds, allows test request to check recovery
+
+### Metrics
+
+The connector exports metrics via the `metrics` crate facade:
+- `snowflake.requests.success` - Successful API requests
+- `snowflake.requests.failed` - Failed API requests
+- `snowflake.requests.retried` - Retried requests
+- `snowflake.request.duration_ms` - Request latency histogram
+- `snowflake.circuit_breaker.rejected` - Requests rejected by circuit breaker
+
 ## Configuration Reference
 
 See [examples/connect-config.yaml](../../examples/connect-config.yaml) for a complete example.

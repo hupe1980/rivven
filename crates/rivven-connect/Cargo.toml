@@ -8,6 +8,12 @@ repository.workspace = true
 description = "Connector SDK and runtime for Rivven - sources, sinks, and transforms"
 readme = "README.md"
 
+[package.metadata.cargo-machete]
+# arrow-json: Used by parquet feature
+# prost: Re-exported via prost-reflect for protobuf schema support
+# testcontainers/testcontainers-modules/tokio-test: Dev dependencies for integration tests
+ignored = ["arrow-json", "prost", "testcontainers", "testcontainers-modules", "tokio-test"]
+
 [lib]
 name = "rivven_connect"
 path = "src/lib.rs"
@@ -37,9 +43,9 @@ azure = ["cloud-storage", "object_store/azure"]
 parquet = ["dep:parquet", "dep:arrow", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-json"]
 
 # Warehouse connectors (data warehouse sinks)
-snowflake = ["dep:jsonwebtoken", "dep:rsa"]
-bigquery = ["dep:gcp-bigquery-client", "dep:google-cloud-auth"]
-redshift = ["dep:aws-sdk-redshift", "dep:aws-credential-types", "dep:rustls", "dep:webpki-roots", "dep:tokio-postgres-rustls"]
+snowflake = ["dep:jsonwebtoken", "dep:rsa", "dep:sha2", "dep:rand", "dep:metrics"]
+bigquery = ["dep:gcp-bigquery-client"]
+redshift = ["dep:rustls", "dep:webpki-roots", "dep:tokio-postgres-rustls"]
 
 # Lakehouse connectors (open table formats)
 iceberg = ["parquet", "dep:iceberg", "dep:iceberg-catalog-rest"]
@@ -86,6 +92,7 @@ chrono = { workspace = true }
 regex = "1.10"
 tokio-postgres = { version = "0.7", optional = true }
 reqwest = { workspace = true }
+metrics = { workspace = true, optional = true }
 
 # SDK dependencies (merged from rivven-connect-sdk)
 schemars = "0.8"
@@ -121,12 +128,11 @@ lz4 = "1.24"
 object_store = { version = "0.11", optional = true }
 
 # AWS SDK (optional - for SQS, Redshift only; S3 uses object_store)
-aws-sdk-redshift = { version = "1", optional = true }
-aws-credential-types = { version = "1", features = ["hardcoded-credentials"], optional = true }
+# Note: aws-sdk-redshift and aws-credential-types are reserved for future IAM auth
+# Current Redshift impl uses PostgreSQL wire protocol with password auth
 
 # Google Cloud (optional - for BigQuery, Pub/Sub only; GCS uses object_store)
 gcp-bigquery-client = { version = "0.25", optional = true }
-google-cloud-auth = { version = "0.17", optional = true }
 
 # Apache Parquet - use version 57 to match iceberg crate's internal dependencies
 parquet = { version = "57", optional = true }
@@ -142,6 +148,8 @@ iceberg-catalog-rest = { version = "0.8", optional = true }
 # Snowflake (optional)
 jsonwebtoken = { version = "9", optional = true }
 rsa = { version = "0.9", optional = true }
+sha2 = { version = "0.10", optional = true }
+rand = { workspace = true, optional = true }
 
 # Redshift TLS (optional)
 rustls = { workspace = true, optional = true }

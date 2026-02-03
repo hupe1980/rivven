@@ -17,8 +17,6 @@ path = "src/lib.rs"
 [dependencies]
 # Core crates
 rivven-core = { workspace = true, features = ["cedar", "tls"] }
-rivven-protocol = { workspace = true }
-rivven-cluster = { workspace = true }
 rivven-cdc = { workspace = true, features = ["postgres", "mysql", "mariadb"] }
 rivven-client = { workspace = true, features = ["tls"] }
 rivven-connect = { workspace = true }
@@ -30,7 +28,6 @@ rustls = { workspace = true, features = ["aws-lc-rs"] }
 
 # Async runtime
 tokio = { workspace = true, features = ["full", "test-util"] }
-tokio-stream = "0.1"
 futures = { workspace = true }
 async-trait = { workspace = true }
 
@@ -40,7 +37,6 @@ serde_json = { workspace = true }
 bytes = { workspace = true }
 
 # Error handling
-thiserror = { workspace = true }
 anyhow = { workspace = true }
 
 # Logging/tracing
@@ -52,7 +48,6 @@ testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres", "mysql", "mariadb"] }
 tokio-postgres = "0.7"
 mysql_async = { version = "0.34", default-features = false }
-flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 # Note: rdkafka removed - requires cmake and librdkafka; add if needed for Kafka comparison tests
 
 # HTTP client for API testing
@@ -66,13 +61,6 @@ tempfile = "3.10"
 portpicker = "0.1"
 schemars = "0.8"
 validator = { version = "0.20", features = ["derive"] }
-
-[dev-dependencies]
-criterion = { version = "0.5", features = ["async_tokio"] }
-proptest = "1.4"
-quickcheck = "1.0"
-quickcheck_macros = "1.0"
-fake = { version = "2.9", features = ["derive"] }
 
 [features]
 default = ["schema"]
