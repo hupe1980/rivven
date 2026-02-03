@@ -35,8 +35,8 @@ jwt = ["auth", "dep:jsonwebtoken"]
 cedar = ["auth", "rivven-core/cedar"]
 # Broker-backed storage (store schemas in rivven topics for durability)
 broker = ["dep:rivven-client"]
-# Prometheus metrics
-metrics = ["dep:prometheus"]
+# Metrics support (uses metrics crate facade)
+metrics = ["dep:metrics"]
 
 [dependencies]
 # Core
@@ -77,8 +77,8 @@ jsonwebtoken = { version = "9", optional = true }
 # Broker-backed storage (optional)
 rivven-client = { workspace = true, optional = true }
 
-# Prometheus metrics (optional)
-prometheus = { workspace = true, optional = true }
+# Metrics (optional - uses metrics crate facade, not prometheus crate)
+metrics = { workspace = true, optional = true }
 
 # Utilities
 base64 = "0.22"

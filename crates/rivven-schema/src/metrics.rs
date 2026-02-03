@@ -1,7 +1,7 @@
-//! Prometheus metrics for Schema Registry
+//! Metrics for Schema Registry
 //!
 //! Provides comprehensive observability metrics for monitoring schema registry
-//! operations, performance, and health.
+//! operations, performance, and health using the `metrics` crate facade.
 //!
 //! # Metrics Overview
 //!
@@ -30,19 +30,19 @@
 //! // Create metrics with custom prefix
 //! let config = MetricsConfig::new()
 //!     .with_prefix("myapp_schema");
-//! let metrics = RegistryMetrics::new(config)?;
+//! let metrics = RegistryMetrics::new(config);
 //!
 //! // Record operations
-//! metrics.record_registration("users-value", "AVRO");
-//! metrics.record_lookup("users-value", true);
+//! metrics.record_registration("users-value", "AVRO", "default");
+//! metrics.record_lookup("users-value", "by_id", true);
 //!
-//! // Get metrics for scraping
-//! let output = metrics.render()?;
+//! // Metrics are automatically exported via metrics-exporter-prometheus
 //! ```
 
-use prometheus::{
-    CounterVec, Encoder, Gauge, HistogramOpts, HistogramVec, Opts, Registry, TextEncoder,
+use metrics::{
+    counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram, Unit,
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Metrics configuration
@@ -54,9 +54,9 @@ pub struct MetricsConfig {
     pub include_context: bool,
     /// Custom labels to add to all metrics
     pub custom_labels: Vec<(String, String)>,
-    /// Histogram buckets for request duration
+    /// Histogram buckets for request duration (informational - actual buckets set by exporter)
     pub duration_buckets: Vec<f64>,
-    /// Histogram buckets for schema size
+    /// Histogram buckets for schema size (informational - actual buckets set by exporter)
     pub size_buckets: Vec<f64>,
 }
 
@@ -100,195 +100,128 @@ impl MetricsConfig {
         self
     }
 
-    /// Set duration histogram buckets
+    /// Set duration histogram buckets (informational)
     pub fn with_duration_buckets(mut self, buckets: Vec<f64>) -> Self {
         self.duration_buckets = buckets;
         self
     }
 
-    /// Set size histogram buckets
+    /// Set size histogram buckets (informational)
     pub fn with_size_buckets(mut self, buckets: Vec<f64>) -> Self {
         self.size_buckets = buckets;
         self
     }
 }
 
-/// Prometheus metrics for Schema Registry
+/// Metrics for Schema Registry using the `metrics` crate facade
+///
+/// This implementation uses the lightweight `metrics` crate which provides
+/// a facade for recording metrics. The actual export format (Prometheus, etc.)
+/// is handled by a separate exporter like `metrics-exporter-prometheus`.
 pub struct RegistryMetrics {
-    /// Prometheus registry
-    registry: Registry,
     /// Configuration
-    #[allow(dead_code)]
     config: MetricsConfig,
 
-    // Counters
-    schemas_registered: CounterVec,
-    schemas_lookups: CounterVec,
-    compatibility_checks: CounterVec,
-    validation_checks: CounterVec,
-    errors: CounterVec,
-    version_state_changes: CounterVec,
-
-    // Gauges
-    schemas_count: Gauge,
-    subjects_count: Gauge,
-    versions_count: Gauge,
-    contexts_count: Gauge,
-    deprecated_versions_count: Gauge,
-    disabled_versions_count: Gauge,
-
-    // Histograms
-    request_duration: HistogramVec,
-    schema_size: HistogramVec,
+    // Internal gauge state (metrics crate gauges need explicit value management)
+    schemas_count: AtomicU64,
+    subjects_count: AtomicU64,
+    versions_count: AtomicU64,
+    contexts_count: AtomicU64,
+    deprecated_versions_count: AtomicU64,
+    disabled_versions_count: AtomicU64,
 }
 
 impl RegistryMetrics {
     /// Create new registry metrics
-    pub fn new(config: MetricsConfig) -> Result<Self, prometheus::Error> {
-        let registry = Registry::new();
-        Self::with_registry(config, registry)
+    pub fn new(config: MetricsConfig) -> Self {
+        let metrics = Self {
+            config,
+            schemas_count: AtomicU64::new(0),
+            subjects_count: AtomicU64::new(0),
+            versions_count: AtomicU64::new(0),
+            contexts_count: AtomicU64::new(0),
+            deprecated_versions_count: AtomicU64::new(0),
+            disabled_versions_count: AtomicU64::new(0),
+        };
+
+        // Register metric descriptions
+        metrics.describe_metrics();
+
+        metrics
     }
 
-    /// Create metrics with a custom registry
-    pub fn with_registry(
-        config: MetricsConfig,
-        registry: Registry,
-    ) -> Result<Self, prometheus::Error> {
-        let prefix = &config.prefix;
+    /// Register metric descriptions for documentation
+    fn describe_metrics(&self) {
+        let prefix = &self.config.prefix;
 
         // Counters
-        let schemas_registered = CounterVec::new(
-            Opts::new(
-                format!("{}_schemas_registered_total", prefix),
-                "Total number of schemas registered",
-            ),
-            &["subject", "schema_type", "context"],
-        )?;
-
-        let schemas_lookups = CounterVec::new(
-            Opts::new(
-                format!("{}_schemas_lookups_total", prefix),
-                "Total number of schema lookups",
-            ),
-            &["subject", "lookup_type", "cache_hit"],
-        )?;
-
-        let compatibility_checks = CounterVec::new(
-            Opts::new(
-                format!("{}_compatibility_checks_total", prefix),
-                "Total number of compatibility checks performed",
-            ),
-            &["subject", "level", "result"],
-        )?;
-
-        let validation_checks = CounterVec::new(
-            Opts::new(
-                format!("{}_validation_checks_total", prefix),
-                "Total number of validation rule checks",
-            ),
-            &["rule_name", "rule_type", "result"],
-        )?;
-
-        let errors = CounterVec::new(
-            Opts::new(
-                format!("{}_errors_total", prefix),
-                "Total number of errors by type",
-            ),
-            &["error_type", "operation"],
-        )?;
-
-        let version_state_changes = CounterVec::new(
-            Opts::new(
-                format!("{}_version_state_changes_total", prefix),
-                "Total number of version state changes",
-            ),
-            &["subject", "from_state", "to_state"],
-        )?;
+        describe_counter!(
+            format!("{}_schemas_registered_total", prefix),
+            "Total number of schemas registered"
+        );
+        describe_counter!(
+            format!("{}_schemas_lookups_total", prefix),
+            "Total number of schema lookups"
+        );
+        describe_counter!(
+            format!("{}_compatibility_checks_total", prefix),
+            "Total number of compatibility checks performed"
+        );
+        describe_counter!(
+            format!("{}_validation_checks_total", prefix),
+            "Total number of validation rule checks"
+        );
+        describe_counter!(
+            format!("{}_errors_total", prefix),
+            "Total number of errors by type"
+        );
+        describe_counter!(
+            format!("{}_version_state_changes_total", prefix),
+            "Total number of version state changes"
+        );
 
         // Gauges
-        let schemas_count = Gauge::new(
+        describe_gauge!(
             format!("{}_schemas_count", prefix),
-            "Current number of unique schemas",
-        )?;
-
-        let subjects_count = Gauge::new(
+            "Current number of unique schemas"
+        );
+        describe_gauge!(
             format!("{}_subjects_count", prefix),
-            "Current number of subjects",
-        )?;
-
-        let versions_count = Gauge::new(
+            "Current number of subjects"
+        );
+        describe_gauge!(
             format!("{}_versions_count", prefix),
-            "Current total number of schema versions",
-        )?;
-
-        let contexts_count = Gauge::new(
+            "Current total number of schema versions"
+        );
+        describe_gauge!(
             format!("{}_contexts_count", prefix),
-            "Current number of schema contexts",
-        )?;
-
-        let deprecated_versions_count = Gauge::new(
+            "Current number of schema contexts"
+        );
+        describe_gauge!(
             format!("{}_deprecated_versions_count", prefix),
-            "Current number of deprecated schema versions",
-        )?;
-
-        let disabled_versions_count = Gauge::new(
+            "Current number of deprecated schema versions"
+        );
+        describe_gauge!(
             format!("{}_disabled_versions_count", prefix),
-            "Current number of disabled schema versions",
-        )?;
+            "Current number of disabled schema versions"
+        );
 
         // Histograms
-        let request_duration = HistogramVec::new(
-            HistogramOpts::new(
-                format!("{}_request_duration_seconds", prefix),
-                "Request duration in seconds",
-            )
-            .buckets(config.duration_buckets.clone()),
-            &["operation", "status"],
-        )?;
+        describe_histogram!(
+            format!("{}_request_duration_seconds", prefix),
+            Unit::Seconds,
+            "Request duration in seconds"
+        );
+        describe_histogram!(
+            format!("{}_schema_size_bytes", prefix),
+            Unit::Bytes,
+            "Schema size in bytes"
+        );
+    }
 
-        let schema_size = HistogramVec::new(
-            HistogramOpts::new(
-                format!("{}_schema_size_bytes", prefix),
-                "Schema size in bytes",
-            )
-            .buckets(config.size_buckets.clone()),
-            &["schema_type"],
-        )?;
-
-        // Register all metrics
-        registry.register(Box::new(schemas_registered.clone()))?;
-        registry.register(Box::new(schemas_lookups.clone()))?;
-        registry.register(Box::new(compatibility_checks.clone()))?;
-        registry.register(Box::new(validation_checks.clone()))?;
-        registry.register(Box::new(errors.clone()))?;
-        registry.register(Box::new(version_state_changes.clone()))?;
-        registry.register(Box::new(schemas_count.clone()))?;
-        registry.register(Box::new(subjects_count.clone()))?;
-        registry.register(Box::new(versions_count.clone()))?;
-        registry.register(Box::new(contexts_count.clone()))?;
-        registry.register(Box::new(deprecated_versions_count.clone()))?;
-        registry.register(Box::new(disabled_versions_count.clone()))?;
-        registry.register(Box::new(request_duration.clone()))?;
-        registry.register(Box::new(schema_size.clone()))?;
-
-        Ok(Self {
-            registry,
-            config,
-            schemas_registered,
-            schemas_lookups,
-            compatibility_checks,
-            validation_checks,
-            errors,
-            version_state_changes,
-            schemas_count,
-            subjects_count,
-            versions_count,
-            contexts_count,
-            deprecated_versions_count,
-            disabled_versions_count,
-            request_duration,
-            schema_size,
-        })
+    /// Get the metric prefix
+    pub fn prefix(&self) -> &str {
+        &self.config.prefix
     }
 
     // ========================================================================
@@ -297,60 +230,67 @@ impl RegistryMetrics {
 
     /// Record a schema registration
     pub fn record_registration(&self, subject: &str, schema_type: &str, context: &str) {
-        self.schemas_registered
-            .with_label_values(&[subject, schema_type, context])
-            .inc();
+        counter!(
+            format!("{}_schemas_registered_total", self.config.prefix),
+            "subject" => subject.to_string(),
+            "schema_type" => schema_type.to_string(),
+            "context" => context.to_string()
+        )
+        .increment(1);
     }
 
     /// Record a schema lookup
     pub fn record_lookup(&self, subject: &str, lookup_type: &str, cache_hit: bool) {
-        self.schemas_lookups
-            .with_label_values(&[
-                subject,
-                lookup_type,
-                if cache_hit { "true" } else { "false" },
-            ])
-            .inc();
+        counter!(
+            format!("{}_schemas_lookups_total", self.config.prefix),
+            "subject" => subject.to_string(),
+            "lookup_type" => lookup_type.to_string(),
+            "cache_hit" => if cache_hit { "true" } else { "false" }.to_string()
+        )
+        .increment(1);
     }
 
     /// Record a compatibility check
     pub fn record_compatibility_check(&self, subject: &str, level: &str, compatible: bool) {
-        self.compatibility_checks
-            .with_label_values(&[
-                subject,
-                level,
-                if compatible {
-                    "compatible"
-                } else {
-                    "incompatible"
-                },
-            ])
-            .inc();
+        counter!(
+            format!("{}_compatibility_checks_total", self.config.prefix),
+            "subject" => subject.to_string(),
+            "level" => level.to_string(),
+            "result" => if compatible { "compatible" } else { "incompatible" }.to_string()
+        )
+        .increment(1);
     }
 
     /// Record a validation rule check
     pub fn record_validation_check(&self, rule_name: &str, rule_type: &str, passed: bool) {
-        self.validation_checks
-            .with_label_values(&[
-                rule_name,
-                rule_type,
-                if passed { "passed" } else { "failed" },
-            ])
-            .inc();
+        counter!(
+            format!("{}_validation_checks_total", self.config.prefix),
+            "rule_name" => rule_name.to_string(),
+            "rule_type" => rule_type.to_string(),
+            "result" => if passed { "passed" } else { "failed" }.to_string()
+        )
+        .increment(1);
     }
 
     /// Record an error
     pub fn record_error(&self, error_type: &str, operation: &str) {
-        self.errors
-            .with_label_values(&[error_type, operation])
-            .inc();
+        counter!(
+            format!("{}_errors_total", self.config.prefix),
+            "error_type" => error_type.to_string(),
+            "operation" => operation.to_string()
+        )
+        .increment(1);
     }
 
     /// Record a version state change
     pub fn record_state_change(&self, subject: &str, from_state: &str, to_state: &str) {
-        self.version_state_changes
-            .with_label_values(&[subject, from_state, to_state])
-            .inc();
+        counter!(
+            format!("{}_version_state_changes_total", self.config.prefix),
+            "subject" => subject.to_string(),
+            "from_state" => from_state.to_string(),
+            "to_state" => to_state.to_string()
+        )
+        .increment(1);
     }
 
     // ========================================================================
@@ -359,52 +299,81 @@ impl RegistryMetrics {
 
     /// Set the current schema count
     pub fn set_schemas_count(&self, count: u64) {
-        self.schemas_count.set(count as f64);
+        self.schemas_count.store(count, Ordering::Relaxed);
+        gauge!(format!("{}_schemas_count", self.config.prefix)).set(count as f64);
     }
 
     /// Set the current subject count
     pub fn set_subjects_count(&self, count: u64) {
-        self.subjects_count.set(count as f64);
+        self.subjects_count.store(count, Ordering::Relaxed);
+        gauge!(format!("{}_subjects_count", self.config.prefix)).set(count as f64);
     }
 
     /// Set the current version count
     pub fn set_versions_count(&self, count: u64) {
-        self.versions_count.set(count as f64);
+        self.versions_count.store(count, Ordering::Relaxed);
+        gauge!(format!("{}_versions_count", self.config.prefix)).set(count as f64);
     }
 
     /// Set the current context count
     pub fn set_contexts_count(&self, count: u64) {
-        self.contexts_count.set(count as f64);
+        self.contexts_count.store(count, Ordering::Relaxed);
+        gauge!(format!("{}_contexts_count", self.config.prefix)).set(count as f64);
     }
 
     /// Set the deprecated versions count
     pub fn set_deprecated_versions_count(&self, count: u64) {
-        self.deprecated_versions_count.set(count as f64);
+        self.deprecated_versions_count
+            .store(count, Ordering::Relaxed);
+        gauge!(format!("{}_deprecated_versions_count", self.config.prefix)).set(count as f64);
     }
 
     /// Set the disabled versions count
     pub fn set_disabled_versions_count(&self, count: u64) {
-        self.disabled_versions_count.set(count as f64);
+        self.disabled_versions_count.store(count, Ordering::Relaxed);
+        gauge!(format!("{}_disabled_versions_count", self.config.prefix)).set(count as f64);
     }
 
     /// Increment schema count
     pub fn inc_schemas_count(&self) {
-        self.schemas_count.inc();
+        let new_val = self.schemas_count.fetch_add(1, Ordering::Relaxed) + 1;
+        gauge!(format!("{}_schemas_count", self.config.prefix)).set(new_val as f64);
     }
 
     /// Increment subject count
     pub fn inc_subjects_count(&self) {
-        self.subjects_count.inc();
+        let new_val = self.subjects_count.fetch_add(1, Ordering::Relaxed) + 1;
+        gauge!(format!("{}_subjects_count", self.config.prefix)).set(new_val as f64);
     }
 
     /// Increment version count
     pub fn inc_versions_count(&self) {
-        self.versions_count.inc();
+        let new_val = self.versions_count.fetch_add(1, Ordering::Relaxed) + 1;
+        gauge!(format!("{}_versions_count", self.config.prefix)).set(new_val as f64);
     }
 
     /// Decrement subject count
     pub fn dec_subjects_count(&self) {
-        self.subjects_count.dec();
+        let new_val = self
+            .subjects_count
+            .fetch_sub(1, Ordering::Relaxed)
+            .saturating_sub(1);
+        gauge!(format!("{}_subjects_count", self.config.prefix)).set(new_val as f64);
+    }
+
+    /// Get current schemas count
+    pub fn get_schemas_count(&self) -> u64 {
+        self.schemas_count.load(Ordering::Relaxed)
+    }
+
+    /// Get current subjects count
+    pub fn get_subjects_count(&self) -> u64 {
+        self.subjects_count.load(Ordering::Relaxed)
+    }
+
+    /// Get current versions count
+    pub fn get_versions_count(&self) -> u64 {
+        self.versions_count.load(Ordering::Relaxed)
     }
 
     // ========================================================================
@@ -413,16 +382,21 @@ impl RegistryMetrics {
 
     /// Record request duration
     pub fn record_duration(&self, operation: &str, status: &str, duration_secs: f64) {
-        self.request_duration
-            .with_label_values(&[operation, status])
-            .observe(duration_secs);
+        histogram!(
+            format!("{}_request_duration_seconds", self.config.prefix),
+            "operation" => operation.to_string(),
+            "status" => status.to_string()
+        )
+        .record(duration_secs);
     }
 
     /// Record schema size
     pub fn record_schema_size(&self, schema_type: &str, size_bytes: usize) {
-        self.schema_size
-            .with_label_values(&[schema_type])
-            .observe(size_bytes as f64);
+        histogram!(
+            format!("{}_schema_size_bytes", self.config.prefix),
+            "schema_type" => schema_type.to_string()
+        )
+        .record(size_bytes as f64);
     }
 
     /// Create a timer for measuring request duration
@@ -432,24 +406,6 @@ impl RegistryMetrics {
             operation: operation.to_string(),
             start: std::time::Instant::now(),
         }
-    }
-
-    // ========================================================================
-    // Export
-    // ========================================================================
-
-    /// Render metrics in Prometheus text format
-    pub fn render(&self) -> Result<String, prometheus::Error> {
-        let encoder = TextEncoder::new();
-        let metric_families = self.registry.gather();
-        let mut buffer = Vec::new();
-        encoder.encode(&metric_families, &mut buffer)?;
-        Ok(String::from_utf8(buffer).unwrap_or_default())
-    }
-
-    /// Get the underlying Prometheus registry
-    pub fn registry(&self) -> &Registry {
-        &self.registry
     }
 }
 
@@ -479,7 +435,7 @@ impl<'a> RequestTimer<'a> {
     }
 }
 
-impl<'a> Drop for RequestTimer<'a> {
+impl Drop for RequestTimer<'_> {
     fn drop(&mut self) {
         // Don't record on drop - require explicit completion
     }
@@ -489,8 +445,8 @@ impl<'a> Drop for RequestTimer<'a> {
 pub type SharedMetrics = Arc<RegistryMetrics>;
 
 /// Create shared metrics
-pub fn create_shared_metrics(config: MetricsConfig) -> Result<SharedMetrics, prometheus::Error> {
-    Ok(Arc::new(RegistryMetrics::new(config)?))
+pub fn create_shared_metrics(config: MetricsConfig) -> SharedMetrics {
+    Arc::new(RegistryMetrics::new(config))
 }
 
 // ============================================================================
@@ -524,9 +480,9 @@ mod tests {
     #[test]
     fn test_metrics_creation() {
         let config = MetricsConfig::default();
-        let metrics = RegistryMetrics::new(config).unwrap();
+        let metrics = RegistryMetrics::new(config);
 
-        // Should be able to record operations
+        // Should be able to record operations without panic
         metrics.record_registration("test-value", "AVRO", "default");
         metrics.record_lookup("test-value", "by_id", true);
         metrics.record_compatibility_check("test-value", "BACKWARD", true);
@@ -538,7 +494,7 @@ mod tests {
     #[test]
     fn test_metrics_gauges() {
         let config = MetricsConfig::default();
-        let metrics = RegistryMetrics::new(config).unwrap();
+        let metrics = RegistryMetrics::new(config);
 
         metrics.set_schemas_count(100);
         metrics.set_subjects_count(50);
@@ -547,16 +503,24 @@ mod tests {
         metrics.set_deprecated_versions_count(10);
         metrics.set_disabled_versions_count(5);
 
+        assert_eq!(metrics.get_schemas_count(), 100);
+        assert_eq!(metrics.get_subjects_count(), 50);
+        assert_eq!(metrics.get_versions_count(), 200);
+
         metrics.inc_schemas_count();
         metrics.inc_subjects_count();
         metrics.inc_versions_count();
         metrics.dec_subjects_count();
+
+        assert_eq!(metrics.get_schemas_count(), 101);
+        assert_eq!(metrics.get_subjects_count(), 50); // inc then dec
+        assert_eq!(metrics.get_versions_count(), 201);
     }
 
     #[test]
     fn test_metrics_histograms() {
         let config = MetricsConfig::default();
-        let metrics = RegistryMetrics::new(config).unwrap();
+        let metrics = RegistryMetrics::new(config);
 
         metrics.record_duration("register", "success", 0.05);
         metrics.record_schema_size("AVRO", 1500);
@@ -565,7 +529,7 @@ mod tests {
     #[test]
     fn test_metrics_timer() {
         let config = MetricsConfig::default();
-        let metrics = RegistryMetrics::new(config).unwrap();
+        let metrics = RegistryMetrics::new(config);
 
         let timer = metrics.start_timer("register");
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -576,48 +540,25 @@ mod tests {
     }
 
     #[test]
-    fn test_metrics_render() {
-        let config = MetricsConfig::default();
-        let metrics = RegistryMetrics::new(config).unwrap();
-
-        metrics.record_registration("users-value", "AVRO", "default");
-        metrics.set_schemas_count(10);
-
-        let output = metrics.render().unwrap();
-        assert!(output.contains("schema_registry_schemas_registered_total"));
-        assert!(output.contains("schema_registry_schemas_count"));
-    }
-
-    #[test]
     fn test_shared_metrics() {
         let config = MetricsConfig::default();
-        let shared = create_shared_metrics(config).unwrap();
+        let shared = create_shared_metrics(config);
 
         // Can clone and share across threads
         let shared2 = shared.clone();
         shared.record_registration("test", "AVRO", "");
         shared2.set_schemas_count(5);
+
+        assert_eq!(shared.get_schemas_count(), 5);
+        assert_eq!(shared2.get_schemas_count(), 5);
     }
 
     #[test]
     fn test_metrics_with_custom_prefix() {
         let config = MetricsConfig::new().with_prefix("myservice_schema_registry");
-        let metrics = RegistryMetrics::new(config).unwrap();
+        let metrics = RegistryMetrics::new(config);
 
+        assert_eq!(metrics.prefix(), "myservice_schema_registry");
         metrics.record_registration("test", "AVRO", "");
-
-        let output = metrics.render().unwrap();
-        assert!(output.contains("myservice_schema_registry_schemas_registered_total"));
-    }
-
-    #[test]
-    fn test_metrics_custom_registry() {
-        let custom_registry = Registry::new();
-        let config = MetricsConfig::default();
-
-        let metrics = RegistryMetrics::with_registry(config, custom_registry).unwrap();
-        metrics.record_registration("test", "AVRO", "");
-
-        assert!(!metrics.render().unwrap().is_empty());
     }
 }

@@ -86,15 +86,14 @@ impl SchemaRegistry {
         })
     }
 
-    /// Create registry with Prometheus metrics enabled
+    /// Create registry with metrics enabled
     #[cfg(feature = "metrics")]
     pub async fn with_metrics(
         config: RegistryConfig,
         metrics_config: MetricsConfig,
     ) -> SchemaResult<Self> {
         let mut registry = Self::new(config).await?;
-        let metrics = RegistryMetrics::new(metrics_config)
-            .map_err(|e| SchemaError::Config(format!("Failed to create metrics: {}", e)))?;
+        let metrics = RegistryMetrics::new(metrics_config);
         registry.metrics = Some(std::sync::Arc::new(metrics));
         Ok(registry)
     }

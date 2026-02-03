@@ -74,10 +74,9 @@ openidconnect = "3"
 oauth2 = "4"
 jsonwebtoken = "9"
 
-# Metrics - unified across workspace
+# Metrics - unified across workspace (uses metrics crate facade, not prometheus crate)
 metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
-prometheus = "0.13"  # For schema registry metrics
 
 # Common dependencies - unified versions
 apache-avro = "0.17"  # Unified: was 0.16/0.17 split
