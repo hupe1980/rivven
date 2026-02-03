@@ -8,9 +8,9 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-rivven-connect = "0.0.4"  # Re-exports derive macros
+rivven-connect = "0.0.5"  # Re-exports derive macros
 # Or directly:
-# rivven-connect-derive = "0.0.4"
+# rivven-connect-derive = "0.0.5"
 ```
 
 ## Available Macros

@@ -206,10 +206,10 @@ See [docs/ICEBERG_SINK.md](../../docs/ICEBERG_SINK.md) for complete configuratio
 
 ```toml
 # In Cargo.toml
-rivven-connect = { version = "0.0.4", features = ["full"] }
+rivven-connect = { version = "0.0.5", features = ["full"] }
 
 # Or selective features
-rivven-connect = { version = "0.0.4", features = ["postgres", "s3"] }
+rivven-connect = { version = "0.0.5", features = ["postgres", "s3"] }
 ```
 
 | Bundle | Includes |
