@@ -40,6 +40,11 @@ pub enum CdcError {
     #[error("MySQL error: {0}")]
     MySql(String),
 
+    /// SQL Server protocol error
+    #[cfg(feature = "sqlserver")]
+    #[error("SQL Server error: {0}")]
+    SqlServer(String),
+
     /// Replication protocol error
     #[error("Replication error: {0}")]
     Replication(String),
@@ -95,6 +100,30 @@ pub enum CdcError {
     /// Deadlock detected
     #[error("Deadlock detected: {0}")]
     DeadlockDetected(String),
+
+    /// Snapshot operation failed
+    #[error("Snapshot failed: {0}")]
+    SnapshotFailed(String),
+
+    /// SMT transform error
+    #[error("Transform error: {0}")]
+    Transform(String),
+
+    /// Checkpoint/offset store error
+    #[error("Checkpoint error: {0}")]
+    Checkpoint(String),
+
+    /// Encryption/decryption error
+    #[error("Encryption error: {0}")]
+    Encryption(String),
+
+    /// Rate limit exceeded
+    #[error("Rate limit exceeded: {0}")]
+    RateLimitExceeded(String),
+
+    /// Authentication error
+    #[error("Authentication failed: {0}")]
+    Authentication(String),
 
     /// Generic error
     #[error("{0}")]
@@ -153,6 +182,42 @@ impl CdcError {
         Self::DeadlockDetected(msg.into())
     }
 
+    /// Create a snapshot failed error
+    pub fn snapshot_failed(msg: impl Into<String>) -> Self {
+        Self::SnapshotFailed(msg.into())
+    }
+
+    /// Create a transform error
+    pub fn transform(msg: impl Into<String>) -> Self {
+        Self::Transform(msg.into())
+    }
+
+    /// Create a checkpoint error
+    pub fn checkpoint(msg: impl Into<String>) -> Self {
+        Self::Checkpoint(msg.into())
+    }
+
+    /// Create an encryption error
+    pub fn encryption(msg: impl Into<String>) -> Self {
+        Self::Encryption(msg.into())
+    }
+
+    /// Create a rate limit exceeded error
+    pub fn rate_limit_exceeded(msg: impl Into<String>) -> Self {
+        Self::RateLimitExceeded(msg.into())
+    }
+
+    /// Create an authentication error
+    pub fn authentication(msg: impl Into<String>) -> Self {
+        Self::Authentication(msg.into())
+    }
+
+    /// Create a SQL Server error
+    #[cfg(feature = "sqlserver")]
+    pub fn sqlserver(msg: impl Into<String>) -> Self {
+        Self::SqlServer(msg.into())
+    }
+
     /// Create a generic error
     pub fn other(msg: impl Into<String>) -> Self {
         Self::Other(msg.into())
@@ -201,6 +266,20 @@ impl CdcError {
                 )
             }
 
+            // SQL Server transient errors
+            #[cfg(feature = "sqlserver")]
+            Self::SqlServer(msg) => {
+                msg.contains("connection") || msg.contains("timeout") || msg.contains("deadlock")
+            }
+
+            // Rate limiting - always retriable after delay
+            Self::RateLimitExceeded(_) => true,
+
+            // Snapshot failures may be retriable (e.g., lock timeouts)
+            Self::SnapshotFailed(msg) => {
+                msg.contains("timeout") || msg.contains("lock") || msg.contains("temporarily")
+            }
+
             // Non-retriable
             Self::Schema(_)
             | Self::Config(_)
@@ -209,6 +288,10 @@ impl CdcError {
             | Self::Serialization(_)
             | Self::Json(_)
             | Self::InvalidState(_)
+            | Self::Transform(_)
+            | Self::Checkpoint(_)
+            | Self::Encryption(_)
+            | Self::Authentication(_)
             | Self::Other(_) => false,
         }
     }
@@ -221,6 +304,7 @@ impl CdcError {
             Self::Timeout(_) => Some(RetriableErrorType::Timeout),
             Self::DeadlockDetected(_) => Some(RetriableErrorType::DeadlockDetected),
             Self::ReplicationSlotInUse(_) => Some(RetriableErrorType::ReplicationSlotInUse),
+            Self::RateLimitExceeded(_) => Some(RetriableErrorType::TemporaryFailure),
             Self::Replication(msg) if msg.contains("temporarily") => {
                 Some(RetriableErrorType::TemporaryFailure)
             }
@@ -236,8 +320,11 @@ impl CdcError {
             Self::Postgres(_) => ErrorCategory::Database,
             #[cfg(feature = "mysql")]
             Self::MySql(_) => ErrorCategory::Database,
+            #[cfg(feature = "sqlserver")]
+            Self::SqlServer(_) => ErrorCategory::Database,
             Self::Replication(_) => ErrorCategory::Replication,
             Self::ReplicationSlotInUse(_) => ErrorCategory::Replication,
+            Self::SnapshotFailed(_) => ErrorCategory::Database,
             Self::Schema(_) => ErrorCategory::Schema,
             Self::Config(_) => ErrorCategory::Configuration,
             Self::Filter(_) => ErrorCategory::Configuration,
@@ -246,9 +333,14 @@ impl CdcError {
             Self::ConnectionClosed => ErrorCategory::Network,
             Self::ConnectionRefused(_) => ErrorCategory::Network,
             Self::Io(_) => ErrorCategory::Network,
+            Self::RateLimitExceeded(_) => ErrorCategory::Network,
             Self::Serialization(_) => ErrorCategory::Serialization,
             Self::Json(_) => ErrorCategory::Serialization,
+            Self::Transform(_) => ErrorCategory::Serialization,
             Self::DeadlockDetected(_) => ErrorCategory::Database,
+            Self::Checkpoint(_) => ErrorCategory::Database,
+            Self::Encryption(_) => ErrorCategory::Serialization,
+            Self::Authentication(_) => ErrorCategory::Database,
             Self::InvalidState(_) => ErrorCategory::Other,
             Self::Other(_) => ErrorCategory::Other,
         }
@@ -261,8 +353,11 @@ impl CdcError {
             Self::Postgres(_) => "postgres_error",
             #[cfg(feature = "mysql")]
             Self::MySql(_) => "mysql_error",
+            #[cfg(feature = "sqlserver")]
+            Self::SqlServer(_) => "sqlserver_error",
             Self::Replication(_) => "replication_error",
             Self::ReplicationSlotInUse(_) => "slot_in_use",
+            Self::SnapshotFailed(_) => "snapshot_failed",
             Self::Schema(_) => "schema_error",
             Self::Config(_) => "config_error",
             Self::Filter(_) => "filter_error",
@@ -271,9 +366,14 @@ impl CdcError {
             Self::ConnectionClosed => "connection_closed",
             Self::ConnectionRefused(_) => "connection_refused",
             Self::Io(_) => "io_error",
+            Self::RateLimitExceeded(_) => "rate_limit_exceeded",
             Self::Serialization(_) => "serialization_error",
             Self::Json(_) => "json_error",
+            Self::Transform(_) => "transform_error",
             Self::DeadlockDetected(_) => "deadlock",
+            Self::Checkpoint(_) => "checkpoint_error",
+            Self::Encryption(_) => "encryption_error",
+            Self::Authentication(_) => "auth_error",
             Self::InvalidState(_) => "invalid_state",
             Self::Other(_) => "unknown",
         }
@@ -332,19 +432,36 @@ mod tests {
         let _ = CdcError::config("Missing option");
         let _ = CdcError::timeout("5 seconds");
         let _ = CdcError::other("Unknown error");
+        let _ = CdcError::snapshot_failed("Lock timeout");
+        let _ = CdcError::transform("Invalid field");
+        let _ = CdcError::checkpoint("Write failed");
+        let _ = CdcError::encryption("Key not found");
+        let _ = CdcError::rate_limit_exceeded("100 req/s");
+        let _ = CdcError::authentication("Invalid credentials");
     }
 
     #[test]
     fn test_error_is_retriable() {
+        // Always retriable
         assert!(CdcError::ConnectionClosed.is_retriable());
         assert!(CdcError::connection_refused("host:5432").is_retriable());
         assert!(CdcError::timeout("5s").is_retriable());
         assert!(CdcError::deadlock_detected("txn 123").is_retriable());
         assert!(CdcError::replication_slot_in_use("slot_name").is_retriable());
+        assert!(CdcError::rate_limit_exceeded("100/s").is_retriable());
 
+        // Conditionally retriable
+        assert!(CdcError::snapshot_failed("lock timeout").is_retriable());
+        assert!(!CdcError::snapshot_failed("invalid schema").is_retriable());
+
+        // Never retriable
         assert!(!CdcError::config("bad config").is_retriable());
         assert!(!CdcError::schema("invalid type").is_retriable());
         assert!(!CdcError::other("unknown").is_retriable());
+        assert!(!CdcError::transform("bad field").is_retriable());
+        assert!(!CdcError::checkpoint("write failed").is_retriable());
+        assert!(!CdcError::encryption("key error").is_retriable());
+        assert!(!CdcError::authentication("invalid creds").is_retriable());
     }
 
     #[test]
@@ -364,6 +481,30 @@ mod tests {
             ErrorCategory::Network
         );
         assert_eq!(CdcError::other("x").category(), ErrorCategory::Other);
+        assert_eq!(
+            CdcError::snapshot_failed("x").category(),
+            ErrorCategory::Database
+        );
+        assert_eq!(
+            CdcError::transform("x").category(),
+            ErrorCategory::Serialization
+        );
+        assert_eq!(
+            CdcError::checkpoint("x").category(),
+            ErrorCategory::Database
+        );
+        assert_eq!(
+            CdcError::encryption("x").category(),
+            ErrorCategory::Serialization
+        );
+        assert_eq!(
+            CdcError::rate_limit_exceeded("x").category(),
+            ErrorCategory::Network
+        );
+        assert_eq!(
+            CdcError::authentication("x").category(),
+            ErrorCategory::Database
+        );
     }
 
     #[test]
@@ -380,6 +521,10 @@ mod tests {
             CdcError::deadlock_detected("x").retriable_error_type(),
             Some(RetriableErrorType::DeadlockDetected)
         );
+        assert_eq!(
+            CdcError::rate_limit_exceeded("x").retriable_error_type(),
+            Some(RetriableErrorType::TemporaryFailure)
+        );
         assert_eq!(CdcError::config("x").retriable_error_type(), None);
     }
 
@@ -388,5 +533,17 @@ mod tests {
         assert_eq!(CdcError::ConnectionClosed.error_code(), "connection_closed");
         assert_eq!(CdcError::timeout("x").error_code(), "timeout");
         assert_eq!(CdcError::config("x").error_code(), "config_error");
+        assert_eq!(
+            CdcError::snapshot_failed("x").error_code(),
+            "snapshot_failed"
+        );
+        assert_eq!(CdcError::transform("x").error_code(), "transform_error");
+        assert_eq!(CdcError::checkpoint("x").error_code(), "checkpoint_error");
+        assert_eq!(CdcError::encryption("x").error_code(), "encryption_error");
+        assert_eq!(
+            CdcError::rate_limit_exceeded("x").error_code(),
+            "rate_limit_exceeded"
+        );
+        assert_eq!(CdcError::authentication("x").error_code(), "auth_error");
     }
 }

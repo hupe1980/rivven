@@ -6,11 +6,38 @@
 //! - **ZeroCopyProducer**: Produces messages without copying payload
 //! - **ZeroCopyConsumer**: Consumes messages with zero-copy access
 //!
-//! Performance characteristics:
+//! # Performance Characteristics
+//!
 //! - Eliminates 2-3 copies per message on hot path
 //! - Uses memory-mapped I/O for disk access
 //! - Reference-counted buffers for safe sharing
 //! - Cache-line aligned for optimal CPU performance
+//!
+//! # Safety Requirements
+//!
+//! The `ZeroCopyBuffer` type implements its own reference counting via `ref_count`.
+//! When using `BufferSlice`, the following safety invariants must be maintained:
+//!
+//! 1. **Lifetime**: A `ZeroCopyBuffer` must outlive all `BufferSlice` instances
+//!    created from it. The recommended pattern is to use `Arc<ZeroCopyBuffer>`
+//!    via `ZeroCopyBufferPool`.
+//!
+//! 2. **Reference Counting**: `BufferSlice::drop()` decrements the buffer's
+//!    ref_count. The caller must ensure the buffer is not dropped while slices
+//!    exist.
+//!
+//! 3. **Thread Safety**: While individual operations are atomic, the caller must
+//!    ensure exclusive access to mutable slice regions.
+//!
+//! # Recommended Usage
+//!
+//! Use `ZeroCopyBufferPool` to manage buffer lifecycle safely:
+//!
+//! ```rust,ignore
+//! let pool = ZeroCopyBufferPool::new(256 * 1024, 16);
+//! let buffer = pool.acquire();  // Returns Arc<ZeroCopyBuffer>
+//! // buffer is safely reference-counted
+//! ```
 
 use bytes::{Bytes, BytesMut};
 use std::alloc::{alloc, dealloc, Layout};

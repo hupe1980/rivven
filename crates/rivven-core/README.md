@@ -109,11 +109,10 @@ let tiered_config = TieredStorageConfig {
 let config = Config::new().with_tiered_storage(tiered_config);
 ```
 
-| Tier | Storage | Latency | Use Case |
-|:-----|:--------|:--------|:---------|
-| **Hot** | In-memory | < 1ms | Recent data, active consumers |
-| **Warm** | Local disk | 1-10ms | Medium-aged data |
-| **Cold** | S3/GCS/Azure | 100ms+ | Archival, compliance |
+**Storage tiers:**
+- **Hot**: In-memory for recent data and active consumers
+- **Warm**: Local disk for medium-aged data
+- **Cold**: S3/GCS/Azure for archival and compliance
 
 ## Hot Path Optimizations
 
@@ -268,13 +267,6 @@ The `BatchStats` struct provides insight into batch composition:
 | `write_bytes` | u64 | Total bytes to be written |
 | `read_bytes` | u64 | Total bytes to be read |
 
-### io_uring Performance
-
-| Backend | IOPS (4KB) | Latency p99 | CPU Usage |
-|---------|------------|-------------|-----------|
-| epoll   | 200K       | 1.5ms       | 80%       |
-| io_uring| 800K       | 0.3ms       | 40%       |
-
 ## Transactions (KIP-98)
 
 Native exactly-once semantics with two-phase commit:
@@ -405,44 +397,6 @@ data/
         │   └── 00000000000000001000.log  # Next segment
         └── partition-1/
 ```
-
-## Benchmarks
-
-In-memory append and read benchmarks measuring raw data-path performance without durability (fsync) or network overhead. These numbers represent the hot path ceiling.
-
-```bash
-cargo bench --package rivven-core
-```
-
-### What's Measured
-
-| Included | Not Included |
-|:---------|:-------------|
-| Message serialization | fsync/durability |
-| CRC32 checksum calculation | Network I/O |
-| Buffer allocation | Replication |
-| Mutex acquisition | Consumer coordination |
-| Write to OS page cache | Disk flush latency |
-
-### Key Optimizations
-
-| Optimization | Impact |
-|:-------------|:-------|
-| **Buffered writes** | 8KB BufWriter batches syscalls |
-| **Sparse indexing** | Index every 4KB instead of every message |
-| **Batch segment writes** | Single I/O operation per batch |
-| **Lock-free offsets** | Atomic offset allocation |
-
-### With Durability (fsync)
-
-For production workloads requiring durability, call `partition.flush()` after writes:
-
-```rust
-partition.append_batch(messages).await?;
-partition.flush().await?; // fsync to disk
-```
-
-Throughput with fsync is bound by disk IOPS — use NVMe for best results.
 
 ## Test Coverage
 

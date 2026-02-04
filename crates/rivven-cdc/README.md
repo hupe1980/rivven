@@ -1,10 +1,20 @@
 # rivven-cdc
 
-> Native Change Data Capture for PostgreSQL, MySQL, and MariaDB.
+> Native Change Data Capture for PostgreSQL, MySQL, MariaDB, and SQL Server.
 
 ## Overview
 
 `rivven-cdc` captures database changes and outputs `CdcEvent` structs with JSON data. The serialization format (Avro, Protobuf, JSON Schema) is decided by the consumer (typically rivven-connect).
+
+### Supported Databases
+
+| Database | Version | Protocol | Status |
+|----------|---------|----------|--------|
+| PostgreSQL | 10+ | WAL streaming (pgoutput) | ✅ Available |
+| MySQL | 5.7+ | Binlog streaming (GTID) | ✅ Available |
+| MariaDB | 10.2+ | Binlog streaming (GTID) | ✅ Available |
+| SQL Server | 2016 SP1+ | CDC table polling | ✅ Available |
+| Oracle | 19c+ | LogMiner | 📋 Planned |
 
 ## Design Philosophy
 
@@ -105,14 +115,25 @@ Internal/advanced types for custom implementations:
 | 10.11.x | ✅ **Recommended** | Feb 2028 | LTS, enhanced JSON, parallel replication |
 | 11.4.x | ✅ Tested | May 2029 | LTS, latest features |
 
+### SQL Server
+
+| Version | Status | EOL | Notes |
+|---------|--------|-----|-------|
+| 2016 SP1+ | ✅ Tested | Jul 2026 | CDC support introduced |
+| 2019 | ✅ **Recommended** | Jan 2030 | Enhanced CDC performance |
+| 2022 | ✅ Tested | TBD | Latest features |
+| Azure SQL | ✅ Tested | N/A | Managed CDC support |
+
 ## Optional Features
 
 | Feature | Description |
 |---------|-------------|
 | `postgres` | PostgreSQL CDC (default) |
 | `mysql` | MySQL/MariaDB CDC (default) |
+| `sqlserver` | SQL Server CDC |
 | `postgres-tls` | PostgreSQL with TLS |
 | `mysql-tls` | MySQL/MariaDB with TLS |
+| `sqlserver-tls` | SQL Server with TLS |
 | `mariadb` | MariaDB CDC (alias for mysql with MariaDB extensions) |
 
 ## Feature Matrix
@@ -121,6 +142,7 @@ Internal/advanced types for custom implementations:
 |---------|-----------|-------|
 | Logical Replication | ✅ | pgoutput plugin |
 | Binlog Streaming | ✅ | MySQL/MariaDB GTID |
+| CDC Table Polling | ✅ | SQL Server CDC tables |
 | Binlog Checksum (CRC32) | ✅ | Auto-negotiation, MySQL 8+/MariaDB 10+ |
 | Schema Metadata | ✅ | Real column names from INFORMATION_SCHEMA |
 | Initial Snapshot | ✅ | Parallel, resumable |
@@ -148,6 +170,53 @@ Internal/advanced types for custom implementations:
 | **Outbox Pattern** | ✅ | `OutboxProcessor` for transactional messaging |
 | **Health Monitoring** | ✅ | `HealthMonitor` with auto-recovery, lag monitoring |
 | **Notifications** | ✅ | `Notifier` for snapshot/streaming progress alerts |
+| **Field Encryption** | ✅ | AES-256-GCM column-level encryption |
+| **Error Classification** | ✅ | Categorized errors with retry detection |
+
+### Error Handling
+
+The crate provides comprehensive error classification for intelligent retry and alerting:
+
+```rust
+use rivven_cdc::{CdcError, ErrorCategory};
+
+// Error categories for metrics/alerting
+match error.category() {
+    ErrorCategory::Database => { /* Connection, query, auth errors */ }
+    ErrorCategory::Replication => { /* WAL, binlog, slot errors */ }
+    ErrorCategory::Network => { /* Timeout, connection lost */ }
+    ErrorCategory::Schema => { /* DDL, type mapping errors */ }
+    ErrorCategory::Serialization => { /* JSON, encryption errors */ }
+    ErrorCategory::Configuration => { /* Invalid settings */ }
+    ErrorCategory::Other => { /* Unclassified */ }
+}
+
+// Check if error is retriable
+if error.is_retriable() {
+    // Exponential backoff retry
+}
+
+// Get metric-safe error code
+println!("Error code: {}", error.error_code()); // e.g., "connection_closed", "timeout"
+```
+
+**Error Types:**
+
+| Error | Category | Retriable | Description |
+|-------|----------|-----------|-------------|
+| `ConnectionClosed` | Network | ✅ | Connection lost |
+| `ConnectionRefused` | Network | ✅ | Host unreachable |
+| `Timeout` | Network | ✅ | Operation timed out |
+| `DeadlockDetected` | Database | ✅ | Transaction deadlock |
+| `ReplicationSlotInUse` | Replication | ✅ | Slot occupied |
+| `RateLimitExceeded` | Network | ✅ | Throttled |
+| `SnapshotFailed` | Database | Conditional | Snapshot error (retryable if timeout/lock) |
+| `Authentication` | Database | ❌ | Auth failure |
+| `Schema` | Schema | ❌ | Invalid schema |
+| `Config` | Configuration | ❌ | Bad configuration |
+| `Transform` | Serialization | ❌ | SMT transform error |
+| `Encryption` | Serialization | ❌ | Encrypt/decrypt error |
+| `Checkpoint` | Database | ❌ | Offset store error |
 
 ### Signal Table (Runtime Control)
 
@@ -516,48 +585,68 @@ let config = MySqlCdcConfig::new("localhost", "root")
 let cdc = MySqlCdc::new(config);
 ```
 
+### SQL Server
+
+```rust
+use rivven_cdc::sqlserver::{SqlServerCdc, SqlServerCdcConfig, SnapshotMode};
+use rivven_cdc::CdcSource;
+
+// SQL Server CDC uses poll-based change capture
+let config = SqlServerCdcConfig::builder()
+    .host("localhost")
+    .port(1433)
+    .username("sa")
+    .password("YourStrong@Passw0rd")
+    .database("mydb")
+    .poll_interval_ms(100)
+    .snapshot_mode(SnapshotMode::Initial) // or Never, Always, WhenNeeded
+    .include_table("dbo", "users")
+    .include_table("dbo", "orders")
+    .build()?;
+
+let mut cdc = SqlServerCdc::new(config);
+let rx = cdc.take_event_receiver().expect("receiver already taken");
+
+cdc.start().await?;
+
+// Access metrics for observability
+let metrics = cdc.metrics();
+println!("Events: {}, Polls: {}, Efficiency: {:.1}%", 
+    metrics.events_captured,
+    metrics.poll_cycles,
+    100.0 * (1.0 - metrics.empty_polls as f64 / metrics.poll_cycles.max(1) as f64)
+);
+
+while let Some(event) = rx.recv().await {
+    println!("Change: {:?}", event);
+}
+```
+
+**SQL Server Setup:**
+
+```sql
+-- Enable CDC on database
+USE mydb;
+EXEC sys.sp_cdc_enable_db;
+
+-- Enable CDC on tables
+EXEC sys.sp_cdc_enable_table
+    @source_schema = 'dbo',
+    @source_name = 'users',
+    @role_name = NULL;
+
+-- Start SQL Server Agent (required for CDC capture job)
+-- In container: /opt/mssql/bin/sqlservr
+```
+
 ## Documentation
 
 - [CDC Overview](../../docs/docs/cdc.md) - Feature overview and concepts
 - [PostgreSQL CDC Guide](../../docs/docs/cdc-postgres.md) - PostgreSQL setup and configuration
 - [MySQL/MariaDB CDC Guide](../../docs/docs/cdc-mysql.md) - MySQL and MariaDB setup
+- [SQL Server CDC Guide](../../docs/docs/cdc-sqlserver.md) - SQL Server setup and configuration
 - [Configuration Reference](../../docs/docs/cdc-configuration.md) - All configuration options
 - [Troubleshooting Guide](../../docs/docs/cdc-troubleshooting.md) - Diagnose and resolve issues
-
-## Benchmarks
-
-Run CDC performance benchmarks:
-
-```bash
-# Throughput benchmarks (schema inference, event parsing, filtering)
-cargo bench -p rivven-cdc --bench cdc_throughput
-
-# Latency benchmarks (metrics overhead, pipeline latency, e2e processing)
-cargo bench -p rivven-cdc --bench cdc_latency
-```
-
-**Benchmark Categories:**
-
-| Benchmark | Description |
-|-----------|-------------|
-| `event_serialization` | JSON encode/decode performance |
-| `filter_evaluation` | Table include/exclude matching |
-| `batch_processing` | End-to-end batch filter performance |
-| `extended_metrics` | Metrics collection overhead |
-| `pipeline_latency` | Transform chain latency |
-| `e2e_processing` | Full event pipeline with metrics |
-| `memory_efficiency` | Allocation per operation |
-
-**Sample Results (M3 MacBook Pro):**
-
-| Operation | Throughput | Notes |
-|-----------|------------|-------|
-| Event serialization (small) | ~2.5M/sec | 80 bytes/event |
-| Event serialization (large) | ~150K/sec | 5KB/event |
-| Filter evaluation (simple) | ~15M/sec | Single glob pattern |
-| Filter evaluation (complex) | ~5M/sec | Multi-pattern + masking |
-| Metrics record_event | ~50M/sec | Atomic counter |
-| Metrics snapshot export | ~200K/sec | Full metrics dump |
 
 ## Documentation
 

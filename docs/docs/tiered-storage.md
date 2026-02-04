@@ -22,11 +22,9 @@ Hot/warm/cold storage architecture for cost-effective data retention.
 
 Rivven implements a **three-tier storage architecture** that automatically moves data between storage tiers based on age and access patterns:
 
-| Tier | Storage | Latency | Use Case |
-|:-----|:--------|:--------|:---------|
-| **Hot** | In-memory + NVMe/SSD | < 1ms | Recent data, active consumers |
-| **Warm** | Local disk (mmap) | 1-10ms | Medium-aged data, occasional access |
-| **Cold** | Object storage | 100ms+ | Archival, compliance, replay |
+- **Hot Tier**: In-memory + NVMe/SSD for recent data and active consumers
+- **Warm Tier**: Local disk (mmap) for medium-aged data with occasional access
+- **Cold Tier**: Object storage for archival, compliance, and replay
 
 This approach optimizes for both **performance** (hot data in memory) and **cost** (cold data in cheap object storage).
 

@@ -26,6 +26,7 @@ path = "src/main.rs"
 default = ["postgres", "mysql"]
 postgres = ["rivven-cdc/postgres", "tokio-postgres"]
 mysql = ["rivven-cdc/mysql"]
+sqlserver = ["rivven-cdc/sqlserver"]
 tls = ["rivven-client/tls"]
 http = []  # HTTP connector is now built-in, just feature-gated
 
@@ -55,7 +56,7 @@ queue-full = ["kafka", "mqtt", "sqs", "pubsub"]
 storage-full = ["s3", "gcs", "azure", "parquet"]
 warehouse-full = ["snowflake", "bigquery", "redshift"]
 lakehouse-full = ["iceberg"]
-full = ["postgres", "mysql", "tls", "http", "queue-full", "storage-full", "warehouse-full", "lakehouse-full"]
+full = ["postgres", "mysql", "sqlserver", "tls", "http", "queue-full", "storage-full", "warehouse-full", "lakehouse-full"]
 
 [dependencies]
 # Internal crates

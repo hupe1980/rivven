@@ -21,7 +21,7 @@ Stream database changes in real-time with native CDC connectors.
 
 ## Overview
 
-Rivven provides **native CDC support** for PostgreSQL and MySQL/MariaDB, enabling real-time change data capture with a lightweight, high-performance Rust implementation.
+Rivven provides **native CDC support** for PostgreSQL, MySQL/MariaDB, and SQL Server, enabling real-time change data capture with a lightweight, high-performance Rust implementation.
 
 ### Key Features
 
@@ -37,11 +37,13 @@ Rivven provides **native CDC support** for PostgreSQL and MySQL/MariaDB, enablin
 
 ### Supported Databases
 
-| Database | Version | Protocol |
-|:---------|:--------|:---------|
-| PostgreSQL | 10+ | Logical replication (pgoutput) |
-| MySQL | 5.7+ | Binary log with GTID |
-| MariaDB | 10.2+ | Binary log with MariaDB GTID |
+| Database | Version | Protocol | Status |
+|:---------|:--------|:---------|:-------|
+| PostgreSQL | 10+ | Logical replication (pgoutput) | ✅ Available |
+| MySQL | 5.7+ | Binary log with GTID | ✅ Available |
+| MariaDB | 10.2+ | Binary log with MariaDB GTID | ✅ Available |
+| SQL Server | 2016 SP1+ | CDC table polling | ✅ Available |
+| Oracle | 19c+ | LogMiner | 📋 Planned |
 
 ### Documentation
 
@@ -49,6 +51,7 @@ Rivven provides **native CDC support** for PostgreSQL and MySQL/MariaDB, enablin
 |:------|:------------|
 | [PostgreSQL CDC Guide](cdc-postgres) | Complete PostgreSQL setup, TLS, signal tables, incremental snapshots |
 | [MySQL/MariaDB CDC Guide](cdc-mysql) | MySQL and MariaDB binary log replication setup |
+| [SQL Server CDC Guide](cdc-sqlserver) | SQL Server CDC setup and configuration |
 | [Configuration Reference](cdc-configuration) | All CDC configuration options and environment variables |
 | [Troubleshooting Guide](cdc-troubleshooting) | Diagnose and resolve common issues |
 

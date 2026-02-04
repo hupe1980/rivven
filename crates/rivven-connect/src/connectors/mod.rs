@@ -43,6 +43,8 @@ pub mod datagen;
 #[cfg(feature = "mysql")]
 pub mod mysql_cdc;
 pub mod postgres_cdc;
+#[cfg(feature = "sqlserver")]
+pub mod sqlserver_cdc;
 
 // Built-in sinks (bundled, minimal dependencies)
 #[cfg(feature = "http")]
@@ -91,6 +93,13 @@ pub fn create_source_registry() -> SourceRegistry {
     // MySQL CDC (bundled, feature-gated)
     #[cfg(feature = "mysql")]
     registry.register("mysql-cdc", Arc::new(mysql_cdc::MySqlCdcSourceFactory));
+
+    // SQL Server CDC (bundled, feature-gated)
+    #[cfg(feature = "sqlserver")]
+    registry.register(
+        "sqlserver-cdc",
+        Arc::new(sqlserver_cdc::SqlServerCdcSourceFactory),
+    );
 
     // Queue sources (feature-gated)
     #[cfg(feature = "kafka")]
@@ -196,7 +205,6 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .description("Generate synthetic test data without external dependencies")
             .source()
             .category(ConnectorCategory::UtilityGenerate)
-            
             .tags(["test", "synthetic", "mock", "development", "demo"])
             .aliases(["generate", "faker", "mock-data"])
             .build(),
@@ -211,7 +219,6 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .description("Change Data Capture from PostgreSQL using logical replication")
             .source()
             .category(ConnectorCategory::DatabaseCdc)
-            
             .feature("postgres")
             .tags([
                 "postgresql",
@@ -235,7 +242,6 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .description("Change Data Capture from MySQL/MariaDB using binlog replication")
             .source()
             .category(ConnectorCategory::DatabaseCdc)
-            
             .feature("mysql")
             .tags([
                 "mysql",
@@ -259,7 +265,6 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .description("Consume messages from Apache Kafka topics")
             .source()
             .category(ConnectorCategory::MessagingKafka)
-            
             .feature("kafka")
             .tags(["kafka", "streaming", "messaging", "queue", "consumer"])
             .aliases(["apache-kafka", "kafka-source"])
@@ -276,7 +281,6 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .description("Subscribe to MQTT broker topics")
             .source()
             .category(ConnectorCategory::MessagingMqtt)
-            
             .feature("mqtt")
             .tags(["mqtt", "iot", "messaging", "broker", "subscribe"])
             .aliases(["mqtt-source", "mosquitto"])
@@ -292,7 +296,6 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .description("Receive messages from Amazon SQS queues")
             .source()
             .category(ConnectorCategory::MessagingCloud)
-            
             .feature("sqs")
             .tags(["aws", "sqs", "amazon", "queue", "cloud", "messaging"])
             .aliases(["aws-sqs", "amazon-sqs", "simple-queue-service"])
@@ -309,7 +312,6 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .description("Receive messages from Google Cloud Pub/Sub")
             .source()
             .category(ConnectorCategory::MessagingCloud)
-            
             .feature("pubsub")
             .tags(["gcp", "google", "pubsub", "cloud", "messaging"])
             .aliases(["gcp-pubsub", "google-pubsub", "cloud-pubsub"])
@@ -329,7 +331,6 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .description("Write events to stdout for debugging and testing")
             .sink()
             .category(ConnectorCategory::UtilityDebug)
-            
             .tags(["stdout", "debug", "console", "log", "test"])
             .aliases(["console", "log", "print"])
             .build(),
@@ -344,7 +345,6 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .description("Send events via HTTP POST requests")
             .sink()
             .category(ConnectorCategory::HttpApi)
-            
             .feature("http")
             .tags(["http", "webhook", "rest", "api", "post"])
             .aliases(["webhook", "http-sink", "rest-api"])
@@ -360,7 +360,6 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .description("Produce messages to Apache Kafka topics")
             .sink()
             .category(ConnectorCategory::MessagingKafka)
-            
             .feature("kafka")
             .tags(["kafka", "streaming", "messaging", "queue", "producer"])
             .aliases(["apache-kafka", "kafka-sink"])
@@ -376,7 +375,6 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .description("Write events to Amazon S3 object storage")
             .sink()
             .category(ConnectorCategory::StorageObject)
-            
             .feature("s3")
             .tags(["aws", "s3", "amazon", "storage", "object", "cloud"])
             .aliases([
@@ -399,7 +397,6 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .description("Write events to Google Cloud Storage")
             .sink()
             .category(ConnectorCategory::StorageObject)
-            
             .feature("gcs")
             .tags(["gcp", "google", "gcs", "storage", "object", "cloud"])
             .aliases(["google-cloud-storage", "gcp-storage"])
@@ -416,7 +413,6 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .description("Write events to Azure Blob Storage")
             .sink()
             .category(ConnectorCategory::StorageObject)
-            
             .feature("azure")
             .tags(["azure", "microsoft", "blob", "storage", "object", "cloud"])
             .aliases(["azure-storage", "azure-blob-storage"])
@@ -433,7 +429,6 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .description("Load events into Snowflake Data Cloud")
             .sink()
             .category(ConnectorCategory::Warehouse)
-            
             .feature("snowflake")
             .tags(["snowflake", "warehouse", "analytics", "cloud", "data-lake"])
             .aliases(["snowflake-streaming", "snowflake-put"])
@@ -450,7 +445,6 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .description("Load events into Google BigQuery")
             .sink()
             .category(ConnectorCategory::Warehouse)
-            
             .feature("bigquery")
             .tags(["gcp", "google", "bigquery", "warehouse", "analytics"])
             .aliases(["gcp-bigquery", "google-bigquery", "bq"])
@@ -467,7 +461,6 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .description("Load events into Amazon Redshift")
             .sink()
             .category(ConnectorCategory::Warehouse)
-            
             .feature("redshift")
             .tags(["aws", "amazon", "redshift", "warehouse", "analytics"])
             .aliases(["aws-redshift", "amazon-redshift"])
@@ -488,7 +481,6 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .description("Write to Apache Iceberg tables - open table format for analytics")
             .sink()
             .category(ConnectorCategory::Lakehouse)
-            
             .feature("iceberg")
             .tags([
                 "iceberg",

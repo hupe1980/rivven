@@ -2,7 +2,7 @@
 //!
 //! File-based implementations of `ProgressStore` trait for snapshot resumability.
 //!
-//! ## Offset Storage Philosophy (Following Debezium Patterns)
+//! ## Offset Storage Philosophy
 //!
 //! **Key principle**: Offsets/progress are stored in the DESTINATION system,
 //! never in the source database. This is because:
@@ -269,9 +269,9 @@ impl ProgressStore for FileProgressStore {
 ///
 /// # ⚠️ Important: Do NOT Use the Source Database
 ///
-/// Following Debezium patterns, progress should be stored in the DESTINATION
-/// system (broker topics) or a dedicated metadata database - NEVER in the
-/// source database being captured. Reasons:
+/// Progress should be stored in the DESTINATION system (broker topics) or a
+/// dedicated metadata database - NEVER in the source database being captured.
+/// Reasons:
 ///
 /// 1. Source databases might be read-only replicas
 /// 2. Avoid polluting source schemas with CDC metadata

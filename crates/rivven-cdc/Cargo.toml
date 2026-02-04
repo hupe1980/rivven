@@ -50,8 +50,22 @@ mysql-tls = [
 ]
 # MariaDB CDC (uses MySQL binlog protocol with MariaDB extensions)
 mariadb = ["mysql"]
+# SQL Server CDC via poll-based CDC tables (requires SQL Server 2016+)
+sqlserver = [
+    "dep:tiberius",
+    "dep:tokio-util",
+    "dep:base64",
+]
+# SQL Server with TLS support
+sqlserver-tls = [
+    "sqlserver",
+    "dep:rustls",
+    "dep:rustls-pemfile",
+    "dep:webpki-roots",
+    "dep:tokio-rustls",
+]
 # All CDC sources
-full = ["postgres", "postgres-tls", "mysql", "mysql-tls", "mariadb"]
+full = ["postgres", "postgres-tls", "mysql", "mysql-tls", "mariadb", "sqlserver", "sqlserver-tls"]
 
 [dependencies]
 tokio = { workspace = true }
@@ -96,6 +110,10 @@ flate2 = { version = "1.1", optional = true, default-features = false, features 
 hmac = { version = "0.12", optional = true }
 pbkdf2 = { version = "0.12", optional = true }
 
+# SQL Server via TDS protocol
+tiberius = { version = "0.12", default-features = false, features = ["tds73", "chrono"], optional = true }
+tokio-util = { version = "0.7", features = ["compat"], optional = true }
+
 # Encryption (AES-256-GCM for column-level encryption)
 aes-gcm = "0.10"
 # Ed25519 for MariaDB client_ed25519 authentication  
@@ -117,7 +135,7 @@ async-trait = "0.1"
 uuid = { version = "1.6", features = ["v4"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["postgres", "mysql", "mariadb"] }
+testcontainers-modules = { version = "0.11", features = ["postgres", "mysql", "mariadb", "mssql_server"] }
 pretty_assertions = "1.4"
 criterion = { version = "0.5", features = ["async_tokio"] }
 fake = { version = "3.0", features = ["derive", "chrono"] }
@@ -151,9 +169,19 @@ path = "tests/cdc_mysql_integration.rs"
 required-features = ["mysql"]
 
 [[test]]
+name = "cdc_mysql_stress"
+path = "tests/cdc_mysql_stress.rs"
+required-features = ["mysql"]
+
+[[test]]
 name = "mysql_version_matrix"
 path = "tests/mysql_version_matrix.rs"
 required-features = ["mysql"]
+
+[[test]]
+name = "cdc_sqlserver_integration"
+path = "tests/cdc_sqlserver_integration.rs"
+required-features = ["sqlserver"]
 
 [[bench]]
 name = "cdc_throughput"

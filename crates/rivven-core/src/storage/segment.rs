@@ -222,7 +222,8 @@ impl Segment {
                 .create(true)
                 .open(&self.index_path)?;
 
-            let mut buf = BytesMut::with_capacity(self.pending_index_entries.len() * INDEX_ENTRY_SIZE);
+            let mut buf =
+                BytesMut::with_capacity(self.pending_index_entries.len() * INDEX_ENTRY_SIZE);
             for (rel_offset, pos) in &self.pending_index_entries {
                 buf.put_u32(*rel_offset);
                 buf.put_u64(*pos);
@@ -251,7 +252,7 @@ impl Segment {
             buf.put_u64(*pos);
         }
         file.write_all(&buf)?;
-        
+
         self.pending_index_entries.clear();
         Ok(())
     }

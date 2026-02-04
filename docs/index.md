@@ -161,16 +161,6 @@ rivven-connect -c rivven-connect.yaml
 
 ---
 
-## Performance
-
-| Benchmark | Result | Notes |
-|:----------|:-------|:------|
-| Message append (100KB) | **46 µs** | ~2 GiB/s throughput |
-| Batch read (1K msgs) | **1.2 ms** | ~836K messages/s |
-| Schema lookup | **29 ns** | O(1) with caching |
-
----
-
 ## Documentation
 
 | Guide | Description |

@@ -217,6 +217,20 @@ sources:
 | `snapshot_lock_timeout` | duration | `30s` | Lock timeout |
 | `snapshot_isolation_level` | enum | `repeatable_read` | Transaction isolation |
 
+#### Snapshot Modes
+
+All standard snapshot modes are supported:
+
+| Mode | Description |
+|------|-------------|
+| `initial` | Snapshot on first run, then stream changes (default) |
+| `always` | Full snapshot on every restart |
+| `never` | Skip snapshot, stream changes only |
+| `when_needed` | Snapshot if no valid binlog position exists |
+| `initial_only` | Snapshot and stop (for data migration) |
+| `no_data` | Capture schema only, skip data (alias: `schema_only`) |
+| `recovery` | Rebuild schema history after corruption |
+
 ### TLS Settings
 
 | Parameter | Type | Default | Description |

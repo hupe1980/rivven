@@ -5,7 +5,7 @@
 //!
 //! ## Supported SMT Transforms
 //!
-//! All Debezium-compatible transforms are supported:
+//! All standard transforms are supported:
 //!
 //! | Transform | Description | Status |
 //! |-----------|-------------|--------|
@@ -44,7 +44,7 @@ use std::sync::Arc;
 
 /// Build an SMT transform from YAML configuration.
 ///
-/// Supports all Debezium-compatible transform types:
+/// Supports all standard transform types:
 /// - `ExtractNewRecordState` - Flatten envelope, extract "after" state
 /// - `ValueToKey` - Extract key fields from value
 /// - `MaskField` - Mask sensitive fields (SSN, credit cards, etc.)

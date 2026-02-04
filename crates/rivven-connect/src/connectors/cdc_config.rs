@@ -163,8 +163,9 @@ pub enum SnapshotModeConfig {
     WhenNeeded,
     /// Snapshot only, no streaming afterward
     InitialOnly,
-    /// Capture schema only, no data
-    SchemaOnly,
+    /// Capture schema only, no data (preferred name)
+    #[serde(alias = "schema_only")]
+    NoData,
     /// Force re-snapshot from source (recovery mode)
     Recovery,
 }
@@ -1473,7 +1474,7 @@ mod tests {
             (SnapshotModeConfig::Never, "\"never\""),
             (SnapshotModeConfig::WhenNeeded, "\"when_needed\""),
             (SnapshotModeConfig::InitialOnly, "\"initial_only\""),
-            (SnapshotModeConfig::SchemaOnly, "\"schema_only\""),
+            (SnapshotModeConfig::NoData, "\"no_data\""),
             (SnapshotModeConfig::Recovery, "\"recovery\""),
         ];
 
@@ -1481,5 +1482,12 @@ mod tests {
             let serialized = serde_json::to_string(&mode).unwrap();
             assert_eq!(serialized, expected);
         }
+    }
+
+    #[test]
+    fn test_snapshot_mode_schema_only_alias() {
+        // Test that schema_only deserializes to NoData
+        let mode: SnapshotModeConfig = serde_json::from_str("\"schema_only\"").unwrap();
+        assert!(matches!(mode, SnapshotModeConfig::NoData));
     }
 }

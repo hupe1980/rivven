@@ -200,7 +200,7 @@ impl SnapshotManagerConfig {
             SnapshotModeConfig::Never => SnapshotMode::NoSnapshot,
             SnapshotModeConfig::WhenNeeded => SnapshotMode::WhenNeeded,
             SnapshotModeConfig::InitialOnly => SnapshotMode::InitialOnly,
-            SnapshotModeConfig::SchemaOnly => SnapshotMode::SchemaOnly,
+            SnapshotModeConfig::NoData => SnapshotMode::SchemaOnly,
             SnapshotModeConfig::Recovery => SnapshotMode::Recovery,
         };
 
@@ -363,7 +363,7 @@ impl<S: SnapshotSource + 'static, P: ProgressStore + 'static> SnapshotManager<S,
                 }
             }
             SnapshotMode::SchemaOnly => {
-                info!("Snapshot mode: SchemaOnly - capturing schema only");
+                info!("Snapshot mode: NoData - capturing schema only");
                 false
             }
             SnapshotMode::Recovery => {
@@ -603,7 +603,7 @@ impl SnapshotExecutor {
             SnapshotModeConfig::Never => false,
             SnapshotModeConfig::WhenNeeded => !self.config.has_prior_state,
             SnapshotModeConfig::InitialOnly => !self.config.has_prior_state,
-            SnapshotModeConfig::SchemaOnly => false, // Schema only doesn't snapshot data
+            SnapshotModeConfig::NoData => false, // NoData mode doesn't snapshot data
             SnapshotModeConfig::Recovery => true,
         }
     }
@@ -2703,13 +2703,13 @@ mod tests {
         }
 
         #[test]
-        fn test_should_snapshot_schema_only_mode() {
-            // Schema only mode never snapshots data
-            let config = make_config(SnapshotModeConfig::SchemaOnly, false);
+        fn test_should_snapshot_no_data_mode() {
+            // NoData mode never snapshots data (captures schema only)
+            let config = make_config(SnapshotModeConfig::NoData, false);
             let executor = SnapshotExecutor::new(config);
             assert!(!executor.should_snapshot());
 
-            let config = make_config(SnapshotModeConfig::SchemaOnly, true);
+            let config = make_config(SnapshotModeConfig::NoData, true);
             let executor = SnapshotExecutor::new(config);
             assert!(!executor.should_snapshot());
         }

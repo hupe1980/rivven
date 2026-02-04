@@ -21,14 +21,13 @@ rivven-connect is designed to scale to **300+ connectors** with:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                 Connector Inventory (Scalable)                   │
+│                 Connector Inventory (Scalable)                  │
 ├─────────────────────────────────────────────────────────────────┤
-│  Categories                                                      │
-│  ├── Database (postgres_cdc, mysql_cdc, mongodb, redis, ...)    │
-│  ├── Messaging (mqtt, sqs, pubsub, nats, ...)                     │
+│  Categories                                                     │
+│  ├── Database (postgres_cdc, mysql_cdc, sqlserver_cdc, ...).    │
+│  ├── Messaging (mqtt, sqs, pubsub, nats, ...)                   │
 │  ├── Storage (s3, gcs, azure, minio, ...)                       │
 │  ├── Warehouse (snowflake, bigquery, redshift, ...)             │
-│  ├── AI/ML (openai, anthropic, pinecone, ...)                   │
 │  └── Utility (datagen, stdout, http, ...)                       │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -124,6 +123,7 @@ rivven-connect run --config rivven-connect.yaml
 | `datagen` | (default) | Synthetic data generator for testing |
 | `postgres-cdc` | `postgres` | PostgreSQL logical replication CDC |
 | `mysql-cdc` | `mysql` | MySQL/MariaDB binlog CDC |
+| `sqlserver-cdc` | `sqlserver` | SQL Server Change Data Capture |
 | `external-queue` | `external-queue` | External message queue consumer |
 | `mqtt` | `mqtt` | MQTT broker subscriber |
 | `sqs` | `sqs` | AWS SQS queue consumer |
@@ -206,10 +206,10 @@ See [docs/ICEBERG_SINK.md](../../docs/ICEBERG_SINK.md) for complete configuratio
 
 ```toml
 # In Cargo.toml
-rivven-connect = { version = "0.0.6", features = ["full"] }
+rivven-connect = { version = "0.0.7", features = ["full"] }
 
 # Or selective features
-rivven-connect = { version = "0.0.6", features = ["postgres", "s3"] }
+rivven-connect = { version = "0.0.7", features = ["postgres", "s3"] }
 ```
 
 | Bundle | Includes |
@@ -443,6 +443,71 @@ CREATE PUBLICATION rivven_pub FOR ALL TABLES;
 ```
 
 The replication slot is created automatically on first run.
+
+## SQL Server CDC Setup
+
+SQL Server CDC uses the native Change Data Capture feature which tracks changes via CDC tables.
+
+### Enable CDC on Database and Tables
+
+```sql
+-- Enable CDC on the database
+USE mydb;
+GO
+EXEC sys.sp_cdc_enable_db;
+GO
+
+-- Enable CDC on tables (creates capture instances)
+EXEC sys.sp_cdc_enable_table
+  @source_schema = N'dbo',
+  @source_name = N'users',
+  @role_name = NULL,
+  @supports_net_changes = 1;
+GO
+
+EXEC sys.sp_cdc_enable_table
+  @source_schema = N'dbo',
+  @source_name = N'orders',
+  @role_name = NULL,
+  @supports_net_changes = 1;
+GO
+```
+
+### Example Configuration
+
+```yaml
+sources:
+  sqlserver_db:
+    connector: sqlserver-cdc
+    config:
+      host: localhost
+      port: 1433
+      database: mydb
+      username: sa
+      password: ${MSSQL_PASSWORD}
+      schema: dbo
+      poll_interval_ms: 500
+      snapshot_mode: initial  # initial, always, never, when_needed
+      encrypt: false
+      trust_server_certificate: true
+      include_tables:
+        - users
+        - orders
+    streams:
+      - name: users
+        namespace: dbo
+        sync_mode: incremental
+      - name: orders
+        namespace: dbo
+        sync_mode: incremental
+```
+
+### Supported Versions
+
+- SQL Server 2016 SP1+ (on-premises)
+- SQL Server 2019 (recommended)
+- SQL Server 2022
+- Azure SQL Database (with CDC enabled)
 
 ## Snowflake Sink Setup
 

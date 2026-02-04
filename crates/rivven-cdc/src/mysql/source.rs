@@ -4,7 +4,7 @@
 
 #[cfg(feature = "mysql-tls")]
 use crate::common::TlsConfig;
-use crate::common::{pattern_match, CdcEvent, CdcOp, CdcSource, Result};
+use crate::common::{pattern_match, CdcEvent, CdcOp, CdcSource, Result, SnapshotMode};
 use anyhow::Context;
 use async_trait::async_trait;
 use mysql_async::prelude::*;
@@ -55,6 +55,8 @@ pub struct MySqlCdcConfig {
     pub include_tables: Vec<String>,
     /// Tables to exclude
     pub exclude_tables: Vec<String>,
+    /// Snapshot mode configuration
+    pub snapshot_mode: SnapshotMode,
     /// TLS configuration (requires `mysql-tls` feature)
     #[cfg(feature = "mysql-tls")]
     pub tls_config: Option<TlsConfig>,
@@ -75,7 +77,8 @@ impl std::fmt::Debug for MySqlCdcConfig {
             .field("use_gtid", &self.use_gtid)
             .field("gtid_set", &self.gtid_set)
             .field("include_tables", &self.include_tables)
-            .field("exclude_tables", &self.exclude_tables);
+            .field("exclude_tables", &self.exclude_tables)
+            .field("snapshot_mode", &self.snapshot_mode);
 
         #[cfg(feature = "mysql-tls")]
         {
@@ -106,6 +109,7 @@ impl Default for MySqlCdcConfig {
             gtid_set: String::new(),
             include_tables: vec![],
             exclude_tables: vec![],
+            snapshot_mode: SnapshotMode::default(),
             #[cfg(feature = "mysql-tls")]
             tls_config: None,
         }
@@ -160,6 +164,12 @@ impl MySqlCdcConfig {
 
     pub fn exclude_table(mut self, pattern: impl Into<String>) -> Self {
         self.exclude_tables.push(pattern.into());
+        self
+    }
+
+    /// Set snapshot mode
+    pub fn with_snapshot_mode(mut self, mode: SnapshotMode) -> Self {
+        self.snapshot_mode = mode;
         self
     }
 

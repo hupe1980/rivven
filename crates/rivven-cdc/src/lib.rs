@@ -1,32 +1,33 @@
 //! # rivven-cdc - Change Data Capture for Rivven
 //!
-//! Production-grade CDC support for PostgreSQL, MySQL, and MariaDB.
+//! Production-grade CDC support for PostgreSQL, MySQL, MariaDB, and SQL Server.
 //!
 //! ## Features
 //!
 //! - `postgres` - PostgreSQL logical replication via pgoutput
 //! - `mysql` - MySQL binlog replication
 //! - `mariadb` - MariaDB binlog replication (enables `mysql`)
+//! - `sqlserver` - SQL Server CDC via poll-based CDC tables
 //! - `full` - All CDC sources
 //!
 //! ## Architecture
 //!
 //! ```text
-//! ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-//! │ PostgreSQL  │     │   MySQL     │     │  MariaDB    │
-//! │    WAL      │     │   Binlog    │     │   Binlog    │
-//! └──────┬──────┘     └──────┬──────┘     └──────┬──────┘
-//!        │                   │                   │
-//!        ▼                   ▼                   ▼
-//! ┌──────────────────────────────────────────────────────┐
-//! │                    CdcSource Trait                   │
-//! └──────────────────────────────────────────────────────┘
-//!        │                   │                   │
-//!        ▼                   ▼                   ▼
-//! ┌──────────────────────────────────────────────────────┐
-//! │                     CdcEvent                         │
-//! │  { op: Insert/Update/Delete, before, after, ... }   │
-//! └──────────────────────────────────────────────────────┘
+//! ┌───────────┐   ┌───────────┐   ┌───────────┐   ┌───────────┐
+//! │PostgreSQL │   │  MySQL    │   │ MariaDB   │   │SQL Server │
+//! │   WAL     │   │  Binlog   │   │  Binlog   │   │CDC Tables │
+//! └─────┬─────┘   └─────┬─────┘   └─────┬─────┘   └─────┬─────┘
+//!       │               │               │               │
+//!       ▼               ▼               ▼               ▼
+//! ┌──────────────────────────────────────────────────────────┐
+//! │                    CdcSource Trait                       │
+//! └──────────────────────────────────────────────────────────┘
+//!       │               │               │               │
+//!       ▼               ▼               ▼               ▼
+//! ┌──────────────────────────────────────────────────────────┐
+//! │                     CdcEvent                             │
+//! │    { op: Insert/Update/Delete, before, after, ... }     │
+//! └──────────────────────────────────────────────────────────┘
 //! ```
 //!
 //! ## Quick Start
@@ -148,3 +149,7 @@ pub mod postgres;
 // MySQL/MariaDB CDC - feature-gated
 #[cfg(feature = "mysql")]
 pub mod mysql;
+
+// SQL Server CDC - feature-gated
+#[cfg(feature = "sqlserver")]
+pub mod sqlserver;

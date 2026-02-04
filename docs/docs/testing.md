@@ -606,27 +606,6 @@ Example properties tested:
 - Compression ratio bounds
 - Offset ordering invariants
 
-## Benchmarks
-
-```bash
-# Run all benchmarks
-cargo bench --workspace
-
-# Run specific benchmarks
-cargo bench -p rivven-core -- compression
-cargo bench -p rivven-cdc -- throughput
-
-# Generate HTML reports
-cargo bench --workspace -- --save-baseline main
-```
-
-Key benchmarks:
-- Message serialization throughput
-- Compression ratios (LZ4/Zstd)
-- WAL append latency
-- Consumer group rebalancing
-- CDC change processing
-
 ## Coverage
 
 Generate coverage reports with `cargo-tarpaulin`:

@@ -158,8 +158,6 @@ impl std::fmt::Display for ConnectorCategory {
     }
 }
 
-
-
 /// Connector type flags
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]

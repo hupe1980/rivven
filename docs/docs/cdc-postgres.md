@@ -208,14 +208,16 @@ sources:
 
 **Snapshot Modes:**
 
+All standard snapshot modes are supported:
+
 | Mode | Description |
 |:-----|:------------|
-| `always` | Full snapshot on every start |
-| `initial` | Snapshot on first start only (default) |
-| `initial_only` | Snapshot and stop (no streaming) |
-| `schema_only` | Capture schema, no data |
-| `when_needed` | Snapshot if no valid offsets |
-| `never` | No snapshot, streaming only |
+| `initial` | Snapshot on first run, then stream changes (default) |
+| `always` | Full snapshot on every restart |
+| `never` | Skip snapshot, stream changes only |
+| `when_needed` | Snapshot if no valid LSN position exists |
+| `initial_only` | Snapshot and stop (for data migration) |
+| `no_data` | Capture schema only, skip data (alias: `schema_only`) |
 
 ### TLS Settings
 

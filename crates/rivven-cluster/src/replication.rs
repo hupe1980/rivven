@@ -6,10 +6,21 @@
 //! - High watermark tracks committed offsets
 //! - ISR tracks which replicas are caught up
 //!
-//! Ack modes:
-//! - acks=0: Fire and forget (no durability guarantee)
-//! - acks=1: Leader acknowledgment (data written to leader)
-//! - acks=all: All ISR acknowledgment (full durability)
+//! # Ack Modes
+//!
+//! - `acks=0`: Fire and forget (no durability guarantee)
+//! - `acks=1`: Leader acknowledgment (data written to leader)
+//! - `acks=all`: All ISR acknowledgment (full durability)
+//!
+//! # Lock Ordering
+//!
+//! When acquiring multiple locks in this module, always follow this order
+//! to prevent deadlocks:
+//!
+//! 1. `replicas` lock (RwLock)
+//! 2. `isr` lock (RwLock)
+//!
+//! Never acquire `isr` before `replicas` in any code path.
 
 use crate::config::ReplicationConfig;
 use crate::error::{ClusterError, Result};
@@ -272,13 +283,16 @@ impl PartitionReplication {
     }
 
     /// Maybe advance the high watermark
+    ///
+    /// Note: Acquires locks in order: replicas -> isr (following module lock ordering)
     async fn maybe_advance_hwm(&self) {
+        // Acquire replicas first to follow lock ordering (replicas -> isr)
+        let replicas = self.replicas.read().await;
         let isr = self.isr.read().await;
 
         // HWM is the minimum LEO across all ISR members
         let mut min_leo = self.log_end_offset.load(Ordering::SeqCst);
 
-        let replicas = self.replicas.read().await;
         for node_id in isr.iter() {
             if node_id == &self.local_node {
                 continue;
@@ -287,6 +301,10 @@ impl PartitionReplication {
                 min_leo = min_leo.min(progress.log_end_offset);
             }
         }
+
+        // Drop locks before potentially acquiring more locks in complete_pending_acks
+        drop(isr);
+        drop(replicas);
 
         let current_hwm = self.high_watermark.load(Ordering::SeqCst);
         if min_leo > current_hwm {
@@ -386,6 +404,34 @@ impl PartitionReplication {
     pub async fn has_min_isr(&self) -> bool {
         let isr = self.isr.read().await;
         isr.len() >= self.config.min_isr as usize
+    }
+
+    /// Clean up stale pending acks that have exceeded the timeout
+    ///
+    /// This should be called periodically to prevent memory leaks from
+    /// pending acks that were never completed (e.g., due to network partitions).
+    /// Returns the number of cleaned up entries.
+    pub fn cleanup_stale_pending_acks(&self, timeout: Duration) -> usize {
+        let now = Instant::now();
+        let mut cleaned = 0;
+
+        self.pending_acks.retain(|_, pending| {
+            let is_stale = now.duration_since(pending.created) >= timeout;
+            if is_stale {
+                cleaned += 1;
+            }
+            !is_stale
+        });
+
+        if cleaned > 0 {
+            debug!(
+                partition = %self.partition_id,
+                cleaned = cleaned,
+                "Cleaned up stale pending acks"
+            );
+        }
+
+        cleaned
     }
 }
 

@@ -75,6 +75,8 @@ impl TokenBucket {
                 self.stats.acquired.fetch_add(count, Ordering::Relaxed);
                 return true;
             }
+            // Hint to the CPU that we're in a spin loop
+            std::hint::spin_loop();
         }
     }
 

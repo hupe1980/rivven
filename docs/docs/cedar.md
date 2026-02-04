@@ -504,17 +504,7 @@ Cedar decisions are logged for compliance:
 
 ---
 
-## Performance
-
-Cedar is designed for real-time authorization:
-
-| Metric | Typical Value |
-|:-------|:--------------|
-| Policy evaluation | < 1ms |
-| Policy count supported | 10,000+ |
-| Entity count supported | 1,000,000+ |
-
-### Optimization Tips
+## Optimization Tips
 
 1. **Use specific policies**: More specific policies evaluate faster
 2. **Limit entity hierarchy depth**: Deep group nesting impacts performance

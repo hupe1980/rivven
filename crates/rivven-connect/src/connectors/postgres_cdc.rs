@@ -1057,8 +1057,8 @@ impl Source for PostgresCdcSource {
             SnapshotModeConfig::InitialOnly => {
                 info!("Snapshot mode: InitialOnly (snapshot only, no streaming)")
             }
-            SnapshotModeConfig::SchemaOnly => {
-                info!("Snapshot mode: SchemaOnly (schema capture only)")
+            SnapshotModeConfig::NoData => {
+                info!("Snapshot mode: NoData (schema capture only)")
             }
             SnapshotModeConfig::Recovery => info!("Snapshot mode: Recovery (force re-snapshot)"),
         }

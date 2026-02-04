@@ -83,7 +83,9 @@ impl Partition {
         let timer = Timer::new();
 
         // Lock-free offset allocation - single atomic operation
-        let offset = self.next_offset.fetch_add(1, Ordering::SeqCst);
+        // Using AcqRel: ensures our write is visible to other threads (Release)
+        // and we see all previous writes (Acquire). SeqCst is unnecessary here.
+        let offset = self.next_offset.fetch_add(1, Ordering::AcqRel);
 
         message.offset = offset;
 
@@ -146,7 +148,7 @@ impl Partition {
 
     /// Get the latest offset
     pub async fn latest_offset(&self) -> u64 {
-        self.next_offset.load(Ordering::SeqCst)
+        self.next_offset.load(Ordering::Acquire)
     }
 
     pub async fn earliest_offset(&self) -> Option<u64> {

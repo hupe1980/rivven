@@ -1097,10 +1097,7 @@ fn list_connectors() -> Result<()> {
 
         println!("{}", parent_name);
         println!("─────────────────────────────────────────────────────────────────────");
-        println!(
-            "{:<18} {:<10} Description",
-            "Name", "Type"
-        );
+        println!("{:<18} {:<10} Description", "Name", "Type");
         println!("─────────────────────────────────────────────────────────────────────");
 
         for meta in connectors {
@@ -1124,10 +1121,7 @@ fn list_connectors() -> Result<()> {
                 meta.description.clone()
             };
 
-            println!(
-                "{:<18} {:<10} {}",
-                meta.name, types_str, desc
-            );
+            println!("{:<18} {:<10} {}", meta.name, types_str, desc);
         }
         println!();
     }

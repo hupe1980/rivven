@@ -18,15 +18,6 @@
 | **QUIC Transport** | 0-RTT, multiplexed streams, BBR congestion control |
 | **Consumer Coordination** | Consumer group management with Raft persistence |
 
-## Performance Characteristics
-
-| Operation | Latency | Notes |
-|:----------|:--------|:------|
-| Raft proposal | ~150μs | Binary postcard serialization |
-| SWIM ping | ~50μs | UDP with suspicion mechanism |
-| Partition lookup | O(1) | DashMap with lock-free reads |
-| ISR update | ~100μs | Atomic operations |
-
 ## Why redb?
 
 Rivven uses **redb** instead of RocksDB for Raft log storage:

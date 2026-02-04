@@ -220,18 +220,12 @@ impl ConnectorInventory {
         let mut results: Vec<_> = self
             .sources
             .values()
-            .filter(|e| {
-                e.metadata
-                    .matches_filters(category, connector_type)
-            })
+            .filter(|e| e.metadata.matches_filters(category, connector_type))
             .map(|e| &e.metadata)
             .chain(
                 self.sinks
                     .values()
-                    .filter(|e| {
-                        e.metadata
-                            .matches_filters(category, connector_type)
-                    })
+                    .filter(|e| e.metadata.matches_filters(category, connector_type))
                     .map(|e| &e.metadata),
             )
             .collect();

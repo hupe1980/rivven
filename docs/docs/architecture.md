@@ -141,11 +141,11 @@ This follows a modular architecture where each connector category can be enabled
 ```toml
 # Only include what you need
 [dependencies]
-rivven-connect = { version = "0.0.6", features = ["postgres", "s3"] }
+rivven-connect = { version = "0.0.7", features = ["postgres", "s3"] }
 
 # Or include everything
 [dependencies]
-rivven-connect = { version = "0.0.6", features = ["full"] }
+rivven-connect = { version = "0.0.7", features = ["full"] }
 ```
 
 ### Bundle Features
@@ -343,13 +343,6 @@ On Linux 5.6+, Rivven uses **io_uring** for kernel-bypassing async I/O:
 │            │<────│ Completion Ring │<────│            │
 └────────────┘     └─────────────────┘     └────────────┘
 ```
-
-**Performance comparison:**
-
-| Backend | IOPS (4KB) | Latency p99 | CPU Usage |
-|:--------|:-----------|:------------|:----------|
-| epoll   | 200K       | 1.5ms       | 80%       |
-| io_uring| 800K       | 0.3ms       | 40%       |
 
 ### Request Pipelining (Client)
 

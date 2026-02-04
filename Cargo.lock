@@ -608,6 +608,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "asynchronous-codec"
+version = "0.6.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4057f2c32adbb2fc158e22fb38433c8e9bbf76b75a4732c7c0cbaf695fb65568"
+dependencies = [
+ "bytes",
+ "futures-sink",
+ "futures-util",
+ "memchr",
+ "pin-project-lite",
+]
+
+[[package]]
 name = "atoi"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1380,6 +1393,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "connection-string"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "510ca239cf13b7f8d16a2b48f263de7b4f8c566f0af58d901031473c76afb1e3"
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2079,6 +2098,26 @@ name = "enum-ordinalize-derive"
 version = "4.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ca9601fb2d62598ee17836250842873a413586e5d7ed88b356e38ddbb0ec631"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.114",
+]
+
+[[package]]
+name = "enumflags2"
+version = "0.7.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1027f7680c853e056ebcec683615fb6fbbc07dbaa13b4d5d9442b146ded4ecef"
+dependencies = [
+ "enumflags2_derive",
+]
+
+[[package]]
+name = "enumflags2_derive"
+version = "0.7.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67c78a4d8fdf9953a5c9d458f9efe940fd97a0cab0941c075a813ac594733827"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5040,6 +5079,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "pretty-hex"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6fa0831dd7cc608c38a5e323422a0077678fa5744aa2be4ad91c4ece8eec8d5"
+
+[[package]]
 name = "pretty_assertions"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5800,7 +5845,7 @@ dependencies = [
 
 [[package]]
 name = "rivven"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "bytes",
@@ -5815,7 +5860,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-cdc"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -5855,10 +5900,12 @@ dependencies = [
  "testcontainers",
  "testcontainers-modules",
  "thiserror 2.0.18",
+ "tiberius",
  "tokio",
  "tokio-postgres",
  "tokio-postgres-rustls",
  "tokio-rustls 0.26.4",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -5868,7 +5915,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-client"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -5885,7 +5932,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-cluster"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "bytes",
  "chrono",
@@ -5920,7 +5967,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-connect"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "apache-avro 0.17.0",
@@ -5988,7 +6035,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-connect-derive"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "darling 0.20.11",
  "proc-macro2",
@@ -5998,7 +6045,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-core"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -6050,7 +6097,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-integration-tests"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6084,7 +6131,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-operator"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6110,7 +6157,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-protocol"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "bytes",
  "postcard",
@@ -6121,7 +6168,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-python"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "bytes",
  "pyo3",
@@ -6133,7 +6180,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-schema"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "apache-avro 0.17.0",
@@ -6167,7 +6214,7 @@ dependencies = [
 
 [[package]]
 name = "rivvend"
-version = "0.0.6"
+version = "0.0.7"
 dependencies = [
  "anyhow",
  "axum",
@@ -7425,6 +7472,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "tiberius"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1446cb4198848d1562301a3340424b4f425ef79f35ef9ee034769a9dd92c10d"
+dependencies = [
+ "async-trait",
+ "asynchronous-codec",
+ "byteorder",
+ "bytes",
+ "chrono",
+ "connection-string",
+ "encoding_rs",
+ "enumflags2",
+ "futures-util",
+ "num-traits",
+ "once_cell",
+ "pin-project-lite",
+ "pretty-hex",
+ "thiserror 1.0.69",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "time"
 version = "0.3.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7656,6 +7727,7 @@ checksum = "9ae9cec805b01e8fc3fd2fe289f89149a9b66dd16786abd8b19cfa7b48cb0098"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-io",
  "futures-sink",
  "pin-project-lite",
  "slab",

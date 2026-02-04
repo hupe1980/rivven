@@ -101,9 +101,7 @@ pub use testing::{
 };
 
 // Re-export metadata types (for connector categorization)
-pub use metadata::{
-    ConnectorCategory, ConnectorMetadata, ConnectorMetadataBuilder, ConnectorType,
-};
+pub use metadata::{ConnectorCategory, ConnectorMetadata, ConnectorMetadataBuilder, ConnectorType};
 
 // Re-export inventory types (for scalable connector management)
 pub use inventory::{ConnectorInventory, HasMetadata, SinkEntry, SourceEntry};
