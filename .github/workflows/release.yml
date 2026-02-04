@@ -232,8 +232,30 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: binaries-*
-          path: release
-          merge-multiple: true
+          path: binaries
+      
+      - name: Create tarballs for release
+        run: |
+          mkdir -p release
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          
+          # Process each platform's binaries
+          for dir in binaries/binaries-*/; do
+            # Extract suffix from directory name (e.g., binaries-linux-amd64 -> linux-amd64)
+            suffix=$(basename "$dir" | sed 's/binaries-//')
+            
+            # Find and package each binary
+            for bin in rivvend rivven rivven-connect rivven-operator rivven-schema; do
+              # Find the binary (may be nested in target/*/release/)
+              binary=$(find "$dir" -name "$bin" -type f | head -1)
+              if [ -n "$binary" ]; then
+                tar -czvf "release/${bin}-${VERSION}-${suffix}.tar.gz" -C "$(dirname "$binary")" "$bin"
+              fi
+            done
+          done
+          
+          echo "=== Release artifacts ==="
+          ls -la release/
       
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -242,29 +264,32 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
-          files: release/*
+          files: release/*.tar.gz
 
   binaries:
     name: Build Binaries (${{ matrix.target }})
     needs: validate
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Linux x86_64 (glibc - compatible with most distros)
+          # Linux x86_64 - STATIC musl binary (works everywhere including Docker)
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             suffix: linux-amd64
-          # Linux arm64 (using native arm64 runner)
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+            cross: false
+          # Linux arm64 - STATIC musl binary (native arm64 runner, no QEMU!)
+          - os: ubuntu-24.04-arm64
+            target: aarch64-unknown-linux-musl
             suffix: linux-arm64
-          # macOS Apple Silicon
+            cross: false
+          # macOS Apple Silicon (dynamic, but that's normal for macOS)
           - os: macos-14
             target: aarch64-apple-darwin
             suffix: darwin-arm64
+            cross: false
     steps:
       - uses: actions/checkout@v4
       
@@ -273,13 +298,24 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       
+      - name: Install musl tools (Linux only)
+        if: contains(matrix.target, 'musl')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools musl-dev
+      
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
       
-      - name: Build binaries
+      - name: Build static binaries
         run: |
+          # For musl targets, enable static linking
+          if [[ "${{ matrix.target }}" == *"musl"* ]]; then
+            export RUSTFLAGS="-C target-feature=+crt-static"
+          fi
+          
           cargo build --release --target ${{ matrix.target }} \
             --package rivvend \
             --package rivven \
@@ -287,34 +323,33 @@ jobs:
             --package rivven-operator \
             --package rivven-schema
       
-      - name: Extract version
-        id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
-      
-      - name: Package binaries
+      - name: Verify static linking (Linux only)
+        if: contains(matrix.target, 'musl')
         run: |
-          mkdir -p dist
-          cd target/${{ matrix.target }}/release
-          
-          # Package each binary
-          for bin in rivvend rivven rivven-connect rivven-operator rivven-schema; do
-            if [ -f "$bin" ]; then
-              tar -czvf ../../../dist/${bin}-${{ steps.version.outputs.VERSION }}-${{ matrix.suffix }}.tar.gz $bin
-            fi
-          done
+          echo "Checking binary linkage..."
+          file target/${{ matrix.target }}/release/rivvend
+          # Verify it's statically linked (should say "statically linked")
+          file target/${{ matrix.target }}/release/rivvend | grep -i static || echo "Warning: may not be fully static"
       
+      # Upload raw binaries (single artifact per platform)
+      # Used by both docker job (COPY) and release job (tarball)
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
           name: binaries-${{ matrix.suffix }}
-          path: dist/*.tar.gz
+          path: |
+            target/${{ matrix.target }}/release/rivvend
+            target/${{ matrix.target }}/release/rivven
+            target/${{ matrix.target }}/release/rivven-connect
+            target/${{ matrix.target }}/release/rivven-operator
+            target/${{ matrix.target }}/release/rivven-schema
           retention-days: 7
 
   docker:
     name: Build & Push Docker Images
-    needs: validate
+    needs: [validate, binaries]
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
@@ -325,6 +360,44 @@ jobs:
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
       
+      # Download pre-built static binaries from binaries job
+      - name: Download amd64 binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: binaries-linux-amd64
+          path: raw-amd64
+      
+      - name: Download arm64 binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: binaries-linux-arm64
+          path: raw-arm64
+      
+      - name: Prepare binaries for Docker
+        run: |
+          # Create directory structure expected by Dockerfile
+          mkdir -p binaries/amd64 binaries/arm64
+          
+          # Move binaries to correct locations (artifacts may have nested paths)
+          for bin in rivvend rivven rivven-connect rivven-operator rivven-schema; do
+            find raw-amd64 -name "$bin" -type f -exec cp {} binaries/amd64/ \;
+            find raw-arm64 -name "$bin" -type f -exec cp {} binaries/arm64/ \;
+          done
+          
+          # Make binaries executable
+          chmod +x binaries/amd64/* binaries/arm64/*
+          
+          # Verify
+          echo "=== AMD64 binaries ==="
+          ls -la binaries/amd64/
+          file binaries/amd64/rivvend
+          
+          echo "=== ARM64 binaries ==="
+          ls -la binaries/arm64/
+          file binaries/arm64/rivvend
+      
+      # QEMU is still needed for buildx to create multi-arch manifests,
+      # but no actual emulation happens since binaries are pre-built
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
       
@@ -342,50 +415,46 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: BINARY=rivvend
           tags: |
             ghcr.io/${{ github.repository_owner }}/rivvend:latest
             ghcr.io/${{ github.repository_owner }}/rivvend:${{ steps.version.outputs.VERSION }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
       
       - name: Build and push rivven-connect
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: BINARY=rivven-connect
           tags: |
             ghcr.io/${{ github.repository_owner }}/rivven-connect:latest
             ghcr.io/${{ github.repository_owner }}/rivven-connect:${{ steps.version.outputs.VERSION }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
       
       - name: Build and push rivven-operator
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: BINARY=rivven-operator
           tags: |
             ghcr.io/${{ github.repository_owner }}/rivven-operator:latest
             ghcr.io/${{ github.repository_owner }}/rivven-operator:${{ steps.version.outputs.VERSION }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
       
       - name: Build and push rivven-schema
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: BINARY=rivven-schema
           tags: |
             ghcr.io/${{ github.repository_owner }}/rivven-schema:latest
             ghcr.io/${{ github.repository_owner }}/rivven-schema:${{ steps.version.outputs.VERSION }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max

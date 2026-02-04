@@ -1,102 +1,53 @@
 # syntax=docker/dockerfile:1
 
 # ============================================================================
-# Rivven Multi-Binary, Multi-Arch Dockerfile
+# Rivven Docker Image
 # ============================================================================
 #
-# Build different images with:
-#   docker build -t ghcr.io/hupe1980/rivvend:latest .
-#   docker build --build-arg BINARY=rivven-connect -t ghcr.io/hupe1980/rivven-connect:latest .
-#   docker build --build-arg BINARY=rivven-operator -t ghcr.io/hupe1980/rivven-operator:latest .
-#   docker build --build-arg BINARY=rivven-schema -t ghcr.io/hupe1980/rivven-schema:latest .
+# Packages pre-built static musl binaries into a minimal scratch image.
+# Final image size: ~10-20MB (just the binary + SSL certs)
 #
-# Multi-arch build (uses native compilation on each platform via QEMU):
-#   docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/hupe1980/rivvend:latest .
+# Usage (CI release pipeline):
+#   The `binaries` job builds static binaries, then the `docker` job copies them:
+#     binaries/amd64/  - x86_64-unknown-linux-musl binaries
+#     binaries/arm64/  - aarch64-unknown-linux-musl binaries
+#
+# Usage (local build):
+#   1. Build binaries locally:
+#      cargo build --release --target x86_64-unknown-linux-musl
+#   2. Prepare binaries directory:
+#      mkdir -p binaries/amd64 && cp target/x86_64-unknown-linux-musl/release/{rivvend,rivven,rivven-connect,rivven-operator,rivven-schema} binaries/amd64/
+#   3. Build image:
+#      docker build -t rivvend:local .
 #
 # ============================================================================
 
 ARG BINARY=rivvend
 
 # ============================================================================
-# Stage 1: Build all binaries (static musl binaries via cross-compilation)
+# Runtime: scratch (absolute minimum - just the binary)
 # ============================================================================
-# Note: Using Debian as the build host because proc-macros (like apache-avro-derive)
-# must run on the host and cannot be compiled for musl. We cross-compile to musl
-# for the final static binaries. All crates use rustls (pure Rust TLS), no OpenSSL needed.
-FROM rust:1.89-bookworm AS builder
+# For static musl binaries, we can use scratch (0 bytes base).
+# We only need CA certificates for TLS connections.
+FROM scratch
 
-WORKDIR /build
-
-# Detect target architecture for musl cross-compilation
+ARG BINARY=rivvend
 ARG TARGETARCH
-
-# Install build dependencies
-# - aws-lc-rs v1.15.3+ only needs a C compiler (no cmake/clang required)
-# - No OpenSSL needed (using rustls for TLS)
-# - No RocksDB (using redb - pure Rust)
-# - No WASM build tools (dashboard is static HTML)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    pkg-config \
-    perl \
-    musl-tools \
-    musl-dev \
-    gcc-aarch64-linux-gnu \
-    && rm -rf /var/lib/apt/lists/*
-
-# Add musl targets for static linking
-RUN rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
-
-# Copy workspace files
-COPY Cargo.toml Cargo.lock ./
-COPY crates ./crates
-
-# Build all binaries as static musl binaries
-# - Proc-macros run on host (glibc), final binaries target musl
-# - Using rustls for TLS (pure Rust, no C dependencies)
-RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=cargo-target,target=/build/target \
-    if [ "$TARGETARCH" = "arm64" ]; then \
-        export TARGET=aarch64-unknown-linux-musl; \
-        export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc; \
-        export CC_aarch64_unknown_linux_musl=aarch64-linux-gnu-gcc; \
-        export AR_aarch64_unknown_linux_musl=aarch64-linux-gnu-ar; \
-    else \
-        export TARGET=x86_64-unknown-linux-musl; \
-        export CC_x86_64_unknown_linux_musl=musl-gcc; \
-    fi && \
-    RUSTFLAGS="-C target-feature=+crt-static" \
-    cargo build --release --target $TARGET \
-       --package rivvend \
-       --package rivven \
-       --package rivven-connect \
-       --package rivven-operator \
-       --package rivven-schema \
-    && mkdir -p /out \
-    && cp target/$TARGET/release/rivvend /out/ \
-    && cp target/$TARGET/release/rivven /out/ \
-    && cp target/$TARGET/release/rivven-connect /out/ \
-    && cp target/$TARGET/release/rivven-operator /out/ \
-    && cp target/$TARGET/release/rivven-schema /out/ \
-    && file /out/rivvend
-
-# ============================================================================
-# Stage 2: Runtime (distroless static - no libc needed for musl static binaries)
-# ============================================================================
-FROM gcr.io/distroless/static-debian12:nonroot
-
-ARG BINARY=rivvend
 
 LABEL org.opencontainers.image.title="Rivven"
 LABEL org.opencontainers.image.description="High-performance distributed event streaming platform"
 LABEL org.opencontainers.image.source="https://github.com/hupe1980/rivven"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 
-# Copy selected binary and CLI tools
-COPY --from=builder /out/${BINARY} /usr/local/bin/app
-COPY --from=builder /out/rivven /usr/local/bin/rivven
+# Copy CA certificates for TLS (from distroless or alpine)
+# This enables HTTPS connections to external services
+COPY --from=gcr.io/distroless/static-debian12:nonroot /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
-# Data/config directory
+# Copy pre-built static binary
+# Docker buildx will select the correct architecture directory via TARGETARCH
+COPY binaries/${TARGETARCH}/${BINARY} /app
+
+# Data/config directory  
 VOLUME ["/data"]
 
 # Ports vary by binary:
@@ -104,10 +55,9 @@ VOLUME ["/data"]
 #   rivven-connect:  8080 (health), 9091 (metrics)
 #   rivven-operator: 8080 (metrics), 8081 (health)
 #   rivven-schema:   8081 (API), 9090 (metrics)
-# Note: EXPOSE is documentation only - actual port mapping at runtime via -p
 EXPOSE 8080 8081 9090 9091 9092 9093 9094
 
-# Run as non-root
-USER nonroot:nonroot
+# Run as non-root (UID 65532 = nonroot in distroless)
+USER 65532:65532
 
-ENTRYPOINT ["/usr/local/bin/app"]
+ENTRYPOINT ["/app"]
