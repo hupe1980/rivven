@@ -1,10 +1,27 @@
-# Apache Iceberg Sink
+---
+layout: default
+title: Apache Iceberg Connector
+parent: Connectors
+nav_order: 10
+---
 
-> Write streaming events to Apache Iceberg tables for analytics and lakehouse workloads.
+# Apache Iceberg Connector
+{: .no_toc }
+
+Write streaming events to Apache Iceberg tables for analytics and lakehouse workloads.
+{: .fs-6 .fw-300 }
+
+## Table of contents
+{: .no_toc .text-delta }
+
+1. TOC
+{:toc}
+
+---
 
 ## Overview
 
-The Apache Iceberg sink enables real-time streaming of events from Rivven to Iceberg tables. This connector uses the **official Apache Iceberg Rust SDK** (`iceberg` crate v0.8.0) for catalog operations, providing production-ready table management.
+The Apache Iceberg connector enables real-time streaming of events from Rivven to Iceberg tables. This connector uses the **official Apache Iceberg Rust SDK** (`iceberg` crate v0.8.0) for catalog operations, providing production-ready table management.
 
 ### Features
 
@@ -22,9 +39,11 @@ The Apache Iceberg sink enables real-time streaming of events from Rivven to Ice
 - **Partition Evolution**: Change partitioning without data migration
 - **Hidden Partitioning**: Partition without exposing partition columns to users
 
+---
+
 ## Implementation Status
 
-The Iceberg sink is built on the **official Apache Iceberg Rust SDK** for full catalog, table management, and data file writing:
+The Iceberg connector is built on the **official Apache Iceberg Rust SDK** for full catalog, table management, and data file writing:
 
 | Feature | Status | Notes |
 |---------|--------|-------|
@@ -635,5 +654,5 @@ This can occur with multiple writers. Solutions:
 - [Iceberg Rust SDK (crates.io)](https://crates.io/crates/iceberg)
 - [Iceberg Rust GitHub](https://github.com/apache/iceberg-rust)
 - [REST Catalog Protocol](https://iceberg.apache.org/spec/#rest-catalog)
-- [rivven-connect README](../crates/rivven-connect/README.md)
-- [CDC Architecture](CDC_ARCHITECTURE.md)
+- [Connectors Overview](connectors.md)
+- [CDC Overview](cdc.md)

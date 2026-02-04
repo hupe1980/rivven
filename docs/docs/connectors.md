@@ -50,6 +50,9 @@ Rivven provides a **native connector framework** that scales to 300+ connectors:
 │  Warehouse                                                       │
 │  └── (snowflake, bigquery, redshift, clickhouse, ...)           │
 │                                                                  │
+│  Lakehouse                                                       │
+│  └── (iceberg, ...)                           │
+│                                                                  │
 │  AI/ML                                                           │
 │  ├── LLM (openai, anthropic, ollama, bedrock, ...)              │
 │  └── Vector (pinecone, qdrant, weaviate, ...)                   │
@@ -610,6 +613,111 @@ The connector exports the following metrics:
 
 {: .note }
 > **Key Format**: The private key must be in **unencrypted PKCS#8 PEM format** (begins with `-----BEGIN PRIVATE KEY-----`). Encrypted keys (PKCS#5) are not supported. Use `openssl pkcs8 -topk8 -nocrypt` to convert.
+
+### Apache Iceberg
+
+Write streaming events to Apache Iceberg tables for analytics and lakehouse workloads. Uses the **official Apache Iceberg Rust SDK** for catalog operations and data file writing.
+
+#### Features
+
+- **Catalog Support**: REST (Polaris, Tabular, Lakekeeper), Memory (testing)
+- **Automatic Table Creation**: Auto-create namespaces and tables with schema inference
+- **Transaction Support**: Atomic commits via Iceberg SDK Transaction API
+- **Storage Backends**: S3, GCS, Azure, Local filesystem
+
+#### Basic Configuration
+
+```yaml
+sinks:
+  lakehouse:
+    connector: iceberg
+    topics: [cdc.orders]
+    consumer_group: iceberg-sink
+    config:
+      catalog:
+        type: rest
+        rest:
+          uri: http://localhost:8181
+          warehouse: s3://my-bucket/warehouse
+      namespace: analytics
+      table: events
+      
+      # Batching
+      batch_size: 10000
+      flush_interval_secs: 60
+      
+      # File configuration
+      target_file_size_mb: 128
+      compression: snappy
+```
+
+#### REST Catalog (Polaris, Tabular)
+
+```yaml
+config:
+  catalog:
+    type: rest
+    rest:
+      uri: http://polaris.example.com:8181
+      warehouse: s3://bucket/warehouse
+      credential: ${ICEBERG_CATALOG_TOKEN}
+```
+
+#### S3 Storage
+
+```yaml
+config:
+  catalog:
+    type: rest
+    rest:
+      uri: http://localhost:8181
+  namespace: analytics
+  table: events
+  s3:
+    region: us-west-2
+    access_key_id: ${AWS_ACCESS_KEY_ID}
+    secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+```
+
+#### MinIO / S3-Compatible
+
+```yaml
+config:
+  s3:
+    region: us-east-1
+    endpoint: http://minio:9000
+    path_style_access: true
+    access_key_id: ${MINIO_ACCESS_KEY}
+    secret_access_key: ${MINIO_SECRET_KEY}
+```
+
+| Parameter | Required | Default | Description |
+|:----------|:---------|:--------|:------------|
+| `catalog.type` | ✓ | - | Catalog type: `rest`, `memory` |
+| `catalog.rest.uri` | ✓ | - | REST catalog URI |
+| `catalog.rest.warehouse` | | - | Warehouse location |
+| `catalog.rest.credential` | | - | OAuth token for authentication |
+| `namespace` | ✓ | - | Iceberg namespace/database |
+| `table` | ✓ | - | Table name |
+| `batch_size` | | `10000` | Events per batch |
+| `flush_interval_secs` | | `60` | Max flush interval |
+| `target_file_size_mb` | | `128` | Target Parquet file size |
+| `compression` | | `snappy` | Compression: `none`, `snappy`, `gzip`, `lz4`, `zstd`, `brotli` |
+| `partitioning` | | `none` | Partition strategy: `none`, `identity`, `bucket`, `time` |
+| `commit_mode` | | `append` | Commit mode: `append`, `overwrite`, `upsert` |
+| `schema_evolution` | | `add_columns` | Schema evolution: `strict`, `add_columns`, `full` |
+
+#### Observability
+
+| Metric | Type | Description |
+|:-------|:-----|:------------|
+| `iceberg.records_written_total` | Counter | Total records written |
+| `iceberg.batches_committed_total` | Counter | Total batches committed |
+| `iceberg.bytes_written_total` | Counter | Total bytes written |
+| `iceberg.commit_duration_seconds` | Histogram | Commit latency |
+
+{: .note }
+> For advanced configuration including partitioning strategies, commit modes, and query examples, see the [Apache Iceberg Sink Guide](iceberg-sink).
 
 ### HTTP Webhook
 
