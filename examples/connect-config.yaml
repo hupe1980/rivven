@@ -40,15 +40,17 @@ sources:
       password: ${POSTGRES_PASSWORD}  # Environment variable expansion
       slot_name: rivven_slot
       publication: rivven_pub
+      # Per-table topic routing (enables dynamic topics based on CDC metadata)
+      # Supports: {database}, {schema}, {table} placeholders
+      topic_routing: "cdc.postgres.{schema}.{table}"
+      # Events from public.users → cdc.postgres.public.users
+      # Events from public.orders → cdc.postgres.public.orders
     # Which tables to capture
     tables:
       - schema: public
         table: users
       - schema: public
         table: orders
-    # Optional: per-table topic routing
-    # topic_routing:
-    #   pattern: "cdc.postgres.{schema}.{table}"
 
 # Sink connectors - consume from broker topics, write to external systems
 sinks:

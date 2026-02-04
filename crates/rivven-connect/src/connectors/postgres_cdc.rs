@@ -295,6 +295,20 @@ pub struct PostgresCdcConfig {
     /// Bloom filter + LRU cache for idempotent processing
     #[serde(default)]
     pub deduplication: DeduplicationCdcConfig,
+
+    /// Topic routing pattern for dynamic topic selection ✅ IMPLEMENTED
+    ///
+    /// Enables per-table topic routing based on CDC event metadata.
+    /// Supported placeholders:
+    /// - `{database}` - Database name (e.g., "mydb")
+    /// - `{schema}` - Schema name (e.g., "public")
+    /// - `{table}` - Table name (e.g., "users")
+    ///
+    /// Example: `"cdc.{schema}.{table}"` → `"cdc.public.users"`
+    ///
+    /// If not set, all events go to the source's configured `topic`.
+    #[serde(default)]
+    pub topic_routing: Option<String>,
 }
 
 /// TLS configuration for PostgreSQL connections
@@ -1221,6 +1235,7 @@ mod tests {
             encryption: FieldEncryptionConfig::default(),
             deduplication: DeduplicationCdcConfig::default(),
             column_filters: HashMap::new(),
+            topic_routing: None,
         };
 
         assert!(config.validate().is_ok());
@@ -1255,6 +1270,7 @@ mod tests {
             encryption: FieldEncryptionConfig::default(),
             deduplication: DeduplicationCdcConfig::default(),
             column_filters: HashMap::new(),
+            topic_routing: None,
         };
 
         assert!(config.validate().is_err());
@@ -1326,6 +1342,7 @@ mod tests {
             encryption: FieldEncryptionConfig::default(),
             deduplication: DeduplicationCdcConfig::default(),
             column_filters: HashMap::new(),
+            topic_routing: None,
         };
 
         let config_debug = format!("{:?}", config);

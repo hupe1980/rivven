@@ -160,6 +160,20 @@ pub struct MySqlCdcConfig {
     /// Deduplication configuration ✅ IMPLEMENTED
     #[serde(default)]
     pub deduplication: DeduplicationCdcConfig,
+
+    /// Topic routing pattern for dynamic topic selection ✅ IMPLEMENTED
+    ///
+    /// Enables per-table topic routing based on CDC event metadata.
+    /// Supported placeholders:
+    /// - `{database}` - Database name (e.g., "mydb")
+    /// - `{schema}` - Schema name (database name for MySQL)
+    /// - `{table}` - Table name (e.g., "users")
+    ///
+    /// Example: `"cdc.{database}.{table}"` → `"cdc.mydb.users"`
+    ///
+    /// If not set, all events go to the source's configured `topic`.
+    #[serde(default)]
+    pub topic_routing: Option<String>,
 }
 
 fn default_port() -> u16 {

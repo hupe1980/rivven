@@ -128,29 +128,51 @@ while let Some(event) = cdc.next().await? {
 
 ### YAML Configuration
 
+**Single topic (all tables → one topic):**
+
 ```yaml
 version: "1.0"
 
 sources:
   mysql_cdc:
     connector: mysql-cdc
-    topic: cdc.mysql
+    topic: cdc.mysql  # Fallback topic
     config:
-      # Connection
       host: localhost
       port: 3306
       database: shop
       user: rivven
       password: ${MYSQL_PASSWORD}
-      
-      # Server ID (must be unique across all replicating clients)
       server_id: 12345
-      
-      # Tables
       tables:
         - shop.orders
         - shop.customers
 ```
+
+**Dynamic topic routing (per-table topics):**
+
+```yaml
+version: "1.0"
+
+sources:
+  mysql_cdc:
+    connector: mysql-cdc
+    topic: cdc.default               # Fallback topic
+    config:
+      host: localhost
+      port: 3306
+      database: shop
+      user: rivven
+      password: ${MYSQL_PASSWORD}
+      server_id: 12345
+      tables:
+        - shop.orders      # → cdc.shop.orders
+        - shop.customers   # → cdc.shop.customers
+      topic_routing: "cdc.{database}.{table}"  # Dynamic routing
+```
+
+{: .note }
+> Topic routing supports placeholders: `{database}`, `{schema}`, `{table}`. See [CDC Configuration Reference](cdc-configuration.md#topic-routing) for details.
 
 ---
 

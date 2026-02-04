@@ -450,12 +450,13 @@ if $RELEASE; then
     run_check "Release Build (rivven)" cargo build --release --package rivven
     run_check "Release Build (rivven-connect)" cargo build --release --package rivven-connect
     run_check "Release Build (rivven-operator)" cargo build --release --package rivven-operator
+    run_check "Release Build (rivven-schema)" cargo build --release --package rivven-schema
     
     # Binary size report
     print_step "Binary Size Report"
     echo "  Binary sizes (release build):"
     TOTAL_SIZE=0
-    for bin in rivvend rivven rivven-connect rivven-operator; do
+    for bin in rivvend rivven rivven-connect rivven-operator rivven-schema; do
         if [[ -f "target/release/$bin" ]]; then
             SIZE_BYTES=$(stat -f%z "target/release/$bin" 2>/dev/null || stat --printf="%s" "target/release/$bin" 2>/dev/null || echo "0")
             SIZE_HUMAN=$(du -h "target/release/$bin" | cut -f1)

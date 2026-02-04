@@ -76,6 +76,7 @@ pub mod rate_limiter;
 pub mod sink_runner;
 pub mod source_runner;
 pub mod telemetry;
+pub mod topic_resolver;
 
 // Distributed coordination
 pub mod distributed;
@@ -88,6 +89,12 @@ pub mod format;
 
 // Re-export SensitiveString at crate root for convenience
 pub use types::SensitiveString;
+
+// Re-export TopicResolver types for CDC topic routing
+pub use topic_resolver::{
+    max_topic_length, valid_placeholders, validate_topic_routing, CaseConversion,
+    NormalizationConfig, TopicMetadata, TopicPatternError, TopicResolver, TopicResolverBuilder,
+};
 
 // Re-export core traits at crate root for ergonomic use
 pub use traits::{

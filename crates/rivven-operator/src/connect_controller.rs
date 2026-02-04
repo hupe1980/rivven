@@ -327,12 +327,22 @@ fn build_pipeline_yaml(spec: &RivvenConnectSpec) -> Result<String> {
             writeln!(yaml, "    enabled: {}", source.enabled)
                 .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
 
-            // Write config if not null/empty
-            if !source.config.is_null() {
+            // Write config - merge topic_routing into config for CDC connectors
+            // topic_routing is CDC-specific and must be in the connector config section
+            let mut config = source.config.clone();
+            if let Some(ref routing) = source.topic_routing {
+                if let serde_json::Value::Object(ref mut map) = config {
+                    map.insert("topic_routing".to_string(), serde_json::json!(routing));
+                } else if config.is_null() {
+                    config = serde_json::json!({"topic_routing": routing});
+                }
+            }
+
+            if !config.is_null() {
                 writeln!(yaml, "    config:")
                     .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
                 // Serialize JSON config to YAML
-                let config_str = serde_json::to_string_pretty(&source.config)
+                let config_str = serde_json::to_string_pretty(&config)
                     .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
                 for line in config_str.lines() {
                     writeln!(yaml, "      {}", line)

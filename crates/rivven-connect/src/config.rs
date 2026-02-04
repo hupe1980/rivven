@@ -192,7 +192,11 @@ pub struct SourceConfig {
     /// Connector type (e.g., "postgres-cdc", "mysql-cdc", "http")
     pub connector: String,
 
-    /// Topic to publish events to
+    /// Topic to publish events to (default topic)
+    ///
+    /// For CDC connectors, this serves as the fallback topic when `topic_routing`
+    /// is not configured or when CDC metadata is unavailable. Also used for
+    /// topic creation if auto-create is enabled.
     pub topic: String,
 
     /// Topic creation settings (overrides global settings.topic)
@@ -206,10 +210,6 @@ pub struct SourceConfig {
     /// Tables/streams to capture (connector-specific)
     #[serde(default)]
     pub tables: Vec<TableConfig>,
-
-    /// Topic routing pattern (optional)
-    /// Supports placeholders: {schema}, {table}, {database}
-    pub topic_routing: Option<String>,
 
     /// Whether this source is enabled
     #[serde(default = "default_true")]
@@ -556,11 +556,9 @@ impl ConnectConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
         // Validate sources
         for (name, source) in &self.sources {
-            if source.topic.is_empty() && source.topic_routing.is_none() {
-                anyhow::bail!(
-                    "Source '{}' must have either 'topic' or 'topic_routing'",
-                    name
-                );
+            // topic is required (fallback for non-CDC or when routing doesn't match)
+            if source.topic.is_empty() {
+                anyhow::bail!("Source '{}' must have a 'topic' specified", name);
             }
         }
 
@@ -574,7 +572,7 @@ impl ConnectConfig {
             }
         }
 
-        // Validate connector-specific configs
+        // Validate connector-specific configs (includes topic_routing for CDC connectors)
         self.validate_connector_configs()?;
 
         Ok(())
@@ -584,6 +582,7 @@ impl ConnectConfig {
     fn validate_connector_configs(&self) -> anyhow::Result<()> {
         use crate::connectors::postgres_cdc::PostgresCdcConfig;
         use crate::connectors::stdout::StdoutSinkConfig;
+        use crate::topic_resolver::validate_topic_routing;
         use validator::Validate;
 
         // Validate source configs
@@ -597,6 +596,24 @@ impl ConnectConfig {
                     pg_config.validate().map_err(|e| {
                         anyhow::anyhow!("Source '{}': config validation failed: {}", name, e)
                     })?;
+
+                    // Validate topic_routing pattern if specified
+                    if let Some(ref pattern) = pg_config.topic_routing {
+                        if let Err(e) = validate_topic_routing(pattern) {
+                            anyhow::bail!(
+                                "Source '{}': invalid topic_routing pattern '{}': {}",
+                                name,
+                                pattern,
+                                e
+                            );
+                        }
+                        tracing::info!(
+                            "Source '{}': topic routing enabled with pattern '{}', fallback topic: '{}'",
+                            name,
+                            pattern,
+                            source.topic
+                        );
+                    }
                 }
                 "http" => {
                     // Basic validation - http connector not fully implemented yet
@@ -776,5 +793,194 @@ sinks:
         let config: ConnectConfig = serde_yaml::from_str(yaml).unwrap();
         let result = config.validate();
         assert!(result.is_ok(), "Valid config should pass: {:?}", result);
+    }
+
+    #[test]
+    fn test_topic_routing_without_topic_fails() {
+        // topic_routing without topic should fail at parse time
+        // topic is required as a fallback for non-CDC events and error cases
+        let yaml = r#"
+version: "1.0"
+broker:
+  bootstrap_servers:
+    - localhost:9092
+sources:
+  pg:
+    connector: postgres-cdc
+    topic_routing: "cdc.{schema}.{table}"
+    config:
+      host: localhost
+      port: 5432
+      database: test
+      user: test
+      password: secret
+      slot_name: test_slot
+      publication_name: test_pub
+sinks:
+  debug:
+    connector: stdout
+    topics: [test.events]
+    consumer_group: debug
+"#;
+        let result: Result<ConnectConfig, _> = serde_yaml::from_str(yaml);
+        // Should fail at parse time because topic is required
+        assert!(result.is_err(), "Config without topic should fail to parse");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("topic"),
+            "Error should mention missing topic: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_topic_routing_with_topic_passes() {
+        // topic_routing WITH topic should pass
+        // topic_routing is now inside connector-specific config
+        let yaml = r#"
+version: "1.0"
+broker:
+  bootstrap_servers:
+    - localhost:9092
+sources:
+  pg:
+    connector: postgres-cdc
+    topic: cdc.events
+    config:
+      host: localhost
+      port: 5432
+      database: test
+      user: test
+      password: secret
+      slot_name: test_slot
+      publication_name: test_pub
+      topic_routing: "cdc.{schema}.{table}"
+sinks:
+  debug:
+    connector: stdout
+    topics: [cdc.events]
+    consumer_group: debug
+"#;
+        let config: ConnectConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = config.validate();
+        assert!(
+            result.is_ok(),
+            "topic_routing with topic should pass: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_topic_routing_invalid_placeholder_fails() {
+        // topic_routing with invalid placeholder should fail validation
+        // topic_routing is now inside connector-specific config
+        let yaml = r#"
+version: "1.0"
+broker:
+  bootstrap_servers:
+    - localhost:9092
+sources:
+  pg:
+    connector: postgres-cdc
+    topic: cdc.events
+    config:
+      host: localhost
+      port: 5432
+      database: test
+      user: test
+      password: secret
+      slot_name: test_slot
+      publication_name: test_pub
+      topic_routing: "cdc.{invalid}.{table}"
+sinks:
+  debug:
+    connector: stdout
+    topics: [cdc.events]
+    consumer_group: debug
+"#;
+        let config: ConnectConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = config.validate();
+        assert!(
+            result.is_err(),
+            "topic_routing with invalid placeholder should fail"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("invalid"),
+            "Error should mention invalid placeholder: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_topic_routing_unclosed_placeholder_fails() {
+        // topic_routing with unclosed placeholder should fail validation
+        // topic_routing is now inside connector-specific config
+        let yaml = r#"
+version: "1.0"
+broker:
+  bootstrap_servers:
+    - localhost:9092
+sources:
+  pg:
+    connector: postgres-cdc
+    topic: cdc.events
+    config:
+      host: localhost
+      port: 5432
+      database: test
+      user: test
+      password: secret
+      slot_name: test_slot
+      publication_name: test_pub
+      topic_routing: "cdc.{schema.{table}"
+sinks:
+  debug:
+    connector: stdout
+    topics: [cdc.events]
+    consumer_group: debug
+"#;
+        let config: ConnectConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = config.validate();
+        assert!(
+            result.is_err(),
+            "topic_routing with unclosed placeholder should fail"
+        );
+    }
+
+    #[test]
+    fn test_topic_routing_empty_placeholder_fails() {
+        // topic_routing with empty placeholder should fail validation
+        // topic_routing is now inside connector-specific config
+        let yaml = r#"
+version: "1.0"
+broker:
+  bootstrap_servers:
+    - localhost:9092
+sources:
+  pg:
+    connector: postgres-cdc
+    topic: cdc.events
+    config:
+      host: localhost
+      port: 5432
+      database: test
+      user: test
+      password: secret
+      slot_name: test_slot
+      publication_name: test_pub
+      topic_routing: "cdc.{}.{table}"
+sinks:
+  debug:
+    connector: stdout
+    topics: [cdc.events]
+    consumer_group: debug
+"#;
+        let config: ConnectConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = config.validate();
+        assert!(
+            result.is_err(),
+            "topic_routing with empty placeholder should fail"
+        );
     }
 }

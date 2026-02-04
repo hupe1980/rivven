@@ -1579,11 +1579,14 @@ pub struct SourceConnectorSpec {
     #[validate(custom(function = "validate_connector_type"))]
     pub connector: String,
 
-    /// Target topic to publish events to
+    /// Target topic to publish events to (fallback/default)
     #[validate(length(min = 1, max = 255, message = "topic must be 1-255 characters"))]
     pub topic: String,
 
-    /// Topic routing pattern (supports {schema}, {table}, {database} placeholders)
+    /// Topic routing pattern for CDC connectors
+    /// Enables dynamic topic selection based on CDC event metadata.
+    /// Supported placeholders: {database}, {schema}, {table}
+    /// Example: "cdc.{schema}.{table}" → "cdc.public.users"
     #[serde(default)]
     pub topic_routing: Option<String>,
 

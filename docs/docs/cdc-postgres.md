@@ -114,30 +114,53 @@ while let Some(event) = cdc.next().await? {
 
 ### YAML Configuration (rivven-connect)
 
+**Single topic (all tables → one topic):**
+
 ```yaml
 version: "1.0"
 
 sources:
   orders_cdc:
     connector: postgres-cdc
-    topic: cdc.orders
+    topic: cdc.orders  # Fallback topic
     config:
-      # Connection
       host: localhost
       port: 5432
       database: shop
       user: rivven
       password: ${POSTGRES_PASSWORD}
-      
-      # Replication
       slot_name: rivven_orders
       publication_name: rivven_orders_pub
-      
-      # Tables (optional, default: all)
       tables:
         - public.orders
         - public.order_items
 ```
+
+**Dynamic topic routing (per-table topics):**
+
+```yaml
+version: "1.0"
+
+sources:
+  orders_cdc:
+    connector: postgres-cdc
+    topic: cdc.default           # Fallback topic
+    config:
+      host: localhost
+      port: 5432
+      database: shop
+      user: rivven
+      password: ${POSTGRES_PASSWORD}
+      slot_name: rivven_orders
+      publication_name: rivven_orders_pub
+      tables:
+        - public.orders        # → cdc.public.orders
+        - public.order_items   # → cdc.public.order_items
+      topic_routing: "cdc.{schema}.{table}"  # Dynamic routing
+```
+
+{: .note }
+> Topic routing supports placeholders: `{database}`, `{schema}`, `{table}`. See [CDC Configuration Reference](cdc-configuration.md#topic-routing) for details.
 
 ---
 
@@ -572,7 +595,7 @@ version: "1.0"
 sources:
   production_cdc:
     connector: postgres-cdc
-    topic: cdc.production
+    topic: cdc.production  # All events go to this topic
     config:
       # Connection
       host: postgres-primary.internal

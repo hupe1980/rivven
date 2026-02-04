@@ -74,8 +74,306 @@ These options apply to all CDC connectors.
 | Option | Type | Default | Description |
 |:-------|:-----|:--------|:------------|
 | `name` | string | required | Unique connector name |
-| `topic` | string | required | Output topic for events |
+| `topic` | string | required | Fallback/default topic for events |
 | `enabled` | bool | `true` | Enable/disable connector |
+
+### Topic Routing
+
+Topic routing enables dynamic topic selection based on CDC event metadata, following industry-standard topic naming conventions.
+
+{: .note }
+`topic_routing` is a CDC-specific option and must be configured inside the connector's `config:` section, not at the source level.
+
+#### Supported Placeholders
+
+| Placeholder | Description | Example Value |
+|:------------|:------------|:--------------|
+| `{database}` | Database name | `mydb` |
+| `{schema}` | Schema name | `public` |
+| `{table}` | Table name | `users` |
+
+#### Examples
+
+**Basic Pattern:**
+```yaml
+sources:
+  postgres:
+    connector: postgres-cdc
+    topic: cdc.default         # Fallback topic
+    config:
+      # ... postgres config
+      topic_routing: "cdc.{schema}.{table}"
+```
+
+Events from `public.users` → topic `cdc.public.users`  
+Events from `inventory.products` → topic `cdc.inventory.products`
+
+**With Database:**
+```yaml
+sources:
+  postgres:
+    connector: postgres-cdc
+    topic: cdc.default
+    config:
+      # ... postgres config
+      topic_routing: "{database}.{schema}.{table}"
+```
+
+Events from `mydb.public.users` → topic `mydb.public.users`
+
+**Simple Table-Based:**
+```yaml
+sources:
+  postgres:
+    connector: postgres-cdc
+    topic: events
+    config:
+      # ... postgres config
+      topic_routing: "events.{table}"
+```
+
+Events from `public.orders` → topic `events.orders`
+
+{: .note }
+The `topic` field is required as a fallback for error cases or when CDC metadata is unavailable.
+
+#### Topic Name Normalization
+
+Database identifiers (schema/table names) often contain characters that are invalid in topic names. Rivven provides comprehensive, best-in-class normalization following industry standards with additional enhancements.
+
+**Topic Name Restrictions:**
+- Valid characters: `a-z`, `A-Z`, `0-9`, `.`, `_`, `-`
+- Maximum length: 249 characters
+
+**Basic Normalization (Default):**
+
+| Original Identifier | Normalized | Reason |
+|:--------------------|:-----------|:-------|
+| `my schema` | `my_schema` | Spaces replaced |
+| `user@data` | `user_data` | Special characters replaced |
+| `order#items` | `order_items` | Invalid characters replaced |
+| `schema.with.dots` | `schema_with_dots` | Dots replaced (avoid extra segments) |
+
+{: .tip }
+Hyphens (`-`) are preserved since they are valid in topic names.
+
+##### Case Conversion Modes
+
+Control how identifier casing is transformed:
+
+| Mode | Input | Output | Use Case |
+|:-----|:------|:-------|:---------|
+| `none` (default) | `MyTable` | `MyTable` | Preserve original casing |
+| `lower` | `MyTable` | `mytable` | Simple lowercase conversion |
+| `upper` | `MyTable` | `MYTABLE` | Uppercase conversion |
+| `snake_case` | `UserProfiles` | `user_profiles` | Convert PascalCase/camelCase to snake_case |
+| `kebab-case` | `UserProfiles` | `user-profiles` | Convert PascalCase/camelCase to kebab-case |
+
+**YAML Configuration:**
+```yaml
+sources:
+  postgres:
+    connector: postgres-cdc
+    topic: cdc.default
+    config:
+      topic_routing: "cdc.{schema}.{table}"
+      normalization:
+        case_conversion: snake_case  # Options: none, lower, upper, snake_case, kebab-case
+```
+
+**Rust API:**
+```rust
+use rivven_connect::{TopicResolver, CaseConversion, NormalizationConfig};
+
+// Simple snake_case conversion
+let resolver = TopicResolver::builder("cdc.{schema}.{table}")
+    .snake_case()
+    .build()?;
+
+// Or use explicit case conversion
+let resolver = TopicResolver::builder("cdc.{schema}.{table}")
+    .normalization(
+        NormalizationConfig::new()
+            .with_case_conversion(CaseConversion::SnakeCase)
+    )
+    .build()?;
+
+// Result: "UserProfiles" → "user_profiles"
+```
+
+##### Avro-Compatible Mode
+
+When using Avro serialization, identifiers must follow stricter naming rules:
+
+- Must start with a letter or underscore
+- Only letters, digits, and underscores allowed
+- Hyphens are NOT valid in Avro names
+
+{: .warning }
+Enable Avro-compatible mode if you're using Avro serialization with Schema Registry.
+
+**YAML Configuration:**
+```yaml
+sources:
+  postgres:
+    connector: postgres-cdc
+    topic: cdc.default
+    config:
+      topic_routing: "cdc.{schema}.{table}"
+      normalization:
+        avro_compatible: true
+```
+
+**Rust API:**
+```rust
+let resolver = TopicResolver::builder("cdc.{schema}.{table}")
+    .avro_compatible()
+    .build()?;
+
+// Results:
+// "my-table" → "my_table" (hyphens replaced)
+// "123users" → "_123users" (leading digit prefixed)
+```
+
+| Input | Avro Output | Reason |
+|:------|:------------|:-------|
+| `my-table` | `my_table` | Hyphens not allowed in Avro |
+| `123users` | `_123users` | Cannot start with digit |
+| `user.data` | `user_data` | Dots not allowed |
+
+##### Prefix/Suffix Stripping
+
+Remove common database-specific prefixes or suffixes from identifiers:
+
+**Common Use Cases:**
+- Strip `dbo_` schema prefix (SQL Server)
+- Strip `public_` schema prefix (PostgreSQL)
+- Strip `_table` suffix patterns
+
+**YAML Configuration:**
+```yaml
+sources:
+  postgres:
+    connector: postgres-cdc
+    topic: cdc.default
+    config:
+      topic_routing: "cdc.{schema}.{table}"
+      normalization:
+        strip_prefixes:
+          - "dbo_"
+          - "public_"
+        strip_suffixes:
+          - "_table"
+          - "_tbl"
+```
+
+**Rust API:**
+```rust
+let resolver = TopicResolver::builder("cdc.{schema}.{table}")
+    .strip_prefixes(vec!["dbo_", "public_"])
+    .strip_suffixes(vec!["_table"])
+    .build()?;
+
+// Results:
+// "dbo_users" → "users"
+// "public_orders" → "orders"
+// "customers_table" → "customers"
+```
+
+{: .note }
+Prefix/suffix matching is case-insensitive. Both `dbo_users` and `DBO_USERS` will have the prefix stripped.
+
+##### Production-Ready Configuration
+
+Combine multiple normalization options for production environments:
+
+**YAML Configuration:**
+```yaml
+sources:
+  postgres:
+    connector: postgres-cdc
+    topic: cdc.default
+    config:
+      topic_routing: "{database}.{schema}.{table}"
+      normalization:
+        case_conversion: snake_case
+        avro_compatible: true
+        strip_prefixes:
+          - "dbo_"
+        replacement_char: "_"
+        truncate_long_names: true
+        include_hash_suffix: true
+```
+
+**Rust API:**
+```rust
+let resolver = TopicResolver::builder("{database}.{schema}.{table}")
+    .snake_case()
+    .avro_compatible()
+    .strip_prefixes(vec!["dbo_"])
+    .build()?;
+
+// Full pipeline:
+// "SalesDB", "dbo_MySchema", "UserProfiles"
+// → After strip prefix: "MySchema"
+// → After snake_case: "my_schema"
+// → After Avro: "my_schema" (already valid)
+// → Final: "sales_db.my_schema.user_profiles"
+```
+
+##### Disabling Normalization
+
+If you need exact topic names without any transformation:
+
+```rust
+let resolver = TopicResolver::builder("cdc.{schema}.{table}")
+    .no_normalization()
+    .build()?;
+```
+
+{: .warning }
+Disabling normalization may produce invalid topic names if your database identifiers contain special characters.
+
+**Long Topic Names:**
+
+When the resolved topic name exceeds 249 characters, it is automatically truncated with a hash suffix to ensure uniqueness:
+
+```
+very_long_prefix.very_long_schema.very_long_table_name...
+→ truncated to: very_long_prefix.very_long_schema.ver..._a1b2c3d4
+```
+
+#### Topic Routing vs Content-Based Routing
+
+Rivven provides two complementary routing mechanisms:
+
+| Mechanism | Use Case | Configuration |
+|:----------|:---------|:--------------|
+| **Topic Routing** | Route by source (table, schema, database) | `topic_routing` pattern (in connector config) |
+| **Event Router** | Route by content (field values, operation type) | Programmatic API |
+
+**Topic Routing** (config-driven) is ideal for per-table topics:
+```yaml
+config:
+  topic_routing: "cdc.{schema}.{table}"
+  # public.users → cdc.public.users
+  # public.orders → cdc.public.orders
+```
+
+**Event Router** (programmatic) is for complex content-based routing:
+```rust
+use rivven_cdc::common::router::{EventRouter, RouteRule, RouteCondition};
+
+let router = EventRouter::builder()
+    .route(RouteRule::new(
+        "high-value",
+        RouteCondition::field_equals("priority", json!("high")),
+        "priority-orders"
+    ))
+    .route(RouteRule::operation_match(CdcOp::Delete, "audit-deletes"))
+    .default_destination("default-events")
+    .build();
+```
 
 ### Table Selection
 

@@ -6,10 +6,12 @@
 //! - Graceful shutdown support
 //! - Per-source metrics
 //! - Auto-create topics with configurable settings
+//! - Dynamic topic routing for CDC connectors
 
 use crate::broker_client::SharedBrokerClient;
 use crate::config::{ConnectConfig, SourceConfig, TopicSettings};
 use crate::error::{ConnectError, ConnectorStatus, Result};
+use crate::topic_resolver::TopicResolver;
 use bytes::Bytes;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -25,6 +27,8 @@ pub struct SourceRunner {
     status: RwLock<ConnectorStatus>,
     events_published: AtomicU64,
     errors_count: AtomicU64,
+    /// Topic resolver for CDC connectors (when topic_routing is configured)
+    topic_resolver: Option<TopicResolver>,
 }
 
 // Methods for health monitoring - reserved for future integration with health.rs
@@ -49,6 +53,31 @@ impl SourceRunner {
         global_topic_settings: TopicSettings,
         broker: SharedBrokerClient,
     ) -> Self {
+        // Extract topic_routing from connector-specific config for CDC connectors
+        let topic_routing_pattern = Self::extract_topic_routing(&config);
+
+        // Initialize topic resolver if topic_routing is configured
+        let topic_resolver = topic_routing_pattern.and_then(|pattern| {
+            match TopicResolver::new(&pattern) {
+                Ok(resolver) => {
+                    info!(
+                        "Source '{}': topic routing enabled with pattern '{}'",
+                        name, pattern
+                    );
+                    Some(resolver)
+                }
+                Err(e) => {
+                    // This should have been caught by config validation,
+                    // but log and fall back to static topic
+                    error!(
+                        "Source '{}': invalid topic_routing pattern '{}': {}. Using static topic '{}' instead",
+                        name, pattern, e, config.topic
+                    );
+                    None
+                }
+            }
+        });
+
         Self {
             name,
             config,
@@ -57,6 +86,37 @@ impl SourceRunner {
             status: RwLock::new(ConnectorStatus::Starting),
             events_published: AtomicU64::new(0),
             errors_count: AtomicU64::new(0),
+            topic_resolver,
+        }
+    }
+
+    /// Extract topic_routing from CDC connector config
+    fn extract_topic_routing(config: &SourceConfig) -> Option<String> {
+        // Only CDC connectors support topic_routing
+        match config.connector.as_str() {
+            "postgres-cdc" => {
+                // Try to parse as PostgresCdcConfig and extract topic_routing
+                if let Ok(pg_config) = serde_yaml::from_value::<
+                    crate::connectors::postgres_cdc::PostgresCdcConfig,
+                >(config.config.clone())
+                {
+                    pg_config.topic_routing
+                } else {
+                    None
+                }
+            }
+            "mysql-cdc" | "mariadb-cdc" => {
+                // Try to parse as MySqlCdcConfig and extract topic_routing
+                if let Ok(mysql_config) = serde_yaml::from_value::<
+                    crate::connectors::mysql_cdc::MySqlCdcConfig,
+                >(config.config.clone())
+                {
+                    mysql_config.topic_routing
+                } else {
+                    None
+                }
+            }
+            _ => None, // Non-CDC connectors don't support topic_routing
         }
     }
 
@@ -181,7 +241,12 @@ impl SourceRunner {
 
     /// Publish an event to the broker
     async fn publish(&self, data: Bytes) -> Result<()> {
-        match self.broker.publish(&self.config.topic, data).await {
+        self.publish_to_topic(&self.config.topic, data).await
+    }
+
+    /// Publish an event to a specific topic
+    async fn publish_to_topic(&self, topic: &str, data: Bytes) -> Result<()> {
+        match self.broker.publish(topic, data).await {
             Ok(_) => {
                 self.events_published.fetch_add(1, Ordering::Relaxed);
                 Ok(())
@@ -257,11 +322,24 @@ impl SourceRunner {
                 event = event_rx.recv() => {
                     match event {
                         Some(cdc_event) => {
+                            // Resolve target topic: use topic_routing if configured, else static topic
+                            let target_topic = if let Some(resolver) = &self.topic_resolver {
+                                use crate::topic_resolver::TopicMetadata;
+                                let metadata = TopicMetadata::new(
+                                    &cdc_event.database,
+                                    &cdc_event.schema,
+                                    &cdc_event.table,
+                                );
+                                resolver.resolve(&metadata)
+                            } else {
+                                self.config.topic.clone()
+                            };
+
                             let json = serde_json::to_vec(&cdc_event)
                                 .map_err(|e| ConnectError::Serialization(e.to_string()))?;
 
-                            if let Err(e) = self.publish(Bytes::from(json)).await {
-                                error!("Source '{}' publish error: {}", self.name, e);
+                            if let Err(e) = self.publish_to_topic(&target_topic, Bytes::from(json)).await {
+                                error!("Source '{}' publish error to '{}': {}", self.name, target_topic, e);
                                 *self.status.write().await = ConnectorStatus::Unhealthy;
                                 // Don't fail, let reconnection logic handle it
                             }

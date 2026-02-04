@@ -547,13 +547,109 @@ See [examples/connect-config.yaml](../../examples/connect-config.yaml) for a com
 sources:
   <name>:
     connector: <connector-type>
+    topic: <output-topic>            # Required: fallback/default topic
     config:
       # Connector-specific configuration
+      topic_routing: <pattern>       # Optional: dynamic topic routing (CDC only)
     streams:
       - name: <stream-name>
         namespace: <optional-namespace>
         sync_mode: full_refresh | incremental
         cursor_field: <optional-field>
+```
+
+### Topic Routing (CDC Connectors)
+
+Route CDC events to different topics based on source metadata. The `topic_routing` option is configured inside the connector's `config` section since it uses CDC-specific placeholders.
+
+```yaml
+sources:
+  postgres:
+    connector: postgres-cdc
+    topic: cdc.default              # Fallback topic
+    config:
+      # ... postgres config
+      topic_routing: "cdc.{schema}.{table}"
+```
+
+**Supported Placeholders:**
+
+| Placeholder | Description | Example |
+|-------------|-------------|---------|
+| `{database}` | Database name | `mydb` |
+| `{schema}` | Schema name | `public` |
+| `{table}` | Table name | `users` |
+
+**Examples:**
+
+- `"cdc.{schema}.{table}"` → `cdc.public.users`
+- `"{database}.{schema}.{table}"` → `mydb.public.users`
+- `"events.{table}"` → `events.orders`
+
+**Topic Name Normalization:**
+
+Rivven provides best-in-class normalization following industry standards:
+
+| Original | Normalized | Reason |
+|----------|------------|--------|
+| `my schema` | `my_schema` | Spaces → underscore |
+| `user@data` | `user_data` | Special chars → underscore |
+| `schema.with.dots` | `schema_with_dots` | Dots replaced |
+| `UserProfiles` | `user_profiles` | snake_case conversion |
+| `my-table` | `my_table` | Avro-compatible mode |
+| `dbo_users` | `users` | Prefix stripping |
+
+**Normalization Options:**
+
+```yaml
+sources:
+  postgres:
+    connector: postgres-cdc
+    topic: cdc.default
+    config:
+      topic_routing: "cdc.{schema}.{table}"
+      normalization:
+        case_conversion: snake_case    # none, lower, upper, snake_case, kebab-case
+        avro_compatible: true          # Stricter naming for Avro
+        strip_prefixes: ["dbo_"]       # Remove common prefixes
+        strip_suffixes: ["_table"]     # Remove common suffixes
+```
+
+Topic names longer than 249 characters are truncated with a hash suffix for uniqueness.
+
+**Programmatic Usage:**
+
+```rust
+use rivven_connect::{TopicResolver, TopicMetadata, CaseConversion, NormalizationConfig};
+
+// Simple snake_case conversion
+let resolver = TopicResolver::builder("cdc.{schema}.{table}")
+    .snake_case()
+    .build()
+    .unwrap();
+
+// Production configuration with all options
+let resolver = TopicResolver::builder("{database}.{schema}.{table}")
+    .snake_case()
+    .avro_compatible()
+    .strip_prefixes(vec!["dbo_", "public_"])
+    .build()
+    .unwrap();
+
+// Resolve topic name
+let metadata = TopicMetadata::new("SalesDB", "dbo_MySchema", "UserProfiles");
+let topic = resolver.resolve(&metadata);  // "sales_db.my_schema.user_profiles"
+
+// Custom normalization config
+let config = NormalizationConfig::new()
+    .with_case_conversion(CaseConversion::SnakeCase)
+    .with_avro_compatible()
+    .with_strip_prefixes(vec!["dbo_".to_string()]);
+
+let resolver = TopicResolver::builder("cdc.{table}")
+    .normalization(config)
+    .build()
+    .unwrap();
 ```
 
 ### Sinks
