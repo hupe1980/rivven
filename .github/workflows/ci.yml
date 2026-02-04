@@ -3,16 +3,13 @@ name: CI
 # CI Strategy:
 # 1. quick-check: Fast checks (fmt, clippy, compile) - catches most issues
 # 2. test: Unit tests on ubuntu + macOS (no Docker) - ~1500 tests in parallel  
-# 3. integration: Integration tests with Docker (Linux only)
-#    - Non-CDC tests run in PARALLEL (~15 min)
-#    - CDC tests run SERIAL (share database state, ~5 min)
+# 3. integration: Integration tests with Docker (Linux only) - runs in parallel
 # 4. doc: Documentation build
 # 5. security: cargo audit
 #
 # Unit tests and integration tests are separated because:
 # - Unit tests can run in parallel on multiple OSes without Docker
 # - Integration tests require Docker (testcontainers)
-# - Only CDC tests need single-threading (share database state)
 
 on:
   push:
@@ -121,21 +118,10 @@ jobs:
           pull_with_retry "mysql:8.0"
           pull_with_retry "mariadb:11.3"
       
-      # Run non-CDC integration tests IN PARALLEL (much faster)
-      # These tests don't share database state and can run concurrently
-      - name: Run integration tests (parallel)
-        run: |
-          cargo test --release -p rivven-integration-tests -- \
-            --skip cdc_postgres \
-            --skip cdc_mysql \
-            --skip cdc_mariadb
-      
-      # Run CDC tests SERIALLY (they share database state)
-      - name: Run CDC tests (serial)
-        run: |
-          cargo test --release -p rivven-integration-tests -- \
-            cdc_postgres cdc_mysql cdc_mariadb \
-            --test-threads=1
+      # Run ALL integration tests in parallel
+      # Each test file gets its own isolated testcontainer instances
+      - name: Run integration tests
+        run: cargo test --release -p rivven-integration-tests
 
   doc:
     name: Documentation

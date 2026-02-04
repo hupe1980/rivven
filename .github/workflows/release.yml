@@ -213,10 +213,13 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
+          skip-existing: true  # Don't fail if version already exists
 
   release:
     name: Create GitHub Release
     needs: [publish, pypi-publish, docker, binaries]
+    # Run even if publish jobs fail (version may already exist)
+    if: always() && needs.binaries.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -281,7 +284,7 @@ jobs:
             suffix: linux-amd64
             cross: false
           # Linux arm64 - STATIC musl binary (native arm64 runner, no QEMU!)
-          - os: ubuntu-24.04-arm64
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             suffix: linux-arm64
             cross: false
