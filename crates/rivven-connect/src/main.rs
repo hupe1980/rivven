@@ -1027,9 +1027,7 @@ fn show_schema(connector: &str, format: &str) -> Result<()> {
 
 /// List available connector types
 fn list_connectors() -> Result<()> {
-    use crate::connectors::{
-        create_connector_inventory, ConnectorCategory, ConnectorType, SupportLevel,
-    };
+    use crate::connectors::{create_connector_inventory, ConnectorCategory, ConnectorType};
 
     let inventory = create_connector_inventory();
 
@@ -1100,8 +1098,8 @@ fn list_connectors() -> Result<()> {
         println!("{}", parent_name);
         println!("─────────────────────────────────────────────────────────────────────");
         println!(
-            "{:<18} {:<10} {:<12} Description",
-            "Name", "Type", "Support"
+            "{:<18} {:<10} Description",
+            "Name", "Type"
         );
         println!("─────────────────────────────────────────────────────────────────────");
 
@@ -1119,24 +1117,16 @@ fn list_connectors() -> Result<()> {
                 .collect();
             let types_str = types.join(",");
 
-            let support = match meta.support {
-                SupportLevel::Certified => "✅ Cert",
-                SupportLevel::Community => "🌐 Comm",
-                SupportLevel::Experimental => "🧪 Exp",
-                SupportLevel::Enterprise => "🏢 Ent",
-                SupportLevel::Deprecated => "⚠️ Dep",
-            };
-
             // Truncate description if too long
-            let desc = if meta.description.len() > 35 {
-                format!("{}...", &meta.description[..32])
+            let desc = if meta.description.len() > 45 {
+                format!("{}...", &meta.description[..42])
             } else {
                 meta.description.clone()
             };
 
             println!(
-                "{:<18} {:<10} {:<12} {}",
-                meta.name, types_str, support, desc
+                "{:<18} {:<10} {}",
+                meta.name, types_str, desc
             );
         }
         println!();

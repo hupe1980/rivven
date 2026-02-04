@@ -15,7 +15,7 @@
 rivven-connect is designed to scale to **300+ connectors** with:
 
 - **Hierarchical Categories**: Connectors organized by type (database, messaging, storage, warehouse, AI/ML)
-- **Rich Metadata**: Tags, support levels, and search capabilities
+- **Rich Metadata**: Tags and search capabilities
 - **Connector Inventory**: Auto-registration with metadata indexing for fast discovery
 - **Feature Gating**: Compile only the connectors you need
 

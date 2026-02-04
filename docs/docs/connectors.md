@@ -23,7 +23,7 @@ Scalable connector framework designed for 300+ connectors.
 Rivven provides a **native connector framework** that scales to 300+ connectors:
 
 - **Hierarchical Categories**: Database, Messaging, Storage, Warehouse, AI/ML, Utility
-- **Rich Metadata**: Tags, support levels, and search capabilities
+- **Rich Metadata**: Tags and search capabilities
 - **Connector Inventory**: Auto-registration with metadata indexing
 - **Feature Gating**: Compile only the connectors you need
 
@@ -75,21 +75,11 @@ rivven-connect connectors
 #
 # 📁 DATABASE
 # ─────────────────────────────────────────────────────────────────────
-# Name               Type       Support      Description
+# Name               Type       Description
 # ─────────────────────────────────────────────────────────────────────
-# postgres-cdc       Source     ✅ Cert      Change Data Capture from PostgreSQL...
-# mysql-cdc          Source     ✅ Cert      Change Data Capture from MySQL/MariaDB...
+# postgres-cdc       Source     Change Data Capture from PostgreSQL...
+# mysql-cdc          Source     Change Data Capture from MySQL/MariaDB...
 ```
-
-### Support Levels
-
-| Level | Badge | Description |
-|-------|-------|-------------|
-| Certified | ✅ | Production-ready with full support |
-| Community | 🌐 | Community-supported, may have limitations |
-| Experimental | 🧪 | Alpha quality - API may change |
-| Enterprise | 🏢 | Enterprise license required |
-| Deprecated | ⚠️ | Will be removed in future versions |
 
 ---
 

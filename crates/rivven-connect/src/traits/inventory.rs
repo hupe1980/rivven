@@ -25,13 +25,13 @@
 //! │         ▼                 ▼                 ▼                   │
 //! │  ┌─────────────────────────────────────────────────────────┐   │
 //! │  │              Metadata Index (for search)                 │   │
-//! │  │  • By category  • By tags  • By support level           │   │
+//! │  │  • By category  • By tags                               │   │
 //! │  └─────────────────────────────────────────────────────────┘   │
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 
 use super::metadata::{
-    ConnectorCategory, ConnectorMetadata, ConnectorMetadataBuilder, ConnectorType, SupportLevel,
+    ConnectorCategory, ConnectorMetadata, ConnectorMetadataBuilder, ConnectorType,
 };
 use super::registry::{SinkFactory, SourceFactory};
 use super::spec::ConnectorSpec;
@@ -216,14 +216,13 @@ impl ConnectorInventory {
         &self,
         category: Option<ConnectorCategory>,
         connector_type: Option<ConnectorType>,
-        support: Option<SupportLevel>,
     ) -> Vec<&ConnectorMetadata> {
         let mut results: Vec<_> = self
             .sources
             .values()
             .filter(|e| {
                 e.metadata
-                    .matches_filters(category, connector_type, support)
+                    .matches_filters(category, connector_type)
             })
             .map(|e| &e.metadata)
             .chain(
@@ -231,7 +230,7 @@ impl ConnectorInventory {
                     .values()
                     .filter(|e| {
                         e.metadata
-                            .matches_filters(category, connector_type, support)
+                            .matches_filters(category, connector_type)
                     })
                     .map(|e| &e.metadata),
             )
@@ -349,8 +348,8 @@ impl ConnectorInventory {
         for parent in parents {
             let connectors = by_parent.get(parent).unwrap();
             doc.push_str(&format!("## {}\n\n", parent.to_uppercase()));
-            doc.push_str("| Name | Type | Support | Description |\n");
-            doc.push_str("|------|------|---------|-------------|\n");
+            doc.push_str("| Name | Type | Description |\n");
+            doc.push_str("|------|------|-------------|\n");
 
             let mut sorted: Vec<_> = connectors.iter().collect();
             sorted.sort_by_key(|m| &m.name);
@@ -371,8 +370,8 @@ impl ConnectorInventory {
                 let types_str = types.join(", ");
 
                 doc.push_str(&format!(
-                    "| `{}` | {} | {} | {} |\n",
-                    meta.name, types_str, meta.support, meta.description
+                    "| `{}` | {} | {} |\n",
+                    meta.name, types_str, meta.description
                 ));
             }
 
@@ -425,7 +424,6 @@ mod tests {
             .description("A mock source for testing")
             .source()
             .category(ConnectorCategory::UtilityDebug)
-            .certified()
             .tags(["mock", "test", "debug"])
             .build();
 
@@ -477,26 +475,19 @@ mod tests {
         let meta1 = ConnectorMetadata::builder("postgres_cdc")
             .source()
             .category(ConnectorCategory::DatabaseCdc)
-            .certified()
             .build();
 
         let meta2 = ConnectorMetadata::builder("mysql_cdc")
             .source()
             .category(ConnectorCategory::DatabaseCdc)
-            .community()
             .build();
 
         inventory.register_source(meta1, Arc::new(MockSourceFactory));
         inventory.register_source(meta2, Arc::new(MockSourceFactory));
 
         // Filter by category
-        let results = inventory.filter(Some(ConnectorCategory::DatabaseCdc), None, None);
+        let results = inventory.filter(Some(ConnectorCategory::DatabaseCdc), None);
         assert_eq!(results.len(), 2);
-
-        // Filter by support level
-        let results = inventory.filter(None, None, Some(SupportLevel::Certified));
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].name, "postgres_cdc");
     }
 
     #[test]
@@ -525,7 +516,6 @@ mod tests {
             .description("Generate synthetic test data")
             .source()
             .category(ConnectorCategory::UtilityGenerate)
-            .certified()
             .build();
 
         inventory.register_source(meta, Arc::new(MockSourceFactory));
@@ -533,6 +523,5 @@ mod tests {
         let docs = inventory.generate_docs();
         assert!(docs.contains("Connector Catalog"));
         assert!(docs.contains("datagen"));
-        assert!(docs.contains("Certified"));
     }
 }

@@ -1,8 +1,7 @@
 //! Connector metadata and categorization for scalable connector discovery
 //!
 //! This module provides a comprehensive metadata system that enables:
-//! - Categorization of connectors (like Redpanda Connect's 300+ components)
-//! - Support levels (Certified, Community, Enterprise)
+//! - Categorization of connectors for scalable connector management
 //! - Rich tagging and search capabilities
 //! - Auto-generated documentation
 //!
@@ -159,45 +158,7 @@ impl std::fmt::Display for ConnectorCategory {
     }
 }
 
-/// Support level for connectors (like Redpanda Connect)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum SupportLevel {
-    /// Production-ready with full support
-    Certified,
-    /// Community-supported, may have limitations
-    Community,
-    /// Experimental/alpha - API may change
-    Experimental,
-    /// Enterprise-only features
-    Enterprise,
-    /// Deprecated - will be removed
-    Deprecated,
-}
 
-impl SupportLevel {
-    /// Whether the connector is production-ready
-    pub fn is_production_ready(&self) -> bool {
-        matches!(self, Self::Certified | Self::Enterprise)
-    }
-
-    /// Badge for display
-    pub fn badge(&self) -> &'static str {
-        match self {
-            Self::Certified => "✅ Certified",
-            Self::Community => "🌐 Community",
-            Self::Experimental => "🧪 Experimental",
-            Self::Enterprise => "🏢 Enterprise",
-            Self::Deprecated => "⚠️ Deprecated",
-        }
-    }
-}
-
-impl std::fmt::Display for SupportLevel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.badge())
-    }
-}
 
 /// Connector type flags
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
@@ -236,9 +197,6 @@ pub struct ConnectorMetadata {
 
     /// Primary category
     pub category: ConnectorCategory,
-
-    /// Support level
-    pub support: SupportLevel,
 
     /// Feature flag required (if any)
     #[serde(default)]
@@ -328,7 +286,6 @@ impl ConnectorMetadata {
         &self,
         category: Option<ConnectorCategory>,
         connector_type: Option<ConnectorType>,
-        support: Option<SupportLevel>,
     ) -> bool {
         if let Some(cat) = category {
             if self.category != cat {
@@ -338,12 +295,6 @@ impl ConnectorMetadata {
 
         if let Some(typ) = connector_type {
             if !self.types.contains(&typ) {
-                return false;
-            }
-        }
-
-        if let Some(sup) = support {
-            if self.support != sup {
                 return false;
             }
         }
@@ -361,7 +312,6 @@ pub struct ConnectorMetadataBuilder {
     long_description: Option<String>,
     types: HashSet<ConnectorType>,
     category: Option<ConnectorCategory>,
-    support: SupportLevel,
     feature: Option<String>,
     dependencies: Vec<String>,
     tags: HashSet<String>,
@@ -384,7 +334,6 @@ impl ConnectorMetadataBuilder {
             long_description: None,
             types: HashSet::new(),
             category: None,
-            support: SupportLevel::Community,
             feature: None,
             dependencies: Vec::new(),
             tags: HashSet::new(),
@@ -441,27 +390,6 @@ impl ConnectorMetadataBuilder {
     pub fn category(mut self, category: ConnectorCategory) -> Self {
         self.category = Some(category);
         self
-    }
-
-    /// Set support level
-    pub fn support(mut self, support: SupportLevel) -> Self {
-        self.support = support;
-        self
-    }
-
-    /// Mark as certified
-    pub fn certified(self) -> Self {
-        self.support(SupportLevel::Certified)
-    }
-
-    /// Mark as community
-    pub fn community(self) -> Self {
-        self.support(SupportLevel::Community)
-    }
-
-    /// Mark as enterprise
-    pub fn enterprise(self) -> Self {
-        self.support(SupportLevel::Enterprise)
     }
 
     /// Set feature flag
@@ -538,7 +466,6 @@ impl ConnectorMetadataBuilder {
 
     /// Mark as deprecated
     pub fn deprecated(mut self, since: impl Into<String>, replaced_by: Option<String>) -> Self {
-        self.support = SupportLevel::Deprecated;
         self.deprecated_since = Some(since.into());
         self.replaced_by = replaced_by;
         self
@@ -557,7 +484,6 @@ impl ConnectorMetadataBuilder {
             long_description: self.long_description,
             types: self.types,
             category: self.category.unwrap_or(ConnectorCategory::UtilityDebug),
-            support: self.support,
             feature: self.feature,
             dependencies: self.dependencies,
             tags: self.tags,
@@ -583,7 +509,6 @@ mod tests {
             .description("Change Data Capture from PostgreSQL using logical replication")
             .source()
             .category(ConnectorCategory::DatabaseCdc)
-            .certified()
             .feature("postgres")
             .tags(["postgresql", "cdc", "replication", "logical"])
             .aliases(["pg_cdc", "postgres-cdc"])
@@ -593,7 +518,6 @@ mod tests {
         assert_eq!(meta.name, "postgres_cdc");
         assert!(meta.types.contains(&ConnectorType::Source));
         assert_eq!(meta.category, ConnectorCategory::DatabaseCdc);
-        assert_eq!(meta.support, SupportLevel::Certified);
     }
 
     #[test]
@@ -618,14 +542,12 @@ mod tests {
             .source()
             .sink()
             .category(ConnectorCategory::MessagingKafka)
-            .certified()
             .build();
 
-        assert!(meta.matches_filters(None, None, None));
-        assert!(meta.matches_filters(Some(ConnectorCategory::MessagingKafka), None, None));
-        assert!(meta.matches_filters(None, Some(ConnectorType::Source), None));
-        assert!(meta.matches_filters(None, None, Some(SupportLevel::Certified)));
-        assert!(!meta.matches_filters(Some(ConnectorCategory::DatabaseCdc), None, None));
+        assert!(meta.matches_filters(None, None));
+        assert!(meta.matches_filters(Some(ConnectorCategory::MessagingKafka), None));
+        assert!(meta.matches_filters(None, Some(ConnectorType::Source)));
+        assert!(!meta.matches_filters(Some(ConnectorCategory::DatabaseCdc), None));
     }
 
     #[test]
