@@ -588,7 +588,7 @@ sources:
 
 **Topic Name Normalization:**
 
-Rivven provides best-in-class normalization following industry standards:
+Rivven provides comprehensive normalization following industry standards:
 
 | Original | Normalized | Reason |
 |----------|------------|--------|

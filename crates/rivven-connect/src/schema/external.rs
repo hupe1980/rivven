@@ -9,7 +9,7 @@
 //!
 //! # Authentication
 //!
-//! Supports best-in-class authentication methods:
+//! Supports multiple authentication methods:
 //! - **OAuth2/OIDC** - Client credentials flow with automatic token refresh
 //! - **mTLS** - Mutual TLS for zero-trust environments
 //! - **API Keys** - Simple header-based authentication

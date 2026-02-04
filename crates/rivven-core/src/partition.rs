@@ -176,25 +176,29 @@ impl Partition {
             .fetch_add(batch_size as u64, Ordering::SeqCst);
 
         let mut offsets = Vec::with_capacity(batch_size);
+        let mut batch_messages = Vec::with_capacity(batch_size);
         let mut batch_data = Vec::new();
 
-        // Write to log manager
+        // Prepare messages with offsets
+        for (i, mut message) in messages.into_iter().enumerate() {
+            let offset = start_offset + i as u64;
+            message.offset = offset;
+
+            // Collect data for tiered storage
+            if self.tiered_storage.is_some() {
+                if let Ok(data) = message.to_bytes() {
+                    batch_data.extend_from_slice(&data);
+                }
+            }
+
+            batch_messages.push((offset, message));
+            offsets.push(offset);
+        }
+
+        // Write to log manager using optimized batch append
         {
             let mut log = self.log_manager.write().await;
-            for (i, mut message) in messages.into_iter().enumerate() {
-                let offset = start_offset + i as u64;
-                message.offset = offset;
-
-                // Collect data for tiered storage
-                if self.tiered_storage.is_some() {
-                    if let Ok(data) = message.to_bytes() {
-                        batch_data.extend_from_slice(&data);
-                    }
-                }
-
-                log.append(offset, message).await?;
-                offsets.push(offset);
-            }
+            log.append_batch(batch_messages).await?;
         }
 
         // Also write to tiered storage if enabled

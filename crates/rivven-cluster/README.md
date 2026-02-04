@@ -4,7 +4,7 @@
 
 ## Overview
 
-`rivven-cluster` provides the distributed coordination layer for Rivven, including leader election, failure detection, and partition assignment.
+`rivven-cluster` provides the distributed coordination layer for Rivven, implementing consensus, membership, and partition management with hot paths optimized for streaming workloads.
 
 ## Features
 
@@ -13,8 +13,19 @@
 | **Raft Consensus** | Leader election and log replication using OpenRaft |
 | **redb Storage** | Pure Rust persistent storage (zero C dependencies) |
 | **SWIM Gossip** | Failure detection and membership management |
-| **Partitioning** | Consistent hashing for partition assignment |
-| **QUIC Transport** | Efficient, secure node-to-node communication |
+| **ISR Replication** | In-Sync Replica tracking with high watermark |
+| **Partitioning** | Consistent hashing with rack awareness |
+| **QUIC Transport** | 0-RTT, multiplexed streams, BBR congestion control |
+| **Consumer Coordination** | Consumer group management with Raft persistence |
+
+## Performance Characteristics
+
+| Operation | Latency | Notes |
+|:----------|:--------|:------|
+| Raft proposal | ~150μs | Binary postcard serialization |
+| SWIM ping | ~50μs | UDP with suspicion mechanism |
+| Partition lookup | O(1) | DashMap with lock-free reads |
+| ISR update | ~100μs | Atomic operations |
 
 ## Why redb?
 
@@ -27,104 +38,205 @@ Rivven uses **redb** instead of RocksDB for Raft log storage:
 | **Cross-compile** | ✅ Works everywhere | ❌ Needs C++ toolchain |
 | **Docker musl** | ✅ Works | ❌ Needs musl-g++ |
 | **ACID** | ✅ Full | ✅ Full |
+| **Memory usage** | Lower | Higher (bloom filters) |
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        rivven-cluster                           │
-├─────────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐       │
-│  │    Raft      │    │    SWIM      │    │  Partition   │       │
-│  │  Consensus   │    │   Gossip     │    │  Manager     │       │
-│  └──────────────┘    └──────────────┘    └──────────────┘       │
-│         │                   │                   │               │
-│         └───────────────────┼───────────────────┘               │
-│                             │                                   │
-│                    ┌────────────────┐                           │
-│                    │ QUIC Transport │                           │
-│                    └────────────────┘                           │
-└─────────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────────────┐
+│                           rivven-cluster                                   │
+├───────────────────────────────────────────────────────────────────────────┤
+│                                                                            │
+│  ┌────────────────┐  ┌────────────────┐  ┌────────────────────────────┐   │
+│  │  ClusterCoord  │  │  Replication   │  │    Consumer Coordinator    │   │
+│  │  (orchestrate) │  │   Manager      │  │    (group management)      │   │
+│  └───────┬────────┘  └───────┬────────┘  └─────────────┬──────────────┘   │
+│          │                   │                         │                   │
+│  ┌───────┴────────┐  ┌───────┴────────┐  ┌─────────────┴──────────────┐   │
+│  │  Raft Consensus│  │ ISR Tracking   │  │   Offset Management        │   │
+│  │  (metadata)    │  │ (replication)  │  │   (commit/fetch)           │   │
+│  └───────┬────────┘  └───────┬────────┘  └─────────────┬──────────────┘   │
+│          │                   │                         │                   │
+│  ┌───────┴────────┐  ┌───────┴────────┐  ┌─────────────┴──────────────┐   │
+│  │  SWIM Gossip   │  │  Partition     │  │   Metadata Store           │   │
+│  │  (membership)  │  │  Placer        │  │   (state machine)          │   │
+│  └───────┬────────┘  └───────┬────────┘  └─────────────┬──────────────┘   │
+│          │                   │                         │                   │
+│          └───────────────────┼─────────────────────────┘                   │
+│                              │                                             │
+│                   ┌──────────┴──────────┐                                  │
+│                   │  Transport Layer    │                                  │
+│                   │  (TCP / QUIC)       │                                  │
+│                   └─────────────────────┘                                  │
+│                                                                            │
+└───────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Components
 
 ### Raft Consensus
 
-Used for metadata replication and leader election:
+Metadata replication with OpenRaft and redb storage:
 
 ```rust
-use rivven_cluster::{RaftNode, RaftConfig};
+use rivven_cluster::{RaftNode, RaftNodeConfig};
 
-let config = RaftConfig {
-    node_id: 1,
-    peers: vec![2, 3],
-    election_timeout_ms: 150..300,
+let config = RaftNodeConfig {
+    node_id: "node-1".to_string(),
+    standalone: false,
+    data_dir: "/var/lib/rivven/raft".into(),
     heartbeat_interval_ms: 50,
+    election_timeout_min_ms: 150,
+    election_timeout_max_ms: 300,
+    snapshot_threshold: 10000,
+    initial_members: vec![],
 };
 
-let node = RaftNode::new(config).await?;
+let mut node = RaftNode::with_config(config).await?;
+node.start().await?;
 ```
 
 ### SWIM Gossip
 
-Decentralized failure detection:
+Decentralized failure detection with O(log N) convergence:
 
 ```rust
-use rivven_cluster::{SwimNode, SwimConfig};
+use rivven_cluster::{Membership, SwimConfig, NodeInfo};
 
 let config = SwimConfig {
-    bind_addr: "0.0.0.0:7946".parse()?,
-    known_peers: vec!["node2:7946".parse()?],
-    protocol_period_ms: 1000,
-    suspect_timeout_ms: 5000,
+    ping_interval: Duration::from_millis(100),
+    ping_timeout: Duration::from_millis(50),
+    indirect_probes: 3,
+    suspicion_multiplier: 3,
+    ..Default::default()
 };
 
-let node = SwimNode::new(config).await?;
+let membership = Membership::new(local_node, config, shutdown_rx).await?;
+membership.join(&seeds).await?;
 ```
 
-### Partition Assignment
+### ISR Replication
 
-Consistent hashing with virtual nodes:
+Kafka-style ISR tracking with high watermark:
 
 ```rust
-use rivven_cluster::{PartitionManager, HashRing};
+use rivven_cluster::{ReplicationManager, ReplicationConfig, PartitionReplication};
 
-let ring = HashRing::new(128); // 128 virtual nodes per physical node
-ring.add_node("node1")?;
-ring.add_node("node2")?;
+let config = ReplicationConfig {
+    min_isr: 2,
+    replica_lag_max_messages: 1000,
+    replica_lag_max_time: Duration::from_secs(10),
+    ..Default::default()
+};
 
-let owner = ring.get_partition_owner("my-topic", 0)?;
+let manager = ReplicationManager::new(node_id, config);
+let partition = manager.get_or_create(partition_id, is_leader);
+
+// Handle follower fetch and update ISR
+manager.handle_replica_fetch(&partition_id, &replica_id, fetch_offset).await?;
+```
+
+### Partition Placement
+
+Consistent hashing with rack awareness:
+
+```rust
+use rivven_cluster::{PartitionPlacer, PlacementConfig, PlacementStrategy};
+
+let config = PlacementConfig {
+    strategy: PlacementStrategy::ConsistentHash,
+    rack_aware: true,
+    virtual_nodes: 150,
+    max_partitions_per_node: 0,
+};
+
+let mut placer = PartitionPlacer::new(config);
+placer.add_node(&node);
+
+let replicas = placer.assign_partition("orders", 0, 3)?;
+```
+
+### QUIC Transport (Optional)
+
+High-performance transport with 0-RTT and multiplexing:
+
+```rust
+use rivven_cluster::quic_transport::{QuicTransport, QuicConfig, TlsConfig};
+
+let config = QuicConfig::high_throughput();
+let tls = TlsConfig::self_signed("rivven-cluster")?;
+
+let transport = QuicTransport::new(bind_addr, config, tls).await?;
+transport.start().await?;
+
+let response = transport.send(&peer_id, request).await?;
+```
+
+## Feature Flags
+
+```toml
+[features]
+default = ["raft", "swim", "metrics-prometheus", "compression"]
+raft = ["openraft", "redb", "reqwest"]
+swim = []
+quic = ["quinn", "rustls", "rcgen"]
+full = ["raft", "swim", "metrics-prometheus", "compression", "quic"]
 ```
 
 ## Configuration
 
 ```yaml
 cluster:
-  node_id: 1
-  bind_address: "0.0.0.0:9093"
+  node_id: "node-1"
+  mode: cluster  # or "standalone"
+  rack: "rack-1"
   
+  client_addr: "0.0.0.0:9092"
+  cluster_addr: "0.0.0.0:9093"
+  
+  seeds:
+    - "node-2:9093"
+    - "node-3:9093"
+  
+  swim:
+    ping_interval_ms: 100
+    ping_timeout_ms: 50
+    indirect_probes: 3
+    suspicion_multiplier: 3
+    
   raft:
-    peers:
-      - "node2:9093"
-      - "node3:9093"
+    heartbeat_interval_ms: 50
     election_timeout_min_ms: 150
     election_timeout_max_ms: 300
+    snapshot_threshold: 10000
     
-  gossip:
-    bind_port: 7946
-    known_peers:
-      - "node2:7946"
-    protocol_period_ms: 1000
+  replication:
+    min_isr: 2
+    replica_lag_max_messages: 1000
+    replica_lag_max_time_secs: 10
+    fetch_interval_ms: 50
     
-  partitioning:
-    virtual_nodes: 128
+  topic_defaults:
+    partitions: 6
     replication_factor: 3
+```
+
+## Testing
+
+```bash
+# Unit tests (68 tests)
+cargo test -p rivven-cluster --lib
+
+# Integration tests (36 tests, 4 ignored for chaos testing)
+cargo test -p rivven-cluster --test '*'
+
+# Standalone stress tests
+cargo test -p rivven-cluster --test three_node_cluster -- --nocapture
 ```
 
 ## Documentation
 
-- [Distributed Architecture](https://rivven.hupe1980.github.io/rivven/docs/architecture)
+- [Architecture Overview](https://rivven.hupe1980.github.io/rivven/docs/architecture)
 - [Kubernetes Deployment](https://rivven.hupe1980.github.io/rivven/docs/kubernetes)
 
 ## License

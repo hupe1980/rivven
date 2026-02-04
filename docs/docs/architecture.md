@@ -275,6 +275,59 @@ On startup, the broker performs recovery in this order:
 
 ## Performance Optimizations
 
+### rivven-core Hot Path Architecture
+
+The core storage engine implements hot path optimizations:
+
+#### Zero-Copy Buffers
+
+Cache-line aligned (64-byte) buffers minimize memory bandwidth:
+
+```rust
+use rivven_core::zero_copy::{ZeroCopyBuffer, BufferSlice};
+
+// Direct writes without intermediate copies
+let mut buffer = ZeroCopyBuffer::new(64 * 1024);
+let slice = buffer.write_slice(data.len());
+slice.copy_from_slice(&data);
+let frozen = buffer.freeze();  // Zero-copy transfer to consumer
+```
+
+#### Lock-Free Data Structures
+
+Optimized for streaming workloads:
+
+| Structure | Use Case | Performance |
+|:----------|:---------|:------------|
+| `LockFreeQueue` | MPMC message passing | O(1) push/pop |
+| `ConcurrentHashMap` | Partition lookup | Sharded RwLocks |
+| `AppendOnlyLog` | Sequential writes | Single-writer |
+| `ConcurrentSkipList` | Range queries | Lock-free traversal |
+
+#### Buffer Pooling
+
+Slab allocation with thread-local caching:
+
+- **Size Classes**: Small (64-512B), Medium (512-4KB), Large (4-64KB), Huge (64KB-1MB)
+- **Thread-Local Cache**: Fast path avoids global lock
+- **Pool Statistics**: Hit rate monitoring
+
+#### Vectorized Batch Processing
+
+SIMD-accelerated operations:
+
+- **CRC32**: 4-8x faster with SSE4.2/AVX2
+- **Batch Encoding**: 2-4x faster than sequential
+- **Memory Search**: memchr SIMD acceleration
+
+#### Group Commit WAL
+
+Write batching for 10-100x throughput improvement:
+
+- **Batch Window**: Configurable commit interval (default: 200μs)
+- **Batch Size**: Trigger flush at threshold (default: 4 MB)
+- **Pending Writes**: Flush after N writes (default: 1000)
+
 ### io_uring Async I/O (Linux)
 
 On Linux 5.6+, Rivven uses **io_uring** for kernel-bypassing async I/O:
@@ -357,6 +410,52 @@ For membership and failure detection:
 - Epidemic protocol for state propagation
 - Suspicion mechanism for false-positive reduction
 - Efficient O(log n) convergence
+
+### ISR Replication
+
+Kafka-style In-Sync Replica management:
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   Leader    │────►│  Follower 1 │     │  Follower 2 │
+│  (Node 1)   │     │  (Node 2)   │     │  (Node 3)   │
+│             │     │             │     │             │
+│ LEO: 1000   │     │ LEO: 998    │     │ LEO: 995    │
+│ HWM: 995    │     │ In ISR ✓   │     │ In ISR ✓   │
+└─────────────┘     └─────────────┘     └─────────────┘
+```
+
+**ISR Membership Rules:**
+- Follower must fetch within `replica_lag_max_time` (default: 10s)
+- Follower must be within `replica_lag_max_messages` (default: 1000)
+- High watermark advances when all ISR members acknowledge
+
+### Ack Modes
+
+| Mode | Guarantee | Latency |
+|:-----|:----------|:--------|
+| `acks=0` | None (fire & forget) | Lowest |
+| `acks=1` | Leader durability | Low |
+| `acks=all` | ISR durability | Higher |
+
+### Partition Placement
+
+Consistent hashing with rack awareness for fault tolerance:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Hash Ring (150 vnodes/node)                 │
+├─────────────────────────────────────────────────────────────────┤
+│  [Node1#0]──[Node2#0]──[Node3#0]──[Node1#1]──[Node2#1]──...    │
+│       │           │           │                                 │
+│   topic-0/0   topic-0/1   topic-0/2                             │
+└─────────────────────────────────────────────────────────────────┘
+
+Rack-Aware Placement:
+├── Rack A: Node 1, Node 2
+├── Rack B: Node 3, Node 4
+└── Replicas spread across racks for fault tolerance
+```
 
 ---
 

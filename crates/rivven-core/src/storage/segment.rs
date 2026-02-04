@@ -3,7 +3,7 @@ use bytes::{BufMut, BytesMut};
 use crc32fast::Hasher;
 use memmap2::Mmap;
 use std::fs::{File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -11,6 +11,8 @@ use tokio::sync::Mutex;
 const INDEX_ENTRY_SIZE: usize = 12; // 4 bytes relative offset, 8 bytes position
 const LOG_SUFFIX: &str = "log";
 const INDEX_SUFFIX: &str = "index";
+/// Index every 4KB of data (sparse indexing for performance)
+const INDEX_INTERVAL_BYTES: u64 = 4096;
 
 /// Represents a segment of the log on disk
 /// A segment consists of a .log file (data) and a .index file (sparse index)
@@ -19,9 +21,13 @@ pub struct Segment {
     base_offset: u64,
     log_path: PathBuf,
     index_path: PathBuf,
-    log_file: Arc<Mutex<File>>,
+    log_file: Arc<Mutex<BufWriter<File>>>,
     current_size: u64,
     index_buffer: Vec<(u32, u64)>, // Relative offset -> Position
+    /// Position of last index entry (for sparse indexing)
+    last_index_position: u64,
+    /// Pending index entries to batch write
+    pending_index_entries: Vec<(u32, u64)>,
 }
 
 impl Segment {
@@ -29,7 +35,7 @@ impl Segment {
         let log_path = dir.join(format!("{:020}.{}", base_offset, LOG_SUFFIX));
         let index_path = dir.join(format!("{:020}.{}", base_offset, INDEX_SUFFIX));
 
-        // Open or create log file
+        // Open or create log file with buffered writes (8KB buffer for batching)
         let mut log_file = OpenOptions::new()
             .read(true)
             .create(true)
@@ -37,6 +43,7 @@ impl Segment {
             .open(&log_path)?;
 
         let current_size = log_file.seek(SeekFrom::End(0))?;
+        let log_writer = BufWriter::with_capacity(8192, log_file);
 
         // Open or create index file
         let index_file = OpenOptions::new()
@@ -50,14 +57,20 @@ impl Segment {
             base_offset,
             log_path,
             index_path,
-            log_file: Arc::new(Mutex::new(log_file)),
+            log_file: Arc::new(Mutex::new(log_writer)),
             current_size,
             index_buffer: Vec::new(),
+            last_index_position: 0,
+            pending_index_entries: Vec::new(),
         };
 
         // Load index if exists
         if index_file.metadata()?.len() > 0 {
             segment.load_index(&index_file)?;
+            // Set last_index_position from loaded index
+            if let Some((_, pos)) = segment.index_buffer.last() {
+                segment.last_index_position = *pos;
+            }
         }
 
         Ok(segment)
@@ -91,6 +104,7 @@ impl Segment {
     }
 
     /// Append a message to the segment
+    /// Optimized with buffered writes and sparse indexing
     pub async fn append(&mut self, offset: u64, mut message: Message) -> Result<u64> {
         if offset < self.base_offset {
             return Err(Error::Other(format!(
@@ -115,52 +129,144 @@ impl Segment {
         frame.put_u32(len);
         frame.put_slice(&bytes);
 
-        // 4. Write to disk (Holding lock)
-        {
-            let mut file = self.log_file.lock().await;
-            file.write_all(&frame)?;
-        }
         let position = self.current_size;
-        // file.sync_data()?; // Optional: Call sync for durability (slow) or rely on OS cache
+        let frame_len = frame.len() as u64;
 
-        self.current_size += frame.len() as u64;
+        // 4. Write to disk using buffered writer (fast path - no syscall per write)
+        {
+            let mut writer = self.log_file.lock().await;
+            writer.write_all(&frame)?;
+            // Note: BufWriter batches writes, actual disk write happens on flush or buffer full
+        }
 
-        // 5. Update Index (every 4KB or so)
+        self.current_size += frame_len;
 
-        // Simple strategy: Index every message for now for exact lookup in concept
-        // optimized: only index if position - last_index_position > 4096
-        let relative_offset = (offset - self.base_offset) as u32;
-        self.append_index(relative_offset, position)?;
+        // 5. Sparse indexing: only add index entry every INDEX_INTERVAL_BYTES
+        if position == 0 || position - self.last_index_position >= INDEX_INTERVAL_BYTES {
+            let relative_offset = (offset - self.base_offset) as u32;
+            self.pending_index_entries.push((relative_offset, position));
+            self.index_buffer.push((relative_offset, position));
+            self.last_index_position = position;
+        }
 
         Ok(position)
     }
 
-    fn append_index(&mut self, relative_offset: u32, position: u64) -> Result<()> {
+    /// Append a batch of messages efficiently (single lock acquisition, batched index)
+    pub async fn append_batch(&mut self, messages: Vec<(u64, Message)>) -> Result<Vec<u64>> {
+        if messages.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut positions = Vec::with_capacity(messages.len());
+        let mut total_frame = BytesMut::with_capacity(messages.len() * 256); // Estimate
+
+        for (offset, mut message) in messages {
+            if offset < self.base_offset {
+                return Err(Error::Other(format!(
+                    "Offset {} is smaller than segment base offset {}",
+                    offset, self.base_offset
+                )));
+            }
+
+            // Serialize
+            message.offset = offset;
+            let bytes = message.to_bytes()?;
+            let len = bytes.len() as u32;
+
+            // CRC
+            let mut hasher = Hasher::new();
+            hasher.update(&bytes);
+            let crc = hasher.finalize();
+
+            let position = self.current_size + total_frame.len() as u64;
+            positions.push(position);
+
+            // Frame: [CRC: 4][Len: 4][Payload: N]
+            total_frame.put_u32(crc);
+            total_frame.put_u32(len);
+            total_frame.put_slice(&bytes);
+
+            // Sparse indexing
+            if position == 0 || position - self.last_index_position >= INDEX_INTERVAL_BYTES {
+                let relative_offset = (offset - self.base_offset) as u32;
+                self.pending_index_entries.push((relative_offset, position));
+                self.index_buffer.push((relative_offset, position));
+                self.last_index_position = position;
+            }
+        }
+
+        // Single write for entire batch
+        {
+            let mut writer = self.log_file.lock().await;
+            writer.write_all(&total_frame)?;
+        }
+
+        self.current_size += total_frame.len() as u64;
+        Ok(positions)
+    }
+
+    /// Flush segment data to disk ensuring durability
+    pub async fn flush(&self) -> Result<()> {
+        // Flush buffered writes
+        {
+            let mut writer = self.log_file.lock().await;
+            writer.flush()?;
+            writer.get_ref().sync_all()?;
+        }
+
+        // Batch write pending index entries
+        if !self.pending_index_entries.is_empty() {
+            let mut file = OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&self.index_path)?;
+
+            let mut buf = BytesMut::with_capacity(self.pending_index_entries.len() * INDEX_ENTRY_SIZE);
+            for (rel_offset, pos) in &self.pending_index_entries {
+                buf.put_u32(*rel_offset);
+                buf.put_u64(*pos);
+            }
+            file.write_all(&buf)?;
+            file.sync_all()?;
+        }
+
+        Ok(())
+    }
+
+    /// Flush pending index entries and clear the buffer
+    pub async fn flush_index(&mut self) -> Result<()> {
+        if self.pending_index_entries.is_empty() {
+            return Ok(());
+        }
+
         let mut file = OpenOptions::new()
             .append(true)
             .create(true)
             .open(&self.index_path)?;
 
-        let mut buf = BytesMut::with_capacity(12);
-        buf.put_u32(relative_offset);
-        buf.put_u64(position);
+        let mut buf = BytesMut::with_capacity(self.pending_index_entries.len() * INDEX_ENTRY_SIZE);
+        for (rel_offset, pos) in &self.pending_index_entries {
+            buf.put_u32(*rel_offset);
+            buf.put_u64(*pos);
+        }
         file.write_all(&buf)?;
-
-        self.index_buffer.push((relative_offset, position));
-        Ok(())
-    }
-
-    /// Flush segment data to disk ensuring durability
-    pub async fn flush(&self) -> Result<()> {
-        let file = self.log_file.lock().await;
-        file.sync_all()?;
+        
+        self.pending_index_entries.clear();
         Ok(())
     }
 
     /// Read a batch of messages starting from a given offset
+    /// Note: Caller should ensure flush() is called before read() for consistency
     pub async fn read(&self, offset: u64, max_bytes: usize) -> Result<Vec<Message>> {
         if offset < self.base_offset {
             return Ok(Vec::new()); // Or error? LogManager should handle this
+        }
+
+        // Flush buffered writes before reading to ensure data visibility
+        {
+            let mut writer = self.log_file.lock().await;
+            writer.flush()?;
         }
 
         // 1. Find position from index
@@ -250,6 +356,12 @@ impl Segment {
     }
 
     pub async fn recover_last_offset(&self) -> Result<Option<u64>> {
+        // Flush buffered writes before recovery scan
+        {
+            let mut writer = self.log_file.lock().await;
+            writer.flush()?;
+        }
+
         let mut start_pos = 0;
         if let Some((_, pos)) = self.index_buffer.last() {
             start_pos = *pos;
@@ -300,6 +412,12 @@ impl Segment {
     /// Uses linear scan through the segment (timestamps may not be monotonic due to clock skew)
     /// Returns None if no matching offset is found
     pub async fn find_offset_for_timestamp(&self, target_timestamp: i64) -> Result<Option<u64>> {
+        // Flush buffered writes before timestamp scan
+        {
+            let mut writer = self.log_file.lock().await;
+            writer.flush()?;
+        }
+
         let file = File::open(&self.log_path)?;
         let len = file.metadata()?.len();
         if len == 0 {
@@ -342,6 +460,12 @@ impl Segment {
     /// Returns (min_timestamp, max_timestamp) in milliseconds since epoch
     /// Useful for quickly determining if a segment might contain a target timestamp
     pub async fn timestamp_bounds(&self) -> Result<Option<(i64, i64)>> {
+        // Flush buffered writes before scanning
+        {
+            let mut writer = self.log_file.lock().await;
+            writer.flush()?;
+        }
+
         let file = File::open(&self.log_path)?;
         let len = file.metadata()?.len();
         if len == 0 {

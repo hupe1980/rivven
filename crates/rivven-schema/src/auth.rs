@@ -3,7 +3,7 @@
 //! Provides enterprise-grade authentication for the Confluent-compatible REST API.
 //! Supports multiple authentication methods and authorization modes.
 //!
-//! ## Authentication Methods (Best-in-Class)
+//! ## Authentication Methods
 //!
 //! 1. **OAuth2/JWT** (jwt feature) - OIDC tokens with claim-based identity
 //! 2. **API Key** - Header-based authentication (X-API-Key or custom)

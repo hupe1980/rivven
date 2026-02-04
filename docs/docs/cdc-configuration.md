@@ -139,7 +139,7 @@ The `topic` field is required as a fallback for error cases or when CDC metadata
 
 #### Topic Name Normalization
 
-Database identifiers (schema/table names) often contain characters that are invalid in topic names. Rivven provides comprehensive, best-in-class normalization following industry standards with additional enhancements.
+Database identifiers (schema/table names) often contain characters that are invalid in topic names. Rivven provides comprehensive normalization following industry standards with additional enhancements.
 
 **Topic Name Restrictions:**
 - Valid characters: `a-z`, `A-Z`, `0-9`, `.`, `_`, `-`

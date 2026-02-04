@@ -66,6 +66,8 @@ impl LogManager {
 
         // Check if we need to roll
         if segment.size() >= self.max_segment_size {
+            // Flush current segment before rolling
+            segment.flush().await?;
             let new_segment = Segment::new(&self.dir, offset)?;
             self.segments.push(new_segment);
             self.active_segment_index += 1;
@@ -73,6 +75,30 @@ impl LogManager {
 
         let segment = &mut self.segments[self.active_segment_index];
         segment.append(offset, message).await
+    }
+
+    /// Batch append for high-throughput scenarios
+    /// Uses segment's batch append for efficient I/O
+    pub async fn append_batch(&mut self, messages: Vec<(u64, Message)>) -> Result<Vec<u64>> {
+        if messages.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let segment = &mut self.segments[self.active_segment_index];
+
+        // Check if we need to roll (estimate batch size)
+        let estimated_size: usize = messages.iter().map(|(_, m)| m.value.len() + 100).sum();
+        if segment.size() + estimated_size as u64 >= self.max_segment_size {
+            // Flush current segment before rolling
+            segment.flush().await?;
+            let first_offset = messages[0].0;
+            let new_segment = Segment::new(&self.dir, first_offset)?;
+            self.segments.push(new_segment);
+            self.active_segment_index += 1;
+        }
+
+        let segment = &mut self.segments[self.active_segment_index];
+        segment.append_batch(messages).await
     }
 
     pub async fn read(&self, offset: u64, max_bytes: usize) -> Result<Vec<Message>> {

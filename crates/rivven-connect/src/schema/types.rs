@@ -94,7 +94,7 @@ impl SchemaRegistryConfig {
 /// Connects to a Confluent-compatible Schema Registry over HTTP.
 /// Use this for rivven-schema, Confluent Schema Registry, or any compatible registry.
 ///
-/// # Authentication Methods (Best-in-Class)
+/// # Authentication Methods
 ///
 /// Supports multiple authentication methods in order of preference:
 /// 1. **OAuth2/OIDC** - For Confluent Cloud and enterprise registries
