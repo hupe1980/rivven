@@ -13,6 +13,7 @@ members = [
     "crates/rivven-schema",
     "crates/rivven-python",
     "crates/rivven-operator",
+    "crates/rivven-rdbc",
     "crates/rivven-integration-tests",  # Integration tests (not published)
 ]
 exclude = [
@@ -86,7 +87,7 @@ rustls-native-certs = "0.8"  # Unified: was 0.7/0.8 split
 tokio-rustls = "0.26"
 async-trait = "0.1"
 rand = "0.8"
-uuid = { version = "1.6", features = ["v4"] }
+uuid = { version = "1.6", features = ["v4", "serde"] }
 
 # Internal crates
 rivven-core = { version = "0.0.8", path = "crates/rivven-core", default-features = false }
@@ -99,6 +100,7 @@ rivven-connect-derive = { version = "0.0.8", path = "crates/rivven-connect-deriv
 rivven-cluster = { version = "0.0.8", path = "crates/rivven-cluster" }
 rivven-schema = { version = "0.0.8", path = "crates/rivven-schema", default-features = false }
 rivven-operator = { version = "0.0.8", path = "crates/rivven-operator" }
+rivven-rdbc = { version = "0.0.8", path = "crates/rivven-rdbc", default-features = false }
 
 [profile.release]
 opt-level = 3

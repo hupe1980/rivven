@@ -51,6 +51,12 @@ pub mod sqlserver_cdc;
 pub mod http;
 pub mod stdout;
 
+// RDBC connectors (query-based source/sink using rivven-rdbc)
+#[cfg(feature = "rdbc")]
+pub mod rdbc_sink;
+#[cfg(feature = "rdbc")]
+pub mod rdbc_source;
+
 // Queue connectors (Kafka, MQTT, SQS, Pub/Sub)
 pub mod queue;
 
@@ -114,6 +120,10 @@ pub fn create_source_registry() -> SourceRegistry {
     #[cfg(feature = "pubsub")]
     registry.register("pubsub", Arc::new(queue::PubSubSourceFactory));
 
+    // RDBC source (query-based, feature-gated)
+    #[cfg(feature = "rdbc")]
+    registry.register("rdbc-source", Arc::new(rdbc_source::RdbcSourceFactory));
+
     registry
 }
 
@@ -163,6 +173,10 @@ pub fn create_sink_registry() -> SinkRegistry {
     // Lakehouse sinks (feature-gated)
     #[cfg(feature = "iceberg")]
     registry.register("iceberg", Arc::new(lakehouse::IcebergSinkFactory));
+
+    // RDBC sink (query-based, feature-gated)
+    #[cfg(feature = "rdbc")]
+    registry.register("rdbc-sink", Arc::new(rdbc_sink::RdbcSinkFactory));
 
     registry
 }
@@ -318,6 +332,31 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .related("sqs")
             .build(),
         Arc::new(queue::PubSubSourceFactory),
+    );
+
+    // RDBC Source (query-based polling)
+    #[cfg(feature = "rdbc")]
+    inventory.register_source(
+        ConnectorMetadata::builder("rdbc-source")
+            .title("RDBC Source")
+            .description("Query-based source for PostgreSQL, MySQL, SQL Server with bulk/incremental/timestamp modes")
+            .source()
+            .category(ConnectorCategory::DatabaseQuery)
+            .feature("rdbc")
+            .tags([
+                "rdbc",
+                "sql",
+                "postgres",
+                "mysql",
+                "sqlserver",
+                "query",
+                "polling",
+                "database",
+            ])
+            .aliases(["rdbc", "sql-source", "database-source", "query-source"])
+            .related("postgres-cdc")
+            .build(),
+        Arc::new(rdbc_source::RdbcSourceFactory),
     );
 
     // ─────────────────────────────────────────────────────────────────
@@ -496,6 +535,35 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .related("delta-lake")
             .build(),
         Arc::new(lakehouse::IcebergSinkFactory),
+    );
+
+    // ─────────────────────────────────────────────────────────────────
+    // DATABASE SINKS
+    // ─────────────────────────────────────────────────────────────────
+
+    // RDBC Sink (batch writes)
+    #[cfg(feature = "rdbc")]
+    inventory.register_sink(
+        ConnectorMetadata::builder("rdbc-sink")
+            .title("RDBC Sink")
+            .description("High-performance batch sink for PostgreSQL, MySQL, SQL Server with upsert/insert/delete modes")
+            .sink()
+            .category(ConnectorCategory::DatabaseQuery)
+            .feature("rdbc")
+            .tags([
+                "rdbc",
+                "sql",
+                "postgres",
+                "mysql",
+                "sqlserver",
+                "sink",
+                "batch",
+                "database",
+            ])
+            .aliases(["rdbc", "sql-sink", "database-sink", "query-sink"])
+            .related("postgres-cdc")
+            .build(),
+        Arc::new(rdbc_sink::RdbcSinkFactory),
     );
 
     inventory

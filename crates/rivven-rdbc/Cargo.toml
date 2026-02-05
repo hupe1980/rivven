@@ -1,0 +1,109 @@
+[package]
+name = "rivven-rdbc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Production-grade relational database connectivity for rivven-connect"
+keywords = ["database", "sql", "postgres", "mysql", "sqlserver"]
+categories = ["database"]
+
+[package.metadata.cargo-machete]
+# sea-query-binder: Required for prepared statement binding
+ignored = ["sea-query-binder"]
+
+[features]
+default = ["postgres", "mysql", "sqlserver"]
+
+# Database backends
+postgres = ["dep:tokio-postgres", "dep:postgres-types", "sea-query/backend-postgres"]
+mysql = ["dep:mysql_async", "sea-query/backend-mysql"]
+sqlserver = ["dep:tiberius", "dep:tokio-util", "sea-query/backend-sqlite"]
+
+# TLS support
+tls = ["postgres-tls", "mysql-tls", "sqlserver-tls"]
+postgres-tls = ["postgres", "dep:tokio-postgres-rustls", "dep:rustls", "dep:rustls-pemfile", "dep:webpki-roots"]
+mysql-tls = ["mysql", "mysql_async?/rustls-tls"]
+sqlserver-tls = ["sqlserver", "tiberius?/rustls"]
+
+# Full feature set
+full = ["postgres", "mysql", "sqlserver", "tls"]
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true, features = ["sync", "time", "rt"] }
+futures = { workspace = true }
+async-trait = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# SQL generation (the secret weapon)
+sea-query = { version = "0.32", features = ["derive", "with-json", "with-chrono", "with-uuid", "with-bigdecimal"] }
+
+# Time handling
+chrono = { workspace = true }
+
+# Numeric precision
+rust_decimal = { version = "1.36", features = ["serde", "db-tokio-postgres"] }
+bigdecimal = { version = "0.4", features = ["serde"] }
+
+# UUID support
+uuid = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Metrics
+metrics = { workspace = true }
+
+# Bytes
+bytes = { workspace = true }
+
+# PostgreSQL backend
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"], optional = true }
+postgres-types = { version = "0.2", features = ["derive", "with-chrono-0_4", "with-uuid-1", "with-serde_json-1"], optional = true }
+tokio-postgres-rustls = { version = "0.13", optional = true }
+
+# MySQL backend
+mysql_async = { version = "0.34", default-features = false, optional = true }
+# flate2 required by mysql_async for compression support
+flate2 = { version = "1.0", default-features = true }
+
+# SQL Server backend
+tiberius = { version = "0.12", default-features = false, features = ["chrono"], optional = true }
+tokio-util = { version = "0.7", features = ["compat"], optional = true }
+
+# URL parsing
+url = { version = "2.5" }
+
+# Hex encoding
+hex = { version = "0.4" }
+
+# TLS
+rustls = { workspace = true, optional = true }
+rustls-pemfile = { workspace = true, optional = true }
+webpki-roots = { version = "0.26", optional = true }
+
+# Connection pooling
+deadpool = { version = "0.12", features = ["managed", "rt_tokio_1"] }
+
+# Hashing for idempotent writes
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres", "mysql", "mssql_server"] }
+tracing-subscriber = { workspace = true }
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+# Benchmarks will be added in a future iteration
+# [[bench]]
+# name = "batch_insert"
+# harness = false

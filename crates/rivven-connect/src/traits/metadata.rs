@@ -47,6 +47,8 @@ pub enum ConnectorCategory {
     DatabaseCdc,
     /// Batch database operations
     DatabaseBatch,
+    /// Query-based database polling (RDBC-style)
+    DatabaseQuery,
     /// NoSQL databases
     DatabaseNosql,
 
@@ -95,7 +97,9 @@ impl ConnectorCategory {
     /// Get the parent category (for hierarchical display)
     pub fn parent(&self) -> Option<&'static str> {
         match self {
-            Self::DatabaseCdc | Self::DatabaseBatch | Self::DatabaseNosql => Some("database"),
+            Self::DatabaseCdc | Self::DatabaseBatch | Self::DatabaseQuery | Self::DatabaseNosql => {
+                Some("database")
+            }
             Self::MessagingKafka | Self::MessagingMqtt | Self::MessagingCloud => Some("messaging"),
             Self::StorageObject | Self::StorageFile => Some("storage"),
             Self::Warehouse => Some("warehouse"),
@@ -112,6 +116,7 @@ impl ConnectorCategory {
         match self {
             Self::DatabaseCdc => "Database CDC",
             Self::DatabaseBatch => "Database Batch",
+            Self::DatabaseQuery => "Database Query (RDBC)",
             Self::DatabaseNosql => "NoSQL Databases",
             Self::MessagingKafka => "Kafka & Compatible",
             Self::MessagingMqtt => "MQTT & Lightweight",

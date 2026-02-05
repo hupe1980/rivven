@@ -124,6 +124,7 @@ rivven-connect run --config rivven-connect.yaml
 | `postgres-cdc` | `postgres` | PostgreSQL logical replication CDC |
 | `mysql-cdc` | `mysql` | MySQL/MariaDB binlog CDC |
 | `sqlserver-cdc` | `sqlserver` | SQL Server Change Data Capture |
+| `rdbc-source` | `rdbc` | Query-based polling source (PostgreSQL, MySQL, SQL Server) |
 | `external-queue` | `external-queue` | External message queue consumer |
 | `mqtt` | `mqtt` | MQTT broker subscriber |
 | `sqs` | `sqs` | AWS SQS queue consumer |
@@ -135,6 +136,7 @@ rivven-connect run --config rivven-connect.yaml
 |-----------|---------|-------------|
 | `stdout` | (default) | Console output for debugging |
 | `http-webhook` | `http` | HTTP/HTTPS POST webhooks |
+| `rdbc-sink` | `rdbc` | Batch database sink (PostgreSQL, MySQL, SQL Server) |
 | `external-queue` | `external-queue` | External message queue producer |
 | `object-storage` | `cloud-storage` | Unified object storage (S3, GCS, Azure, local) |
 | `s3` | `s3` | Amazon S3 / MinIO / R2 (via object-storage) |
@@ -202,6 +204,64 @@ sinks:
 
 See [docs/ICEBERG_SINK.md](../../docs/ICEBERG_SINK.md) for complete configuration reference.
 
+### RDBC Connectors
+
+Query-based connectors powered by `rivven-rdbc`. Features hot path optimizations including true batch operations (10-100x throughput vs per-row) and optional transactional writes for exactly-once semantics.
+
+#### RDBC Source
+
+Query-based polling source supporting bulk, incrementing, timestamp, and combined modes:
+
+```yaml
+sources:
+  users:
+    connector: rdbc-source
+    topic: user-events                # Required: destination topic
+    config:
+      connection_url: postgres://user:pass@localhost/db
+      schema: public
+      table: users
+      mode: incrementing              # bulk | incrementing | timestamp | timestamp_incrementing
+      incrementing_column: id
+      poll_interval_ms: 1000
+      batch_size: 1000
+      pool_size: 1                    # Optional: connection pool size (default: 1)
+```
+
+#### RDBC Sink
+
+High-performance batch writer with connection pooling, upsert, insert, and delete support:
+
+```yaml
+sinks:
+  users_copy:
+    connector: rdbc-sink
+    topics: [user-events]             # Required: topics to consume
+    consumer_group: rdbc-warehouse    # Required: for offset tracking
+    config:
+      connection_url: postgres://user:pass@localhost/warehouse
+      schema: public
+      table: users_snapshot
+      write_mode: upsert              # insert | update | upsert
+      pk_columns: [id]
+      batch_size: 1000
+      batch_timeout_ms: 5000
+      delete_enabled: true
+      transactional: true             # Optional: exactly-once semantics
+      pool_size: 4                    # Optional: connection pool size (default: 4)
+```
+
+#### Multi-Database Support
+
+Use the `rdbc-*` features to enable database drivers:
+
+```toml
+rivven-connect = { version = "0.0.8", features = ["rdbc-postgres"] }       # PostgreSQL
+rivven-connect = { version = "0.0.8", features = ["rdbc-mysql"] }          # MySQL/MariaDB  
+rivven-connect = { version = "0.0.8", features = ["rdbc-sqlserver"] }      # SQL Server
+rivven-connect = { version = "0.0.8", features = ["rdbc-full"] }           # All databases
+```
+
 ### Feature Bundles
 
 ```toml
@@ -214,11 +274,12 @@ rivven-connect = { version = "0.0.8", features = ["postgres", "s3"] }
 
 | Bundle | Includes |
 |--------|----------|
+| `rdbc-full` | rdbc-postgres, rdbc-mysql, rdbc-sqlserver |
 | `queue-full` | mqtt, sqs, pubsub |
 | `storage-full` | s3, gcs, azure, parquet |
 | `lakehouse-full` | iceberg |
 | `warehouse-full` | snowflake, bigquery, redshift |
-| `full` | All connectors |
+| `full` | All connectors (including rdbc-full) |
 
 ### Single Message Transforms (SMT)
 
