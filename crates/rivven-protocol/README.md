@@ -81,7 +81,7 @@ Enable protobuf serialization with the `protobuf` feature:
 
 ```toml
 [dependencies]
-rivven-protocol = { version = "0.0.7", features = ["protobuf"] }
+rivven-protocol = { version = "0.0.8", features = ["protobuf"] }
 ```
 
 ```rust

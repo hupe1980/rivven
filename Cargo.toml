@@ -20,7 +20,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.0.7"
+version = "0.0.8"
 edition = "2021"
 rust-version = "1.89"
 authors = ["hupe1980"]
@@ -89,16 +89,16 @@ rand = "0.8"
 uuid = { version = "1.6", features = ["v4"] }
 
 # Internal crates
-rivven-core = { version = "0.0.7", path = "crates/rivven-core", default-features = false }
-rivven-protocol = { version = "0.0.7", path = "crates/rivven-protocol" }
-rivvend = { version = "0.0.7", path = "crates/rivvend" }
-rivven-client = { version = "0.0.7", path = "crates/rivven-client" }
-rivven-cdc = { version = "0.0.7", path = "crates/rivven-cdc" }
-rivven-connect = { version = "0.0.7", path = "crates/rivven-connect" }
-rivven-connect-derive = { version = "0.0.7", path = "crates/rivven-connect-derive" }
-rivven-cluster = { version = "0.0.7", path = "crates/rivven-cluster" }
-rivven-schema = { version = "0.0.7", path = "crates/rivven-schema", default-features = false }
-rivven-operator = { version = "0.0.7", path = "crates/rivven-operator" }
+rivven-core = { version = "0.0.8", path = "crates/rivven-core", default-features = false }
+rivven-protocol = { version = "0.0.8", path = "crates/rivven-protocol" }
+rivvend = { version = "0.0.8", path = "crates/rivvend" }
+rivven-client = { version = "0.0.8", path = "crates/rivven-client" }
+rivven-cdc = { version = "0.0.8", path = "crates/rivven-cdc" }
+rivven-connect = { version = "0.0.8", path = "crates/rivven-connect" }
+rivven-connect-derive = { version = "0.0.8", path = "crates/rivven-connect-derive" }
+rivven-cluster = { version = "0.0.8", path = "crates/rivven-cluster" }
+rivven-schema = { version = "0.0.8", path = "crates/rivven-schema", default-features = false }
+rivven-operator = { version = "0.0.8", path = "crates/rivven-operator" }
 
 [profile.release]
 opt-level = 3
@@ -110,7 +110,7 @@ strip = true
 # Dependency Deduplication Analysis
 # ============================================================================
 # Run `cargo tree --duplicates` to see current duplicate count.
-# As of v0.0.7: ~79 duplicate versions (down from 82)
+# As of v0.0.8: ~79 duplicate versions (down from 82)
 #
 # These duplicates are UNAVOIDABLE due to upstream crate dependencies:
 #
