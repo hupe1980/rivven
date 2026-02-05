@@ -159,7 +159,7 @@ consumer:
 
 ---
 
-## Static Membership (KIP-345)
+## Static Membership
 
 Static membership provides **stable consumer identity** across restarts, essential for Kubernetes deployments.
 
@@ -230,7 +230,7 @@ spec:
 
 ---
 
-## Cooperative Rebalancing (KIP-429)
+## Cooperative Rebalancing
 
 Cooperative rebalancing eliminates **stop-the-world** rebalances by using incremental partition reassignment.
 

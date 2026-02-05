@@ -190,6 +190,7 @@ impl From<rivven_client::Error> for RivvenError {
             rivven_client::Error::AuthenticationFailed(msg) => {
                 Self::server(format!("Authentication failed: {}", msg))
             }
+            rivven_client::Error::ConfigError(msg) => Self::invalid_config(msg),
             rivven_client::Error::Other(msg) => Self::server(msg),
         }
     }

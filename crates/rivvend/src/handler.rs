@@ -19,11 +19,11 @@ pub struct RequestHandler {
     topic_manager: TopicManager,
     offset_manager: OffsetManager,
     partitioner: StickyPartitioner,
-    /// Idempotent producer state manager (KIP-98)
+    /// Idempotent producer state manager
     idempotent_manager: Arc<IdempotentProducerManager>,
-    /// Transaction coordinator (KIP-98 Transactions)
+    /// Transaction coordinator
     transaction_coordinator: Arc<TransactionCoordinator>,
-    /// Per-principal quota manager (Kafka parity)
+    /// Per-principal quota manager
     quota_manager: Arc<QuotaManager>,
     /// Topic configuration manager (Admin API)
     topic_config_manager: Arc<TopicConfigManager>,
@@ -178,7 +178,7 @@ impl RequestHandler {
                     .await
             }
 
-            // Idempotent Producer (KIP-98)
+            // Idempotent Producer
             Request::InitProducerId { producer_id } => {
                 self.handle_init_producer_id(producer_id).await
             }
@@ -204,7 +204,7 @@ impl RequestHandler {
                 .await
             }
 
-            // Native Transactions (KIP-98)
+            // Native Transactions
             Request::BeginTransaction {
                 txn_id,
                 producer_id,
@@ -735,7 +735,7 @@ impl RequestHandler {
     }
 
     // =========================================================================
-    // Idempotent Producer (KIP-98)
+    // Idempotent Producer
     // =========================================================================
 
     /// Initialize producer ID for idempotent producer
@@ -906,7 +906,7 @@ impl RequestHandler {
     }
 
     // =========================================================================
-    // Transaction Handlers (KIP-98 Transactions)
+    // Transaction Handlers
     // =========================================================================
 
     async fn handle_begin_transaction(

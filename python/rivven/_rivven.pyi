@@ -2,21 +2,70 @@
 
 from typing import Optional, List, Tuple, Any, AsyncIterator
 
-class RivvenError(Exception):
-    """Exception raised for Rivven operations"""
+# Exception hierarchy
+class RivvenException(Exception):
+    """Base exception for all Rivven errors"""
+    ...
+
+class ConnectionException(RivvenException):
+    """Connection-related errors (network, pool exhausted, circuit breaker)"""
+    ...
+
+class ServerException(RivvenException):
+    """Server-side errors"""
+    ...
+
+class TimeoutException(RivvenException):
+    """Request timeout errors"""
+    ...
+
+class SerializationException(RivvenException):
+    """Serialization/deserialization errors"""
+    ...
+
+class ConfigException(RivvenException):
+    """Configuration errors"""
+    ...
+
+# Backward-compatible alias
+RivvenError = RivvenException
+
+class ProducerState:
+    """State for exactly-once semantics producers.
+    
+    Contains producer_id, epoch, and sequence number tracking.
+    Returned by init_producer_id() and required for transactional operations.
+    """
     
     @property
-    def message(self) -> str:
-        """Error message"""
+    def producer_id(self) -> int:
+        """Get the producer ID"""
         ...
     
     @property
-    def kind(self) -> str:
-        """Error category (Connection, Server, Timeout, etc.)"""
+    def producer_epoch(self) -> int:
+        """Get the producer epoch"""
+        ...
+    
+    @property
+    def next_sequence(self) -> int:
+        """Get and increment the next sequence number"""
         ...
 
 class Message:
     """A message consumed from a Rivven topic"""
+    
+    def __init__(
+        self,
+        value: bytes,
+        offset: int,
+        timestamp: int,
+        partition: int,
+        topic: str,
+        key: Optional[bytes] = None,
+    ) -> None:
+        """Create a new Message (primarily for internal use)"""
+        ...
     
     @property
     def value(self) -> bytes:
@@ -55,9 +104,18 @@ class Message:
     def key_str(self) -> Optional[str]:
         """Get key as UTF-8 string"""
         ...
+    
+    def size(self) -> int:
+        """Get total size of message payload (value + key) in bytes"""
+        ...
 
 class Producer:
     """Producer for publishing messages to a topic"""
+    
+    @property
+    def topic(self) -> str:
+        """Get the topic this producer is bound to"""
+        ...
     
     async def send(
         self,
@@ -78,19 +136,36 @@ class Producer:
     
     async def send_batch(
         self,
-        values: List[bytes],
-        keys: Optional[List[Optional[bytes]]] = None,
+        messages: List[Tuple[bytes, Optional[bytes]]],
     ) -> List[int]:
-        """Send multiple messages and return their offsets"""
+        """Send multiple messages (value, key) and return their offsets"""
         ...
 
 class Consumer:
     """Consumer for reading messages from a topic"""
     
+    @property
+    def topic(self) -> str:
+        """Get the topic being consumed"""
+        ...
+    
+    @property
+    def partition(self) -> int:
+        """Get the partition being consumed"""
+        ...
+    
+    @property
+    def group(self) -> Optional[str]:
+        """Get the consumer group (if any)"""
+        ...
+    
+    async def current_offset(self) -> int:
+        """Get the current offset"""
+        ...
+    
     async def fetch(
         self,
-        max_messages: int = 100,
-        timeout_ms: int = 5000,
+        max_messages: Optional[int] = None,
     ) -> List[Message]:
         """Fetch a batch of messages"""
         ...
@@ -99,20 +174,20 @@ class Consumer:
         """Commit current offsets"""
         ...
     
-    async def seek(self, partition: int, offset: int) -> None:
-        """Seek to a specific offset in a partition"""
+    async def seek(self, offset: int) -> None:
+        """Seek to a specific offset"""
         ...
     
-    async def seek_to_beginning(self, partition: int) -> None:
-        """Seek to the beginning of a partition"""
+    async def seek_to_beginning(self) -> None:
+        """Seek to the beginning of the partition"""
         ...
     
-    async def seek_to_end(self, partition: int) -> None:
-        """Seek to the end of a partition"""
+    async def seek_to_end(self) -> None:
+        """Seek to the end of the partition"""
         ...
     
-    async def get_offset_bounds(self, partition: int) -> Tuple[int, int]:
-        """Get the earliest and latest offsets for a partition"""
+    async def get_offset_bounds(self) -> Tuple[int, int]:
+        """Get the earliest and latest offsets for the partition"""
         ...
     
     def __aiter__(self) -> AsyncIterator[Message]:
@@ -155,13 +230,26 @@ class RivvenClient:
         """Get a producer for the specified topic"""
         ...
     
-    def consumer(
+    async def consumer(
         self,
         topic: str,
-        group_id: Optional[str] = None,
+        partition: int = 0,
+        group: Optional[str] = None,
+        start_offset: Optional[int] = None,
+        batch_size: int = 100,
         auto_commit: bool = True,
     ) -> Consumer:
         """Get a consumer for the specified topic"""
+        ...
+    
+    # Authentication
+    
+    async def authenticate(self, username: str, password: str) -> Tuple[str, int]:
+        """Authenticate with username/password. Returns (session_id, expires_in)"""
+        ...
+    
+    async def authenticate_scram(self, username: str, password: str) -> Tuple[str, int]:
+        """Authenticate with SCRAM-SHA-256. Returns (session_id, expires_in)"""
         ...
     
     # Consumer Groups
@@ -180,20 +268,20 @@ class RivvenClient:
     
     async def commit_offset(
         self,
+        group: str,
         topic: str,
         partition: int,
         offset: int,
-        group_id: str,
     ) -> None:
         """Commit an offset for a consumer group"""
         ...
     
     async def get_offset(
         self,
+        group: str,
         topic: str,
         partition: int,
-        group_id: str,
-    ) -> int:
+    ) -> Optional[int]:
         """Get the committed offset for a consumer group"""
         ...
     
@@ -211,44 +299,131 @@ class RivvenClient:
     async def consume(
         self,
         topic: str,
-        max_messages: int = 100,
-        timeout_ms: int = 5000,
+        partition: int,
+        offset: int,
+        max_messages: int,
     ) -> List[Message]:
         """Consume messages from a topic"""
         ...
     
-    # Schema Registry
+    # Admin Operations
     
-    async def register_schema(
+    async def get_offset_for_timestamp(
         self,
-        subject: str,
-        schema: str,
-    ) -> int:
-        """Register a schema and return its ID"""
+        topic: str,
+        partition: int,
+        timestamp_ms: int,
+    ) -> Optional[int]:
+        """Get the offset for a given timestamp"""
         ...
     
-    async def get_schema(self, schema_id: int) -> str:
-        """Get a schema by ID"""
+    async def describe_topic_configs(self, topic: str) -> dict[str, str]:
+        """Get topic configuration as key-value pairs"""
+        ...
+    
+    async def alter_topic_config(self, topic: str, key: str, value: str) -> None:
+        """Alter a topic configuration value"""
+        ...
+    
+    async def create_partitions(self, topic: str, new_total: int) -> int:
+        """Add partitions to a topic. Returns new partition count."""
+        ...
+    
+    async def delete_records(
+        self,
+        topic: str,
+        partition: int,
+        before_offset: int,
+    ) -> int:
+        """Delete records before an offset. Returns new low watermark."""
+        ...
+    
+    async def delete_records_batch(
+        self,
+        topic: str,
+        partition_offsets: List[Tuple[int, int]],
+    ) -> List[Tuple[int, int, Optional[str]]]:
+        """Delete records for multiple partitions.
+        
+        Args:
+            topic: Topic name
+            partition_offsets: List of (partition, before_offset) tuples
+        
+        Returns:
+            List of (partition, low_watermark, error) tuples
+        """
+        ...
+    
+    # Transaction Support
+    
+    async def init_producer_id(
+        self,
+        transactional_id: Optional[str] = None,
+    ) -> ProducerState:
+        """Initialize producer for idempotent/transactional producing.
+        
+        Returns:
+            ProducerState containing producer_id, epoch, and sequence tracking
+        """
+        ...
+    
+    async def publish_idempotent(
+        self,
+        topic: str,
+        value: bytes,
+        producer_state: ProducerState,
+        key: Optional[bytes] = None,
+    ) -> int:
+        """Publish with exactly-once semantics. Returns offset."""
+        ...
+    
+    async def begin_transaction(
+        self,
+        transactional_id: str,
+        producer_state: ProducerState,
+    ) -> None:
+        """Begin a transaction"""
+        ...
+    
+    async def add_partitions_to_txn(
+        self,
+        transactional_id: str,
+        producer_state: ProducerState,
+        topic_partitions: List[Tuple[str, int]],
+    ) -> None:
+        """Add topic-partitions to a transaction"""
+        ...
+    
+    async def commit_transaction(
+        self,
+        transactional_id: str,
+        producer_state: ProducerState,
+    ) -> None:
+        """Commit a transaction"""
+        ...
+    
+    async def abort_transaction(
+        self,
+        transactional_id: str,
+        producer_state: ProducerState,
+    ) -> None:
+        """Abort a transaction"""
         ...
     
     # Health
     
-    async def ping(self) -> bool:
+    async def ping(self) -> None:
         """Check if the server is reachable"""
         ...
 
 # Module-level functions
 
-async def connect(
-    addr: str,
-    timeout_ms: int = 5000,
-) -> RivvenClient:
+async def connect(addr: str) -> RivvenClient:
     """
     Connect to a Rivven server.
     
     Args:
         addr: Server address (e.g., "localhost:9092")
-        timeout_ms: Connection timeout in milliseconds
     
     Returns:
         RivvenClient instance
@@ -260,20 +435,20 @@ async def connect(
 
 async def connect_tls(
     addr: str,
-    ca_cert: str,
-    client_cert: Optional[str] = None,
-    client_key: Optional[str] = None,
-    timeout_ms: int = 5000,
+    ca_cert_path: str,
+    server_name: str,
+    client_cert_path: Optional[str] = None,
+    client_key_path: Optional[str] = None,
 ) -> RivvenClient:
     """
     Connect to a Rivven server with TLS.
     
     Args:
         addr: Server address (e.g., "localhost:9093")
-        ca_cert: Path to CA certificate file
-        client_cert: Optional path to client certificate file
-        client_key: Optional path to client key file
-        timeout_ms: Connection timeout in milliseconds
+        ca_cert_path: Path to CA certificate file
+        server_name: Server hostname for certificate verification
+        client_cert_path: Optional path to client certificate file
+        client_key_path: Optional path to client key file
     
     Returns:
         RivvenClient instance

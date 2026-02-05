@@ -7,7 +7,7 @@
 pub use rivven_protocol::{
     BrokerInfo, DeleteRecordsResult, MessageData, PartitionMetadata, QuotaAlteration, QuotaEntry,
     Request, Response, TopicConfigDescription, TopicConfigEntry, TopicConfigValue, TopicMetadata,
-    MAX_MESSAGE_SIZE, PROTOCOL_VERSION,
+    WireFormat, MAX_MESSAGE_SIZE, PROTOCOL_VERSION,
 };
 
 // Re-export error types for convenience

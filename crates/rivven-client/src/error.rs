@@ -5,8 +5,11 @@ pub enum Error {
     #[error("Connection error: {0}")]
     ConnectionError(String),
 
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
+
     #[error("IO error: {0}")]
-    IoError(#[from] std::io::Error),
+    IoError(String),
 
     #[error("Serialization error: {0}")]
     SerializationError(#[from] postcard::Error),
@@ -43,6 +46,12 @@ pub enum Error {
 
     #[error("{0}")]
     Other(String),
+}
+
+impl From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Self {
+        Error::IoError(err.to_string())
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

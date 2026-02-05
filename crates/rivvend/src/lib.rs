@@ -28,7 +28,6 @@ pub mod protocol;
 pub mod raft_api;
 pub mod rate_limiter;
 pub mod secure_server;
-pub mod server;
 
 #[cfg(feature = "dashboard")]
 pub mod dashboard;
@@ -47,7 +46,6 @@ pub use rate_limiter::{
 pub use secure_server::{
     ConnectionSecurityContext, SecureServer, SecureServerBuilder, SecureServerConfig,
 };
-pub use server::Server;
 
 #[cfg(feature = "dashboard")]
 pub use dashboard::{create_dashboard_router, DashboardData, DashboardState};

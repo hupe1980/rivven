@@ -1,6 +1,6 @@
 //! Admin API Integration Tests
 //!
-//! Tests for the Rivven Admin API (Kafka KIP-195/KIP-226 parity).
+//! Tests for the Rivven Admin API.
 //! Verifies AlterTopicConfig, CreatePartitions, DeleteRecords, DescribeTopicConfigs.
 //!
 //! Run with: cargo test -p rivven-integration-tests --test admin_api -- --nocapture

@@ -122,7 +122,7 @@ pub enum Request {
         partition: u32,
         offset: u64,
         max_messages: usize,
-        /// Isolation level for transactional reads (KIP-98)
+        /// Isolation level for transactional reads
         /// None = read_uncommitted (default, backward compatible)
         /// Some(0) = read_uncommitted
         /// Some(1) = read_committed (filters aborted transaction messages)
@@ -190,7 +190,7 @@ pub enum Request {
     },
 
     // =========================================================================
-    // Idempotent Producer (KIP-98)
+    // Idempotent Producer
     // =========================================================================
     /// Initialize idempotent producer (request producer ID and epoch)
     ///
@@ -220,7 +220,7 @@ pub enum Request {
     },
 
     // =========================================================================
-    // Native Transactions (KIP-98 Transactions)
+    // Native Transactions
     // =========================================================================
     /// Begin a new transaction
     BeginTransaction {
@@ -457,7 +457,7 @@ pub enum Response {
     Ok,
 
     // =========================================================================
-    // Idempotent Producer (KIP-98)
+    // Idempotent Producer
     // =========================================================================
     /// Producer ID initialized
     ProducerIdInitialized {
@@ -478,7 +478,7 @@ pub enum Response {
     },
 
     // =========================================================================
-    // Native Transactions (KIP-98 Transactions)
+    // Native Transactions
     // =========================================================================
     /// Transaction started successfully
     TransactionStarted {
@@ -582,26 +582,186 @@ pub enum Response {
 }
 
 impl Request {
-    /// Serialize request to bytes
+    /// Serialize request to bytes (postcard format, no format prefix)
+    ///
+    /// For internal Rust-to-Rust communication where format is known.
+    /// Use `to_wire()` for wire transmission with format detection support.
+    #[inline]
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         Ok(postcard::to_allocvec(self)?)
     }
 
-    /// Deserialize request from bytes
+    /// Deserialize request from bytes (postcard format)
+    ///
+    /// For internal Rust-to-Rust communication where format is known.
+    /// Use `from_wire()` for wire transmission with format detection support.
+    #[inline]
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
         Ok(postcard::from_bytes(data)?)
+    }
+
+    /// Serialize request with wire format prefix
+    ///
+    /// Wire format: `[format_byte][payload]`
+    /// - format_byte: 0x00 = postcard, 0x01 = protobuf
+    /// - payload: serialized message
+    ///
+    /// Note: Length prefix is NOT included (handled by transport layer)
+    #[inline]
+    pub fn to_wire(&self, format: crate::WireFormat) -> Result<Vec<u8>> {
+        match format {
+            crate::WireFormat::Postcard => {
+                let payload = postcard::to_allocvec(self)?;
+                let mut result = Vec::with_capacity(1 + payload.len());
+                result.push(format.as_byte());
+                result.extend_from_slice(&payload);
+                Ok(result)
+            }
+            crate::WireFormat::Protobuf => {
+                // Protobuf requires the `protobuf` feature
+                #[cfg(feature = "protobuf")]
+                {
+                    let payload = self.to_proto_bytes()?;
+                    let mut result = Vec::with_capacity(1 + payload.len());
+                    result.push(format.as_byte());
+                    result.extend_from_slice(&payload);
+                    Ok(result)
+                }
+                #[cfg(not(feature = "protobuf"))]
+                {
+                    Err(crate::ProtocolError::Serialization(
+                        "Protobuf support requires the 'protobuf' feature".into(),
+                    ))
+                }
+            }
+        }
+    }
+
+    /// Deserialize request with format auto-detection
+    ///
+    /// Detects format from first byte and deserializes accordingly.
+    /// Returns the deserialized request and the detected format.
+    #[inline]
+    pub fn from_wire(data: &[u8]) -> Result<(Self, crate::WireFormat)> {
+        if data.is_empty() {
+            return Err(crate::ProtocolError::Serialization(
+                "Empty wire data".into(),
+            ));
+        }
+
+        let format_byte = data[0];
+        let format = crate::WireFormat::from_byte(format_byte).ok_or_else(|| {
+            crate::ProtocolError::Serialization(format!(
+                "Unknown wire format: 0x{:02x}",
+                format_byte
+            ))
+        })?;
+
+        let payload = &data[1..];
+
+        match format {
+            crate::WireFormat::Postcard => {
+                let request = postcard::from_bytes(payload)?;
+                Ok((request, format))
+            }
+            crate::WireFormat::Protobuf => {
+                #[cfg(feature = "protobuf")]
+                {
+                    let request = Self::from_proto_bytes(payload)?;
+                    Ok((request, format))
+                }
+                #[cfg(not(feature = "protobuf"))]
+                {
+                    Err(crate::ProtocolError::Serialization(
+                        "Protobuf support requires the 'protobuf' feature".into(),
+                    ))
+                }
+            }
+        }
     }
 }
 
 impl Response {
-    /// Serialize response to bytes
+    /// Serialize response to bytes (postcard format, no format prefix)
+    #[inline]
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         Ok(postcard::to_allocvec(self)?)
     }
 
-    /// Deserialize response from bytes
+    /// Deserialize response from bytes (postcard format)
+    #[inline]
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
         Ok(postcard::from_bytes(data)?)
+    }
+
+    /// Serialize response with wire format prefix
+    #[inline]
+    pub fn to_wire(&self, format: crate::WireFormat) -> Result<Vec<u8>> {
+        match format {
+            crate::WireFormat::Postcard => {
+                let payload = postcard::to_allocvec(self)?;
+                let mut result = Vec::with_capacity(1 + payload.len());
+                result.push(format.as_byte());
+                result.extend_from_slice(&payload);
+                Ok(result)
+            }
+            crate::WireFormat::Protobuf => {
+                #[cfg(feature = "protobuf")]
+                {
+                    let payload = self.to_proto_bytes()?;
+                    let mut result = Vec::with_capacity(1 + payload.len());
+                    result.push(format.as_byte());
+                    result.extend_from_slice(&payload);
+                    Ok(result)
+                }
+                #[cfg(not(feature = "protobuf"))]
+                {
+                    Err(crate::ProtocolError::Serialization(
+                        "Protobuf support requires the 'protobuf' feature".into(),
+                    ))
+                }
+            }
+        }
+    }
+
+    /// Deserialize response with format auto-detection
+    #[inline]
+    pub fn from_wire(data: &[u8]) -> Result<(Self, crate::WireFormat)> {
+        if data.is_empty() {
+            return Err(crate::ProtocolError::Serialization(
+                "Empty wire data".into(),
+            ));
+        }
+
+        let format_byte = data[0];
+        let format = crate::WireFormat::from_byte(format_byte).ok_or_else(|| {
+            crate::ProtocolError::Serialization(format!(
+                "Unknown wire format: 0x{:02x}",
+                format_byte
+            ))
+        })?;
+
+        let payload = &data[1..];
+
+        match format {
+            crate::WireFormat::Postcard => {
+                let response = postcard::from_bytes(payload)?;
+                Ok((response, format))
+            }
+            crate::WireFormat::Protobuf => {
+                #[cfg(feature = "protobuf")]
+                {
+                    let response = Self::from_proto_bytes(payload)?;
+                    Ok((response, format))
+                }
+                #[cfg(not(feature = "protobuf"))]
+                {
+                    Err(crate::ProtocolError::Serialization(
+                        "Protobuf support requires the 'protobuf' feature".into(),
+                    ))
+                }
+            }
+        }
     }
 }
 
@@ -651,6 +811,94 @@ mod tests {
             let decoded = Response::from_bytes(&bytes).unwrap();
             assert!(!bytes.is_empty());
             let _ = decoded;
+        }
+    }
+
+    #[test]
+    fn test_request_wire_roundtrip() {
+        let request = Request::Ping;
+
+        // Serialize with format prefix
+        let wire_bytes = request.to_wire(crate::WireFormat::Postcard).unwrap();
+
+        // First byte should be format identifier
+        assert_eq!(wire_bytes[0], 0x00); // Postcard format
+
+        // Deserialize with auto-detection
+        let (decoded, format) = Request::from_wire(&wire_bytes).unwrap();
+        assert_eq!(format, crate::WireFormat::Postcard);
+        assert!(matches!(decoded, Request::Ping));
+    }
+
+    #[test]
+    fn test_response_wire_roundtrip() {
+        let response = Response::Pong;
+
+        // Serialize with format prefix
+        let wire_bytes = response.to_wire(crate::WireFormat::Postcard).unwrap();
+
+        // First byte should be format identifier
+        assert_eq!(wire_bytes[0], 0x00); // Postcard format
+
+        // Deserialize with auto-detection
+        let (decoded, format) = Response::from_wire(&wire_bytes).unwrap();
+        assert_eq!(format, crate::WireFormat::Postcard);
+        assert!(matches!(decoded, Response::Pong));
+    }
+
+    #[test]
+    fn test_wire_format_empty_data() {
+        let result = Request::from_wire(&[]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_wire_format_complex_request() {
+        use bytes::Bytes;
+
+        let request = Request::Publish {
+            topic: "test-topic".to_string(),
+            partition: Some(3),
+            key: Some(Bytes::from("my-key")),
+            value: Bytes::from("hello world"),
+        };
+
+        let wire_bytes = request.to_wire(crate::WireFormat::Postcard).unwrap();
+        assert_eq!(wire_bytes[0], 0x00);
+
+        let (decoded, format) = Request::from_wire(&wire_bytes).unwrap();
+        assert_eq!(format, crate::WireFormat::Postcard);
+
+        // Verify the decoded request matches
+        if let Request::Publish {
+            topic, partition, ..
+        } = decoded
+        {
+            assert_eq!(topic, "test-topic");
+            assert_eq!(partition, Some(3));
+        } else {
+            panic!("Expected Publish request");
+        }
+    }
+
+    #[test]
+    fn test_wire_format_complex_response() {
+        let response = Response::Published {
+            offset: 12345,
+            partition: 7,
+        };
+
+        let wire_bytes = response.to_wire(crate::WireFormat::Postcard).unwrap();
+        assert_eq!(wire_bytes[0], 0x00);
+
+        let (decoded, format) = Response::from_wire(&wire_bytes).unwrap();
+        assert_eq!(format, crate::WireFormat::Postcard);
+
+        if let Response::Published { offset, partition } = decoded {
+            assert_eq!(offset, 12345);
+            assert_eq!(partition, 7);
+        } else {
+            panic!("Expected Published response");
         }
     }
 }

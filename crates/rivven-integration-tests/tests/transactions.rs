@@ -1,6 +1,6 @@
 //! Transaction Integration Tests
 //!
-//! Tests for Rivven's native transaction support (Kafka KIP-98 parity).
+//! Tests for Rivven's native transaction support.
 //! Verifies exactly-once semantics with cross-topic atomic writes.
 //!
 //! Run with: cargo test -p rivven-integration-tests --test transactions -- --nocapture
@@ -752,7 +752,7 @@ async fn test_non_transactional_publish() -> Result<()> {
 }
 
 // =============================================================================
-// READ COMMITTED ISOLATION TESTS (KIP-98)
+// READ COMMITTED ISOLATION TESTS
 // =============================================================================
 
 /// Test that read_committed filters aborted transaction messages

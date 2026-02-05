@@ -1,6 +1,6 @@
 //! Quota Integration Tests
 //!
-//! Tests for per-principal quotas (Kafka KIP-55 parity).
+//! Tests for per-principal quotas.
 //! Verifies throughput limiting on a per-user, per-client-id, or per-consumer-group basis.
 //!
 //! Run with: cargo test -p rivven-integration-tests --test quotas -- --nocapture

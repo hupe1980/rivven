@@ -48,7 +48,7 @@ use rivven_core::{
 
 use crate::auth_handler::{AuthenticatedHandler, ConnectionAuth};
 use crate::handler::RequestHandler;
-use crate::protocol::{Request, Response};
+use crate::protocol::{Request, Response, WireFormat};
 
 // ============================================================================
 // Configuration
@@ -575,7 +575,9 @@ impl SecureServer {
                 let response = Response::Error {
                     message: format!("MESSAGE_TOO_LARGE: {} bytes exceeds limit", msg_len),
                 };
-                self.send_response(&mut stream, &response).await?;
+                // Default to Postcard for error responses before we parse format
+                self.send_response_with_format(&mut stream, &response, WireFormat::Postcard)
+                    .await?;
                 continue;
             }
 
@@ -596,15 +598,17 @@ impl SecureServer {
                 }
             }
 
-            // Parse request
-            let request = match Request::from_bytes(&buffer) {
-                Ok(req) => req,
+            // Parse request with wire format detection
+            let (request, wire_format) = match Request::from_wire(&buffer) {
+                Ok((req, fmt)) => (req, fmt),
                 Err(e) => {
                     warn!("Invalid request from {}: {}", client_addr, e);
                     let response = Response::Error {
                         message: format!("INVALID_REQUEST: {}", e),
                     };
-                    self.send_response(&mut stream, &response).await?;
+                    // Default to Postcard for error responses if we couldn't parse the format
+                    self.send_response_with_format(&mut stream, &response, WireFormat::Postcard)
+                        .await?;
                     continue;
                 }
             };
@@ -614,17 +618,23 @@ impl SecureServer {
                 .handle(request, &mut security_ctx.auth_state, &client_ip)
                 .await;
 
-            // Send response
-            self.send_response(&mut stream, &response).await?;
+            // Send response in the same format the client used
+            self.send_response_with_format(&mut stream, &response, wire_format)
+                .await?;
         }
     }
 
-    /// Send a response
-    async fn send_response<S>(&self, stream: &mut S, response: &Response) -> anyhow::Result<()>
+    /// Send a response with the specified wire format
+    async fn send_response_with_format<S>(
+        &self,
+        stream: &mut S,
+        response: &Response,
+        format: WireFormat,
+    ) -> anyhow::Result<()>
     where
         S: AsyncWrite + Unpin,
     {
-        let response_bytes = response.to_bytes()?;
+        let response_bytes = response.to_wire(format)?;
         let len = response_bytes.len() as u32;
         stream.write_all(&len.to_be_bytes()).await?;
         stream.write_all(&response_bytes).await?;

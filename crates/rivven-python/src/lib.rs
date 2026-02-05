@@ -38,6 +38,7 @@ mod consumer;
 mod error;
 mod message;
 mod producer;
+mod producer_state;
 
 use pyo3::prelude::*;
 
@@ -46,6 +47,7 @@ pub use consumer::Consumer;
 pub use error::RivvenError;
 pub use message::Message;
 pub use producer::Producer;
+pub use producer_state::ProducerState;
 
 use error::IntoPyErr;
 
@@ -157,6 +159,7 @@ fn _rivven(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Message>()?;
     m.add_class::<Consumer>()?;
     m.add_class::<Producer>()?;
+    m.add_class::<ProducerState>()?;
 
     Ok(())
 }

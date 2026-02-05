@@ -20,8 +20,9 @@ rivven-core = { workspace = true, features = ["cedar", "tls"] }
 rivven-cdc = { workspace = true, features = ["postgres", "mysql", "mariadb"] }
 rivven-client = { workspace = true, features = ["tls"] }
 rivven-connect = { workspace = true }
+rivven-protocol = { workspace = true, features = ["protobuf"] }
 rivven-schema = { workspace = true, features = ["server", "avro", "auth"] }
-rivvend = { workspace = true, features = ["tls"] }
+rivvend = { workspace = true, features = ["tls", "protobuf"] }
 
 # TLS crypto provider - needed for runtime initialization
 rustls = { workspace = true, features = ["aws-lc-rs"] }
@@ -49,6 +50,9 @@ testcontainers-modules = { version = "0.11", features = ["postgres", "mysql", "m
 tokio-postgres = "0.7"
 mysql_async = { version = "0.34", default-features = false }
 # Note: rdkafka removed - requires cmake and librdkafka; add if needed for Kafka comparison tests
+
+# CLI parsing (for creating test CLI instances)
+clap = { workspace = true }
 
 # HTTP client for API testing
 reqwest = { workspace = true }
@@ -133,3 +137,7 @@ path = "tests/compression.rs"
 [[test]]
 name = "tiered_storage"
 path = "tests/tiered_storage.rs"
+
+[[test]]
+name = "protobuf_protocol"
+path = "tests/protobuf_protocol.rs"

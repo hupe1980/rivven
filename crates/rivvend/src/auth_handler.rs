@@ -427,7 +427,7 @@ impl AuthenticatedHandler {
                 ResourceType::ConsumerGroup(consumer_group.clone()),
                 Permission::Delete,
             ),
-            // Idempotent Producer (KIP-98)
+            // Idempotent Producer
             Request::InitProducerId { .. } => {
                 // InitProducerId requires IdempotentWrite on Cluster
                 (ResourceType::Cluster, Permission::IdempotentWrite)
@@ -457,7 +457,7 @@ impl AuthenticatedHandler {
                 // Then check topic Write permission
                 (ResourceType::Topic(topic.clone()), Permission::Write)
             }
-            // Native Transactions (KIP-98 Transactions)
+            // Native Transactions
             Request::BeginTransaction { .. }
             | Request::AddPartitionsToTxn { .. }
             | Request::AddOffsetsToTxn { .. }

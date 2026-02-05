@@ -13,6 +13,7 @@ cedar = ["rivven-core/cedar"]
 oidc = ["rivven-core/oidc"]
 tls = ["rivven-core/tls"]
 dashboard = ["rust-embed", "mime_guess"]
+protobuf = ["rivven-protocol/protobuf"]
 
 [[bin]]
 name = "rivvend"

@@ -24,7 +24,9 @@
 use crate::cli::Cli;
 use crate::handler::RequestHandler;
 use crate::partitioner::StickyPartitionerConfig;
-use crate::protocol::{BrokerInfo, PartitionMetadata, Request, Response, TopicMetadata};
+use crate::protocol::{
+    BrokerInfo, PartitionMetadata, Request, Response, TopicMetadata, WireFormat,
+};
 use crate::raft_api::RaftApiState;
 use bytes::{Bytes, BytesMut};
 use rivven_cluster::{
@@ -1085,7 +1087,8 @@ where
                     msg_len, max_request_size
                 ),
             };
-            if let Ok(bytes) = error_response.to_bytes() {
+            // Use postcard format since we haven't parsed the request yet
+            if let Ok(bytes) = error_response.to_wire(WireFormat::Postcard) {
                 let len = bytes.len() as u32;
                 let _ = stream.write_all(&len.to_be_bytes()).await;
                 let _ = stream.write_all(&bytes).await;
@@ -1105,7 +1108,8 @@ where
                 let error_response = Response::Error {
                     message: "RATE_LIMIT_EXCEEDED: Too many requests".to_string(),
                 };
-                if let Ok(bytes) = error_response.to_bytes() {
+                // Use postcard format since we haven't parsed the request yet
+                if let Ok(bytes) = error_response.to_wire(WireFormat::Postcard) {
                     let len = bytes.len() as u32;
                     let _ = stream.write_all(&len.to_be_bytes()).await;
                     let _ = stream.write_all(&bytes).await;
@@ -1136,9 +1140,9 @@ where
             }
         }
 
-        // Deserialize request
-        let request = match Request::from_bytes(&buffer) {
-            Ok(req) => req,
+        // Deserialize request using wire format
+        let (request, wire_format) = match Request::from_wire(&buffer) {
+            Ok((req, fmt)) => (req, fmt),
             Err(e) => {
                 error!("Failed to deserialize request from {}: {}", client_ip, e);
                 continue;
@@ -1151,8 +1155,8 @@ where
         // Route and handle request
         let response = router.route(request).await;
 
-        // Serialize response
-        let response_bytes = match response.to_bytes() {
+        // Serialize response using same wire format as request
+        let response_bytes = match response.to_wire(wire_format) {
             Ok(bytes) => bytes,
             Err(e) => {
                 error!("Failed to serialize response: {}", e);

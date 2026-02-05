@@ -77,7 +77,8 @@ This multi-binary architecture provides **security isolation**—database creden
 |:------|:--------|:------------|
 | `rivven-core` | Storage engine | Topics, partitions, consumer groups, compression |
 | `rivvend` | Broker binary | TCP server, protocol handling, auth |
-| `rivven-client` | Rust client | Native async client library |
+| `rivven-client` | Rust client | Production client with pooling, batching, retries |
+| `rivven-protocol` | Wire protocol | postcard + protobuf serialization |
 | `rivven` | CLI | Command-line interface |
 | `rivven-cluster` | Distributed | Raft consensus, SWIM gossip, partitioning |
 | `rivven-cdc` | CDC library | PostgreSQL and MySQL replication primitives |
@@ -482,7 +483,7 @@ Consumer groups track offsets per topic-partition:
 
 Rivven provides exactly-once semantics through two complementary features:
 
-### Idempotent Producer (KIP-98)
+### Idempotent Producer
 
 Eliminates duplicates during retries without full transactions:
 
@@ -567,12 +568,55 @@ This ensures:
 
 ### Wire Format
 
-Rivven uses a simple length-prefixed binary protocol:
+Rivven uses a **format-prefixed** binary protocol for cross-language support:
 
 ```
-┌────────────┬──────────────────────────┐
-│ Length (4B)│ Postcard-encoded payload │
-└────────────┴──────────────────────────┘
+┌────────────┬─────────────┬──────────────────────────┐
+│ Length (4B)│ Format (1B) │ Serialized payload       │
+│ Big-endian │ 0x00=post   │ Request or Response      │
+│ u32        │ 0x01=proto  │                          │
+└────────────┴─────────────┴──────────────────────────┘
+```
+
+- **Length**: 4-byte big-endian unsigned integer (includes format byte)
+- **Format**: 1-byte wire format identifier
+  - `0x00`: postcard (Rust-native, ~50ns serialize)
+  - `0x01`: protobuf (cross-language compatible)
+- **Payload**: Serialized Request or Response
+
+### Format Auto-Detection
+
+The server **auto-detects** the wire format from the first byte and responds in the same format:
+
+```rust
+// Rust client (postcard - fastest)
+let wire_bytes = request.to_wire(WireFormat::Postcard)?;
+let (response, format) = Response::from_wire(&response_bytes)?;
+
+// Non-Rust clients use format byte 0x01 for protobuf
+```
+
+### Cross-Language Support
+
+| Format | Feature | Languages | Use Case |
+|:-------|:--------|:----------|:---------|
+| **postcard** | default | Rust | Maximum performance |
+| **protobuf** | `protobuf` | Go, Java, Python, C++ | Cross-language |
+
+| Language | Status | Approach |
+|:---------|:-------|:---------|
+| **Rust** | ✅ Native | `rivven-client` crate |
+| **Python** | ✅ Bindings | `rivven-python` (PyO3) |
+| **Go** | 🔜 Planned | Use proto file in `rivven-protocol` |
+| **Java** | 🔜 Planned | Use proto file in `rivven-protocol` |
+
+**Protobuf Usage:**
+```bash
+# Generate Go client
+protoc --go_out=. crates/rivven-protocol/proto/rivven.proto
+
+# Generate Java client
+protoc --java_out=. crates/rivven-protocol/proto/rivven.proto
 ```
 
 ### Request Types
@@ -653,27 +697,24 @@ rivven_cdc_events_total{connector="postgres"} 9999
 
 ### Web Dashboard
 
-The optional dashboard is built with **Leptos** (Rust → WebAssembly) and provides:
+The optional dashboard is a **lightweight static HTML/JavaScript** UI embedded in the binary:
 
-- Topic overview and message counts
+- Real-time cluster overview (auto-refresh every 5s)
+- Topic management and monitoring
 - Consumer group status with lag indicators
-- Cluster health and node membership
-- Raft state visualization
+- Cluster node visualization
 - Prometheus metrics integration
 
-**Build the dashboard:**
+**Enable the dashboard:**
 
 ```bash
-# Install trunk (Leptos build tool)
-cargo install trunk
-rustup target add wasm32-unknown-unknown
+# Start rivvend with dashboard enabled
+rivvend --data-dir ./data --dashboard
 
-# Build and install dashboard assets
-just dashboard-install
-
-# Rebuild server with embedded dashboard
-cargo build -p rivvend --release
+# Dashboard available at http://localhost:8080/
 ```
+
+**Security:** The dashboard is disabled by default. In production, enable authentication via reverse proxy or mTLS.
 
 ---
 

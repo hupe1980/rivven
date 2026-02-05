@@ -311,8 +311,8 @@ impl Client {
 
     /// Send a request and receive a response
     async fn send_request(&mut self, request: Request) -> Result<Response> {
-        // Serialize request
-        let request_bytes = request.to_bytes()?;
+        // Serialize request with wire format prefix
+        let request_bytes = request.to_wire(rivven_protocol::WireFormat::Postcard)?;
 
         // Write length prefix + request
         let len = request_bytes.len() as u32;
@@ -334,8 +334,8 @@ impl Client {
         let mut response_buf = vec![0u8; msg_len];
         self.stream.read_exact(&mut response_buf).await?;
 
-        // Deserialize response
-        let response = Response::from_bytes(&response_buf)?;
+        // Deserialize response (auto-detects wire format)
+        let (response, _format) = Response::from_wire(&response_buf)?;
 
         Ok(response)
     }
@@ -423,7 +423,7 @@ impl Client {
     ///   - `None` or `Some(0)` = read_uncommitted (default): Returns all messages
     ///   - `Some(1)` = read_committed: Filters out messages from aborted transactions
     ///
-    /// # Read Committed Isolation (KIP-98)
+    /// # Read Committed Isolation
     ///
     /// When using `isolation_level = Some(1)` (read_committed), the consumer will:
     /// - Not see messages from transactions that were aborted
@@ -705,7 +705,7 @@ impl Client {
     }
 
     // ========================================================================
-    // Admin API (Kafka KIP-195/KIP-226 Parity)
+    // Admin API
     // ========================================================================
 
     /// Describe topic configurations
@@ -901,7 +901,7 @@ impl Client {
     }
 
     // =========================================================================
-    // Idempotent Producer API (KIP-98)
+    // Idempotent Producer API
     // =========================================================================
 
     /// Initialize an idempotent producer
@@ -1017,7 +1017,7 @@ impl Client {
     }
 
     // =========================================================================
-    // Transaction API (KIP-98 Transactions)
+    // Transaction API
     // =========================================================================
 
     /// Begin a new transaction

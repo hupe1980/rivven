@@ -7,8 +7,9 @@
 //! - Test data generators
 
 use anyhow::Result;
+use clap::Parser;
 use rivven_core::{AuthConfig, AuthManager, Config};
-use rivvend::{SecureServer, SecureServerConfig, Server};
+use rivvend::{Cli, ClusterServer, SecureServer, SecureServerConfig};
 use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -36,18 +37,51 @@ impl TestBroker {
     }
 
     /// Start a test broker with custom configuration
+    ///
+    /// Uses ClusterServer (production code path) to ensure tests exercise
+    /// the same code that runs in production.
     pub async fn start_with_config(mut config: Config) -> Result<Self> {
         let port = portpicker::pick_unused_port().expect("No available port");
+        let api_port = portpicker::pick_unused_port().expect("No available API port");
         let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
 
         config.bind_address = "127.0.0.1".to_string();
         config.port = port;
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        let server_config = config.clone();
+
+        // If config has a custom data_dir (e.g., for persistence tests), use it.
+        // Otherwise use a unique temp dir to avoid Raft conflicts between tests.
+        let use_custom_dir = config.data_dir != "./data" && !config.data_dir.is_empty();
+        let temp_dir = if use_custom_dir {
+            None
+        } else {
+            Some(tempfile::tempdir()?)
+        };
+        let data_dir = if let Some(ref td) = temp_dir {
+            td.path().to_string_lossy().to_string()
+        } else {
+            config.data_dir.clone()
+        };
+
+        // Create CLI args to match the config - uses ClusterServer for production parity
+        let args = vec![
+            "rivvend".to_string(),
+            "--bind".to_string(),
+            format!("127.0.0.1:{}", port),
+            "--api-bind".to_string(),
+            format!("127.0.0.1:{}", api_port),
+            "--data-dir".to_string(),
+            data_dir,
+            "--no-dashboard".to_string(),
+        ];
+
+        let cli = Cli::parse_from(&args);
 
         let handle = tokio::spawn(async move {
-            let server = match Server::new(server_config).await {
+            // Keep temp_dir alive for the duration of the server
+            let _temp_dir = temp_dir;
+            let server = match ClusterServer::new(cli).await {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::error!("Failed to create server: {}", e);
@@ -66,12 +100,12 @@ impl TestBroker {
             }
         });
 
-        // Wait for server to be ready
-        for _ in 0..50 {
+        // Wait for server to be ready (ClusterServer needs more time for Raft init)
+        for _ in 0..100 {
             if tokio::net::TcpStream::connect(addr).await.is_ok() {
                 break;
             }
-            sleep(Duration::from_millis(20)).await;
+            sleep(Duration::from_millis(50)).await;
         }
 
         Ok(Self {

@@ -1,4 +1,4 @@
-//! Idempotent Producer Support (KIP-98)
+//! Idempotent Producer Support
 //!
 //! Provides exactly-once semantics for producers without full transactions.
 //!

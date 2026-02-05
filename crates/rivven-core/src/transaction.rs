@@ -1,4 +1,4 @@
-//! Native Transaction Support (KIP-98)
+//! Native Transaction Support
 //!
 //! Provides exactly-once semantics with cross-topic atomic writes.
 //!
@@ -318,7 +318,7 @@ pub enum TransactionMarker {
     Abort,
 }
 
-/// Consumer isolation level (KIP-98)
+/// Consumer isolation level
 ///
 /// Controls whether consumers can see uncommitted transactional messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -1469,7 +1469,7 @@ mod tests {
     }
 
     // =========================================================================
-    // Isolation Level Tests (KIP-98)
+    // Isolation Level Tests
     // =========================================================================
 
     #[test]

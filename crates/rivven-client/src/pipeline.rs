@@ -311,8 +311,8 @@ impl PipelinedClient {
         let request_id = self.inner.next_request_id.fetch_add(1, Ordering::Relaxed);
         let (response_tx, response_rx) = oneshot::channel();
 
-        // Serialize request with ID prefix
-        let request_bytes = request.to_bytes()?;
+        // Serialize request with wire format and ID prefix
+        let request_bytes = request.to_wire(rivven_protocol::WireFormat::Postcard)?;
         let mut data = BytesMut::with_capacity(8 + request_bytes.len());
         data.extend_from_slice(&request_id.to_be_bytes());
         data.extend_from_slice(&request_bytes);
@@ -576,8 +576,10 @@ async fn reader_task(
             break;
         }
 
-        // Parse response
-        let result = Response::from_bytes(&response_buf).map_err(Error::ProtocolError);
+        // Parse response (auto-detects wire format)
+        let result = Response::from_wire(&response_buf)
+            .map(|(resp, _format)| resp)
+            .map_err(Error::ProtocolError);
 
         // Dispatch to waiting request
         let sender = {

@@ -5,6 +5,7 @@ from rivven._rivven import (
     Message,
     Consumer,
     Producer,
+    ProducerState,
     # Exception types
     RivvenException,
     ConnectionException,
@@ -16,13 +17,18 @@ from rivven._rivven import (
     version,
 )
 
+# Backward-compatible alias
+RivvenError = RivvenException
+
 __all__ = [
     "RivvenClient",
     "Message",
     "Consumer",
     "Producer",
+    "ProducerState",
     # Exceptions
     "RivvenException",
+    "RivvenError",  # Alias for backward compatibility
     "ConnectionException",
     "ServerException",
     "TimeoutException",

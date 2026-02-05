@@ -12,9 +12,7 @@ name = "rivven"
 path = "src/main.rs"
 
 [dependencies]
-rivven-core = { workspace = true }
 rivven-client = { workspace = true }
-rivvend = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

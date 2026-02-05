@@ -1,6 +1,15 @@
 # rivven-python
 
-> Python bindings for the Rivven event streaming platform.
+> High-performance Python bindings for the Rivven event streaming platform.
+
+## Features
+
+- **Native Performance**: Zero-copy message handling through Rust bindings (PyO3)
+- **Async-First**: Full async/await support with Python's asyncio
+- **Type-Safe**: Complete type annotations for IDE support
+- **Transaction Support**: Exactly-once semantics with transactional producers
+- **Authentication**: Multiple auth methods (simple, SCRAM-SHA-256)
+- **Admin Operations**: Full topic and partition management
 
 ## Installation
 
@@ -10,98 +19,201 @@ pip install rivven
 
 ## Usage
 
+### Basic Connection
+
+```python
+import asyncio
+import rivven
+
+async def main():
+    # Connect to Rivven cluster
+    client = await rivven.connect("localhost:9092")
+    
+    # Create a topic
+    await client.create_topic("my-topic", partitions=3)
+    
+    # List topics
+    topics = await client.list_topics()
+    print(f"Topics: {topics}")
+
+asyncio.run(main())
+```
+
 ### Producer
 
 ```python
-from rivven import Client, ProducerConfig
+import asyncio
+import rivven
 
-client = Client.connect("localhost:9092")
-producer = client.producer()
+async def produce():
+    client = await rivven.connect("localhost:9092")
+    producer = client.producer("my-topic")
+    
+    # Send a message
+    offset = await producer.send(b'{"event": "login"}', key=b"user-123")
+    print(f"Sent at offset: {offset}")
+    
+    # Send to specific partition
+    await producer.send_to_partition(b"value", partition=0, key=b"key")
+    
+    # Batch send for better throughput
+    offsets = await producer.send_batch([b"msg1", b"msg2", b"msg3"])
 
-# Send a message
-producer.send("my-topic", key=b"user-123", value=b'{"event": "login"}')
-
-# Send with headers
-producer.send(
-    "my-topic",
-    key=b"user-123",
-    value=b'{"event": "purchase"}',
-    headers={"source": "api", "version": "1.0"}
-)
-
-# Flush and close
-producer.flush()
+asyncio.run(produce())
 ```
 
 ### Consumer
 
 ```python
-from rivven import Client, ConsumerConfig
+import asyncio
+import rivven
 
-client = Client.connect("localhost:9092")
-consumer = client.consumer(
-    group_id="my-group",
-    topics=["my-topic"]
-)
+async def consume():
+    client = await rivven.connect("localhost:9092")
+    consumer = client.consumer("my-topic", group_id="my-group")
+    
+    # Fetch messages
+    messages = await consumer.fetch(max_messages=100)
+    for msg in messages:
+        print(f"Offset {msg.offset}: {msg.value_str()}")
+    
+    # Commit offsets
+    await consumer.commit()
+    
+    # Or use async iterator
+    async for msg in consumer:
+        print(f"Received: {msg.value_str()}")
+        await consumer.commit()
 
-# Poll for messages
-for record in consumer.poll(timeout_ms=1000):
-    print(f"Key: {record.key}, Value: {record.value}")
-    consumer.commit(record)
-
-# Or use iterator
-for record in consumer:
-    process(record)
-    consumer.commit(record)
+asyncio.run(consume())
 ```
 
 ### Admin Operations
 
 ```python
-from rivven import Client
+import asyncio
+import rivven
 
-client = Client.connect("localhost:9092")
+async def admin():
+    client = await rivven.connect("localhost:9092")
+    
+    # Create topic
+    await client.create_topic("new-topic", partitions=3, replication_factor=1)
+    
+    # List topics
+    topics = await client.list_topics()
+    print(f"Topics: {topics}")
+    
+    # Get topic configuration
+    configs = await client.describe_topic_configs("new-topic")
+    print(f"Configs: {configs}")
+    
+    # Modify topic configuration
+    await client.alter_topic_config("new-topic", "retention.ms", "86400000")
+    
+    # Add partitions
+    await client.create_partitions("new-topic", new_total=6)
+    
+    # Get offset for timestamp
+    offset = await client.get_offset_for_timestamp("new-topic", 0, 1699900000000)
+    
+    # Delete records before offset
+    await client.delete_records("new-topic", 0, before_offset=100)
+    
+    # Delete topic
+    await client.delete_topic("old-topic")
 
-# Create topic
-client.create_topic("new-topic", partitions=3, replication_factor=2)
-
-# List topics
-topics = client.list_topics()
-for topic in topics:
-    print(f"{topic.name}: {topic.partitions} partitions")
-
-# Delete topic
-client.delete_topic("old-topic")
+asyncio.run(admin())
 ```
 
-### Async Support
+### Authentication
 
 ```python
 import asyncio
-from rivven import AsyncClient
+import rivven
 
-async def main():
-    client = await AsyncClient.connect("localhost:9092")
-    producer = await client.producer()
+async def authenticated():
+    client = await rivven.connect("localhost:9092")
     
-    await producer.send("my-topic", key=b"key", value=b"value")
-    await producer.flush()
+    # Simple authentication
+    await client.authenticate("username", "password")
+    
+    # Or SCRAM-SHA-256 authentication
+    await client.authenticate_scram("username", "password")
+    
+    # Use client as normal
+    topics = await client.list_topics()
 
-asyncio.run(main())
+asyncio.run(authenticated())
 ```
 
-## Configuration
+### TLS Connection
 
 ```python
-from rivven import ClientConfig
+import asyncio
+import rivven
 
-config = ClientConfig(
-    bootstrap_servers=["node1:9092", "node2:9092"],
-    connection_timeout_ms=10000,
-    request_timeout_ms=30000,
-)
+async def secure():
+    # Connect with TLS
+    client = await rivven.connect_tls(
+        "localhost:9093",
+        ca_cert="/path/to/ca.crt",
+        client_cert="/path/to/client.crt",  # Optional: mTLS
+        client_key="/path/to/client.key",   # Optional: mTLS
+    )
+    
+    topics = await client.list_topics()
 
-client = Client.connect_with_config(config)
+asyncio.run(secure())
+```
+
+### Transactions (Exactly-Once Semantics)
+
+```python
+import asyncio
+import rivven
+
+async def transactional():
+    client = await rivven.connect("localhost:9092")
+    
+    # Initialize transactional producer - returns a ProducerState object
+    producer_state = await client.init_producer_id("my-txn-id")
+    print(f"Producer ID: {producer_state.producer_id}, Epoch: {producer_state.producer_epoch}")
+    
+    try:
+        # Begin transaction
+        await client.begin_transaction("my-txn-id", producer_state)
+        
+        # Add partitions to transaction
+        await client.add_partitions_to_txn("my-txn-id", producer_state, [
+            ("my-topic", 0),
+            ("my-topic", 1),
+        ])
+        
+        # Publish with idempotent semantics - sequence is auto-incremented
+        await client.publish_idempotent(
+            topic="my-topic",
+            value=b"message-1",
+            producer_state=producer_state,
+            key=b"key-1"
+        )
+        
+        await client.publish_idempotent(
+            topic="my-topic",
+            value=b"message-2",
+            producer_state=producer_state,
+            key=b"key-2"
+        )
+        
+        # Commit transaction
+        await client.commit_transaction("my-txn-id", producer_state)
+        
+    except Exception as e:
+        # Abort on error
+        await client.abort_transaction("my-txn-id", producer_state)
+        raise
+
+asyncio.run(transactional())
 ```
 
 ## Exception Handling

@@ -196,6 +196,74 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `max_batch_size` | 64 | 256 | 1 |
 | `request_timeout` | 30s | 60s | 10s |
 
+### High-Performance Producer
+
+For maximum throughput with all best practices, use `Producer`:
+
+```rust
+use rivven_client::{Producer, ProducerConfig};
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Configure with Kafka-like semantics
+    let config = ProducerConfig::builder()
+        .bootstrap_servers(vec!["localhost:9092".to_string()])
+        .batch_size(16384)          // Batch up to 16KB
+        .linger_ms(5)               // Wait 5ms for batch
+        .buffer_memory(32 * 1024 * 1024)  // 32MB buffer
+        .enable_idempotence(true)   // Exactly-once semantics
+        .build();
+
+    // Arc-based for thread-safe concurrent access
+    let producer = Arc::new(Producer::new(config).await?);
+
+    // Share across tasks (sticky partitioning for keyless messages)
+    for i in 0..1000 {
+        let producer = Arc::clone(&producer);
+        tokio::spawn(async move {
+            producer.send("topic", format!("msg-{}", i)).await
+        });
+    }
+
+    // With key (consistent partition assignment)
+    producer.send_with_key("topic", Some("user-123"), "event").await?;
+
+    // Flush ensures all pending records are delivered
+    producer.flush().await?;
+
+    // Check producer statistics
+    let stats = producer.stats();
+    println!("Records sent: {}", stats.records_sent);
+    println!("Success rate: {:.1}%", stats.success_rate() * 100.0);
+    
+    Ok(())
+}
+```
+
+#### Producer Features
+
+| Feature | Description |
+|---------|-------------|
+| **Metadata Cache** | TTL-based caching reduces metadata requests |
+| **Sticky Partitioning** | Batches keyless messages to same partition |
+| **Backpressure** | Memory-bounded buffers prevent OOM |
+| **Murmur2 Hashing** | Kafka-compatible key partitioning (optimized) |
+| **Batched I/O** | Single flush per batch minimizes syscalls |
+| **Pipelined Responses** | Write-all, then read-all for throughput |
+| **Completion Tracking** | `flush()` waits for all pending records |
+| **Metadata Refresh** | `refresh_metadata()` fetches partition info |
+
+#### Producer Configuration
+
+| Config | Default | High-Throughput | Low-Latency | Exactly-Once |
+|--------|---------|-----------------|-------------|--------------|
+| `batch_size` | 16KB | 64KB | 1 | 16KB |
+| `linger_ms` | 0 | 10 | 0 | 0 |
+| `max_in_flight_requests` | 5 | 10 | 1 | 5 |
+| `enable_idempotence` | false | false | false | true |
+| `acks` | 1 | 1 | 1 | -1 (all) |
+
 ### Health Monitoring
 
 Monitor client and server health in real-time:

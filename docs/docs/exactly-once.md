@@ -22,7 +22,7 @@ Guaranteed delivery without duplicates.
 
 Rivven provides exactly-once semantics through two complementary features:
 
-1. **Idempotent Producer** (KIP-98) — Exactly-once delivery within a single topic
+1. **Idempotent Producer** — Exactly-once delivery within a single topic
 2. **Native Transactions** — Atomic writes across multiple topics
 
 ---

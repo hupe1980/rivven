@@ -25,31 +25,158 @@ This crate defines canonical wire protocol types for client-server communication
 ## Usage
 
 ```rust
-use rivven_protocol::{Request, Response, MessageData};
+use rivven_protocol::{Request, Response, WireFormat};
 
 // Create a produce request
-let data = MessageData::new(b"Hello, Rivven!".to_vec());
-let request = Request::Produce {
+let request = Request::Publish {
     topic: "events".to_string(),
     partition: Some(0),
-    data: vec![data],
+    key: None,
+    value: bytes::Bytes::from_static(b"Hello, Rivven!"),
 };
 
-// Serialize for transmission
-let bytes = request.to_bytes()?;
+// Serialize with wire format byte prefix (recommended)
+let wire_bytes = request.to_wire(WireFormat::Postcard)?;
 
-// Deserialize on receipt
-let request = Request::from_bytes(&bytes)?;
+// Deserialize with auto-detection
+let (request, format) = Request::from_wire(&wire_bytes)?;
+assert_eq!(format, WireFormat::Postcard);
 ```
 
 ## Wire Format
 
-Messages are serialized using [postcard](https://docs.rs/postcard/) with the following guarantees:
+Messages use a **format-prefixed** wire protocol:
 
-- Compact binary encoding with COBS framing support
-- Variable-length integer encoding (varint)
-- `#[no_std]` compatible
-- Maximum message size enforced before deserialization
+```
+┌─────────────────┬──────────────────┬─────────────────────────┐
+│ Length (4 bytes)│ Format (1 byte)  │ Payload (N bytes)       │
+│ Big-endian u32  │ 0x00 = postcard  │ Serialized Request/Resp │
+│                 │ 0x01 = protobuf  │                         │
+└─────────────────┴──────────────────┴─────────────────────────┘
+```
+
+### Format Byte Values
+
+| Byte | Format | Description |
+|:-----|:-------|:------------|
+| `0x00` | postcard | Rust-native, fastest (~50ns serialize) |
+| `0x01` | protobuf | Cross-language compatible |
+
+### Serialization Methods
+
+| Method | Description |
+|:-------|:------------|
+| `to_wire(format)` | Serialize with format byte prefix |
+| `from_wire(data)` | Deserialize with auto-format detection |
+| `to_bytes()` | Postcard only, no format prefix (legacy) |
+| `from_bytes(data)` | Postcard only, no format prefix (legacy) |
+
+### Server Behavior
+
+The server auto-detects the wire format from the first byte and responds in the same format the client used.
+
+### Protobuf Feature
+
+Enable protobuf serialization with the `protobuf` feature:
+
+```toml
+[dependencies]
+rivven-protocol = { version = "0.0.7", features = ["protobuf"] }
+```
+
+```rust
+use rivven_protocol::{Request, WireFormat};
+
+// Serialize request as protobuf
+let request = Request::Ping;
+let wire_bytes = request.to_wire(WireFormat::Protobuf)?;
+
+// First byte is 0x01 (protobuf)
+assert_eq!(wire_bytes[0], 0x01);
+```
+
+## Cross-Language Support
+
+### Architecture
+
+The Rivven broker uses **postcard** for maximum performance with Rust clients. For other languages, the protocol is documented via **Protocol Buffers**:
+
+```
+┌─────────────────┐                    ┌─────────────────┐
+│   Rust Client   │───── postcard ────►│                 │
+│ (rivven-client) │◄──── postcard ─────│     rivvend     │
+└─────────────────┘                    │    (broker)     │
+                                       └─────────────────┘
+```
+
+### Multi-Language Clients
+
+For Go, Java, Python, and other languages, use the proto file as the **wire format specification**:
+
+| Format | Use Case | Performance |
+|:-------|:---------|:------------|
+| **postcard** | Rust clients (native) | Fastest (~50ns serialize) |
+| **protobuf** | Reference spec for other languages | Fast (~200ns serialize) |
+
+### Protobuf Schema
+
+The proto file at [`proto/rivven.proto`](proto/rivven.proto) documents the wire format. Client implementers specify their own package names:
+
+```protobuf
+package rivven.protocol.v1;
+
+message PublishRequest {
+  string topic = 1;
+  optional uint32 partition = 2;
+  Record record = 3;
+}
+
+message Record {
+  bytes key = 1;
+  bytes value = 2;
+  repeated RecordHeader headers = 3;
+  int64 timestamp = 4;
+}
+```
+
+### Generate Client Stubs
+
+```bash
+# Go
+protoc --go_out=. --go_opt=Mrivven.proto=github.com/yourorg/rivven-go/protocol proto/rivven.proto
+
+# Java
+protoc --java_out=. proto/rivven.proto
+
+# Python
+protoc --python_out=. proto/rivven.proto
+
+# TypeScript (ts-proto)
+protoc --plugin=./node_modules/.bin/protoc-gen-ts_proto --ts_proto_out=. proto/rivven.proto
+```
+
+### Implementing a Client
+
+To implement a client in another language:
+
+1. Generate code from `proto/rivven.proto`
+2. Connect to broker on port 9092
+3. Use length-prefixed framing: `[4-byte length][1-byte format][payload]`
+4. Use format byte `0x01` for protobuf
+5. Serialize requests using protobuf
+6. Parse responses using protobuf (server responds in same format)
+
+### Proto Message Types
+
+| Message Type | Description |
+|:-------------|:------------|
+| `Request` | Wrapper with header + oneof request types |
+| `Response` | Wrapper with header + oneof response types |
+| `Record` | Key, value, headers, timestamp |
+| `BatchPublishRequest` | Grouped by partition for efficiency |
+| `ConsumeResponse` | Records with high watermark |
+| `GetMetadataResponse` | Topic/partition/broker info |
+| `ErrorCode` | Comprehensive error enum |
 
 ## License
 

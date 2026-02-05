@@ -1,13 +1,12 @@
 //! Rivven CLI - Command line interface for Rivven
 //!
 //! This is the main CLI for interacting with Rivven servers.
+//! For the Rivven server daemon, use `rivvend`.
 //! For CDC (Change Data Capture), use the separate `rivven-connect` binary.
 
 use bytes::Bytes;
 use clap::{Parser, Subcommand};
 use rivven_client::Client;
-use rivven_core::Config;
-use rivvend::Server;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -24,29 +23,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the Rivven server (broker)
-    Server {
-        /// Port to bind to
-        #[arg(short, long, default_value = "9092")]
-        port: u16,
-
-        /// Bind address
-        #[arg(short, long, default_value = "127.0.0.1")]
-        bind: String,
-
-        /// Number of default partitions for new topics
-        #[arg(short = 'n', long, default_value = "3")]
-        partitions: u32,
-
-        /// Enable persistence to disk
-        #[arg(long)]
-        persist: bool,
-
-        /// Data directory for persistence
-        #[arg(long, default_value = "./data")]
-        data_dir: String,
-    },
-
     /// Topic management
     Topic {
         #[command(subcommand)]
@@ -201,43 +177,6 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Server {
-            port,
-            bind,
-            partitions,
-            persist,
-            data_dir,
-        } => {
-            println!("Starting Rivven server...");
-            println!("  Bind: {}:{}", bind, port);
-            println!("  Partitions: {}", partitions);
-            println!(
-                "  Persistence: {}",
-                if persist { &data_dir } else { "disabled" }
-            );
-            println!();
-
-            let config = Config::default()
-                .with_port(port)
-                .with_bind_address(bind)
-                .with_default_partitions(partitions)
-                .with_persistence(persist)
-                .with_data_dir(data_dir);
-
-            let server = Server::new(config).await?;
-
-            // Setup graceful shutdown
-            let running = Arc::new(AtomicBool::new(true));
-            let r = running.clone();
-
-            ctrlc::set_handler(move || {
-                println!("\nShutting down...");
-                r.store(false, Ordering::SeqCst);
-            })?;
-
-            server.start().await?;
-        }
-
         Commands::Topic { action } => match action {
             TopicCommands::Create {
                 name,

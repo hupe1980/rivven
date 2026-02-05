@@ -115,15 +115,46 @@
 //! ## Feature Flags
 //!
 //! - `tls` - Enable TLS support via rustls
+//!
+//! ## High-Performance Producer
+//!
+//! For maximum throughput with all best practices, use [`Producer`]:
+//!
+//! ```rust,ignore
+//! use rivven_client::{Producer, ProducerConfig};
+//! use std::sync::Arc;
+//!
+//! let config = ProducerConfig::builder()
+//!     .bootstrap_servers(vec!["localhost:9092".to_string()])
+//!     .batch_size(16384)
+//!     .linger_ms(5)
+//!     .enable_idempotence(true)
+//!     .build();
+//!
+//! let producer = Arc::new(Producer::new(config).await?);
+//!
+//! // Thread-safe sharing
+//! for i in 0..1000 {
+//!     let producer = Arc::clone(&producer);
+//!     tokio::spawn(async move {
+//!         producer.send("topic", format!("msg-{}", i)).await
+//!     });
+//! }
+//! ```
 
 pub mod client;
 pub mod error;
 pub mod pipeline;
+pub mod producer;
 pub mod resilient;
 
 pub use client::{AlterTopicConfigResult, AuthSession, Client, DeleteRecordsResult, ProducerState};
 pub use error::{Error, Result};
 pub use pipeline::{PipelineConfig, PipelineConfigBuilder, PipelineStatsSnapshot, PipelinedClient};
+pub use producer::{
+    CompressionType, Producer, ProducerConfig, ProducerConfigBuilder, ProducerStatsSnapshot,
+    RecordMetadata,
+};
 pub use resilient::{ResilientClient, ResilientClientConfig, ResilientClientConfigBuilder};
 
 // Re-export TLS configuration when available
@@ -133,5 +164,5 @@ pub use rivven_core::tls::TlsConfig;
 // Re-export protocol types from rivven-protocol
 pub use rivven_protocol::{
     BrokerInfo, MessageData, PartitionMetadata, Request, Response, SchemaType, TopicConfigEntry,
-    TopicMetadata, MAX_MESSAGE_SIZE, PROTOCOL_VERSION,
+    TopicMetadata, WireFormat, MAX_MESSAGE_SIZE, PROTOCOL_VERSION,
 };

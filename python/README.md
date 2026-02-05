@@ -8,6 +8,9 @@ High-performance Python bindings for the [Rivven](https://github.com/hupe1980/ri
 - **Async-First**: Full async/await support with Python's asyncio
 - **Type-Safe**: Complete type annotations for IDE support
 - **Easy to Use**: Pythonic API design with familiar patterns
+- **Transaction Support**: Exactly-once semantics with transactional producers
+- **Authentication**: Multiple auth methods (simple, SCRAM-SHA-256)
+- **Admin Operations**: Full topic and partition management
 
 ## Installation
 
@@ -149,6 +152,106 @@ async def secure_connect():
 asyncio.run(secure_connect())
 ```
 
+### Authentication
+
+```python
+import asyncio
+import rivven
+
+async def authenticated_connect():
+    client = await rivven.connect("localhost:9092")
+    
+    # Simple username/password authentication
+    await client.authenticate("username", "password")
+    
+    # Or use SCRAM-SHA-256 authentication
+    await client.authenticate_scram("username", "password")
+    
+    # Use client as normal
+    topics = await client.list_topics()
+
+asyncio.run(authenticated_connect())
+```
+
+### Transactions (Exactly-Once Semantics)
+
+```python
+import asyncio
+import rivven
+
+async def transactional_produce():
+    client = await rivven.connect("localhost:9092")
+    
+    # Initialize transactional producer
+    producer_id, epoch = await client.init_producer_id("my-txn-id")
+    
+    try:
+        # Begin transaction
+        await client.begin_transaction("my-txn-id", producer_id, epoch)
+        
+        # Publish with idempotent semantics
+        await client.publish_idempotent(
+            topic="my-topic",
+            value=b"message-1",
+            producer_id=producer_id,
+            epoch=epoch,
+            sequence=0,
+            key=b"key-1"
+        )
+        await client.publish_idempotent(
+            topic="my-topic",
+            value=b"message-2",
+            producer_id=producer_id,
+            epoch=epoch,
+            sequence=1,
+            key=b"key-2"
+        )
+        
+        # Commit transaction
+        await client.commit_transaction("my-txn-id", producer_id, epoch)
+        print("Transaction committed successfully")
+        
+    except Exception as e:
+        # Abort transaction on error
+        await client.abort_transaction("my-txn-id", producer_id, epoch)
+        print(f"Transaction aborted: {e}")
+
+asyncio.run(transactional_produce())
+```
+
+### Admin Operations
+
+```python
+import asyncio
+import rivven
+
+async def admin_operations():
+    client = await rivven.connect("localhost:9092")
+    
+    # Create topic with multiple partitions
+    await client.create_topic("my-topic", partitions=3, replication_factor=1)
+    
+    # Get topic configuration
+    configs = await client.describe_topic_configs("my-topic")
+    print(f"Topic configs: {configs}")
+    
+    # Modify topic configuration
+    await client.alter_topic_config("my-topic", "retention.ms", "86400000")
+    
+    # Add more partitions
+    await client.create_partitions("my-topic", new_total=6)
+    
+    # Get offset for a specific timestamp
+    offset = await client.get_offset_for_timestamp("my-topic", partition=0, timestamp_ms=1699900000000)
+    print(f"Offset at timestamp: {offset}")
+    
+    # Delete records before a specific offset
+    deleted = await client.delete_records("my-topic", partition=0, before_offset=100)
+    print(f"Deleted records, new low watermark: {deleted}")
+
+asyncio.run(admin_operations())
+```
+
 ## API Reference
 
 ### Module Functions
@@ -179,19 +282,37 @@ Main client class for interacting with Rivven.
 - `delete_topic(name)` - Delete a topic
 - `list_topics()` - List all topics
 - `get_metadata(topic)` - Get detailed topic metadata
+- `describe_topic_configs(topic)` - Get topic configuration
+- `alter_topic_config(topic, key, value)` - Modify topic configuration
+- `create_partitions(topic, new_total)` - Add partitions to a topic
+- `delete_records(topic, partition, before_offset)` - Delete records before offset
+- `get_offset_for_timestamp(topic, partition, timestamp_ms)` - Get offset for timestamp
 
 #### Producer/Consumer
 
 - `producer(topic)` - Get a producer for the topic
-- `consumer(topic, group_id=None, auto_commit=True)` - Get a consumer
+- `consumer(topic, group_id=None, auto_commit=True, isolation_level=None)` - Get a consumer
 
 #### Consumer Groups
 
 - `list_groups()` - List all consumer groups
 - `describe_group(group_id)` - Get group details
 - `delete_group(group_id)` - Delete a consumer group
-- `commit_offset(topic, partition, offset, group_id)` - Commit offset
-- `get_offset(topic, partition, group_id)` - Get committed offset
+- `commit_offset(group_id, topic, partition, offset)` - Commit offset
+- `get_offset(group_id, topic, partition)` - Get committed offset
+
+#### Authentication
+
+- `authenticate(username, password)` - Simple authentication
+- `authenticate_scram(username, password)` - SCRAM-SHA-256 authentication
+
+#### Transactions
+
+- `init_producer_id(transactional_id)` - Initialize transactional producer, returns (producer_id, epoch)
+- `begin_transaction(transactional_id, producer_id, epoch)` - Begin a transaction
+- `commit_transaction(transactional_id, producer_id, epoch)` - Commit a transaction
+- `abort_transaction(transactional_id, producer_id, epoch)` - Abort a transaction
+- `publish_idempotent(topic, value, producer_id, epoch, sequence, key=None)` - Publish with exactly-once semantics
 
 #### Health
 

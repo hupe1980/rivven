@@ -1,0 +1,335 @@
+syntax = "proto3";
+
+package rivven.protocol.v1;
+
+// Wire format definition for Rivven protocol.
+// Client implementers can override package options when generating code:
+//   protoc --go_out=. --go_opt=Mrivven.proto=your/package rivven.proto
+//   protoc --java_out=. --java_opt=java_package=your.package rivven.proto
+
+// ============================================================================
+// Common Types
+// ============================================================================
+
+// Message header for all requests/responses
+message Header {
+  // Protocol version (must be 1)
+  uint32 version = 1;
+  // Correlation ID for request/response matching
+  uint64 correlation_id = 2;
+  // Optional client ID for tracking
+  string client_id = 3;
+}
+
+// Record key-value pair
+message Record {
+  // Optional record key for partitioning
+  bytes key = 1;
+  // Record value (payload)
+  bytes value = 2;
+  // Optional headers
+  repeated RecordHeader headers = 3;
+  // Timestamp (milliseconds since epoch, 0 = server-assigned)
+  int64 timestamp = 4;
+}
+
+// Record header (key-value metadata)
+message RecordHeader {
+  string key = 1;
+  bytes value = 2;
+}
+
+// ============================================================================
+// Requests
+// ============================================================================
+
+// Wrapper for all request types
+message Request {
+  Header header = 1;
+  oneof request_type {
+    PublishRequest publish = 10;
+    ConsumeRequest consume = 11;
+    CreateTopicRequest create_topic = 12;
+    DeleteTopicRequest delete_topic = 13;
+    ListTopicsRequest list_topics = 14;
+    GetMetadataRequest get_metadata = 15;
+    CommitOffsetRequest commit_offset = 16;
+    GetOffsetRequest get_offset = 17;
+    AuthenticateRequest authenticate = 20;
+    PingRequest ping = 30;
+  }
+}
+
+// Publish a message to a topic
+message PublishRequest {
+  // Topic name
+  string topic = 1;
+  // Optional partition (if not set, computed from key or round-robin)
+  optional uint32 partition = 2;
+  // Record to publish
+  Record record = 3;
+}
+
+// Batch publish multiple messages
+message BatchPublishRequest {
+  // Topic name
+  string topic = 1;
+  // Records to publish
+  repeated PartitionRecords partition_records = 2;
+  // Required acks: 0 = none, 1 = leader, -1 = all ISR
+  int32 acks = 3;
+  // Timeout in milliseconds
+  uint32 timeout_ms = 4;
+}
+
+// Records for a single partition
+message PartitionRecords {
+  uint32 partition = 1;
+  repeated Record records = 2;
+}
+
+// Consume messages from a topic partition
+message ConsumeRequest {
+  // Topic name
+  string topic = 1;
+  // Partition to consume from
+  uint32 partition = 2;
+  // Starting offset
+  uint64 offset = 3;
+  // Maximum number of messages to return
+  uint32 max_messages = 4;
+  // Maximum bytes to return (0 = no limit)
+  uint64 max_bytes = 5;
+  // Isolation level: 0 = read_uncommitted, 1 = read_committed
+  uint32 isolation_level = 6;
+}
+
+// Create a new topic
+message CreateTopicRequest {
+  // Topic name
+  string name = 1;
+  // Number of partitions (0 = use server default)
+  uint32 partitions = 2;
+  // Replication factor (0 = use server default)
+  uint32 replication_factor = 3;
+  // Topic configuration
+  map<string, string> config = 4;
+}
+
+// Delete a topic
+message DeleteTopicRequest {
+  string name = 1;
+}
+
+// List all topics
+message ListTopicsRequest {
+  // Optional prefix filter
+  string prefix = 1;
+}
+
+// Get topic metadata
+message GetMetadataRequest {
+  // Topic names (empty = all topics)
+  repeated string topics = 1;
+}
+
+// Commit consumer group offset
+message CommitOffsetRequest {
+  string consumer_group = 1;
+  string topic = 2;
+  uint32 partition = 3;
+  uint64 offset = 4;
+  // Optional metadata
+  string metadata = 5;
+}
+
+// Get consumer group offset
+message GetOffsetRequest {
+  string consumer_group = 1;
+  string topic = 2;
+  uint32 partition = 3;
+}
+
+// Authenticate with the server
+message AuthenticateRequest {
+  // Authentication mechanism
+  oneof mechanism {
+    PlainAuth plain = 1;
+    ScramAuth scram = 2;
+  }
+}
+
+message PlainAuth {
+  string username = 1;
+  string password = 2;
+}
+
+message ScramAuth {
+  // SCRAM mechanism: "SCRAM-SHA-256" or "SCRAM-SHA-512"
+  string mechanism = 1;
+  // Client-first message (base64 encoded)
+  bytes client_first = 2;
+}
+
+// Ping/health check
+message PingRequest {}
+
+// ============================================================================
+// Responses
+// ============================================================================
+
+// Wrapper for all response types
+message Response {
+  Header header = 1;
+  oneof response_type {
+    PublishResponse publish = 10;
+    ConsumeResponse consume = 11;
+    CreateTopicResponse create_topic = 12;
+    DeleteTopicResponse delete_topic = 13;
+    ListTopicsResponse list_topics = 14;
+    GetMetadataResponse get_metadata = 15;
+    CommitOffsetResponse commit_offset = 16;
+    GetOffsetResponse get_offset = 17;
+    AuthenticateResponse authenticate = 20;
+    PingResponse ping = 30;
+    ErrorResponse error = 99;
+  }
+}
+
+// Publish response
+message PublishResponse {
+  // Offset assigned to the message
+  uint64 offset = 1;
+  // Partition the message was written to
+  uint32 partition = 2;
+  // Server-assigned timestamp
+  int64 timestamp = 3;
+}
+
+// Batch publish response
+message BatchPublishResponse {
+  repeated PartitionPublishResult results = 1;
+}
+
+message PartitionPublishResult {
+  uint32 partition = 1;
+  // Base offset for this partition's batch
+  uint64 base_offset = 2;
+  // Error code (0 = success)
+  int32 error_code = 3;
+  string error_message = 4;
+}
+
+// Consume response
+message ConsumeResponse {
+  // Messages consumed
+  repeated ConsumedRecord records = 1;
+  // High watermark (latest offset + 1)
+  uint64 high_watermark = 2;
+}
+
+message ConsumedRecord {
+  uint64 offset = 1;
+  uint32 partition = 2;
+  int64 timestamp = 3;
+  bytes key = 4;
+  bytes value = 5;
+  repeated RecordHeader headers = 6;
+}
+
+// Create topic response
+message CreateTopicResponse {
+  // Name of the created topic
+  string name = 1;
+  // Number of partitions created
+  uint32 partitions = 2;
+}
+
+// Delete topic response
+message DeleteTopicResponse {}
+
+// List topics response
+message ListTopicsResponse {
+  repeated string topics = 1;
+}
+
+// Get metadata response
+message GetMetadataResponse {
+  repeated TopicMetadata topics = 1;
+  repeated BrokerInfo brokers = 2;
+}
+
+message TopicMetadata {
+  string name = 1;
+  repeated PartitionMetadata partitions = 2;
+  bool internal = 3;
+}
+
+message PartitionMetadata {
+  uint32 id = 1;
+  uint32 leader = 2;
+  repeated uint32 replicas = 3;
+  repeated uint32 isr = 4;
+}
+
+message BrokerInfo {
+  uint32 id = 1;
+  string host = 2;
+  uint32 port = 3;
+  string rack = 4;
+}
+
+// Commit offset response
+message CommitOffsetResponse {}
+
+// Get offset response
+message GetOffsetResponse {
+  // Committed offset (-1 if not found)
+  int64 offset = 1;
+  string metadata = 2;
+}
+
+// Authenticate response
+message AuthenticateResponse {
+  // Session ID for authenticated session
+  string session_id = 1;
+  // Session expiry in seconds
+  uint32 expires_in = 2;
+  // For SCRAM: server challenge (base64 encoded)
+  bytes server_response = 3;
+}
+
+// Ping response
+message PingResponse {}
+
+// Error response
+message ErrorResponse {
+  // Error code (see ErrorCode enum)
+  int32 code = 1;
+  // Human-readable error message
+  string message = 2;
+  // Detailed error info
+  map<string, string> details = 3;
+}
+
+// ============================================================================
+// Error Codes
+// ============================================================================
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_UNKNOWN = 1;
+  ERROR_CODE_INVALID_REQUEST = 2;
+  ERROR_CODE_TOPIC_NOT_FOUND = 3;
+  ERROR_CODE_PARTITION_NOT_FOUND = 4;
+  ERROR_CODE_OFFSET_OUT_OF_RANGE = 5;
+  ERROR_CODE_NOT_LEADER = 6;
+  ERROR_CODE_BROKER_NOT_AVAILABLE = 7;
+  ERROR_CODE_REPLICA_NOT_AVAILABLE = 8;
+  ERROR_CODE_MESSAGE_TOO_LARGE = 9;
+  ERROR_CODE_INVALID_TOPIC = 10;
+  ERROR_CODE_INVALID_PARTITION = 11;
+  ERROR_CODE_UNAUTHORIZED = 12;
+  ERROR_CODE_TIMEOUT = 13;
+  ERROR_CODE_QUOTA_EXCEEDED = 14;
+}

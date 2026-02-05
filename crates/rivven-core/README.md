@@ -14,7 +14,7 @@
 | **Storage** | Log segments, tiered storage (hot/warm/cold), compaction |
 | **I/O** | io_uring (Linux), kqueue (macOS), memory-mapped files |
 | **Compression** | LZ4, Zstd, Snappy (streaming-optimized) |
-| **Transactions** | KIP-98 exactly-once semantics, 2PC protocol |
+| **Transactions** | Exactly-once semantics, 2PC protocol |
 | **Batching** | Group commit WAL, vectorized encoding, SIMD checksums |
 | **Security** | TLS 1.3, Cedar authorization, AES-256-GCM encryption |
 
@@ -61,7 +61,7 @@ rivven-core/
 │   └── compaction.rs     # Log compaction with tombstones
 │
 ├── Transactions
-│   └── transaction.rs    # KIP-98 exactly-once semantics
+│   └── transaction.rs    # Exactly-once semantics
 │
 ├── Security
 │   ├── auth.rs           # Authentication providers
@@ -267,7 +267,7 @@ The `BatchStats` struct provides insight into batch composition:
 | `write_bytes` | u64 | Total bytes to be written |
 | `read_bytes` | u64 | Total bytes to be read |
 
-## Transactions (KIP-98)
+## Transactions
 
 Native exactly-once semantics with two-phase commit:
 

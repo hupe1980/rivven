@@ -5852,8 +5852,6 @@ dependencies = [
  "clap",
  "ctrlc",
  "rivven-client",
- "rivven-core",
- "rivvend",
  "tokio",
  "tracing-subscriber",
 ]
@@ -6103,6 +6101,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
+ "clap",
  "futures",
  "mysql_async",
  "portpicker",
@@ -6112,6 +6111,7 @@ dependencies = [
  "rivven-client",
  "rivven-connect",
  "rivven-core",
+ "rivven-protocol",
  "rivven-schema",
  "rivvend",
  "rustls 0.23.36",
@@ -6161,6 +6161,8 @@ version = "0.0.7"
 dependencies = [
  "bytes",
  "postcard",
+ "prost",
+ "prost-build",
  "serde",
  "serde_bytes",
  "thiserror 2.0.18",

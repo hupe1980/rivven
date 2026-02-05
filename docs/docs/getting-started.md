@@ -257,6 +257,53 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
+### High-Performance Producer
+
+```rust
+use rivven_client::{Producer, ProducerConfig};
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Create producer with batching and sticky partitioning
+    let config = ProducerConfig::builder()
+        .bootstrap_servers(vec!["localhost:9092".to_string()])
+        .batch_size(16384)           // 16 KB batches
+        .linger_ms(5)                // 5ms linger for batching
+        .metadata_max_age(std::time::Duration::from_secs(300)) // 5 min metadata cache
+        .max_in_flight_requests(5)   // Memory-bounded backpressure
+        .build();
+    
+    // Arc-based for thread-safe concurrent access
+    let producer = Arc::new(Producer::new(config).await?);
+    
+    // Simple send (uses murmur2 partitioning like Kafka)
+    let metadata = producer.send("events", b"value").await?;
+    println!("Published at partition {} offset {}", metadata.partition, metadata.offset);
+    
+    // Send with key for consistent partitioning
+    let metadata = producer.send_with_key("events", Some("user-123"), b"event").await?;
+    
+    // Share across tasks for parallel publishing
+    for i in 0..100 {
+        let producer = Arc::clone(&producer);
+        tokio::spawn(async move {
+            producer.send("events", format!("msg-{}", i)).await
+        });
+    }
+    
+    // Flush ensures all pending records are delivered
+    producer.flush().await?;
+    
+    // Check statistics
+    let stats = producer.stats();
+    println!("Published {} records, {} delivered", stats.records_sent, stats.records_delivered);
+    
+    producer.close().await;
+    Ok(())
+}
+```
+
 ### Consumer Example
 
 ```rust
@@ -281,29 +328,164 @@ async fn main() -> anyhow::Result<()> {
 
 ## Python Client
 
+High-performance Python bindings with full async/await support.
+
 ### Installation
 
 ```bash
 pip install rivven
 ```
 
-### Usage
+### Basic Usage
 
 ```python
-from rivven import Client
+import asyncio
+import rivven
 
-# Connect
-client = Client("localhost:9092")
+async def main():
+    # Connect to Rivven
+    client = await rivven.connect("localhost:9092")
+    
+    # Create a topic
+    await client.create_topic("events", partitions=3)
+    
+    # Produce messages
+    producer = client.producer("events")
+    offset = await producer.send(b"Hello from Python!", key=b"key-1")
+    print(f"Published at offset: {offset}")
+    
+    # Consume messages
+    consumer = client.consumer("events", group_id="my-group")
+    messages = await consumer.fetch(max_messages=10)
+    for msg in messages:
+        print(f"Offset {msg.offset}: {msg.value_str()}")
+    await consumer.commit()
 
-# Publish
-offset = client.publish("events", b"Hello from Python!")
-print(f"Published at offset: {offset}")
-
-# Consume
-messages = client.consume("events", partition=0, offset=0, max_messages=10)
-for msg in messages:
-    print(f"Offset {msg.offset}: {msg.value}")
+asyncio.run(main())
 ```
+
+### Async Iterator Pattern
+
+```python
+import asyncio
+import rivven
+
+async def stream():
+    client = await rivven.connect("localhost:9092")
+    consumer = client.consumer("events", group_id="my-group")
+    
+    async for message in consumer:
+        print(f"Received: {message.value_str()}")
+        await consumer.commit()
+
+asyncio.run(stream())
+```
+
+### Authentication
+
+```python
+import asyncio
+import rivven
+
+async def authenticated():
+    client = await rivven.connect("localhost:9092")
+    
+    # Simple authentication
+    await client.authenticate("username", "password")
+    
+    # Or SCRAM-SHA-256
+    await client.authenticate_scram("username", "password")
+    
+    topics = await client.list_topics()
+
+asyncio.run(authenticated())
+```
+
+### TLS Connection
+
+```python
+import asyncio
+import rivven
+
+async def secure():
+    client = await rivven.connect_tls(
+        "localhost:9093",
+        ca_cert="/path/to/ca.crt",
+        client_cert="/path/to/client.crt",  # Optional: mTLS
+        client_key="/path/to/client.key",   # Optional: mTLS
+    )
+    
+    topics = await client.list_topics()
+
+asyncio.run(secure())
+```
+
+### Transactions (Exactly-Once Semantics)
+
+```python
+import asyncio
+import rivven
+
+async def transactional():
+    client = await rivven.connect("localhost:9092")
+    
+    # Initialize transactional producer
+    producer_id, epoch = await client.init_producer_id("my-txn-id")
+    
+    try:
+        await client.begin_transaction("my-txn-id", producer_id, epoch)
+        
+        await client.publish_idempotent(
+            topic="events",
+            value=b"message",
+            producer_id=producer_id,
+            epoch=epoch,
+            sequence=0,
+            key=b"key"
+        )
+        
+        await client.commit_transaction("my-txn-id", producer_id, epoch)
+    except Exception:
+        await client.abort_transaction("my-txn-id", producer_id, epoch)
+        raise
+
+asyncio.run(transactional())
+```
+
+### Admin Operations
+
+```python
+import asyncio
+import rivven
+
+async def admin():
+    client = await rivven.connect("localhost:9092")
+    
+    # Topic management
+    await client.create_topic("my-topic", partitions=3)
+    topics = await client.list_topics()
+    
+    # Topic configuration
+    configs = await client.describe_topic_configs("my-topic")
+    await client.alter_topic_config("my-topic", "retention.ms", "86400000")
+    
+    # Partition management
+    await client.create_partitions("my-topic", new_total=6)
+    
+    # Offset management
+    offset = await client.get_offset_for_timestamp("my-topic", 0, 1699900000000)
+    await client.delete_records("my-topic", 0, before_offset=100)
+    
+    # Consumer groups
+    groups = await client.list_groups()
+    await client.describe_group("my-group")
+    await client.commit_offset("my-group", "my-topic", 0, 100)
+    committed = await client.get_offset("my-group", "my-topic", 0)
+
+asyncio.run(admin())
+```
+
+For complete API reference, see the [Python SDK README](https://github.com/hupe1980/rivven/tree/main/python).
 
 ---
 

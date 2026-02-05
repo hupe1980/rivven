@@ -15,6 +15,13 @@ serde = { workspace = true }
 serde_bytes = { workspace = true }
 postcard = { workspace = true }
 thiserror = { workspace = true }
+# Protobuf support (optional, for cross-language clients)
+prost = { version = "0.13", optional = true }
+
+[build-dependencies]
+prost-build = { version = "0.13", optional = true }
 
 [features]
 default = []
+# Enable protobuf wire format for cross-language client support (Go, Java, etc.)
+protobuf = ["dep:prost", "dep:prost-build"]
