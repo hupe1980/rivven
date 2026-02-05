@@ -240,6 +240,31 @@ except RivvenException as e:
     print(f"General Rivven error: {e}")
 ```
 
+## Testing
+
+### Running Tests
+
+```bash
+# Install test dependencies
+pip install -r requirements-test.txt
+
+# Run API tests (no broker required)
+pytest tests/test_api.py -v
+
+# Run integration tests (requires running broker)
+export RIVVEN_BROKER="localhost:9092"
+pytest tests/test_integration.py -v -m integration
+```
+
+### Type Checking
+
+The package includes type stubs (`rivven.pyi`) for IDE support and static type checking:
+
+```bash
+pip install mypy
+mypy your_code.py
+```
+
 ## Building from Source
 
 ```bash
@@ -252,6 +277,9 @@ maturin build --release
 
 # Install locally
 pip install target/wheels/rivven-*.whl
+
+# Development install (editable)
+maturin develop --release
 ```
 
 ## Documentation

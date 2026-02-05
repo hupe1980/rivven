@@ -21,6 +21,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -55,6 +58,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -180,9 +186,9 @@ jobs:
           manylinux: ${{ matrix.manylinux }}
           container: ${{ matrix.container || '' }}
           before-script-linux: |
-            # Install required build dependencies for vendored OpenSSL
-            yum install -y perl-IPC-Cmd perl-FindBin perl-File-Compare perl-File-Copy 2>/dev/null || \
-            apt-get update && apt-get install -y perl make 2>/dev/null || true
+            # Install required build dependencies for vendored OpenSSL and protobuf
+            yum install -y perl-IPC-Cmd perl-FindBin perl-File-Compare perl-File-Copy protobuf-compiler 2>/dev/null || \
+            apt-get update && apt-get install -y perl make protobuf-compiler 2>/dev/null || true
       
       - name: Upload wheels
         uses: actions/upload-artifact@v4
@@ -301,11 +307,18 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       
-      - name: Install musl tools (Linux only)
-        if: contains(matrix.target, 'musl')
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools musl-dev
+          sudo apt-get install -y protobuf-compiler
+          if [[ "${{ matrix.target }}" == *"musl"* ]]; then
+            sudo apt-get install -y musl-tools musl-dev
+          fi
+      
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
       
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

@@ -10,7 +10,8 @@ keywords = ["cdc", "postgres", "mysql", "mariadb", "replication"]
 
 [package.metadata.cargo-machete]
 # flate2: Required by mysql_async for compression support
-ignored = ["flate2"]
+# md-5: Crate name is md-5 but imported as md5 (RustCrypto naming convention)
+ignored = ["flate2", "md-5"]
 
 [features]
 default = ["postgres", "mysql"]
