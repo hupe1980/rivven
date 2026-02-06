@@ -97,7 +97,7 @@ impl SourceRunner {
             "postgres-cdc" => {
                 // Try to parse as PostgresCdcConfig and extract topic_routing
                 if let Ok(pg_config) = serde_yaml::from_value::<
-                    crate::connectors::postgres_cdc::PostgresCdcConfig,
+                    crate::connectors::cdc::PostgresCdcConfig,
                 >(config.config.clone())
                 {
                     pg_config.topic_routing
@@ -108,7 +108,7 @@ impl SourceRunner {
             "mysql-cdc" | "mariadb-cdc" => {
                 // Try to parse as MySqlCdcConfig and extract topic_routing
                 if let Ok(mysql_config) = serde_yaml::from_value::<
-                    crate::connectors::mysql_cdc::MySqlCdcConfig,
+                    crate::connectors::cdc::MySqlCdcConfig,
                 >(config.config.clone())
                 {
                     mysql_config.topic_routing
@@ -260,7 +260,7 @@ impl SourceRunner {
 
     #[cfg(feature = "postgres")]
     async fn run_postgres_cdc(&self, shutdown_rx: &mut broadcast::Receiver<()>) -> Result<()> {
-        use crate::connectors::postgres_cdc::PostgresCdcConfig as SdkPgConfig;
+        use crate::connectors::cdc::PostgresCdcConfig as SdkPgConfig;
         use rivven_cdc::common::CdcSource;
         use rivven_cdc::postgres::{PostgresCdc, PostgresCdcConfig};
         use validator::Validate;

@@ -108,7 +108,7 @@
 //! );
 //! ```
 
-use super::cdc_config::{SnapshotCdcConfig, SnapshotModeConfig};
+use super::config::{SnapshotCdcConfig, SnapshotModeConfig};
 use rivven_cdc::common::{
     CdcEvent, FileProgressStore, MemoryProgressStore, ProgressStore, Result, SnapshotConfig,
     SnapshotCoordinator, SnapshotMode, SnapshotProgress, SnapshotSource, SnapshotStatsSnapshot,
@@ -980,17 +980,15 @@ impl Default for IncrementalSnapshotExecutorConfig {
 impl IncrementalSnapshotExecutorConfig {
     /// Create from YAML incremental snapshot config.
     pub fn from_yaml(
-        yaml_config: &super::cdc_config::IncrementalSnapshotCdcConfig,
+        yaml_config: &super::config::IncrementalSnapshotCdcConfig,
         connection_string: String,
     ) -> Self {
         Self {
             chunk_size: yaml_config.chunk_size,
             max_concurrent_chunks: yaml_config.max_concurrent_chunks,
             watermark_strategy: match yaml_config.watermark_strategy {
-                super::cdc_config::WatermarkStrategyConfig::Insert => {
-                    WatermarkStrategy::InsertInsert
-                }
-                super::cdc_config::WatermarkStrategyConfig::UpdateAndInsert => {
+                super::config::WatermarkStrategyConfig::Insert => WatermarkStrategy::InsertInsert,
+                super::config::WatermarkStrategyConfig::UpdateAndInsert => {
                     WatermarkStrategy::InsertDelete
                 }
             },
@@ -2620,7 +2618,7 @@ mod tests {
     #[cfg(feature = "postgres")]
     mod executor_tests {
         use super::super::*;
-        use crate::connectors::cdc_config::{SnapshotCdcConfig, SnapshotModeConfig};
+        use crate::connectors::cdc::config::{SnapshotCdcConfig, SnapshotModeConfig};
 
         fn make_config(mode: SnapshotModeConfig, has_prior_state: bool) -> SnapshotExecutorConfig {
             SnapshotExecutorConfig {

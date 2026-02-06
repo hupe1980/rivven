@@ -19,12 +19,12 @@
 //!
 //! ```rust,ignore
 //! use rivven_connect::{SourceRegistry, SinkRegistry};
-//! use rivven_connect::connectors::{postgres_cdc, stdout};
+//! use rivven_connect::connectors::{cdc, stdout};
 //! use std::sync::Arc;
 //!
 //! fn main() {
 //!     let mut sources = SourceRegistry::new();
-//!     sources.register("postgres-cdc", Arc::new(postgres_cdc::PostgresCdcSourceFactory));
+//!     sources.register("postgres-cdc", Arc::new(cdc::PostgresCdcSourceFactory));
 //!
 //!     let mut sinks = SinkRegistry::new();
 //!     sinks.register("stdout", Arc::new(stdout::StdoutSinkFactory));

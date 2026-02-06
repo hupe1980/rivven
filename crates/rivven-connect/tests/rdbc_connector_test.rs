@@ -17,7 +17,7 @@ mod source_config_tests {
 
     #[test]
     fn test_deserialize_minimal_config() {
-        let config: Result<rivven_connect::connectors::rdbc_source::RdbcSourceConfig, _> =
+        let config: Result<rivven_connect::connectors::rdbc::RdbcSourceConfig, _> =
             serde_json::from_value(minimal_config());
         assert!(config.is_ok());
         let config = config.unwrap();
@@ -37,7 +37,7 @@ mod source_config_tests {
             "topic": "user-changes"
         });
 
-        let config: rivven_connect::connectors::rdbc_source::RdbcSourceConfig =
+        let config: rivven_connect::connectors::rdbc::RdbcSourceConfig =
             serde_json::from_value(json).unwrap();
 
         assert_eq!(config.schema, Some("public".to_string()));
@@ -55,11 +55,11 @@ mod source_config_tests {
             "table": "users",
             "mode": "bulk"
         });
-        let config: rivven_connect::connectors::rdbc_source::RdbcSourceConfig =
+        let config: rivven_connect::connectors::rdbc::RdbcSourceConfig =
             serde_json::from_value(json).unwrap();
         assert!(matches!(
             config.mode,
-            rivven_connect::connectors::rdbc_source::RdbcQueryMode::Bulk
+            rivven_connect::connectors::rdbc::RdbcQueryMode::Bulk
         ));
 
         // Test Incrementing mode
@@ -69,11 +69,11 @@ mod source_config_tests {
             "mode": "incrementing",
             "incrementing_column": "event_id"
         });
-        let config: rivven_connect::connectors::rdbc_source::RdbcSourceConfig =
+        let config: rivven_connect::connectors::rdbc::RdbcSourceConfig =
             serde_json::from_value(json).unwrap();
         assert!(matches!(
             config.mode,
-            rivven_connect::connectors::rdbc_source::RdbcQueryMode::Incrementing
+            rivven_connect::connectors::rdbc::RdbcQueryMode::Incrementing
         ));
 
         // Test Timestamp mode
@@ -83,11 +83,11 @@ mod source_config_tests {
             "mode": "timestamp",
             "timestamp_column": "created_at"
         });
-        let config: rivven_connect::connectors::rdbc_source::RdbcSourceConfig =
+        let config: rivven_connect::connectors::rdbc::RdbcSourceConfig =
             serde_json::from_value(json).unwrap();
         assert!(matches!(
             config.mode,
-            rivven_connect::connectors::rdbc_source::RdbcQueryMode::Timestamp
+            rivven_connect::connectors::rdbc::RdbcQueryMode::Timestamp
         ));
         assert_eq!(config.timestamp_column, Some("created_at".to_string()));
 
@@ -99,11 +99,11 @@ mod source_config_tests {
             "timestamp_column": "updated_at",
             "incrementing_column": "id"
         });
-        let config: rivven_connect::connectors::rdbc_source::RdbcSourceConfig =
+        let config: rivven_connect::connectors::rdbc::RdbcSourceConfig =
             serde_json::from_value(json).unwrap();
         assert!(matches!(
             config.mode,
-            rivven_connect::connectors::rdbc_source::RdbcQueryMode::TimestampIncrementing
+            rivven_connect::connectors::rdbc::RdbcQueryMode::TimestampIncrementing
         ));
     }
 }
@@ -118,7 +118,7 @@ mod sink_config_tests {
             "table": "users"
         });
 
-        let config: rivven_connect::connectors::rdbc_sink::RdbcSinkConfig =
+        let config: rivven_connect::connectors::rdbc::RdbcSinkConfig =
             serde_json::from_value(json).unwrap();
         assert_eq!(config.table, "users");
     }
@@ -136,7 +136,7 @@ mod sink_config_tests {
             "batch_timeout_ms": 5000
         });
 
-        let config: rivven_connect::connectors::rdbc_sink::RdbcSinkConfig =
+        let config: rivven_connect::connectors::rdbc::RdbcSinkConfig =
             serde_json::from_value(json).unwrap();
 
         assert_eq!(config.schema, Some("public".to_string()));
@@ -151,15 +151,15 @@ mod sink_config_tests {
         let modes = [
             (
                 "insert",
-                rivven_connect::connectors::rdbc_sink::RdbcWriteMode::Insert,
+                rivven_connect::connectors::rdbc::RdbcWriteMode::Insert,
             ),
             (
                 "update",
-                rivven_connect::connectors::rdbc_sink::RdbcWriteMode::Update,
+                rivven_connect::connectors::rdbc::RdbcWriteMode::Update,
             ),
             (
                 "upsert",
-                rivven_connect::connectors::rdbc_sink::RdbcWriteMode::Upsert,
+                rivven_connect::connectors::rdbc::RdbcWriteMode::Upsert,
             ),
         ];
 
@@ -169,7 +169,7 @@ mod sink_config_tests {
                 "table": "users",
                 "write_mode": mode_str
             });
-            let config: rivven_connect::connectors::rdbc_sink::RdbcSinkConfig =
+            let config: rivven_connect::connectors::rdbc::RdbcSinkConfig =
                 serde_json::from_value(json).unwrap();
             assert_eq!(config.write_mode, expected);
         }
@@ -181,13 +181,13 @@ mod sink_config_tests {
             "connection_url": "postgres://localhost/db",
             "table": "users"
         });
-        let config: rivven_connect::connectors::rdbc_sink::RdbcSinkConfig =
+        let config: rivven_connect::connectors::rdbc::RdbcSinkConfig =
             serde_json::from_value(json).unwrap();
 
         // Default write mode is Insert
         assert_eq!(
             config.write_mode,
-            rivven_connect::connectors::rdbc_sink::RdbcWriteMode::Insert
+            rivven_connect::connectors::rdbc::RdbcWriteMode::Insert
         );
         // Default batch size is 1000
         assert_eq!(config.batch_size, 1000);
@@ -209,7 +209,7 @@ mod sink_config_tests {
             "transactional": true,
             "pool_size": 8
         });
-        let config: rivven_connect::connectors::rdbc_sink::RdbcSinkConfig =
+        let config: rivven_connect::connectors::rdbc::RdbcSinkConfig =
             serde_json::from_value(json).unwrap();
 
         assert!(config.transactional);
@@ -225,7 +225,7 @@ mod spec_tests {
 
     #[test]
     fn test_rdbc_source_spec() {
-        let spec = rivven_connect::connectors::rdbc_source::RdbcSource::spec();
+        let spec = rivven_connect::connectors::rdbc::RdbcSource::spec();
         assert_eq!(spec.connector_type, "rdbc-source");
         // Version matches package version
         assert!(!spec.version.is_empty());
@@ -235,7 +235,7 @@ mod spec_tests {
 
     #[test]
     fn test_rdbc_sink_spec() {
-        let spec = rivven_connect::connectors::rdbc_sink::RdbcSink::spec();
+        let spec = rivven_connect::connectors::rdbc::RdbcSink::spec();
         assert_eq!(spec.connector_type, "rdbc-sink");
         // Version matches package version
         assert!(!spec.version.is_empty());

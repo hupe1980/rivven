@@ -783,7 +783,7 @@ async fn check_broker(config: &ConnectConfig) -> Result<()> {
 const CHECK_TIMEOUT_SECS: u64 = 30;
 
 async fn check_source_config(_name: &str, source: &config::SourceConfig) -> Result<String> {
-    use connectors::postgres_cdc::{PostgresCdcConfig, PostgresCdcSource};
+    use connectors::cdc::{PostgresCdcConfig, PostgresCdcSource};
     use rivven_connect::Source;
     use std::time::Duration;
     use validator::Validate;
@@ -912,7 +912,7 @@ const DISCOVER_TIMEOUT_SECS: u64 = 60;
 
 /// Discover available streams/tables from a source
 async fn discover_source(config: ConnectConfig, source_name: String, format: String) -> Result<()> {
-    use connectors::postgres_cdc::{PostgresCdcConfig, PostgresCdcSource};
+    use connectors::cdc::{PostgresCdcConfig, PostgresCdcSource};
     use rivven_connect::Source;
     use validator::Validate;
 
@@ -999,7 +999,7 @@ async fn discover_source(config: ConnectConfig, source_name: String, format: Str
 
 /// Show config schema for a connector type
 fn show_schema(connector: &str, format: &str) -> Result<()> {
-    use connectors::postgres_cdc::PostgresCdcConfig;
+    use connectors::cdc::PostgresCdcConfig;
     use connectors::stdout::StdoutSinkConfig;
     use schemars::schema_for;
 

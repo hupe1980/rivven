@@ -80,14 +80,14 @@
 //!     enabled: true
 //! ```
 
-use super::super::prelude::*;
-use super::cdc_config::{
+use super::config::{
     ColumnFilterConfig, DeduplicationCdcConfig, FieldEncryptionConfig, HeartbeatCdcConfig,
     IncrementalSnapshotCdcConfig, ReadOnlyReplicaConfig, SchemaChangeTopicConfig,
     SignalTableConfig, SmtTransformConfig, SnapshotCdcConfig, SnapshotModeConfig,
     TombstoneCdcConfig, TransactionTopicCdcConfig,
 };
 use crate::connectors::{AnySource, SourceFactory};
+use crate::prelude::*;
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use secrecy::{ExposeSecret, SecretString};
@@ -845,7 +845,7 @@ impl Source for PostgresCdcSource {
         catalog: &ConfiguredCatalog,
         state: Option<State>,
     ) -> Result<BoxStream<'static, Result<SourceEvent>>> {
-        use super::cdc_features::{CdcFeatureConfig, CdcFeatureProcessor};
+        use super::features::{CdcFeatureConfig, CdcFeatureProcessor};
         use futures::StreamExt;
         use rivven_cdc::common::CdcSource;
         use rivven_cdc::postgres::{PostgresCdc, PostgresCdcConfig as CdcConfig};
@@ -920,7 +920,7 @@ impl Source for PostgresCdcSource {
         // ====================================================================
         // Execute Snapshot Phase (if configured)
         // ====================================================================
-        use super::cdc_snapshot::{SnapshotExecutor, SnapshotExecutorConfig};
+        use super::snapshot::{SnapshotExecutor, SnapshotExecutorConfig};
 
         // Build table list from catalog: (schema, table, primary_key)
         let snapshot_tables: Vec<(String, String, String)> = catalog
@@ -977,7 +977,7 @@ impl Source for PostgresCdcSource {
             // Convert snapshot events to SourceEvents and return as stream
             let snapshot_stream = futures::stream::iter(snapshot_events)
                 .filter_map(move |cdc_event| async move {
-                    super::cdc_common::cdc_event_to_source_event(&cdc_event).map(Ok)
+                    super::common::cdc_event_to_source_event(&cdc_event).map(Ok)
                 })
                 .boxed();
             return Ok(snapshot_stream);
@@ -1099,8 +1099,7 @@ impl Source for PostgresCdcSource {
                     };
 
                     // Use shared conversion function from cdc_common
-                    let source_event =
-                        super::cdc_common::cdc_event_to_source_event(&processed.event)?;
+                    let source_event = super::common::cdc_event_to_source_event(&processed.event)?;
                     Some(Ok(source_event))
                 }
             });
@@ -1109,7 +1108,7 @@ impl Source for PostgresCdcSource {
         // Snapshot events are emitted first, then streaming continues
         let snapshot_event_stream =
             futures::stream::iter(snapshot_events).filter_map(|cdc_event| async move {
-                super::cdc_common::cdc_event_to_source_event(&cdc_event).map(Ok)
+                super::common::cdc_event_to_source_event(&cdc_event).map(Ok)
             });
 
         // Chain: snapshot events first, then streaming events

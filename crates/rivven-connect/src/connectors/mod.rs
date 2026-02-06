@@ -29,22 +29,11 @@
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 
-// Shared CDC configuration types
-pub mod cdc_config;
-// Shared CDC utilities (SMT, column filters, event conversion)
-pub mod cdc_common;
-// Full CDC feature integration (dedup, signals, encryption, etc.)
-pub mod cdc_features;
-// Snapshot management (initial + incremental snapshots)
-pub mod cdc_snapshot;
+// CDC connectors (PostgreSQL, MySQL, SQL Server)
+pub mod cdc;
 
 // Built-in sources (bundled, minimal dependencies)
 pub mod datagen;
-#[cfg(feature = "mysql")]
-pub mod mysql_cdc;
-pub mod postgres_cdc;
-#[cfg(feature = "sqlserver")]
-pub mod sqlserver_cdc;
 
 // Built-in sinks (bundled, minimal dependencies)
 #[cfg(feature = "http")]
@@ -53,9 +42,7 @@ pub mod stdout;
 
 // RDBC connectors (query-based source/sink using rivven-rdbc)
 #[cfg(feature = "rdbc")]
-pub mod rdbc_sink;
-#[cfg(feature = "rdbc")]
-pub mod rdbc_source;
+pub mod rdbc;
 
 // Queue connectors (Kafka, MQTT, SQS, Pub/Sub)
 pub mod queue;
@@ -91,21 +78,15 @@ pub fn create_source_registry() -> SourceRegistry {
 
     // Always register postgres-cdc (bundled)
     #[cfg(feature = "postgres")]
-    registry.register(
-        "postgres-cdc",
-        Arc::new(postgres_cdc::PostgresCdcSourceFactory),
-    );
+    registry.register("postgres-cdc", Arc::new(cdc::PostgresCdcSourceFactory));
 
     // MySQL CDC (bundled, feature-gated)
     #[cfg(feature = "mysql")]
-    registry.register("mysql-cdc", Arc::new(mysql_cdc::MySqlCdcSourceFactory));
+    registry.register("mysql-cdc", Arc::new(cdc::MySqlCdcSourceFactory));
 
     // SQL Server CDC (bundled, feature-gated)
     #[cfg(feature = "sqlserver")]
-    registry.register(
-        "sqlserver-cdc",
-        Arc::new(sqlserver_cdc::SqlServerCdcSourceFactory),
-    );
+    registry.register("sqlserver-cdc", Arc::new(cdc::SqlServerCdcSourceFactory));
 
     // Queue sources (feature-gated)
     #[cfg(feature = "kafka")]
@@ -122,7 +103,7 @@ pub fn create_source_registry() -> SourceRegistry {
 
     // RDBC source (query-based, feature-gated)
     #[cfg(feature = "rdbc")]
-    registry.register("rdbc-source", Arc::new(rdbc_source::RdbcSourceFactory));
+    registry.register("rdbc-source", Arc::new(rdbc::RdbcSourceFactory));
 
     registry
 }
@@ -176,7 +157,7 @@ pub fn create_sink_registry() -> SinkRegistry {
 
     // RDBC sink (query-based, feature-gated)
     #[cfg(feature = "rdbc")]
-    registry.register("rdbc-sink", Arc::new(rdbc_sink::RdbcSinkFactory));
+    registry.register("rdbc-sink", Arc::new(rdbc::RdbcSinkFactory));
 
     registry
 }
@@ -245,7 +226,7 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .aliases(["pg-cdc", "postgres_cdc", "postgresql-cdc"])
             .related("mysql-cdc")
             .build(),
-        Arc::new(postgres_cdc::PostgresCdcSourceFactory),
+        Arc::new(cdc::PostgresCdcSourceFactory),
     );
 
     // MySQL CDC
@@ -268,7 +249,7 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .aliases(["mysql_cdc", "mariadb-cdc"])
             .related("postgres-cdc")
             .build(),
-        Arc::new(mysql_cdc::MySqlCdcSourceFactory),
+        Arc::new(cdc::MySqlCdcSourceFactory),
     );
 
     // Kafka source
@@ -356,7 +337,7 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .aliases(["rdbc", "sql-source", "database-source", "query-source"])
             .related("postgres-cdc")
             .build(),
-        Arc::new(rdbc_source::RdbcSourceFactory),
+        Arc::new(rdbc::RdbcSourceFactory),
     );
 
     // ─────────────────────────────────────────────────────────────────
@@ -563,7 +544,7 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .aliases(["rdbc", "sql-sink", "database-sink", "query-sink"])
             .related("postgres-cdc")
             .build(),
-        Arc::new(rdbc_sink::RdbcSinkFactory),
+        Arc::new(rdbc::RdbcSinkFactory),
     );
 
     inventory

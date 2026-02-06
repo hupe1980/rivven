@@ -1701,3 +1701,534 @@ impl Drop for TestSchemaRegistry {
         }
     }
 }
+
+// ============================================================================
+// Kafka Test Container
+// ============================================================================
+
+/// A Kafka container for integration tests using testcontainers.
+///
+/// This fixture starts a Kafka container (using Redpanda, a Kafka-compatible
+/// streaming platform that starts faster and requires no Zookeeper).
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let kafka = TestKafka::start().await?;
+/// println!("Kafka bootstrap: {}", kafka.bootstrap_servers());
+/// kafka.create_topic("test-topic", 3, 1).await?;
+/// ```
+pub struct TestKafka {
+    pub container: testcontainers::ContainerAsync<testcontainers_modules::kafka::Kafka>,
+    pub host: String,
+    pub port: u16,
+}
+
+impl TestKafka {
+    /// Start a Kafka container.
+    ///
+    /// Uses the Kafka testcontainer module which provides a single-node
+    /// Kafka broker with KRaft (no Zookeeper required).
+    pub async fn start() -> Result<Self> {
+        use testcontainers::runners::AsyncRunner;
+        use testcontainers_modules::kafka::Kafka;
+
+        info!("Starting Kafka container...");
+
+        let container = Kafka::default().start().await?;
+
+        let host = container.get_host().await?.to_string();
+
+        // Retry port retrieval to handle testcontainers race condition
+        let mut port = None;
+        for i in 0..20 {
+            match container.get_host_port_ipv4(9093).await {
+                Ok(p) => {
+                    port = Some(p);
+                    break;
+                }
+                Err(e) => {
+                    tracing::debug!("Waiting for Kafka port exposure (attempt {}): {}", i + 1, e);
+                    sleep(Duration::from_millis(200 * (i + 1) as u64)).await;
+                }
+            }
+        }
+        let port = port.ok_or_else(|| anyhow::anyhow!("Kafka port not exposed after retries"))?;
+
+        // Wait for Kafka to be ready
+        Self::wait_for_kafka(&host, port).await?;
+
+        info!("Kafka ready at {}:{}", host, port);
+
+        Ok(Self {
+            container,
+            host,
+            port,
+        })
+    }
+
+    /// Wait for Kafka to become ready by attempting to connect.
+    async fn wait_for_kafka(host: &str, port: u16) -> Result<()> {
+        let bootstrap = format!("{}:{}", host, port);
+
+        for i in 0..60 {
+            match tokio::net::TcpStream::connect(&bootstrap).await {
+                Ok(_) => {
+                    info!("Kafka TCP ready after {} attempts", i + 1);
+                    // Give Kafka a bit more time after TCP is available
+                    sleep(Duration::from_millis(1000)).await;
+                    return Ok(());
+                }
+                Err(e) => {
+                    tracing::debug!("Waiting for Kafka (attempt {}): {}", i + 1, e);
+                }
+            }
+            sleep(Duration::from_millis(500)).await;
+        }
+
+        anyhow::bail!("Kafka did not become ready in time")
+    }
+
+    /// Get the Kafka bootstrap servers connection string.
+    #[inline]
+    pub fn bootstrap_servers(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+
+    /// Get host string.
+    #[inline]
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// Get port number.
+    #[inline]
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Create a topic with the specified configuration.
+    ///
+    /// Uses rskafka to create the topic via the Kafka protocol.
+    pub async fn create_topic(
+        &self,
+        name: &str,
+        num_partitions: i32,
+        replication_factor: i16,
+    ) -> Result<()> {
+        use rskafka::client::ClientBuilder;
+
+        let client = ClientBuilder::new(vec![self.bootstrap_servers()])
+            .build()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create Kafka client: {}", e))?;
+
+        // Create topic using controller client
+        let controller = client
+            .controller_client()
+            .map_err(|e| anyhow::anyhow!("Failed to get controller client: {}", e))?;
+
+        controller
+            .create_topic(name, num_partitions, replication_factor, 5000)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create topic {}: {}", name, e))?;
+
+        info!(
+            "Created Kafka topic '{}' with {} partitions",
+            name, num_partitions
+        );
+        Ok(())
+    }
+
+    /// Produce messages to a topic.
+    ///
+    /// Returns the offsets of the produced messages.
+    pub async fn produce_messages(
+        &self,
+        topic: &str,
+        partition: i32,
+        messages: Vec<(Option<Vec<u8>>, Vec<u8>)>,
+    ) -> Result<Vec<i64>> {
+        use rskafka::client::partition::UnknownTopicHandling;
+        use rskafka::client::ClientBuilder;
+        use rskafka::record::Record;
+
+        let client = ClientBuilder::new(vec![self.bootstrap_servers()])
+            .build()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create Kafka client: {}", e))?;
+
+        let partition_client = client
+            .partition_client(topic, partition, UnknownTopicHandling::Error)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get partition client: {}", e))?;
+
+        let records: Vec<Record> = messages
+            .into_iter()
+            .map(|(key, value)| Record {
+                key,
+                value: Some(value),
+                headers: Default::default(),
+                timestamp: chrono::Utc::now(),
+            })
+            .collect();
+
+        let offsets = partition_client
+            .produce(
+                records,
+                rskafka::client::partition::Compression::NoCompression,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to produce messages: {}", e))?;
+
+        info!(
+            "Produced {} messages to {}/{}",
+            offsets.len(),
+            topic,
+            partition
+        );
+        Ok(offsets)
+    }
+
+    /// Consume messages from a topic partition starting from an offset.
+    pub async fn consume_messages(
+        &self,
+        topic: &str,
+        partition: i32,
+        start_offset: i64,
+        max_messages: usize,
+    ) -> Result<Vec<rskafka::record::RecordAndOffset>> {
+        use rskafka::client::partition::UnknownTopicHandling;
+        use rskafka::client::ClientBuilder;
+
+        let client = ClientBuilder::new(vec![self.bootstrap_servers()])
+            .build()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create Kafka client: {}", e))?;
+
+        let partition_client = client
+            .partition_client(topic, partition, UnknownTopicHandling::Error)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get partition client: {}", e))?;
+
+        let (records, _high_watermark) = partition_client
+            .fetch_records(start_offset, 1..1_048_576, 5000)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to fetch records: {}", e))?;
+
+        let result: Vec<_> = records.into_iter().take(max_messages).collect();
+        info!(
+            "Consumed {} messages from {}/{} starting at offset {}",
+            result.len(),
+            topic,
+            partition,
+            start_offset
+        );
+        Ok(result)
+    }
+
+    /// Get the current high watermark for a topic partition.
+    ///
+    /// The high watermark is the offset of the last committed message + 1.
+    #[inline]
+    pub async fn get_high_watermark(&self, topic: &str, partition: i32) -> Result<i64> {
+        use rskafka::client::partition::{OffsetAt, UnknownTopicHandling};
+        use rskafka::client::ClientBuilder;
+
+        let client = ClientBuilder::new(vec![self.bootstrap_servers()])
+            .build()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create Kafka client: {}", e))?;
+
+        let partition_client = client
+            .partition_client(topic, partition, UnknownTopicHandling::Error)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get partition client: {}", e))?;
+
+        let offset = partition_client
+            .get_offset(OffsetAt::Latest)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to get high watermark: {}", e))?;
+
+        Ok(offset)
+    }
+}
+
+// ============================================================================
+// MQTT Test Container (Mosquitto)
+// ============================================================================
+
+/// An MQTT broker container for integration tests using testcontainers.
+///
+/// This fixture starts an Eclipse Mosquitto MQTT broker which is lightweight
+/// and starts quickly.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let mqtt = TestMqtt::start().await?;
+/// println!("MQTT broker: {}", mqtt.broker_url());
+/// mqtt.publish("test/topic", b"hello", 0).await?;
+/// ```
+pub struct TestMqtt {
+    pub container: testcontainers::ContainerAsync<testcontainers_modules::mosquitto::Mosquitto>,
+    pub host: String,
+    pub port: u16,
+}
+
+impl TestMqtt {
+    /// Start a Mosquitto MQTT broker container.
+    pub async fn start() -> Result<Self> {
+        use testcontainers::runners::AsyncRunner;
+        use testcontainers_modules::mosquitto::Mosquitto;
+
+        info!("Starting Mosquitto MQTT broker...");
+
+        let container = Mosquitto::default().start().await?;
+
+        let host = container.get_host().await?.to_string();
+
+        // Retry port retrieval
+        let mut port = None;
+        for i in 0..20 {
+            match container.get_host_port_ipv4(1883).await {
+                Ok(p) => {
+                    port = Some(p);
+                    break;
+                }
+                Err(e) => {
+                    tracing::debug!("Waiting for MQTT port exposure (attempt {}): {}", i + 1, e);
+                    sleep(Duration::from_millis(100 * (i + 1) as u64)).await;
+                }
+            }
+        }
+        let port = port.ok_or_else(|| anyhow::anyhow!("MQTT port not exposed after retries"))?;
+
+        // Wait for MQTT to be ready
+        Self::wait_for_mqtt(&host, port).await?;
+
+        info!("MQTT broker ready at {}:{}", host, port);
+
+        Ok(Self {
+            container,
+            host,
+            port,
+        })
+    }
+
+    /// Wait for the MQTT broker to become ready.
+    async fn wait_for_mqtt(host: &str, port: u16) -> Result<()> {
+        use rumqttc::{AsyncClient, MqttOptions};
+
+        let client_id = format!("test-probe-{}", uuid::Uuid::new_v4());
+        let mut options = MqttOptions::new(client_id, host, port);
+        options.set_keep_alive(Duration::from_secs(5));
+
+        for i in 0..30 {
+            let (client, mut eventloop) = AsyncClient::new(options.clone(), 10);
+
+            // Try to connect
+            let connect_result = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    match eventloop.poll().await {
+                        Ok(rumqttc::Event::Incoming(rumqttc::Packet::ConnAck(ack))) => {
+                            if ack.code == rumqttc::ConnectReturnCode::Success {
+                                return Ok(());
+                            }
+                            return Err(anyhow::anyhow!("ConnAck error: {:?}", ack.code));
+                        }
+                        Ok(_) => continue,
+                        Err(e) => return Err(anyhow::anyhow!("Connection error: {}", e)),
+                    }
+                }
+            })
+            .await;
+
+            let _ = client.disconnect().await;
+
+            match connect_result {
+                Ok(Ok(())) => {
+                    info!("MQTT broker ready after {} attempts", i + 1);
+                    return Ok(());
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!("MQTT not ready (attempt {}): {}", i + 1, e);
+                }
+                Err(_) => {
+                    tracing::debug!("MQTT connection timeout (attempt {})", i + 1);
+                }
+            }
+
+            sleep(Duration::from_millis(300)).await;
+        }
+
+        anyhow::bail!("MQTT broker did not become ready in time")
+    }
+
+    /// Get the MQTT broker URL.
+    #[inline]
+    pub fn broker_url(&self) -> String {
+        format!("mqtt://{}:{}", self.host, self.port)
+    }
+
+    /// Get host and port tuple.
+    #[inline]
+    pub fn host_port(&self) -> (&str, u16) {
+        (&self.host, self.port)
+    }
+
+    /// Get host string.
+    #[inline]
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// Get port number.
+    #[inline]
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Publish a message to a topic.
+    pub async fn publish(&self, topic: &str, payload: &[u8], qos: u8) -> Result<()> {
+        use rumqttc::{AsyncClient, MqttOptions, QoS};
+
+        let client_id = format!("test-pub-{}", uuid::Uuid::new_v4());
+        let mut options = MqttOptions::new(client_id, &self.host, self.port);
+        options.set_keep_alive(Duration::from_secs(5));
+
+        let qos = match qos {
+            0 => QoS::AtMostOnce,
+            1 => QoS::AtLeastOnce,
+            _ => QoS::ExactlyOnce,
+        };
+
+        let (client, mut eventloop) = AsyncClient::new(options, 10);
+
+        // Wait for connection
+        let connected = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match eventloop.poll().await {
+                    Ok(rumqttc::Event::Incoming(rumqttc::Packet::ConnAck(ack))) => {
+                        if ack.code == rumqttc::ConnectReturnCode::Success {
+                            return Ok(());
+                        }
+                        return Err(anyhow::anyhow!("ConnAck error: {:?}", ack.code));
+                    }
+                    Ok(_) => continue,
+                    Err(e) => return Err(anyhow::anyhow!("Connection error: {}", e)),
+                }
+            }
+        })
+        .await;
+
+        connected.map_err(|_| anyhow::anyhow!("Connection timeout"))??;
+
+        // Publish the message
+        client
+            .publish(topic, qos, false, payload)
+            .await
+            .map_err(|e| anyhow::anyhow!("Publish error: {}", e))?;
+
+        // Wait for publish acknowledgement if QoS > 0
+        if qos != QoS::AtMostOnce {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    match eventloop.poll().await {
+                        Ok(rumqttc::Event::Incoming(rumqttc::Packet::PubAck(_))) => return Ok(()),
+                        Ok(rumqttc::Event::Incoming(rumqttc::Packet::PubComp(_))) => return Ok(()),
+                        Ok(_) => continue,
+                        Err(e) => return Err(anyhow::anyhow!("Poll error: {}", e)),
+                    }
+                }
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("Publish ack timeout"))??;
+        }
+
+        let _ = client.disconnect().await;
+
+        info!("Published {} bytes to topic '{}'", payload.len(), topic);
+        Ok(())
+    }
+
+    /// Subscribe to a topic and receive messages.
+    ///
+    /// Returns a receiver that will receive messages as they arrive.
+    pub async fn subscribe(
+        &self,
+        topic: &str,
+        qos: u8,
+    ) -> Result<(
+        rumqttc::AsyncClient,
+        tokio::sync::mpsc::Receiver<(String, Vec<u8>)>,
+    )> {
+        use rumqttc::{AsyncClient, MqttOptions, QoS};
+
+        let client_id = format!("test-sub-{}", uuid::Uuid::new_v4());
+        let mut options = MqttOptions::new(client_id, &self.host, self.port);
+        options.set_keep_alive(Duration::from_secs(30));
+
+        let qos = match qos {
+            0 => QoS::AtMostOnce,
+            1 => QoS::AtLeastOnce,
+            _ => QoS::ExactlyOnce,
+        };
+
+        let (client, mut eventloop) = AsyncClient::new(options, 100);
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+
+        // Wait for connection and subscribe
+        let client_clone = client.clone();
+        let topic_owned = topic.to_string();
+
+        tokio::spawn(async move {
+            let mut connected = false;
+
+            loop {
+                match eventloop.poll().await {
+                    Ok(rumqttc::Event::Incoming(packet)) => {
+                        match packet {
+                            rumqttc::Packet::ConnAck(ack) => {
+                                if ack.code == rumqttc::ConnectReturnCode::Success {
+                                    connected = true;
+                                    // Subscribe after connection
+                                    if let Err(e) = client_clone.subscribe(&topic_owned, qos).await
+                                    {
+                                        tracing::error!("Subscribe error: {}", e);
+                                        break;
+                                    }
+                                }
+                            }
+                            rumqttc::Packet::SubAck(_) => {
+                                tracing::debug!(
+                                    "Subscribed to '{}' (connected={})",
+                                    topic_owned,
+                                    connected
+                                );
+                            }
+                            rumqttc::Packet::Publish(publish) => {
+                                let topic = publish.topic.clone();
+                                let payload = publish.payload.to_vec();
+                                if tx.send((topic, payload)).await.is_err() {
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::error!("MQTT event loop error: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Wait a bit for subscription to be established
+        sleep(Duration::from_millis(100)).await;
+
+        Ok((client, rx))
+    }
+}

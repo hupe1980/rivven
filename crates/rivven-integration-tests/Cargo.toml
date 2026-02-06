@@ -19,7 +19,7 @@ path = "src/lib.rs"
 rivven-core = { workspace = true, features = ["cedar", "tls"] }
 rivven-cdc = { workspace = true, features = ["postgres", "mysql", "mariadb"] }
 rivven-client = { workspace = true, features = ["tls"] }
-rivven-connect = { workspace = true, features = ["rdbc-postgres"] }
+rivven-connect = { workspace = true, features = ["rdbc-postgres", "kafka", "mqtt"] }
 rivven-rdbc = { workspace = true, features = ["postgres"] }
 rivven-protocol = { workspace = true, features = ["protobuf"] }
 rivven-schema = { workspace = true, features = ["server", "avro", "auth"] }
@@ -47,10 +47,13 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
 # Testing utilities
 testcontainers = "0.23"
-testcontainers-modules = { version = "0.11", features = ["postgres", "mysql", "mariadb"] }
+testcontainers-modules = { version = "0.11", features = ["postgres", "mysql", "mariadb", "kafka", "mosquitto"] }
 tokio-postgres = "0.7"
 mysql_async = { version = "0.34", default-features = false }
-# Note: rdkafka removed - requires cmake and librdkafka; add if needed for Kafka comparison tests
+
+# Kafka & MQTT client libraries for integration tests
+rskafka = "0.5"
+rumqttc = "0.24"
 
 # CLI parsing (for creating test CLI instances)
 clap = { workspace = true }
@@ -146,3 +149,11 @@ path = "tests/protobuf_protocol.rs"
 [[test]]
 name = "rdbc_connectors"
 path = "tests/rdbc_connectors.rs"
+
+[[test]]
+name = "kafka_connector"
+path = "tests/kafka_connector.rs"
+
+[[test]]
+name = "mqtt_connector"
+path = "tests/mqtt_connector.rs"

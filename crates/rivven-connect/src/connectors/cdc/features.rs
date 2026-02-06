@@ -44,7 +44,7 @@
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 
-use crate::connectors::cdc_config::{
+use super::config::{
     ColumnFilterConfig, CompactionConfig, DeduplicationCdcConfig, EventRouterConfig,
     FieldEncryptionConfig, HealthMonitorConfig, HeartbeatCdcConfig, IncrementalSnapshotCdcConfig,
     NotificationConfig, OutboxConfig, ParallelCdcConfig, PartitionStrategyConfig,
@@ -388,7 +388,7 @@ impl CdcFeatureProcessor {
         if !config.transforms.is_empty() {
             let mut chain = SmtChain::new();
             for transform_config in &config.transforms {
-                match super::cdc_common::build_smt_transform(transform_config) {
+                match super::common::build_smt_transform(transform_config) {
                     Ok(transform) => {
                         chain = chain.add_boxed(transform);
                         debug!("Added SMT transform: {:?}", transform_config.transform_type);
@@ -654,7 +654,7 @@ impl CdcFeatureProcessor {
         // 2. Apply column filters
         let stream_name = format!("{}.{}", event.schema, event.table);
         if let Some(filter) = self.column_filters.get(&stream_name) {
-            super::cdc_common::apply_column_filter_to_event(&mut event, filter);
+            super::common::apply_column_filter_to_event(&mut event, filter);
         }
 
         // 3. Apply SMT transforms
@@ -1880,7 +1880,7 @@ fn create_tombstone(delete_event: &CdcEvent) -> CdcEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connectors::cdc_config::SmtTransformType;
+    use crate::connectors::cdc::config::SmtTransformType;
 
     fn create_test_event() -> CdcEvent {
         CdcEvent {

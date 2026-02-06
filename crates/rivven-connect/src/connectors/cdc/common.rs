@@ -33,7 +33,7 @@
 //!       format: iso8601
 //! ```
 
-use super::cdc_config::{ColumnFilterConfig, SmtTransformConfig, SmtTransformType};
+use super::config::{ColumnFilterConfig, SmtTransformConfig, SmtTransformType};
 use rivven_cdc::common::{CdcEvent, CdcOp, FilterCondition, Smt, SmtChain};
 use std::collections::HashMap;
 use std::sync::Arc;

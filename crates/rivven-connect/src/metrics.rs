@@ -41,6 +41,24 @@ pub struct ConnectorMetrics {
     pub rate_limited_events: AtomicU64,
     /// Total time spent waiting for rate limiter (ms, only for sinks)
     pub rate_limit_wait_ms: AtomicU64,
+
+    // Pool metrics (for RDBC connectors)
+    /// Pool connections created
+    pub pool_connections_created: AtomicU64,
+    /// Pool acquisitions total
+    pub pool_acquisitions: AtomicU64,
+    /// Pool connections reused (cache hits)
+    pub pool_reused: AtomicU64,
+    /// Pool connections freshly created
+    pub pool_fresh: AtomicU64,
+    /// Pool health check failures
+    pub pool_health_failures: AtomicU64,
+    /// Pool connections recycled (lifetime expired)
+    pub pool_lifetime_recycled: AtomicU64,
+    /// Pool connections recycled (idle expired)
+    pub pool_idle_recycled: AtomicU64,
+    /// Pool total wait time (microseconds)
+    pub pool_wait_time_us: AtomicU64,
 }
 
 pub type SharedMetricsState = Arc<RwLock<MetricsState>>;
@@ -225,6 +243,102 @@ async fn render_metrics(state: &SharedMetricsState) -> String {
     }
     output.push('\n');
 
+    // Pool metrics for RDBC connectors
+    output.push_str(
+        "# HELP rivven_connect_pool_connections_total Total connections created by pool\n",
+    );
+    output.push_str("# TYPE rivven_connect_pool_connections_total counter\n");
+    for (name, metrics) in state.sources.iter().chain(state.sinks.iter()) {
+        let created = metrics.pool_connections_created.load(Ordering::Relaxed);
+        if created > 0 {
+            output.push_str(&format!(
+                "rivven_connect_pool_connections_total{{connector=\"{}\"}} {}\n",
+                name, created
+            ));
+        }
+    }
+    output.push('\n');
+
+    output.push_str("# HELP rivven_connect_pool_acquisitions_total Total pool acquisitions\n");
+    output.push_str("# TYPE rivven_connect_pool_acquisitions_total counter\n");
+    for (name, metrics) in state.sources.iter().chain(state.sinks.iter()) {
+        let acquisitions = metrics.pool_acquisitions.load(Ordering::Relaxed);
+        if acquisitions > 0 {
+            output.push_str(&format!(
+                "rivven_connect_pool_acquisitions_total{{connector=\"{}\"}} {}\n",
+                name, acquisitions
+            ));
+        }
+    }
+    output.push('\n');
+
+    output.push_str("# HELP rivven_connect_pool_reuse_ratio Pool connection reuse ratio (0-1)\n");
+    output.push_str("# TYPE rivven_connect_pool_reuse_ratio gauge\n");
+    for (name, metrics) in state.sources.iter().chain(state.sinks.iter()) {
+        let reused = metrics.pool_reused.load(Ordering::Relaxed);
+        let fresh = metrics.pool_fresh.load(Ordering::Relaxed);
+        let total = reused + fresh;
+        if total > 0 {
+            let ratio = reused as f64 / total as f64;
+            output.push_str(&format!(
+                "rivven_connect_pool_reuse_ratio{{connector=\"{}\"}} {:.4}\n",
+                name, ratio
+            ));
+        }
+    }
+    output.push('\n');
+
+    output.push_str(
+        "# HELP rivven_connect_pool_avg_wait_ms Average pool acquisition wait time in milliseconds\n",
+    );
+    output.push_str("# TYPE rivven_connect_pool_avg_wait_ms gauge\n");
+    for (name, metrics) in state.sources.iter().chain(state.sinks.iter()) {
+        let acquisitions = metrics.pool_acquisitions.load(Ordering::Relaxed);
+        let wait_us = metrics.pool_wait_time_us.load(Ordering::Relaxed);
+        if acquisitions > 0 {
+            let avg_ms = (wait_us as f64 / 1000.0) / acquisitions as f64;
+            output.push_str(&format!(
+                "rivven_connect_pool_avg_wait_ms{{connector=\"{}\"}} {:.3}\n",
+                name, avg_ms
+            ));
+        }
+    }
+    output.push('\n');
+
+    output.push_str("# HELP rivven_connect_pool_recycled_total Total connections recycled\n");
+    output.push_str("# TYPE rivven_connect_pool_recycled_total counter\n");
+    for (name, metrics) in state.sources.iter().chain(state.sinks.iter()) {
+        let lifetime = metrics.pool_lifetime_recycled.load(Ordering::Relaxed);
+        let idle = metrics.pool_idle_recycled.load(Ordering::Relaxed);
+        let total = lifetime + idle;
+        if total > 0 {
+            output.push_str(&format!(
+                "rivven_connect_pool_recycled_total{{connector=\"{}\",reason=\"lifetime\"}} {}\n",
+                name, lifetime
+            ));
+            output.push_str(&format!(
+                "rivven_connect_pool_recycled_total{{connector=\"{}\",reason=\"idle\"}} {}\n",
+                name, idle
+            ));
+        }
+    }
+    output.push('\n');
+
+    output.push_str(
+        "# HELP rivven_connect_pool_health_failures_total Total pool health check failures\n",
+    );
+    output.push_str("# TYPE rivven_connect_pool_health_failures_total counter\n");
+    for (name, metrics) in state.sources.iter().chain(state.sinks.iter()) {
+        let failures = metrics.pool_health_failures.load(Ordering::Relaxed);
+        if failures > 0 {
+            output.push_str(&format!(
+                "rivven_connect_pool_health_failures_total{{connector=\"{}\"}} {}\n",
+                name, failures
+            ));
+        }
+    }
+    output.push('\n');
+
     // Broker connection metrics
     output.push_str(
         "# HELP rivven_connect_broker_connection_attempts_total Total broker connection attempts\n",
@@ -267,6 +381,7 @@ mod tests {
                         is_running: AtomicBool::new(true),
                         rate_limited_events: AtomicU64::new(0),
                         rate_limit_wait_ms: AtomicU64::new(0),
+                        ..Default::default()
                     },
                 );
                 map
@@ -282,6 +397,7 @@ mod tests {
                         is_running: AtomicBool::new(true),
                         rate_limited_events: AtomicU64::new(50),
                         rate_limit_wait_ms: AtomicU64::new(1234),
+                        ..Default::default()
                     },
                 );
                 map
@@ -303,5 +419,61 @@ mod tests {
         );
         assert!(output
             .contains("rivven_connect_sink_rate_limit_wait_ms_total{sink=\"test_sink\"} 1234"));
+    }
+
+    #[tokio::test]
+    async fn test_pool_metrics_rendering() {
+        let state = Arc::new(RwLock::new(MetricsState {
+            started_at: Some(Instant::now()),
+            sources: std::collections::HashMap::new(),
+            sinks: {
+                let mut map = std::collections::HashMap::new();
+                map.insert(
+                    "rdbc_sink".to_string(),
+                    ConnectorMetrics {
+                        events_total: AtomicU64::new(1000),
+                        errors_total: AtomicU64::new(0),
+                        is_running: AtomicBool::new(true),
+                        // Pool metrics
+                        pool_connections_created: AtomicU64::new(5),
+                        pool_acquisitions: AtomicU64::new(100),
+                        pool_reused: AtomicU64::new(95),
+                        pool_fresh: AtomicU64::new(5),
+                        pool_health_failures: AtomicU64::new(2),
+                        pool_lifetime_recycled: AtomicU64::new(3),
+                        pool_idle_recycled: AtomicU64::new(1),
+                        pool_wait_time_us: AtomicU64::new(5000), // 5ms total
+                        ..Default::default()
+                    },
+                );
+                map
+            },
+            broker_connection_attempts: AtomicU64::new(0),
+            broker_connection_failures: AtomicU64::new(0),
+        }));
+
+        let output = render_metrics(&state).await;
+
+        // Pool connections
+        assert!(output.contains("rivven_connect_pool_connections_total{connector=\"rdbc_sink\"} 5"));
+        // Pool acquisitions
+        assert!(
+            output.contains("rivven_connect_pool_acquisitions_total{connector=\"rdbc_sink\"} 100")
+        );
+        // Reuse ratio: 95 / 100 = 0.95
+        assert!(output.contains("rivven_connect_pool_reuse_ratio{connector=\"rdbc_sink\"} 0.95"));
+        // Avg wait: 5000us / 100 / 1000 = 0.05ms
+        assert!(output.contains("rivven_connect_pool_avg_wait_ms{connector=\"rdbc_sink\"} 0.050"));
+        // Recycled counts
+        assert!(output.contains(
+            "rivven_connect_pool_recycled_total{connector=\"rdbc_sink\",reason=\"lifetime\"} 3"
+        ));
+        assert!(output.contains(
+            "rivven_connect_pool_recycled_total{connector=\"rdbc_sink\",reason=\"idle\"} 1"
+        ));
+        // Health failures
+        assert!(
+            output.contains("rivven_connect_pool_health_failures_total{connector=\"rdbc_sink\"} 2")
+        );
     }
 }

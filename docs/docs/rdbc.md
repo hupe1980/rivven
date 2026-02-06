@@ -135,7 +135,72 @@ let stats = pool.stats();
 println!("Connections created: {}", stats.connections_created);
 println!("Acquisitions: {}", stats.acquisitions);
 println!("Exhausted count: {}", stats.exhausted_count);
+println!("Connections reused: {}", stats.reused_count);
+println!("Fresh connections: {}", stats.fresh_count);
+
+// Helper methods for common metrics
+println!("Reuse rate: {:.1}%", stats.reuse_rate() * 100.0);
+println!("Total recycled: {}", stats.recycled_total());
+println!("Avg wait time: {:.2}ms", stats.avg_wait_time_ms());
+println!("Health failure rate: {:.1}%", stats.health_failure_rate() * 100.0);
+println!("Active connections: {}", stats.active_connections());
 ```
+
+### Connection Lifecycle Tracking
+
+Connections track their lifecycle for accurate pooling and observability:
+
+```rust
+use rivven_rdbc::connection::ConnectionLifecycle;
+
+// Get a connection and check its lifecycle
+let conn = pool.get().await?;
+
+// Check connection age and expiry
+println!("Connection age: {:?}", conn.age());
+println!("Is expired: {}", conn.is_expired(Duration::from_secs(1800)));
+
+// Check how long the connection has been borrowed
+println!("Time in use: {:?}", conn.time_in_use());
+
+// The pool records why connections were recycled
+let stats = pool.stats();
+println!("Lifetime expired: {}", stats.lifetime_expired_count);
+println!("Idle timeout expired: {}", stats.idle_expired_count);
+```
+
+All connection types (PostgreSQL, MySQL, SQL Server) implement `ConnectionLifecycle`:
+
+| Method | Description |
+|--------|-------------|
+| `created_at()` | When the connection was established |
+| `age()` | Duration since creation |
+| `is_expired(max_lifetime)` | Check if connection exceeded max lifetime |
+| `idle_time()` | Duration since last use |
+| `is_idle_expired(idle_timeout)` | Check if connection exceeded idle timeout |
+| `touch()` | Update last-used timestamp |
+
+### Pool Statistics Reference
+
+| Field | Description |
+|-------|-------------|
+| `connections_created` | Total new connections created |
+| `acquisitions` | Total successful borrows |
+| `reused_count` | Connections reused from idle stack |
+| `fresh_count` | Connections created for immediate use |
+| `lifetime_expired_count` | Recycled due to max lifetime |
+| `idle_expired_count` | Recycled due to idle timeout |
+| `health_check_failures` | Failed health checks |
+| `exhausted_count` | Pool exhaustion timeouts |
+| `total_wait_time_us` | Cumulative acquisition wait time |
+
+| Helper Method | Returns |
+|---------------|---------|
+| `reuse_rate()` | Ratio of reused vs fresh connections (0.0-1.0) |
+| `recycled_total()` | Total connections recycled for any reason |
+| `avg_wait_time_ms()` | Average acquisition wait time in milliseconds |
+| `health_failure_rate()` | Ratio of failed health checks (0.0-1.0) |
+| `active_connections()` | Connections currently in use |
 
 ## Transactions
 
@@ -425,7 +490,12 @@ sources:
       incrementing_column: id
       poll_interval_ms: 1000
       batch_size: 1000
-      pool_size: 1                  # Optional - connection pool size (default: 1)
+      # Pool configuration
+      pool_size: 1                  # Optional - max connections (default: 1)
+      min_pool_size: 1              # Optional - warm-up connections (default: 1)
+      max_lifetime_secs: 3600       # Optional - max connection age (default: 1 hour)
+      idle_timeout_secs: 600        # Optional - idle timeout (default: 10 minutes)
+      acquire_timeout_ms: 30000     # Optional - pool wait timeout (default: 30 seconds)
 ```
 
 ### RDBC Sink
@@ -444,8 +514,13 @@ sinks:
       write_mode: upsert            # insert | update | upsert
       pk_columns: [id]
       batch_size: 1000
-      pool_size: 4                  # Optional - connection pool size (default: 4)
       transactional: true           # Optional - exactly-once semantics
+      # Pool configuration with lifecycle management
+      pool_size: 4                  # Optional - max connections (default: 4)
+      min_pool_size: 2              # Optional - warm-up connections (default: 1)
+      max_lifetime_secs: 3600       # Optional - max connection age (default: 1 hour)
+      idle_timeout_secs: 600        # Optional - idle timeout (default: 10 minutes)
+      acquire_timeout_ms: 30000     # Optional - pool wait timeout (default: 30 seconds)
 ```
 
 ### Configuration Reference
@@ -456,13 +531,30 @@ sinks:
 | `table` | ✓ | ✓ | - | Target table name |
 | `schema` | ✓ | ✓ | - | Database schema (e.g., "public") |
 | `batch_size` | ✓ | ✓ | 1000 | Records per batch |
-| `pool_size` | ✓ | ✓ | 1/4 | Connection pool size (source: 1, sink: 4) |
+| `pool_size` | ✓ | ✓ | 1/4 | Max connections (source: 1, sink: 4) |
+| `min_pool_size` | ✓ | ✓ | 1 | Warm-up connections at startup |
+| `max_lifetime_secs` | ✓ | ✓ | 3600 | Max connection age before recycling |
+| `idle_timeout_secs` | ✓ | ✓ | 600 | Idle timeout before recycling |
+| `acquire_timeout_ms` | ✓ | ✓ | 30000 | Pool acquisition timeout |
 | `mode` | ✓ | - | bulk | Query mode (bulk/incrementing/timestamp) |
 | `write_mode` | - | ✓ | insert | Write mode (insert/update/upsert) |
 | `pk_columns` | - | ✓ | - | Primary key columns for upsert/update |
 | `transactional` | - | ✓ | false | Wrap batches in transactions |
 | `poll_interval_ms` | ✓ | - | 5000 | Polling interval |
 | `batch_timeout_ms` | - | ✓ | 5000 | Batch flush timeout |
+
+### Pool Metrics
+
+RDBC connectors expose pool metrics via the Prometheus endpoint (`/metrics`):
+
+| Metric | Description |
+|--------|-------------|
+| `rivven_connect_pool_connections_total` | Total connections created |
+| `rivven_connect_pool_acquisitions_total` | Total pool acquisitions |
+| `rivven_connect_pool_reuse_ratio` | Connection reuse ratio (0-1, higher = better) |
+| `rivven_connect_pool_avg_wait_ms` | Average acquisition wait time |
+| `rivven_connect_pool_recycled_total{reason}` | Connections recycled (lifetime/idle) |
+| `rivven_connect_pool_health_failures_total` | Failed health checks |
 
 ### Feature Flags
 

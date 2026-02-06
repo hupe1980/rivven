@@ -100,6 +100,30 @@ pub struct RdbcSourceConfig {
     #[serde(default = "default_pool_size")]
     #[validate(range(min = 1, max = 16))]
     pub pool_size: u32,
+
+    /// Minimum pool size for warm-up (default: 1)
+    ///
+    /// Number of connections to create at startup. Useful for reducing
+    /// latency on first poll.
+    #[serde(default = "default_min_pool_size")]
+    #[validate(range(min = 1, max = 16))]
+    pub min_pool_size: u32,
+
+    /// Maximum connection lifetime in seconds (default: 3600 = 1 hour)
+    ///
+    /// Connections older than this are recycled to prevent stale connections.
+    #[serde(default = "default_max_lifetime_secs")]
+    pub max_lifetime_secs: u64,
+
+    /// Idle connection timeout in seconds (default: 600 = 10 minutes)
+    ///
+    /// Idle connections exceeding this timeout are recycled.
+    #[serde(default = "default_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+
+    /// Connection acquire timeout in milliseconds (default: 30000 = 30 seconds)
+    #[serde(default = "default_acquire_timeout_ms")]
+    pub acquire_timeout_ms: u64,
 }
 
 fn default_poll_interval() -> u64 {
@@ -112,6 +136,22 @@ fn default_batch_size() -> u32 {
 
 fn default_pool_size() -> u32 {
     1
+}
+
+fn default_min_pool_size() -> u32 {
+    1
+}
+
+fn default_max_lifetime_secs() -> u64 {
+    3600
+}
+
+fn default_idle_timeout_secs() -> u64 {
+    600
+}
+
+fn default_acquire_timeout_ms() -> u64 {
+    30000
 }
 
 impl Default for RdbcSourceConfig {
@@ -127,6 +167,10 @@ impl Default for RdbcSourceConfig {
             batch_size: default_batch_size(),
             topic: None,
             pool_size: default_pool_size(),
+            min_pool_size: default_min_pool_size(),
+            max_lifetime_secs: default_max_lifetime_secs(),
+            idle_timeout_secs: default_idle_timeout_secs(),
+            acquire_timeout_ms: default_acquire_timeout_ms(),
         }
     }
 }
@@ -195,22 +239,24 @@ async fn create_connection(
 /// Create a connection pool based on URL scheme and config
 #[cfg(feature = "rdbc-postgres")]
 async fn create_pool(
-    url: &str,
-    pool_size: u32,
+    config: &RdbcSourceConfig,
 ) -> std::result::Result<std::sync::Arc<SimpleConnectionPool>, rivven_rdbc::Error> {
     use rivven_rdbc::postgres::PgConnectionFactory;
+    use std::time::Duration;
     let factory = std::sync::Arc::new(PgConnectionFactory);
-    let pool_config = PoolConfig::new(url)
-        .with_min_size(1)
-        .with_max_size(pool_size as usize)
+    let pool_config = PoolConfig::new(&config.connection_url)
+        .with_min_size(config.min_pool_size as usize)
+        .with_max_size(config.pool_size as usize)
+        .with_acquire_timeout(Duration::from_millis(config.acquire_timeout_ms))
+        .with_max_lifetime(Duration::from_secs(config.max_lifetime_secs))
+        .with_idle_timeout(Duration::from_secs(config.idle_timeout_secs))
         .with_test_on_borrow(true);
     SimpleConnectionPool::new(pool_config, factory).await
 }
 
 #[cfg(not(feature = "rdbc-postgres"))]
 async fn create_pool(
-    _url: &str,
-    _pool_size: u32,
+    _config: &RdbcSourceConfig,
 ) -> std::result::Result<std::sync::Arc<SimpleConnectionPool>, rivven_rdbc::Error> {
     Err(rivven_rdbc::Error::config(
         "No RDBC backend enabled. Enable 'rdbc-postgres' feature.",
@@ -279,8 +325,8 @@ impl Source for RdbcSource {
     ) -> Result<BoxStream<'static, Result<SourceEvent>>> {
         let config = config.clone();
 
-        // Create connection pool (shared across all poll iterations)
-        let pool = create_pool(&config.connection_url, config.pool_size)
+        // Create connection pool with full lifecycle configuration
+        let pool = create_pool(&config)
             .await
             .map_err(|e| ConnectorError::Connection(e.to_string()))?;
 
@@ -298,6 +344,8 @@ impl Source for RdbcSource {
                 table = %config.table,
                 mode = ?config.mode,
                 pool_size = config.pool_size,
+                max_lifetime_secs = config.max_lifetime_secs,
+                idle_timeout_secs = config.idle_timeout_secs,
                 "Starting RDBC source with connection pool"
             );
 
@@ -635,5 +683,42 @@ mod tests {
         let spec = RdbcSource::spec();
         assert_eq!(spec.connector_type, "rdbc-source");
         assert!(spec.supports_incremental);
+    }
+
+    #[test]
+    fn test_pool_lifecycle_config_defaults() {
+        let config: RdbcSourceConfig = serde_json::from_str(
+            r#"{"connection_url": "postgres://localhost/test", "table": "users"}"#,
+        )
+        .unwrap();
+
+        // Verify new pool lifecycle defaults
+        assert_eq!(config.max_lifetime_secs, 3600);
+        assert_eq!(config.idle_timeout_secs, 600);
+        assert_eq!(config.acquire_timeout_ms, 30000);
+        assert_eq!(config.pool_size, 1); // Sources default to 1
+        assert_eq!(config.min_pool_size, 1);
+    }
+
+    #[test]
+    fn test_pool_lifecycle_config_custom() {
+        let config: RdbcSourceConfig = serde_json::from_str(
+            r#"{
+                "connection_url": "postgres://localhost/test",
+                "table": "users",
+                "pool_size": 4,
+                "min_pool_size": 2,
+                "max_lifetime_secs": 1800,
+                "idle_timeout_secs": 300,
+                "acquire_timeout_ms": 15000
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.pool_size, 4);
+        assert_eq!(config.min_pool_size, 2);
+        assert_eq!(config.max_lifetime_secs, 1800);
+        assert_eq!(config.idle_timeout_secs, 300);
+        assert_eq!(config.acquire_timeout_ms, 15000);
     }
 }

@@ -61,9 +61,14 @@ rivven-connect init > rivven-connect.yaml
 ```yaml
 version: "1.0"
 
+broker:
+  bootstrap_servers:
+    - localhost:9092
+
 sources:
   postgres_db:
     connector: postgres-cdc
+    topic: cdc.postgres.events       # Required: destination topic
     config:
       host: localhost
       port: 5432
@@ -72,22 +77,22 @@ sources:
       password: ${POSTGRES_PASSWORD}
       slot_name: rivven_slot
       publication: rivven_pub
-    streams:
-      - name: users
-        namespace: public
-        sync_mode: incremental
+      topic_routing: "cdc.{schema}.{table}"  # Optional: dynamic routing
+      schemas:
+        - public
+      tables:
+        - users
+        - orders
 
 sinks:
-  broker:
-    connector: rivven
+  s3_archive:
+    connector: s3
+    topics: [cdc.postgres.events]    # Required: topics to consume
+    consumer_group: s3-archive       # Required: for offset tracking
     config:
-      address: localhost:9092
-
-pipelines:
-  cdc_to_broker:
-    source: postgres_db
-    sink: broker
-    enabled: true
+      bucket: my-data-lake
+      region: us-east-1
+      format: parquet
 ```
 
 ### 3. Check Configuration
@@ -125,8 +130,9 @@ rivven-connect run --config rivven-connect.yaml
 | `mysql-cdc` | `mysql` | MySQL/MariaDB binlog CDC |
 | `sqlserver-cdc` | `sqlserver` | SQL Server Change Data Capture |
 | `rdbc-source` | `rdbc` | Query-based polling source (PostgreSQL, MySQL, SQL Server) |
+| `kafka-source` | `kafka` | Apache Kafka consumer (pure Rust, zero C deps) |
 | `external-queue` | `external-queue` | External message queue consumer |
-| `mqtt` | `mqtt` | MQTT broker subscriber |
+| `mqtt` | `mqtt` | MQTT broker subscriber (rumqttc, TLS, exponential backoff) |
 | `sqs` | `sqs` | AWS SQS queue consumer |
 | `pubsub` | `pubsub` | Google Cloud Pub/Sub subscriber |
 
@@ -135,8 +141,9 @@ rivven-connect run --config rivven-connect.yaml
 | Connector | Feature | Description |
 |-----------|---------|-------------|
 | `stdout` | (default) | Console output for debugging |
-| `http-webhook` | `http` | HTTP/HTTPS POST webhooks |
+| `http-webhook` | `http` | HTTP/HTTPS webhooks with signing |
 | `rdbc-sink` | `rdbc` | Batch database sink (PostgreSQL, MySQL, SQL Server) |
+| `kafka-sink` | `kafka` | Apache Kafka producer (pure Rust, zero C deps) |
 | `external-queue` | `external-queue` | External message queue producer |
 | `object-storage` | `cloud-storage` | Unified object storage (S3, GCS, Azure, local) |
 | `s3` | `s3` | Amazon S3 / MinIO / R2 (via object-storage) |
@@ -156,6 +163,8 @@ powered by the `object_store` crate. Configure with the `provider` field:
 sinks:
   events:
     connector: object-storage
+    topics: [app.events]             # Required: topics to consume
+    consumer_group: object-storage   # Required: for offset tracking
     config:
       provider: s3    # s3 | gcs | azure | local
       bucket: my-bucket
@@ -182,6 +191,8 @@ The Iceberg sink writes events to Apache Iceberg tables using the **official Apa
 sinks:
   lakehouse:
     connector: iceberg
+    topics: [cdc.events]             # Required: topics to consume
+    consumer_group: iceberg-sink     # Required: for offset tracking
     config:
       catalog:
         type: rest            # rest | glue | hive | memory
@@ -204,9 +215,116 @@ sinks:
 
 See [docs/ICEBERG_SINK.md](../../docs/ICEBERG_SINK.md) for complete configuration reference.
 
+### Apache Kafka (Pure Rust)
+
+The Kafka connector provides bidirectional Kafka integration using [rskafka](https://crates.io/crates/rskafka), a pure Rust Kafka client with **zero C dependencies**:
+
+- **Pure Rust**: No librdkafka, no C compiler needed
+- **Lock-free Metrics**: Atomic counters with Prometheus export
+- **Exponential Backoff**: Configurable retry with backoff
+- **Compression**: None, Gzip, Snappy, LZ4, Zstd
+- **Security**: SASL PLAIN with SSL/TLS
+
+```yaml
+# Source: Consume from Kafka
+sources:
+  kafka_orders:
+    connector: kafka-source
+    topic: kafka-orders           # Rivven topic (destination)
+    config:
+      brokers: ["kafka1:9092", "kafka2:9092"]
+      topic: orders               # Kafka topic (external source)
+      consumer_group: rivven-migration
+      start_offset: earliest
+      fetch_max_messages: 500
+      retry_initial_ms: 100
+      retry_max_ms: 10000
+      security:
+        protocol: sasl_ssl
+        mechanism: PLAIN
+        username: ${KAFKA_USER}
+        password: ${KAFKA_PASSWORD}
+
+# Sink: Produce to Kafka
+sinks:
+  kafka_replica:
+    connector: kafka-sink
+    topics: [orders]              # Rivven topics to consume from
+    consumer_group: kafka-producer
+    config:
+      brokers: ["kafka1:9092"]
+      topic: orders-replica       # Kafka topic (external destination)
+      compression: lz4
+      acks: all
+      batch_size_bytes: 16384
+      linger_ms: 5
+```
+
+See [docs/kafka-connector.md](../../docs/docs/kafka-connector.md) for complete configuration reference.
+
+### HTTP Webhook Sink
+
+Best-in-class HTTP webhook sink with enterprise features:
+
+- **Methods**: POST, PUT, PATCH, DELETE
+- **Authentication**: Bearer, Basic, API Key
+- **Signing**: HMAC-SHA256 webhook signatures
+- **Compression**: gzip for payloads above threshold
+- **Circuit Breaker**: Fail fast when endpoint is unavailable
+- **Retry Strategy**: Exponential backoff with jitter
+- **URL Templates**: Dynamic URLs with `{stream}`, `{event_type}`, `{namespace}`
+- **Batching**: Configurable size and timeout
+- **TLS**: Custom CA certificates
+
+```yaml
+sinks:
+  events:
+    connector: http-webhook
+    topics: [orders, users]          # Required: topics to consume
+    consumer_group: http-webhook     # Required: for offset tracking
+    config:
+      url: https://api.example.com/{stream}/events
+      method: POST
+      batch_size: 100
+      batch_timeout_ms: 5000
+
+      # Authentication
+      auth:
+        type: bearer
+        token: ${WEBHOOK_TOKEN}
+
+      # HMAC Signing (for webhook verification)
+      signing:
+        secret: ${WEBHOOK_SECRET}
+        header_name: X-Webhook-Signature
+        include_timestamp: true
+
+      # Compression (for large payloads)
+      compression_threshold_bytes: 1024
+
+      # Resilience
+      max_retries: 3
+      retry_backoff_ms: 1000
+      retry_jitter: true
+      circuit_breaker_threshold: 5
+      circuit_breaker_reset_secs: 30
+
+      # Advanced
+      max_concurrency: 4
+      timeout_secs: 30
+      health_check_url: https://api.example.com/health
+      headers:
+        X-Custom-Header: value
+```
+
+**Metrics** (via `/metrics`):
+- `requests_sent`, `requests_success`, `requests_failed`
+- `circuit_breaker_rejections`, `rate_limited`
+- `bytes_sent`, `bytes_compressed`, `avg_latency_ms`
+
 ### RDBC Connectors
 
-Query-based connectors powered by `rivven-rdbc`. Features hot path optimizations including true batch operations (10-100x throughput vs per-row) and optional transactional writes for exactly-once semantics.
+Query-based connectors powered by `rivven-rdbc`. Features hot path optimizations including true batch operations (10-100x throughput vs per-row), connection lifecycle management, and optional transactional writes for exactly-once semantics.
 
 #### RDBC Source
 
@@ -225,7 +343,12 @@ sources:
       incrementing_column: id
       poll_interval_ms: 1000
       batch_size: 1000
-      pool_size: 1                    # Optional: connection pool size (default: 1)
+      # Pool configuration
+      pool_size: 1                    # Optional: max connections (default: 1)
+      min_pool_size: 1                # Optional: warm-up connections (default: 1)
+      max_lifetime_secs: 3600         # Optional: max connection age (default: 1 hour)
+      idle_timeout_secs: 600          # Optional: idle timeout (default: 10 minutes)
+      acquire_timeout_ms: 30000       # Optional: pool wait timeout (default: 30 seconds)
 ```
 
 #### RDBC Sink
@@ -248,8 +371,26 @@ sinks:
       batch_timeout_ms: 5000
       delete_enabled: true
       transactional: true             # Optional: exactly-once semantics
-      pool_size: 4                    # Optional: connection pool size (default: 4)
+      # Pool configuration with lifecycle management
+      pool_size: 4                    # Optional: max connections (default: 4)
+      min_pool_size: 2                # Optional: warm-up connections (default: 1)
+      max_lifetime_secs: 3600         # Optional: max connection age (default: 1 hour)
+      idle_timeout_secs: 600          # Optional: idle timeout (default: 10 minutes)
+      acquire_timeout_ms: 30000       # Optional: pool wait timeout (default: 30 seconds)
 ```
+
+#### Pool Metrics
+
+RDBC connectors expose pool metrics via the Prometheus endpoint (`/metrics`):
+
+| Metric | Description |
+|--------|-------------|
+| `rivven_connect_pool_connections_total` | Total connections created |
+| `rivven_connect_pool_acquisitions_total` | Total pool acquisitions |
+| `rivven_connect_pool_reuse_ratio` | Connection reuse ratio (0-1) |
+| `rivven_connect_pool_avg_wait_ms` | Average acquisition wait time |
+| `rivven_connect_pool_recycled_total` | Connections recycled (by reason) |
+| `rivven_connect_pool_health_failures_total` | Failed health checks |
 
 #### Multi-Database Support
 
@@ -607,7 +748,8 @@ GRANT INSERT, SELECT ON TABLE ANALYTICS.CDC.EVENTS TO ROLE RIVVEN_ROLE;
 sinks:
   snowflake:
     connector: snowflake
-    topics: [cdc.orders]
+    topics: [cdc.orders]             # Required: topics to consume
+    consumer_group: snowflake-sink   # Required: for offset tracking
     config:
       account: myorg-account123
       user: RIVVEN_USER
@@ -673,15 +815,14 @@ See [examples/connect-config.yaml](../../examples/connect-config.yaml) for a com
 sources:
   <name>:
     connector: <connector-type>
-    topic: <output-topic>            # Required: fallback/default topic
+    topic: <output-topic>            # Required: destination topic
     config:
       # Connector-specific configuration
       topic_routing: <pattern>       # Optional: dynamic topic routing (CDC only)
-    streams:
-      - name: <stream-name>
-        namespace: <optional-namespace>
-        sync_mode: full_refresh | incremental
-        cursor_field: <optional-field>
+      schemas:                       # Optional: schemas to include
+        - <schema-name>
+      tables:                        # Optional: tables to include
+        - <table-name>
 ```
 
 ### Topic Routing (CDC Connectors)
@@ -784,26 +925,10 @@ let resolver = TopicResolver::builder("cdc.{table}")
 sinks:
   <name>:
     connector: <connector-type>
+    topics: [<topic1>, <topic2>]     # Required: topics to consume
+    consumer_group: <group-id>       # Required: for offset tracking
     config:
       # Connector-specific configuration
-    batch:
-      max_records: 10000
-      timeout_ms: 5000
-```
-
-### Pipelines
-
-```yaml
-pipelines:
-  <name>:
-    source: <source-name>
-    sink: <sink-name>
-    transforms:
-      - <transform-name>
-    enabled: true
-    settings:
-      rate_limit: 10000  # events/sec, 0 = unlimited
-      on_error: skip | stop | dead_letter
 ```
 
 ## Security
@@ -1244,16 +1369,23 @@ cargo build -p rivven-connect
 # Run with verbose logging
 cargo run -p rivven-connect -- -v run --config examples/connect-config.yaml
 
-# Run tests
+# Run unit tests
 cargo test -p rivven-connect
+
+# Run integration tests (requires Docker)
+cargo test -p rivven-integration-tests --test kafka_connector
+cargo test -p rivven-integration-tests --test mqtt_connector
 ```
 
 ## Documentation
 
 - [Connectors](https://rivven.hupe1980.github.io/rivven/docs/connectors)
+- [Kafka Connector](https://rivven.hupe1980.github.io/rivven/docs/kafka-connector)
+- [MQTT Connector](https://rivven.hupe1980.github.io/rivven/docs/mqtt-connector)
 - [Connector Development](https://rivven.hupe1980.github.io/rivven/docs/connector-development)
 - [CDC Guide](https://rivven.hupe1980.github.io/rivven/docs/cdc)
 
 ## License
 
 Apache-2.0. See [LICENSE](../../LICENSE).
+

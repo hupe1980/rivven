@@ -96,6 +96,53 @@ let conn = pool.get().await?;
 // Connection is automatically returned when dropped
 ```
 
+### Connection Lifecycle Tracking
+
+The pool tracks connection lifecycle to enable accurate recycling and observability:
+
+```rust
+use rivven_rdbc::prelude::*;
+
+// Get a pooled connection
+let conn = pool.get().await?;
+
+// Check connection age and expiry status
+println!("Connection age: {:?}", conn.age());
+println!("Is expired: {}", conn.is_expired(Duration::from_secs(1800)));
+
+// Check how long the connection has been in use (borrowed)
+println!("Time in use: {:?}", conn.time_in_use());
+
+// The pool tracks recycling reasons for observability
+let stats = pool.stats();
+println!("Connections expired by lifetime: {}", stats.lifetime_expired_count);
+println!("Connections expired by idle timeout: {}", stats.idle_expired_count);
+println!("Connections reused: {}", stats.reused_count);
+println!("Fresh connections: {}", stats.fresh_count);
+
+// Use helper methods for common metrics
+println!("Reuse rate: {:.1}%", stats.reuse_rate() * 100.0);
+println!("Total recycled: {}", stats.recycled_total());
+println!("Avg wait time: {:.2}ms", stats.avg_wait_time_ms());
+println!("Health failure rate: {:.1}%", stats.health_failure_rate() * 100.0);
+println!("Active connections: {}", stats.active_connections());
+```
+
+Connections implement the `ConnectionLifecycle` trait for detailed lifecycle introspection:
+
+```rust
+use rivven_rdbc::connection::ConnectionLifecycle;
+
+// Get creation time and idle duration
+let created_at = conn.created_at();
+let idle = conn.idle_time().await;
+
+// Check against timeouts
+if conn.is_idle_expired(Duration::from_secs(600)).await {
+    // Connection has been idle too long
+}
+```
+
 ## SQL Dialect Abstraction
 
 rivven-rdbc uses sea-query for portable SQL generation:
@@ -216,4 +263,4 @@ cargo test -p rivven-integration-tests --test rdbc_connectors
 
 ## License
 
-LApache-2.0. See [LICENSE](../../LICENSE).
+Apache-2.0. See [LICENSE](../../LICENSE).

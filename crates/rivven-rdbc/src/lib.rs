@@ -84,14 +84,14 @@ pub mod prelude {
 
     // Connection traits and config
     pub use crate::connection::{
-        Connection, ConnectionConfig, ConnectionFactory, DatabaseType, IsolationLevel,
-        PreparedStatement, RowStream, Transaction,
+        Connection, ConnectionConfig, ConnectionFactory, ConnectionLifecycle, DatabaseType,
+        IsolationLevel, PreparedStatement, RowStream, Transaction,
     };
 
     // Pool types
     pub use crate::pool::{
         create_pool, create_pool_with_config, AtomicPoolStats, ConnectionPool, PoolBuilder,
-        PoolConfig, PoolStats, PooledConnection, SimpleConnectionPool,
+        PoolConfig, PoolStats, PooledConnection, RecycleReason, SimpleConnectionPool,
     };
 
     // Dialect types

@@ -133,7 +133,9 @@ use parquet::file::properties::WriterProperties;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
@@ -502,6 +504,500 @@ impl Default for IcebergSinkConfig {
 }
 
 // ============================================================================
+// Metrics (Lock-Free Observability)
+// ============================================================================
+
+/// Point-in-time snapshot of Iceberg sink metrics.
+///
+/// This is a plain struct (no atomics) that can be cloned, serialized,
+/// and passed across threads without synchronization concerns.
+///
+/// # Serialization
+///
+/// The struct derives `Serialize` and `Deserialize` for easy JSON export:
+///
+/// ```ignore
+/// let json = serde_json::to_string(&snapshot)?;
+/// ```
+///
+/// # Prometheus Export
+///
+/// Use `to_prometheus_format()` to generate Prometheus-compatible output:
+///
+/// ```ignore
+/// let prom = snapshot.to_prometheus_format("myapp");
+/// // Returns metrics like:
+/// // myapp_iceberg_records_written_total 1000
+/// // myapp_iceberg_bytes_written_total 50000
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetricsSnapshot {
+    /// Total records successfully written
+    pub records_written: u64,
+    /// Total records failed to write
+    pub records_failed: u64,
+    /// Total bytes written (estimated from Arrow buffers)
+    pub bytes_written: u64,
+    /// Total commits to Iceberg (successful)
+    pub commits_success: u64,
+    /// Total failed commit attempts
+    pub commits_failed: u64,
+    /// Total commit retries due to conflicts
+    pub commit_retries: u64,
+    /// Total data files created
+    pub files_created: u64,
+    /// Total batches flushed
+    pub batches_flushed: u64,
+    /// Cumulative commit latency in microseconds
+    pub commit_latency_us: u64,
+    /// Cumulative write latency in microseconds
+    pub write_latency_us: u64,
+    /// Minimum batch size (records) - 0 if no batches
+    #[serde(default)]
+    pub batch_size_min: u64,
+    /// Maximum batch size (records)
+    #[serde(default)]
+    pub batch_size_max: u64,
+    /// Sum of all batch sizes (for calculating average)
+    #[serde(default)]
+    pub batch_size_sum: u64,
+}
+
+impl MetricsSnapshot {
+    /// Get average commit latency in milliseconds
+    pub fn avg_commit_latency_ms(&self) -> f64 {
+        if self.commits_success == 0 {
+            return 0.0;
+        }
+        (self.commit_latency_us as f64 / self.commits_success as f64) / 1000.0
+    }
+
+    /// Get average write latency in milliseconds
+    pub fn avg_write_latency_ms(&self) -> f64 {
+        if self.batches_flushed == 0 {
+            return 0.0;
+        }
+        (self.write_latency_us as f64 / self.batches_flushed as f64) / 1000.0
+    }
+
+    /// Get commit retry rate (retries / total commits)
+    pub fn retry_rate(&self) -> f64 {
+        let total = self.commits_success + self.commits_failed;
+        if total == 0 {
+            return 0.0;
+        }
+        self.commit_retries as f64 / total as f64
+    }
+
+    /// Get success rate (successful records / total records)
+    pub fn success_rate(&self) -> f64 {
+        let total = self.records_written + self.records_failed;
+        if total == 0 {
+            return 1.0;
+        }
+        self.records_written as f64 / total as f64
+    }
+
+    /// Get throughput in bytes per second given elapsed time
+    pub fn bytes_per_second(&self, elapsed_secs: f64) -> f64 {
+        if elapsed_secs <= 0.0 {
+            return 0.0;
+        }
+        self.bytes_written as f64 / elapsed_secs
+    }
+
+    /// Get throughput in records per second given elapsed time
+    pub fn records_per_second(&self, elapsed_secs: f64) -> f64 {
+        if elapsed_secs <= 0.0 {
+            return 0.0;
+        }
+        self.records_written as f64 / elapsed_secs
+    }
+
+    /// Get average batch size in records
+    pub fn avg_batch_size(&self) -> f64 {
+        if self.batches_flushed == 0 {
+            return 0.0;
+        }
+        self.batch_size_sum as f64 / self.batches_flushed as f64
+    }
+
+    /// Export metrics in Prometheus text format.
+    ///
+    /// # Arguments
+    ///
+    /// * `prefix` - Metric prefix (e.g., "myapp" → "myapp_iceberg_records_written_total")
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let snapshot = sink.metrics().snapshot();
+    /// let prometheus_output = snapshot.to_prometheus_format("rivven");
+    /// ```
+    pub fn to_prometheus_format(&self, prefix: &str) -> String {
+        let mut output = String::with_capacity(1024);
+
+        // Counters
+        output.push_str(&format!(
+            "# HELP {prefix}_iceberg_records_written_total Total records written\n\
+             # TYPE {prefix}_iceberg_records_written_total counter\n\
+             {prefix}_iceberg_records_written_total {}\n",
+            self.records_written
+        ));
+
+        output.push_str(&format!(
+            "# HELP {prefix}_iceberg_records_failed_total Total records failed\n\
+             # TYPE {prefix}_iceberg_records_failed_total counter\n\
+             {prefix}_iceberg_records_failed_total {}\n",
+            self.records_failed
+        ));
+
+        output.push_str(&format!(
+            "# HELP {prefix}_iceberg_bytes_written_total Total bytes written\n\
+             # TYPE {prefix}_iceberg_bytes_written_total counter\n\
+             {prefix}_iceberg_bytes_written_total {}\n",
+            self.bytes_written
+        ));
+
+        output.push_str(&format!(
+            "# HELP {prefix}_iceberg_commits_total Total successful commits\n\
+             # TYPE {prefix}_iceberg_commits_total counter\n\
+             {prefix}_iceberg_commits_total {}\n",
+            self.commits_success
+        ));
+
+        output.push_str(&format!(
+            "# HELP {prefix}_iceberg_commits_failed_total Total failed commits\n\
+             # TYPE {prefix}_iceberg_commits_failed_total counter\n\
+             {prefix}_iceberg_commits_failed_total {}\n",
+            self.commits_failed
+        ));
+
+        output.push_str(&format!(
+            "# HELP {prefix}_iceberg_commit_retries_total Total commit retries\n\
+             # TYPE {prefix}_iceberg_commit_retries_total counter\n\
+             {prefix}_iceberg_commit_retries_total {}\n",
+            self.commit_retries
+        ));
+
+        output.push_str(&format!(
+            "# HELP {prefix}_iceberg_files_created_total Total Parquet files created\n\
+             # TYPE {prefix}_iceberg_files_created_total counter\n\
+             {prefix}_iceberg_files_created_total {}\n",
+            self.files_created
+        ));
+
+        output.push_str(&format!(
+            "# HELP {prefix}_iceberg_batches_flushed_total Total batches flushed\n\
+             # TYPE {prefix}_iceberg_batches_flushed_total counter\n\
+             {prefix}_iceberg_batches_flushed_total {}\n",
+            self.batches_flushed
+        ));
+
+        // Computed gauges
+        output.push_str(&format!(
+            "# HELP {prefix}_iceberg_commit_latency_avg_ms Average commit latency in milliseconds\n\
+             # TYPE {prefix}_iceberg_commit_latency_avg_ms gauge\n\
+             {prefix}_iceberg_commit_latency_avg_ms {:.3}\n",
+            self.avg_commit_latency_ms()
+        ));
+
+        output.push_str(&format!(
+            "# HELP {prefix}_iceberg_write_latency_avg_ms Average write latency in milliseconds\n\
+             # TYPE {prefix}_iceberg_write_latency_avg_ms gauge\n\
+             {prefix}_iceberg_write_latency_avg_ms {:.3}\n",
+            self.avg_write_latency_ms()
+        ));
+
+        output.push_str(&format!(
+            "# HELP {prefix}_iceberg_success_rate Record success rate (0.0-1.0)\n\
+             # TYPE {prefix}_iceberg_success_rate gauge\n\
+             {prefix}_iceberg_success_rate {:.4}\n",
+            self.success_rate()
+        ));
+
+        output.push_str(&format!(
+            "# HELP {prefix}_iceberg_batch_size_avg Average batch size in records\n\
+             # TYPE {prefix}_iceberg_batch_size_avg gauge\n\
+             {prefix}_iceberg_batch_size_avg {:.1}\n",
+            self.avg_batch_size()
+        ));
+
+        if self.batch_size_max > 0 {
+            output.push_str(&format!(
+                "# HELP {prefix}_iceberg_batch_size_min Minimum batch size in records\n\
+                 # TYPE {prefix}_iceberg_batch_size_min gauge\n\
+                 {prefix}_iceberg_batch_size_min {}\n",
+                self.batch_size_min
+            ));
+
+            output.push_str(&format!(
+                "# HELP {prefix}_iceberg_batch_size_max Maximum batch size in records\n\
+                 # TYPE {prefix}_iceberg_batch_size_max gauge\n\
+                 {prefix}_iceberg_batch_size_max {}\n",
+                self.batch_size_max
+            ));
+        }
+
+        output
+    }
+}
+
+/// Lock-free metrics for Iceberg sink performance monitoring.
+///
+/// All counters use `Relaxed` ordering for maximum throughput on hot paths.
+/// These metrics are designed to have zero impact on write latency.
+///
+/// # Thread Safety
+///
+/// All operations are lock-free using atomic primitives. Multiple threads
+/// can safely increment counters concurrently without contention.
+///
+/// # Observability
+///
+/// Use `snapshot()` to capture a point-in-time view of all metrics for
+/// reporting to monitoring systems. Use `reset()` to clear counters for
+/// interval-based reporting.
+#[derive(Debug, Default)]
+pub struct IcebergSinkMetrics {
+    /// Total records successfully written
+    pub records_written: AtomicU64,
+    /// Total records failed to write
+    pub records_failed: AtomicU64,
+    /// Total bytes written (estimated from Arrow buffers)
+    pub bytes_written: AtomicU64,
+    /// Total commits to Iceberg (successful)
+    pub commits_success: AtomicU64,
+    /// Total failed commit attempts
+    pub commits_failed: AtomicU64,
+    /// Total commit retries due to conflicts
+    pub commit_retries: AtomicU64,
+    /// Total data files created
+    pub files_created: AtomicU64,
+    /// Total batches flushed
+    pub batches_flushed: AtomicU64,
+    /// Cumulative commit latency in microseconds (for averaging)
+    pub commit_latency_us: AtomicU64,
+    /// Cumulative write latency in microseconds (for averaging)
+    pub write_latency_us: AtomicU64,
+    /// Minimum batch size (records) - uses u64::MAX as sentinel for "not set"
+    batch_size_min: AtomicU64,
+    /// Maximum batch size (records)
+    batch_size_max: AtomicU64,
+    /// Sum of all batch sizes (for average calculation)
+    batch_size_sum: AtomicU64,
+}
+
+impl IcebergSinkMetrics {
+    /// Create new metrics instance
+    pub fn new() -> Self {
+        Self {
+            records_written: AtomicU64::new(0),
+            records_failed: AtomicU64::new(0),
+            bytes_written: AtomicU64::new(0),
+            commits_success: AtomicU64::new(0),
+            commits_failed: AtomicU64::new(0),
+            commit_retries: AtomicU64::new(0),
+            files_created: AtomicU64::new(0),
+            batches_flushed: AtomicU64::new(0),
+            commit_latency_us: AtomicU64::new(0),
+            write_latency_us: AtomicU64::new(0),
+            batch_size_min: AtomicU64::new(u64::MAX), // Sentinel for "not set"
+            batch_size_max: AtomicU64::new(0),
+            batch_size_sum: AtomicU64::new(0),
+        }
+    }
+
+    /// Record a batch size for min/max/avg tracking.
+    ///
+    /// This uses lock-free CAS operations to update min/max atomically.
+    #[inline]
+    pub fn record_batch_size(&self, size: u64) {
+        // Update sum (always succeeds with fetch_add)
+        self.batch_size_sum.fetch_add(size, Ordering::Relaxed);
+
+        // Update min using CAS loop
+        let mut current_min = self.batch_size_min.load(Ordering::Relaxed);
+        while size < current_min {
+            match self.batch_size_min.compare_exchange_weak(
+                current_min,
+                size,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current_min = actual,
+            }
+            std::hint::spin_loop();
+        }
+
+        // Update max using CAS loop
+        let mut current_max = self.batch_size_max.load(Ordering::Relaxed);
+        while size > current_max {
+            match self.batch_size_max.compare_exchange_weak(
+                current_max,
+                size,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => current_max = actual,
+            }
+            std::hint::spin_loop();
+        }
+    }
+
+    /// Get average commit latency in milliseconds
+    pub fn avg_commit_latency_ms(&self) -> f64 {
+        let commits = self.commits_success.load(Ordering::Relaxed);
+        if commits == 0 {
+            return 0.0;
+        }
+        let latency_us = self.commit_latency_us.load(Ordering::Relaxed);
+        (latency_us as f64 / commits as f64) / 1000.0
+    }
+
+    /// Get average write latency in milliseconds
+    pub fn avg_write_latency_ms(&self) -> f64 {
+        let batches = self.batches_flushed.load(Ordering::Relaxed);
+        if batches == 0 {
+            return 0.0;
+        }
+        let latency_us = self.write_latency_us.load(Ordering::Relaxed);
+        (latency_us as f64 / batches as f64) / 1000.0
+    }
+
+    /// Get commit retry rate (retries / total commits)
+    pub fn retry_rate(&self) -> f64 {
+        let total = self.commits_success.load(Ordering::Relaxed)
+            + self.commits_failed.load(Ordering::Relaxed);
+        if total == 0 {
+            return 0.0;
+        }
+        self.commit_retries.load(Ordering::Relaxed) as f64 / total as f64
+    }
+
+    /// Get success rate (successful records / total records)
+    pub fn success_rate(&self) -> f64 {
+        let total = self.records_written.load(Ordering::Relaxed)
+            + self.records_failed.load(Ordering::Relaxed);
+        if total == 0 {
+            return 1.0;
+        }
+        self.records_written.load(Ordering::Relaxed) as f64 / total as f64
+    }
+
+    /// Get throughput in bytes per second given elapsed time
+    pub fn bytes_per_second(&self, elapsed_secs: f64) -> f64 {
+        if elapsed_secs <= 0.0 {
+            return 0.0;
+        }
+        self.bytes_written.load(Ordering::Relaxed) as f64 / elapsed_secs
+    }
+
+    /// Get throughput in records per second given elapsed time
+    pub fn records_per_second(&self, elapsed_secs: f64) -> f64 {
+        if elapsed_secs <= 0.0 {
+            return 0.0;
+        }
+        self.records_written.load(Ordering::Relaxed) as f64 / elapsed_secs
+    }
+
+    /// Capture a point-in-time snapshot of all metrics.
+    ///
+    /// This is useful for periodic reporting to monitoring systems.
+    /// The snapshot is a plain struct that can be cloned and serialized.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let metrics = sink.metrics();
+    /// let snapshot = metrics.snapshot();
+    /// println!("Records written: {}", snapshot.records_written);
+    /// println!("Success rate: {:.1}%", snapshot.success_rate() * 100.0);
+    /// ```
+    pub fn snapshot(&self) -> MetricsSnapshot {
+        let min_raw = self.batch_size_min.load(Ordering::Relaxed);
+        MetricsSnapshot {
+            records_written: self.records_written.load(Ordering::Relaxed),
+            records_failed: self.records_failed.load(Ordering::Relaxed),
+            bytes_written: self.bytes_written.load(Ordering::Relaxed),
+            commits_success: self.commits_success.load(Ordering::Relaxed),
+            commits_failed: self.commits_failed.load(Ordering::Relaxed),
+            commit_retries: self.commit_retries.load(Ordering::Relaxed),
+            files_created: self.files_created.load(Ordering::Relaxed),
+            batches_flushed: self.batches_flushed.load(Ordering::Relaxed),
+            commit_latency_us: self.commit_latency_us.load(Ordering::Relaxed),
+            write_latency_us: self.write_latency_us.load(Ordering::Relaxed),
+            batch_size_min: if min_raw == u64::MAX { 0 } else { min_raw },
+            batch_size_max: self.batch_size_max.load(Ordering::Relaxed),
+            batch_size_sum: self.batch_size_sum.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Reset all counters to zero.
+    ///
+    /// This is useful for interval-based reporting where you want to
+    /// capture metrics for a specific time window and then reset.
+    ///
+    /// # Thread Safety
+    ///
+    /// This operation is atomic per-counter but not globally atomic.
+    /// There may be brief inconsistencies if other threads are actively
+    /// writing during the reset. For precise interval metrics, prefer
+    /// `snapshot_and_reset()` which captures and resets atomically.
+    pub fn reset(&self) {
+        self.records_written.store(0, Ordering::Relaxed);
+        self.records_failed.store(0, Ordering::Relaxed);
+        self.bytes_written.store(0, Ordering::Relaxed);
+        self.commits_success.store(0, Ordering::Relaxed);
+        self.commits_failed.store(0, Ordering::Relaxed);
+        self.commit_retries.store(0, Ordering::Relaxed);
+        self.files_created.store(0, Ordering::Relaxed);
+        self.batches_flushed.store(0, Ordering::Relaxed);
+        self.commit_latency_us.store(0, Ordering::Relaxed);
+        self.write_latency_us.store(0, Ordering::Relaxed);
+        self.batch_size_min.store(u64::MAX, Ordering::Relaxed);
+        self.batch_size_max.store(0, Ordering::Relaxed);
+        self.batch_size_sum.store(0, Ordering::Relaxed);
+    }
+
+    /// Atomically capture a snapshot and reset all counters.
+    ///
+    /// This is the preferred method for interval-based reporting as it
+    /// ensures no writes are lost between snapshot and reset.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Report metrics every 60 seconds
+    /// loop {
+    ///     tokio::time::sleep(Duration::from_secs(60)).await;
+    ///     let snapshot = metrics.snapshot_and_reset();
+    ///     reporter.send(snapshot);
+    /// }
+    /// ```
+    pub fn snapshot_and_reset(&self) -> MetricsSnapshot {
+        let min_raw = self.batch_size_min.swap(u64::MAX, Ordering::Relaxed);
+        MetricsSnapshot {
+            records_written: self.records_written.swap(0, Ordering::Relaxed),
+            records_failed: self.records_failed.swap(0, Ordering::Relaxed),
+            bytes_written: self.bytes_written.swap(0, Ordering::Relaxed),
+            commits_success: self.commits_success.swap(0, Ordering::Relaxed),
+            commits_failed: self.commits_failed.swap(0, Ordering::Relaxed),
+            commit_retries: self.commit_retries.swap(0, Ordering::Relaxed),
+            files_created: self.files_created.swap(0, Ordering::Relaxed),
+            batches_flushed: self.batches_flushed.swap(0, Ordering::Relaxed),
+            commit_latency_us: self.commit_latency_us.swap(0, Ordering::Relaxed),
+            write_latency_us: self.write_latency_us.swap(0, Ordering::Relaxed),
+            batch_size_min: if min_raw == u64::MAX { 0 } else { min_raw },
+            batch_size_max: self.batch_size_max.swap(0, Ordering::Relaxed),
+            batch_size_sum: self.batch_size_sum.swap(0, Ordering::Relaxed),
+        }
+    }
+}
+
+// ============================================================================
 // Sink Implementation
 // ============================================================================
 
@@ -514,9 +1010,28 @@ impl Default for IcebergSinkConfig {
 /// - Automatic table creation with schema inference
 /// - Batched writes with configurable thresholds
 /// - Transaction-based commits for atomicity
+/// - Lock-free metrics for observability
+/// - Commit retry with exponential backoff
+///
+/// # Hot Path Optimizations
+///
+/// | Optimization | Impact |
+/// |--------------|--------|
+/// | Lock-free metrics | Zero contention on counters |
+/// | Batch accumulation | Reduce transaction overhead |
+/// | Arrow columnar format | Cache-friendly memory layout |
+/// | Parquet compression | Reduce I/O bandwidth |
+/// | UUID file naming | Prevent conflicts on parallel writes |
+///
+/// # Commit Retry Strategy
+///
+/// On commit conflicts (e.g., concurrent writers), the sink retries with
+/// exponential backoff: 100ms → 200ms → 400ms → 800ms (up to 3 retries).
 pub struct IcebergSink {
     /// Cached catalog instance (wrapped in `Arc<RwLock>` for thread-safe access)
     catalog_cache: Arc<RwLock<Option<CatalogInstance>>>,
+    /// Lock-free metrics for observability
+    metrics: Arc<IcebergSinkMetrics>,
 }
 
 /// Wrapper to hold either REST or Memory catalog
@@ -584,7 +1099,13 @@ impl IcebergSink {
     pub fn new() -> Self {
         Self {
             catalog_cache: Arc::new(RwLock::new(None)),
+            metrics: Arc::new(IcebergSinkMetrics::new()),
         }
+    }
+
+    /// Get a reference to the sink metrics
+    pub fn metrics(&self) -> &IcebergSinkMetrics {
+        &self.metrics
     }
 
     /// Create or get cached catalog instance
@@ -1083,7 +1604,11 @@ impl IcebergSink {
     /// 1. Convert SourceEvents to Arrow RecordBatch
     /// 2. Create data file writer with location/file name generators
     /// 3. Write RecordBatch to Parquet data files
-    /// 4. Commit data files atomically via Transaction API
+    /// 4. Commit data files atomically via Transaction API (with retry on conflict)
+    ///
+    /// # Commit Retry Strategy
+    ///
+    /// On commit conflicts, retries with exponential backoff: 100ms → 200ms → 400ms
     async fn flush_batch(
         &self,
         config: &IcebergSinkConfig,
@@ -1093,6 +1618,8 @@ impl IcebergSink {
         if events.is_empty() {
             return Ok(WriteResult::new());
         }
+
+        let write_start = Instant::now();
 
         // Get the Iceberg schema from the table
         let iceberg_schema = table.metadata().current_schema();
@@ -1174,42 +1701,140 @@ impl IcebergSink {
             ConnectorError::Serialization(format!("Failed to close data file writer: {}", e))
         })?;
 
-        if data_files.is_empty() {
+        let file_count = data_files.len();
+        if file_count == 0 {
             warn!("No data files produced from write");
             return Ok(WriteResult::new());
         }
 
+        // Update file metrics
+        self.metrics
+            .files_created
+            .fetch_add(file_count as u64, Ordering::Relaxed);
+
         info!(
             "Created {} data file(s) for Iceberg table {}.{}",
-            data_files.len(),
-            config.namespace,
-            config.table
+            file_count, config.namespace, config.table
         );
 
-        // Create a transaction to commit the data files
-        let tx = Transaction::new(table);
+        // Commit with retry on conflict (exponential backoff: 100ms, 200ms, 400ms)
+        const MAX_RETRIES: u32 = 3;
+        const INITIAL_BACKOFF_MS: u64 = 100;
+        let mut last_error = None;
 
-        // Use fast_append to add data files without rewriting manifests
-        let action = tx.fast_append().add_data_files(data_files);
+        for attempt in 0..=MAX_RETRIES {
+            if attempt > 0 {
+                let backoff_ms = INITIAL_BACKOFF_MS * (1 << (attempt - 1));
+                self.metrics.commit_retries.fetch_add(1, Ordering::Relaxed);
+                warn!(
+                    attempt,
+                    backoff_ms, "Retrying commit after conflict, backing off"
+                );
+                tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+            }
 
-        // Apply the action and get the updated transaction
-        let tx = action.apply(tx).map_err(|e| {
-            ConnectorError::Serialization(format!("Failed to apply fast append action: {}", e))
-        })?;
+            let commit_start = Instant::now();
 
-        // Commit the transaction to the catalog
-        let _updated_table = tx.commit(catalog.as_catalog()).await.map_err(|e| {
-            ConnectorError::Serialization(format!("Failed to commit transaction: {}", e))
-        })?;
+            // Create a transaction to commit the data files
+            let tx = Transaction::new(table);
 
-        info!(
-            "Committed {} records to Iceberg table {}.{} via transaction",
-            num_rows, config.namespace, config.table
-        );
+            // Use fast_append to add data files without rewriting manifests
+            let action = tx.fast_append().add_data_files(data_files.clone());
 
-        let mut result = WriteResult::new();
-        result.add_success(num_rows as u64, bytes_estimate as u64);
-        Ok(result)
+            // Apply the action and get the updated transaction
+            let tx = match action.apply(tx) {
+                Ok(tx) => tx,
+                Err(e) => {
+                    last_error = Some(ConnectorError::Serialization(format!(
+                        "Apply failed: {}",
+                        e
+                    )));
+                    continue;
+                }
+            };
+
+            // Commit the transaction to the catalog
+            match tx.commit(catalog.as_catalog()).await {
+                Ok(_) => {
+                    // Record commit latency
+                    let commit_elapsed = commit_start.elapsed();
+                    self.metrics
+                        .commit_latency_us
+                        .fetch_add(commit_elapsed.as_micros() as u64, Ordering::Relaxed);
+                    self.metrics.commits_success.fetch_add(1, Ordering::Relaxed);
+
+                    // Record write latency (includes data file creation + commit)
+                    let write_elapsed = write_start.elapsed();
+                    self.metrics
+                        .write_latency_us
+                        .fetch_add(write_elapsed.as_micros() as u64, Ordering::Relaxed);
+                    self.metrics.batches_flushed.fetch_add(1, Ordering::Relaxed);
+
+                    // Record batch size for min/max/avg tracking
+                    self.metrics.record_batch_size(num_rows as u64);
+
+                    // Update record/bytes metrics
+                    self.metrics
+                        .records_written
+                        .fetch_add(num_rows as u64, Ordering::Relaxed);
+                    self.metrics
+                        .bytes_written
+                        .fetch_add(bytes_estimate as u64, Ordering::Relaxed);
+
+                    info!(
+                        records = num_rows,
+                        bytes = bytes_estimate,
+                        files = file_count,
+                        commit_ms = commit_elapsed.as_millis(),
+                        total_ms = write_elapsed.as_millis(),
+                        "Committed batch to Iceberg table {}.{}",
+                        config.namespace,
+                        config.table
+                    );
+
+                    let mut result = WriteResult::new();
+                    result.add_success(num_rows as u64, bytes_estimate as u64);
+                    return Ok(result);
+                }
+                Err(e) => {
+                    // Check if this is a conflict error that might be retryable
+                    let err_msg = e.to_string();
+                    if err_msg.contains("conflict")
+                        || err_msg.contains("Conflict")
+                        || err_msg.contains("stale")
+                    {
+                        warn!(
+                            attempt,
+                            error = %e,
+                            "Commit conflict detected, will retry"
+                        );
+                        last_error = Some(ConnectorError::Serialization(format!(
+                            "Commit conflict: {}",
+                            e
+                        )));
+                        continue;
+                    }
+
+                    // Non-retryable error
+                    self.metrics.commits_failed.fetch_add(1, Ordering::Relaxed);
+                    self.metrics
+                        .records_failed
+                        .fetch_add(num_rows as u64, Ordering::Relaxed);
+                    return Err(
+                        ConnectorError::Serialization(format!("Commit failed: {}", e)).into(),
+                    );
+                }
+            }
+        }
+
+        // All retries exhausted
+        self.metrics.commits_failed.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .records_failed
+            .fetch_add(num_rows as u64, Ordering::Relaxed);
+        Err(last_error
+            .unwrap_or_else(|| ConnectorError::Serialization("Commit failed after retries".into()))
+            .into())
     }
 
     /// Convert source events to an Arrow RecordBatch using the Iceberg table schema
@@ -1648,5 +2273,205 @@ mod tests {
             let json = serde_json::to_string(&mode).unwrap();
             assert_eq!(json, format!("\"{}\"", expected));
         }
+    }
+
+    #[test]
+    fn test_metrics_snapshot_struct() {
+        let snapshot = MetricsSnapshot {
+            records_written: 1000,
+            records_failed: 50,
+            bytes_written: 100_000,
+            commits_success: 10,
+            commits_failed: 1,
+            commit_retries: 3,
+            files_created: 10,
+            batches_flushed: 11,
+            commit_latency_us: 50_000,
+            write_latency_us: 100_000,
+            batch_size_min: 50,
+            batch_size_max: 150,
+            batch_size_sum: 1050, // 11 batches averaging ~95 records
+        };
+
+        // Verify computed metrics
+        assert_eq!(snapshot.avg_commit_latency_ms(), 5.0); // 50000/10/1000
+        assert_eq!(snapshot.avg_write_latency_ms(), 100_000.0 / 11.0 / 1000.0);
+        assert!((snapshot.success_rate() - 1000.0 / 1050.0).abs() < 0.001);
+        assert!((snapshot.retry_rate() - 3.0 / 11.0).abs() < 0.001);
+        assert_eq!(snapshot.bytes_per_second(10.0), 10_000.0);
+        assert_eq!(snapshot.records_per_second(10.0), 100.0);
+        assert!((snapshot.avg_batch_size() - 95.45).abs() < 0.1); // 1050/11
+    }
+
+    #[test]
+    fn test_metrics_snapshot_edge_cases() {
+        let empty = MetricsSnapshot::default();
+
+        // Edge cases with zero values
+        assert_eq!(empty.avg_commit_latency_ms(), 0.0);
+        assert_eq!(empty.avg_write_latency_ms(), 0.0);
+        assert_eq!(empty.success_rate(), 1.0); // 0/0 defaults to 100%
+        assert_eq!(empty.retry_rate(), 0.0);
+        assert_eq!(empty.bytes_per_second(0.0), 0.0);
+        assert_eq!(empty.bytes_per_second(-1.0), 0.0);
+        assert_eq!(empty.records_per_second(0.0), 0.0);
+    }
+
+    #[test]
+    fn test_metrics_snapshot_clone_eq() {
+        let snapshot1 = MetricsSnapshot {
+            records_written: 100,
+            ..Default::default()
+        };
+        let snapshot2 = snapshot1.clone();
+        assert_eq!(snapshot1, snapshot2);
+    }
+
+    #[test]
+    fn test_iceberg_sink_metrics_snapshot() {
+        let metrics = IcebergSinkMetrics::new();
+        metrics.records_written.store(500, Ordering::Relaxed);
+        metrics.bytes_written.store(25_000, Ordering::Relaxed);
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.records_written, 500);
+        assert_eq!(snapshot.bytes_written, 25_000);
+
+        // Original metrics unchanged
+        assert_eq!(metrics.records_written.load(Ordering::Relaxed), 500);
+    }
+
+    #[test]
+    fn test_iceberg_sink_metrics_reset() {
+        let metrics = IcebergSinkMetrics::new();
+        metrics.records_written.store(500, Ordering::Relaxed);
+        metrics.commits_success.store(10, Ordering::Relaxed);
+
+        metrics.reset();
+
+        assert_eq!(metrics.records_written.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.commits_success.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_iceberg_sink_metrics_snapshot_and_reset() {
+        let metrics = IcebergSinkMetrics::new();
+        metrics.records_written.store(500, Ordering::Relaxed);
+        metrics.commits_success.store(10, Ordering::Relaxed);
+
+        let snapshot = metrics.snapshot_and_reset();
+
+        // Snapshot has original values
+        assert_eq!(snapshot.records_written, 500);
+        assert_eq!(snapshot.commits_success, 10);
+
+        // Metrics now zero
+        assert_eq!(metrics.records_written.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.commits_success.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_iceberg_sink_metrics_records_per_second() {
+        let metrics = IcebergSinkMetrics::new();
+        metrics.records_written.store(10_000, Ordering::Relaxed);
+
+        assert_eq!(metrics.records_per_second(10.0), 1000.0);
+        assert_eq!(metrics.records_per_second(0.0), 0.0);
+    }
+
+    #[test]
+    fn test_metrics_batch_size_tracking() {
+        let metrics = IcebergSinkMetrics::new();
+
+        // Record several batch sizes
+        metrics.record_batch_size(100);
+        metrics.record_batch_size(50);
+        metrics.record_batch_size(200);
+        metrics.record_batch_size(75);
+
+        let snapshot = metrics.snapshot();
+
+        // Verify min/max/sum
+        assert_eq!(snapshot.batch_size_min, 50);
+        assert_eq!(snapshot.batch_size_max, 200);
+        assert_eq!(snapshot.batch_size_sum, 425); // 100 + 50 + 200 + 75
+    }
+
+    #[test]
+    fn test_metrics_batch_size_empty() {
+        let metrics = IcebergSinkMetrics::new();
+        let snapshot = metrics.snapshot();
+
+        // No batches recorded - min should be 0 (converted from sentinel)
+        assert_eq!(snapshot.batch_size_min, 0);
+        assert_eq!(snapshot.batch_size_max, 0);
+        assert_eq!(snapshot.batch_size_sum, 0);
+        assert_eq!(snapshot.avg_batch_size(), 0.0);
+    }
+
+    #[test]
+    fn test_metrics_prometheus_export() {
+        let snapshot = MetricsSnapshot {
+            records_written: 1000,
+            records_failed: 10,
+            bytes_written: 50_000,
+            commits_success: 10,
+            commits_failed: 1,
+            commit_retries: 2,
+            files_created: 10,
+            batches_flushed: 11,
+            commit_latency_us: 55_000,
+            write_latency_us: 110_000,
+            batch_size_min: 50,
+            batch_size_max: 150,
+            batch_size_sum: 1000,
+        };
+
+        let output = snapshot.to_prometheus_format("test");
+
+        // Verify key metrics are present
+        assert!(output.contains("test_iceberg_records_written_total 1000"));
+        assert!(output.contains("test_iceberg_records_failed_total 10"));
+        assert!(output.contains("test_iceberg_bytes_written_total 50000"));
+        assert!(output.contains("test_iceberg_commits_total 10"));
+        assert!(output.contains("test_iceberg_batch_size_min 50"));
+        assert!(output.contains("test_iceberg_batch_size_max 150"));
+        assert!(output.contains("# TYPE test_iceberg_records_written_total counter"));
+        assert!(output.contains("# HELP test_iceberg_success_rate"));
+    }
+
+    #[test]
+    fn test_metrics_snapshot_json_serialization() {
+        let snapshot = MetricsSnapshot {
+            records_written: 500,
+            bytes_written: 25_000,
+            commits_success: 5,
+            batches_flushed: 5,
+            batch_size_min: 80,
+            batch_size_max: 120,
+            batch_size_sum: 500,
+            ..Default::default()
+        };
+
+        // Serialize to JSON
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(json.contains("\"records_written\":500"));
+        assert!(json.contains("\"batch_size_min\":80"));
+
+        // Deserialize back
+        let parsed: MetricsSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.records_written, 500);
+        assert_eq!(parsed.batch_size_max, 120);
+    }
+
+    #[test]
+    fn test_metrics_avg_batch_size() {
+        let snapshot = MetricsSnapshot {
+            batches_flushed: 10,
+            batch_size_sum: 1000,
+            ..Default::default()
+        };
+
+        assert_eq!(snapshot.avg_batch_size(), 100.0);
     }
 }

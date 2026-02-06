@@ -11,9 +11,9 @@ Rivven uses a multi-layered testing strategy to ensure reliability, performance,
 ## Test Structure
 
 ```
-Tests: 1610+ passing
+Tests: 1685+ passing
 ├── Unit Tests       (~1300) - Per-crate tests in src/
-├── Integration      (~210)  - rivven-integration-tests/
+├── Integration      (~285)  - rivven-integration-tests/
 ├── Property-based   (~50)   - proptest/quickcheck
 ├── Benchmarks       (~50)   - criterion micro-benchmarks
 └── Feature-gated    (~113)  - Optional feature tests
@@ -54,6 +54,8 @@ cargo test -p rivven-integration-tests
 cargo test -p rivven-integration-tests --test cdc_postgres
 cargo test -p rivven-integration-tests --test cdc_mysql
 cargo test -p rivven-integration-tests --test cdc_mariadb
+cargo test -p rivven-integration-tests --test kafka_connector
+cargo test -p rivven-integration-tests --test mqtt_connector
 cargo test -p rivven-integration-tests --test client_protocol
 cargo test -p rivven-integration-tests --test e2e_pipeline
 cargo test -p rivven-integration-tests --test cluster_consensus
@@ -294,6 +296,114 @@ Tests complete connector pipelines with simulated sources and sinks:
 | `test_connector_fan_out` | Single topic → multiple sinks |
 | `test_connector_retry_recovery` | Transient failure recovery |
 | `test_connector_with_schema` | Schema-aware transformations |
+
+### Kafka Connector Tests (`kafka_connector.rs`)
+
+Tests Kafka connector integration using testcontainers with a real Kafka broker:
+
+```bash
+# Run Kafka connector tests
+cargo test -p rivven-integration-tests --test kafka_connector
+```
+
+**Infrastructure Tests:**
+
+| Test | Description |
+|------|-------------|
+| `test_kafka_container_starts` | Container lifecycle and connectivity |
+| `test_kafka_create_topic` | Topic creation via admin API |
+| `test_kafka_produce_consume` | Message produce/consume round-trip |
+
+**Source Connector Tests:**
+
+| Test | Description |
+|------|-------------|
+| `test_kafka_source_check` | Source connector `check()` validation |
+| `test_kafka_source_discover` | Source connector `discover()` catalog |
+| `test_kafka_source_read` | Source connector `read()` streaming |
+| `test_kafka_source_metrics` | Lock-free metrics gathering |
+| `test_kafka_source_shutdown` | Graceful shutdown signaling |
+| `test_kafka_source_offset_modes` | Earliest/Latest/Offset start modes |
+| `test_kafka_source_high_throughput` | 1000+ messages performance |
+| `test_kafka_source_nonexistent_topic` | Error handling for missing topics |
+| `test_kafka_source_multiple_partitions` | Multi-partition topic handling |
+| `test_kafka_source_empty_topic` | Empty topic handling |
+| `test_kafka_source_invalid_broker` | Invalid broker error handling |
+| `test_kafka_multiple_consumer_groups` | Independent consumer groups |
+
+**Sink Connector Tests:**
+
+| Test | Description |
+|------|-------------|
+| `test_kafka_sink_check` | Sink connector `check()` validation |
+| `test_kafka_sink_metrics` | Sink metrics tracking |
+| `test_kafka_sink_compression` | Gzip/LZ4/Snappy/Zstd compression |
+| `test_kafka_sink_custom_headers` | Custom header injection |
+| `test_kafka_sink_idempotent` | Idempotent producer configuration |
+
+**Batch Operations Tests:**
+
+| Test | Description |
+|------|-------------|
+| `test_kafka_batch_metrics` | Batch size min/max/avg tracking |
+
+### MQTT Connector Tests (`mqtt_connector.rs`)
+
+Tests MQTT connector integration using testcontainers with Mosquitto broker:
+
+```bash
+# Run MQTT connector tests
+cargo test -p rivven-integration-tests --test mqtt_connector
+```
+
+**Infrastructure Tests:**
+
+| Test | Description |
+|------|-------------|
+| `test_mqtt_container_starts` | Container lifecycle and connectivity |
+| `test_mqtt_publish_subscribe` | Basic pub/sub message flow |
+| `test_mqtt_wildcard_subscription` | Wildcard topic matching (`+`, `#`) |
+
+**Source Connector Tests:**
+
+| Test | Description |
+|------|-------------|
+| `test_mqtt_source_check` | Source connector `check()` validation |
+| `test_mqtt_source_discover` | Source connector `discover()` catalog |
+| `test_mqtt_source_read` | Source connector `read()` streaming |
+| `test_mqtt_source_metrics` | Lock-free metrics gathering |
+| `test_mqtt_source_shutdown` | Graceful shutdown signaling |
+| `test_mqtt_high_throughput` | 1000+ message performance |
+
+**QoS Level Tests:**
+
+| Test | Description |
+|------|-------------|
+| `test_mqtt_qos_0` | At most once delivery (fire-and-forget) |
+| `test_mqtt_qos_1` | At least once delivery (acknowledged) |
+| `test_mqtt_qos_2` | Exactly once delivery (assured) |
+
+**Advanced Feature Tests:**
+
+| Test | Description |
+|------|-------------|
+| `test_mqtt_last_will_config` | Last Will and Testament configuration |
+| `test_mqtt_retained_message` | Retained message support |
+| `test_mqtt_persistent_session` | clean_session=false support |
+| `test_mqtt_multi_level_wildcard` | Multi-level wildcard (#) matching |
+| `test_mqtt_single_level_wildcard_positions` | Single-level wildcard (+) positions |
+
+**Edge Case Tests:**
+
+| Test | Description |
+|------|-------------|
+| `test_mqtt_special_topic_names` | Special character topic handling |
+| `test_mqtt_binary_payload` | Binary/non-UTF8 payload support |
+| `test_mqtt_large_payload` | Large message handling (64KB+) |
+| `test_mqtt_connection_churn` | Multiple sequential connections |
+| `test_mqtt_config_defaults` | Default configuration values |
+| `test_mqtt_invalid_broker_url` | Invalid broker error handling |
+| `test_mqtt_metrics_snapshot_and_reset` | Metrics snapshot/reset functionality |
 
 ### Durability Tests (`durability.rs`)
 

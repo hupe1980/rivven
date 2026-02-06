@@ -165,12 +165,12 @@ rivven-connect run --config connect.yaml
 │  │  • Storage       │       │  Sources: postgres-cdc, mysql  │  │
 │  │  • Replication   │       │  Sinks:   s3, snowflake, http  │  │
 │  │  • Auth/RBAC     │       │  Transforms: SMTs, filters     │  │
-│  └──────────────────┘       └────────────────────────────────┘  │
-│           │                            │                        │
-│           ▼                            ▼                        │
+│  └──────────────────┘       └───────────────┬────────────────┘  │
+│                                             │                   │
+│                                             ▼                   │
 │  ┌──────────────────┐       ┌────────────────────────────────┐  │
-│  │  rivven-schema   │       │        rivven-operator         │  │
-│  │ (schema registry)│       │      (kubernetes CRDs)         │  │
+│  │ rivven-operator  │       │        rivven-schema           │  │
+│  │ (kubernetes CRDs)│       │      (schema registry)         │  │
 │  └──────────────────┘       └────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```

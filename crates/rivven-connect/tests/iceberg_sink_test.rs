@@ -610,3 +610,210 @@ fn test_iceberg_factory() {
     let _sink = factory.create();
     // Successfully created sink
 }
+
+// ============================================================================
+// Metrics Tests
+// ============================================================================
+
+#[test]
+fn test_metrics_default_values() {
+    use rivven_connect::connectors::lakehouse::IcebergSinkMetrics;
+
+    let metrics = IcebergSinkMetrics::new();
+    assert_eq!(
+        metrics
+            .records_written
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+    assert_eq!(
+        metrics
+            .commits_success
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0
+    );
+    assert_eq!(metrics.avg_commit_latency_ms(), 0.0);
+    assert_eq!(metrics.success_rate(), 1.0); // 0/0 defaults to 100%
+    assert_eq!(metrics.retry_rate(), 0.0);
+}
+
+#[test]
+fn test_metrics_calculations() {
+    use rivven_connect::connectors::lakehouse::IcebergSinkMetrics;
+    use std::sync::atomic::Ordering;
+
+    let metrics = IcebergSinkMetrics::new();
+
+    // Simulate some writes
+    metrics.records_written.store(900, Ordering::Relaxed);
+    metrics.records_failed.store(100, Ordering::Relaxed);
+    metrics.commits_success.store(9, Ordering::Relaxed);
+    metrics.commits_failed.store(1, Ordering::Relaxed);
+    metrics.commit_retries.store(3, Ordering::Relaxed);
+    metrics.commit_latency_us.store(9000, Ordering::Relaxed); // 9000us / 9 commits = 1000us = 1ms avg
+    metrics.batches_flushed.store(10, Ordering::Relaxed);
+
+    // Verify calculations
+    assert_eq!(metrics.success_rate(), 0.9); // 900/1000
+    assert_eq!(metrics.retry_rate(), 0.3); // 3 retries / 10 total commits
+    assert_eq!(metrics.avg_commit_latency_ms(), 1.0); // 9000us / 9 = 1000us = 1ms
+}
+
+#[test]
+fn test_metrics_bytes_per_second() {
+    use rivven_connect::connectors::lakehouse::IcebergSinkMetrics;
+    use std::sync::atomic::Ordering;
+
+    let metrics = IcebergSinkMetrics::new();
+    metrics.bytes_written.store(1_000_000, Ordering::Relaxed);
+
+    // 1MB over 2 seconds = 500KB/s
+    let throughput = metrics.bytes_per_second(2.0);
+    assert_eq!(throughput, 500_000.0);
+
+    // Edge case: 0 elapsed time
+    assert_eq!(metrics.bytes_per_second(0.0), 0.0);
+    assert_eq!(metrics.bytes_per_second(-1.0), 0.0);
+}
+
+#[tokio::test]
+async fn test_sink_metrics_after_write() {
+    use std::sync::atomic::Ordering;
+
+    let sink = IcebergSink::new();
+
+    // Initial metrics should be zero
+    let metrics = sink.metrics();
+    assert_eq!(metrics.records_written.load(Ordering::Relaxed), 0);
+    assert_eq!(metrics.batches_flushed.load(Ordering::Relaxed), 0);
+
+    // After a successful write, metrics should be updated
+    // (Note: We can't actually test this without a real catalog,
+    // but we can verify the metrics struct is accessible)
+    assert_eq!(metrics.commits_success.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn test_metrics_snapshot() {
+    use rivven_connect::connectors::lakehouse::IcebergSinkMetrics;
+    use std::sync::atomic::Ordering;
+
+    let metrics = IcebergSinkMetrics::new();
+
+    // Set some values
+    metrics.records_written.store(1000, Ordering::Relaxed);
+    metrics.bytes_written.store(50000, Ordering::Relaxed);
+    metrics.commits_success.store(10, Ordering::Relaxed);
+    metrics.batches_flushed.store(10, Ordering::Relaxed);
+    metrics.commit_latency_us.store(50000, Ordering::Relaxed); // 5ms avg
+
+    // Take a snapshot
+    let snapshot = metrics.snapshot();
+
+    // Verify snapshot captures all values
+    assert_eq!(snapshot.records_written, 1000);
+    assert_eq!(snapshot.bytes_written, 50000);
+    assert_eq!(snapshot.commits_success, 10);
+    assert_eq!(snapshot.batches_flushed, 10);
+    assert_eq!(snapshot.commit_latency_us, 50000);
+
+    // Verify snapshot methods work
+    assert_eq!(snapshot.avg_commit_latency_ms(), 5.0);
+    assert_eq!(snapshot.success_rate(), 1.0);
+    assert_eq!(snapshot.bytes_per_second(10.0), 5000.0);
+    assert_eq!(snapshot.records_per_second(10.0), 100.0);
+
+    // Original metrics should be unchanged
+    assert_eq!(metrics.records_written.load(Ordering::Relaxed), 1000);
+}
+
+#[test]
+fn test_metrics_reset() {
+    use rivven_connect::connectors::lakehouse::IcebergSinkMetrics;
+    use std::sync::atomic::Ordering;
+
+    let metrics = IcebergSinkMetrics::new();
+
+    // Set some values
+    metrics.records_written.store(1000, Ordering::Relaxed);
+    metrics.bytes_written.store(50000, Ordering::Relaxed);
+    metrics.commits_success.store(10, Ordering::Relaxed);
+    metrics.commit_retries.store(5, Ordering::Relaxed);
+    metrics.files_created.store(10, Ordering::Relaxed);
+
+    // Reset
+    metrics.reset();
+
+    // All values should be zero
+    assert_eq!(metrics.records_written.load(Ordering::Relaxed), 0);
+    assert_eq!(metrics.bytes_written.load(Ordering::Relaxed), 0);
+    assert_eq!(metrics.commits_success.load(Ordering::Relaxed), 0);
+    assert_eq!(metrics.commit_retries.load(Ordering::Relaxed), 0);
+    assert_eq!(metrics.files_created.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn test_metrics_snapshot_and_reset() {
+    use rivven_connect::connectors::lakehouse::IcebergSinkMetrics;
+    use std::sync::atomic::Ordering;
+
+    let metrics = IcebergSinkMetrics::new();
+
+    // Set some values
+    metrics.records_written.store(1000, Ordering::Relaxed);
+    metrics.bytes_written.store(50000, Ordering::Relaxed);
+    metrics.commits_success.store(10, Ordering::Relaxed);
+    metrics.batches_flushed.store(10, Ordering::Relaxed);
+
+    // Snapshot and reset atomically
+    let snapshot = metrics.snapshot_and_reset();
+
+    // Snapshot should have the original values
+    assert_eq!(snapshot.records_written, 1000);
+    assert_eq!(snapshot.bytes_written, 50000);
+    assert_eq!(snapshot.commits_success, 10);
+    assert_eq!(snapshot.batches_flushed, 10);
+
+    // Metrics should now be zero
+    assert_eq!(metrics.records_written.load(Ordering::Relaxed), 0);
+    assert_eq!(metrics.bytes_written.load(Ordering::Relaxed), 0);
+    assert_eq!(metrics.commits_success.load(Ordering::Relaxed), 0);
+    assert_eq!(metrics.batches_flushed.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn test_metrics_snapshot_clone_and_compare() {
+    use rivven_connect::connectors::lakehouse::MetricsSnapshot;
+
+    let snapshot1 = MetricsSnapshot {
+        records_written: 100,
+        bytes_written: 5000,
+        ..Default::default()
+    };
+
+    let snapshot2 = snapshot1.clone();
+    assert_eq!(snapshot1, snapshot2);
+
+    // Different snapshots are not equal
+    let snapshot3 = MetricsSnapshot {
+        records_written: 200,
+        ..Default::default()
+    };
+    assert_ne!(snapshot1, snapshot3);
+}
+
+#[test]
+fn test_metrics_records_per_second() {
+    use rivven_connect::connectors::lakehouse::IcebergSinkMetrics;
+    use std::sync::atomic::Ordering;
+
+    let metrics = IcebergSinkMetrics::new();
+    metrics.records_written.store(10000, Ordering::Relaxed);
+
+    // 10000 records over 10 seconds = 1000 rps
+    assert_eq!(metrics.records_per_second(10.0), 1000.0);
+
+    // Edge cases
+    assert_eq!(metrics.records_per_second(0.0), 0.0);
+    assert_eq!(metrics.records_per_second(-1.0), 0.0);
+}

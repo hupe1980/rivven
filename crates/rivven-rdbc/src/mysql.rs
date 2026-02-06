@@ -19,8 +19,8 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 
 use crate::connection::{
-    Connection, ConnectionConfig, ConnectionFactory, DatabaseType, IsolationLevel,
-    PreparedStatement, RowStream, Transaction,
+    Connection, ConnectionConfig, ConnectionFactory, ConnectionLifecycle, DatabaseType,
+    IsolationLevel, PreparedStatement, RowStream, Transaction,
 };
 use crate::error::{Error, Result};
 use crate::schema::{
@@ -179,15 +179,33 @@ fn mysql_value_to_value(val: mysql_async::Value) -> Value {
 /// MySQL connection implementation
 pub struct MySqlConnection {
     conn: Arc<Mutex<Option<Conn>>>,
-    #[allow(dead_code)]
     database: String,
     in_transaction: Arc<AtomicBool>,
-    #[allow(dead_code)]
     created_at: Instant,
     last_used: Mutex<Instant>,
 }
 
 impl MySqlConnection {
+    /// Get the database name this connection is connected to
+    pub fn database(&self) -> &str {
+        &self.database
+    }
+
+    /// Get the age of this connection (time since creation)
+    pub fn age(&self) -> std::time::Duration {
+        self.created_at.elapsed()
+    }
+
+    /// Check if connection is older than the specified max lifetime
+    pub fn is_expired(&self, max_lifetime: std::time::Duration) -> bool {
+        self.age() > max_lifetime
+    }
+
+    /// Get time since last use
+    pub async fn idle_time(&self) -> std::time::Duration {
+        self.last_used.lock().await.elapsed()
+    }
+
     /// Create a new MySQL connection from an existing connection
     pub fn new(conn: Conn, database: String) -> Self {
         let now = Instant::now();
@@ -230,6 +248,21 @@ impl MySqlConnection {
     async fn put_conn(&self, conn: Conn) {
         let mut guard = self.conn.lock().await;
         *guard = Some(conn);
+        *self.last_used.lock().await = Instant::now();
+    }
+}
+
+#[async_trait]
+impl ConnectionLifecycle for MySqlConnection {
+    fn created_at(&self) -> Instant {
+        self.created_at
+    }
+
+    async fn idle_time(&self) -> std::time::Duration {
+        self.last_used.lock().await.elapsed()
+    }
+
+    async fn touch(&self) {
         *self.last_used.lock().await = Instant::now();
     }
 }

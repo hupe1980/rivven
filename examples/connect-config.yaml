@@ -14,8 +14,9 @@ version: "1.0"
 
 # Broker connection (required)
 broker:
-  # Primary broker address
-  address: localhost:9092
+  # Bootstrap servers (can be single or list for high availability)
+  bootstrap_servers:
+    - localhost:9092
   # TLS configuration (optional)
   tls:
     enabled: false
@@ -45,12 +46,12 @@ sources:
       topic_routing: "cdc.postgres.{schema}.{table}"
       # Events from public.users → cdc.postgres.public.users
       # Events from public.orders → cdc.postgres.public.orders
-    # Which tables to capture
-    tables:
-      - schema: public
-        table: users
-      - schema: public
-        table: orders
+      # Which schemas and tables to capture (empty = all)
+      schemas:
+        - public
+      tables:
+        - users
+        - orders
 
 # Sink connectors - consume from broker topics, write to external systems
 sinks:

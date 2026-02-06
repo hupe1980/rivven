@@ -12,8 +12,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use futures::StreamExt;
-use rivven_connect::connectors::rdbc_sink::{RdbcSink, RdbcSinkConfig, RdbcWriteMode};
-use rivven_connect::connectors::rdbc_source::{RdbcQueryMode, RdbcSource, RdbcSourceConfig};
+use rivven_connect::connectors::rdbc::{
+    RdbcQueryMode, RdbcSink, RdbcSinkConfig, RdbcSource, RdbcSourceConfig, RdbcWriteMode,
+};
 use rivven_connect::traits::{ConfiguredCatalog, Sink, Source, SourceEvent};
 use rivven_integration_tests::fixtures::TestPostgres;
 use rivven_integration_tests::helpers::*;

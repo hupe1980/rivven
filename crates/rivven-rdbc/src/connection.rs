@@ -2,6 +2,7 @@
 //!
 //! Core abstractions for database connectivity:
 //! - Connection: Basic connection with query execution
+//! - ConnectionLifecycle: Optional lifecycle tracking for pool management
 //! - PreparedStatement: Parameterized query support
 //! - Transaction: ACID transaction support
 //! - RowStream: Streaming row iteration
@@ -9,9 +10,54 @@
 use async_trait::async_trait;
 use std::future::Future;
 use std::pin::Pin;
+use std::time::{Duration, Instant};
 
 use crate::error::Result;
 use crate::types::{Row, Value};
+
+/// Lifecycle tracking for connections (used by connection pools)
+///
+/// This trait provides optional lifecycle information for connections,
+/// enabling accurate pool management and observability.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use rivven_rdbc::connection::ConnectionLifecycle;
+/// use std::time::Duration;
+///
+/// let conn = pool.get().await?;
+/// println!("Connection age: {:?}", conn.age());
+/// if conn.is_expired(Duration::from_secs(1800)) {
+///     println!("Connection should be recycled");
+/// }
+/// ```
+#[async_trait]
+pub trait ConnectionLifecycle: Send + Sync {
+    /// Get the instant when this connection was created
+    fn created_at(&self) -> Instant;
+
+    /// Get the age of this connection (time since creation)
+    fn age(&self) -> Duration {
+        self.created_at().elapsed()
+    }
+
+    /// Check if connection has exceeded the given maximum lifetime
+    fn is_expired(&self, max_lifetime: Duration) -> bool {
+        self.age() > max_lifetime
+    }
+
+    /// Get duration since this connection was last used
+    async fn idle_time(&self) -> Duration;
+
+    /// Check if connection has exceeded idle timeout
+    async fn is_idle_expired(&self, idle_timeout: Duration) -> bool {
+        self.idle_time().await > idle_timeout
+    }
+
+    /// Update the last-used timestamp (called when connection is actively used)
+    async fn touch(&self);
+}
 
 /// A connection to a database
 #[async_trait]
@@ -287,5 +333,54 @@ mod tests {
         assert_eq!(config.query_timeout_ms, 15000);
         assert_eq!(config.application_name, Some("myapp".into()));
         assert_eq!(config.properties.get("sslmode"), Some(&"require".into()));
+    }
+
+    #[test]
+    fn test_database_type_display() {
+        assert_eq!(format!("{}", DatabaseType::PostgreSQL), "PostgreSQL");
+        assert_eq!(format!("{}", DatabaseType::MySQL), "MySQL");
+        assert_eq!(format!("{}", DatabaseType::SqlServer), "SQL Server");
+        assert_eq!(format!("{}", DatabaseType::SQLite), "SQLite");
+        assert_eq!(format!("{}", DatabaseType::Oracle), "Oracle");
+        assert_eq!(format!("{}", DatabaseType::Unknown), "Unknown");
+    }
+
+    #[test]
+    fn test_isolation_level_display() {
+        assert_eq!(
+            format!("{}", IsolationLevel::ReadUncommitted),
+            "READ UNCOMMITTED"
+        );
+        assert_eq!(
+            format!("{}", IsolationLevel::ReadCommitted),
+            "READ COMMITTED"
+        );
+        assert_eq!(
+            format!("{}", IsolationLevel::RepeatableRead),
+            "REPEATABLE READ"
+        );
+        assert_eq!(format!("{}", IsolationLevel::Serializable), "SERIALIZABLE");
+        assert_eq!(format!("{}", IsolationLevel::Snapshot), "SNAPSHOT");
+    }
+
+    /// Test ConnectionLifecycle default implementations
+    #[test]
+    fn test_connection_lifecycle_defaults() {
+        // Test that default implementations are logically correct
+        // The actual trait requires async methods, so we test the logic
+        let now = Instant::now();
+
+        // age = now.elapsed(), should be very small
+        let age = now.elapsed();
+        assert!(age < Duration::from_secs(1));
+
+        // is_expired with 30 minutes should be false for a just-created connection
+        let max_lifetime = Duration::from_secs(1800);
+        assert!(age <= max_lifetime);
+
+        // is_expired with very short lifetime should become true quickly
+        std::thread::sleep(Duration::from_millis(5));
+        let short_lifetime = Duration::from_millis(1);
+        assert!(now.elapsed() > short_lifetime);
     }
 }

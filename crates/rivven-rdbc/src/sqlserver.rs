@@ -18,8 +18,8 @@ use tokio::sync::Mutex;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
 use crate::connection::{
-    Connection, ConnectionConfig, ConnectionFactory, DatabaseType, IsolationLevel,
-    PreparedStatement, RowStream, Transaction,
+    Connection, ConnectionConfig, ConnectionFactory, ConnectionLifecycle, DatabaseType,
+    IsolationLevel, PreparedStatement, RowStream, Transaction,
 };
 use crate::error::{Error, Result};
 use crate::types::{Row, Value};
@@ -28,12 +28,26 @@ use crate::types::{Row, Value};
 pub struct SqlServerConnection {
     client: Arc<Mutex<Client<Compat<TcpStream>>>>,
     in_transaction: AtomicBool,
-    #[allow(dead_code)]
     created_at: Instant,
     last_used: Mutex<Instant>,
 }
 
 impl SqlServerConnection {
+    /// Get the age of this connection (time since creation)
+    pub fn age(&self) -> std::time::Duration {
+        self.created_at.elapsed()
+    }
+
+    /// Check if connection is older than the specified max lifetime
+    pub fn is_expired(&self, max_lifetime: std::time::Duration) -> bool {
+        self.age() > max_lifetime
+    }
+
+    /// Get time since last use
+    pub async fn idle_time(&self) -> std::time::Duration {
+        self.last_used.lock().await.elapsed()
+    }
+
     /// Create a new SQL Server connection from config
     pub async fn connect(config: &ConnectionConfig) -> Result<Self> {
         // Parse URL: sqlserver://user:pass@host:port/database
@@ -92,6 +106,21 @@ impl SqlServerConnection {
 
     async fn update_last_used(&self) {
         *self.last_used.lock().await = Instant::now();
+    }
+}
+
+#[async_trait]
+impl ConnectionLifecycle for SqlServerConnection {
+    fn created_at(&self) -> Instant {
+        self.created_at
+    }
+
+    async fn idle_time(&self) -> std::time::Duration {
+        self.last_used.lock().await.elapsed()
+    }
+
+    async fn touch(&self) {
+        self.update_last_used().await;
     }
 }
 

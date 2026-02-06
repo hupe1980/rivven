@@ -13,10 +13,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
+use tokio::sync::Mutex;
 
 use crate::connection::{
-    Connection, ConnectionConfig, ConnectionFactory, DatabaseType, IsolationLevel,
-    PreparedStatement, RowStream, Transaction,
+    Connection, ConnectionConfig, ConnectionFactory, ConnectionLifecycle, DatabaseType,
+    IsolationLevel, PreparedStatement, RowStream, Transaction,
 };
 use crate::dialect::{PostgresDialect, SqlDialect};
 use crate::error::{Error, Result};
@@ -206,14 +208,19 @@ fn pg_value_to_value(
 pub struct PgConnection {
     client: Arc<tokio_postgres::Client>,
     closed: AtomicBool,
+    created_at: Instant,
+    last_used: Mutex<Instant>,
 }
 
 impl PgConnection {
     /// Create a new connection from a tokio-postgres client
     pub fn new(client: tokio_postgres::Client) -> Self {
+        let now = Instant::now();
         Self {
             client: Arc::new(client),
             closed: AtomicBool::new(false),
+            created_at: now,
+            last_used: Mutex::new(now),
         }
     }
 
@@ -222,11 +229,41 @@ impl PgConnection {
         &self.client
     }
 
-    /// Build parameters for query
-    #[allow(dead_code)]
-    fn build_params(_values: &[Value]) -> Vec<&(dyn tokio_postgres::types::ToSql + Sync)> {
-        // This is a simplified version - in production you'd want to avoid allocation
-        vec![]
+    /// Get the age of this connection (time since creation)
+    #[inline]
+    pub fn age(&self) -> std::time::Duration {
+        self.created_at.elapsed()
+    }
+
+    /// Check if connection is older than the specified max lifetime
+    #[inline]
+    pub fn is_expired(&self, max_lifetime: std::time::Duration) -> bool {
+        self.age() > max_lifetime
+    }
+
+    /// Get time since last use
+    pub async fn idle_time(&self) -> std::time::Duration {
+        self.last_used.lock().await.elapsed()
+    }
+
+    /// Update last used timestamp (called internally after queries)
+    async fn update_last_used(&self) {
+        *self.last_used.lock().await = Instant::now();
+    }
+}
+
+#[async_trait]
+impl ConnectionLifecycle for PgConnection {
+    fn created_at(&self) -> Instant {
+        self.created_at
+    }
+
+    async fn idle_time(&self) -> std::time::Duration {
+        self.last_used.lock().await.elapsed()
+    }
+
+    async fn touch(&self) {
+        self.update_last_used().await;
     }
 }
 

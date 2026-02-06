@@ -39,7 +39,7 @@ Rivven provides a **native connector framework** that scales to 300+ connectors:
 │  └── NoSQL (redis, cassandra, ...)                              │
 │                                                                  │
 │  Messaging                                                       │
-│  ├── Queues (external, ...)                                     │
+│  ├── Queues (kafka, external, ...)                              │
 │  ├── MQTT (mqtt, rabbitmq, ...)                                 │
 │  └── Cloud (sqs, pubsub, azure_queue, ...)                      │
 │                                                                  │
@@ -323,8 +323,8 @@ sources:
       consumer_group: rivven-consumer
       auto_offset_reset: earliest
       security:
-        protocol: SASL_SSL
-        mechanism: SCRAM-SHA-512
+        protocol: sasl_ssl
+        mechanism: SCRAM_SHA_512
         username: ${QUEUE_USER}
         password: ${QUEUE_PASSWORD}
 ```
@@ -335,37 +335,152 @@ sources:
 | `source_topics` | ✓ | - | Topics to consume |
 | `consumer_group` | ✓ | - | Consumer group ID |
 | `auto_offset_reset` | | `latest` | Offset reset policy |
-| `security.protocol` | | `PLAINTEXT` | Security protocol |
+| `security.protocol` | | `plaintext` | Security protocol |
+
+### Kafka Source
+
+Consume from Apache Kafka topics for migration or hybrid deployments. See [Kafka Connector](kafka-connector) for full documentation.
+
+```yaml
+sources:
+  kafka:
+    connector: kafka-source
+    topic: kafka-events           # Rivven topic (where consumed messages go)
+    config:
+      brokers: ["kafka1:9092", "kafka2:9092"]
+      topic: orders               # Kafka topic (external source to consume from)
+      consumer_group: rivven-migration
+      start_offset: earliest
+      security:
+        protocol: sasl_ssl
+        mechanism: SCRAM_SHA_256
+        username: ${KAFKA_USER}
+        password: ${KAFKA_PASSWORD}
+```
+
+| Parameter | Required | Default | Description |
+|:----------|:---------|:--------|:------------|
+| `topic` (outer) | ✓ | - | Rivven topic for consumed messages |
+| `brokers` | ✓ | - | Kafka broker addresses |
+| `topic` (config) | ✓ | - | Kafka topic to consume from |
+| `consumer_group` | ✓ | - | Consumer group ID |
+| `start_offset` | | `latest` | `earliest`, `latest`, or specific offset |
+| `security.protocol` | | `plaintext` | `plaintext`, `ssl`, `sasl_plaintext`, `sasl_ssl` |
+
+**Metrics:**
+
+| Metric | Type | Description |
+|:-------|:-----|:------------|
+| `kafka.source.messages_consumed_total` | Counter | Messages consumed |
+| `kafka.source.bytes_consumed_total` | Counter | Bytes consumed |
+| `kafka.source.polls_total` | Counter | Poll operations |
+| `kafka.source.poll_latency_avg_ms` | Gauge | Average poll latency |
 
 ### MQTT Source
 
-Subscribe to MQTT topics for IoT data ingestion.
+Subscribe to MQTT topics for IoT data ingestion. Uses rumqttc (pure Rust MQTT client)
+for production connectivity with TLS support and exponential backoff. See [MQTT Connector](mqtt-connector) for full documentation.
+
+**Features:**
+- Real MQTT 3.1.1/5.0 protocol support via rumqttc
+- TLS/SSL encryption (`mqtts://` URLs) with rustls
+- Wildcard topics (`+` single-level, `#` multi-level)
+- Lock-free metrics with atomic counters (`Ordering::Relaxed`)
+- Exponential backoff for reconnection
+- Last Will and Testament (LWT) for connection monitoring
+- Prometheus-exportable metrics
 
 ```yaml
 sources:
   mqtt:
     connector: mqtt
-    topic: iot-events
+    topic: iot-events  # Rivven destination topic
     config:
-      broker_url: mqtt://broker:1883
+      # MQTT broker settings
+      broker_url: mqtts://broker.example.com:8883
       topics:
         - sensors/+/temperature
         - sensors/+/humidity
       client_id: rivven-mqtt-client
-      qos: 1
+      qos: at_least_once   # at_most_once | at_least_once | exactly_once
       clean_session: true
+      
+      # Authentication
       auth:
         username: ${MQTT_USER}
         password: ${MQTT_PASSWORD}
+      
+      # Connection tuning
+      keep_alive_secs: 60
+      connect_timeout_secs: 30
+      max_inflight: 100
+      
+      # Exponential backoff for reconnection
+      retry_initial_ms: 100
+      retry_max_ms: 10000
+      retry_multiplier: 2.0
+      
+      # Payload handling
+      parse_json_payload: true
+      include_metadata: true
+      
+      # Last Will and Testament (optional)
+      last_will:
+        topic: clients/rivven/status
+        message: offline
+        qos: at_least_once
+        retain: true
 ```
 
 | Parameter | Required | Default | Description |
 |:----------|:---------|:--------|:------------|
-| `broker_url` | ✓ | - | MQTT broker URL |
+| `broker_url` | ✓ | - | MQTT broker URL (`mqtt://` or `mqtts://` for TLS) |
 | `topics` | ✓ | - | MQTT topic patterns (wildcards supported) |
 | `client_id` | | auto | Client identifier |
-| `qos` | | `1` | Quality of Service (0, 1, 2) |
+| `qos` | | `at_most_once` | Quality of Service: `at_most_once`, `at_least_once`, `exactly_once` |
 | `clean_session` | | `true` | Start with clean session |
+| `keep_alive_secs` | | `60` | Keep-alive interval in seconds |
+| `connect_timeout_secs` | | `30` | Connection timeout |
+| `max_inflight` | | `100` | Max in-flight messages |
+| `retry_initial_ms` | | `100` | Initial backoff delay |
+| `retry_max_ms` | | `10000` | Maximum backoff delay |
+| `retry_multiplier` | | `2.0` | Backoff multiplier |
+| `parse_json_payload` | | `true` | Parse payload as JSON |
+| `include_metadata` | | `true` | Include message metadata |
+| `last_will.topic` | | - | LWT topic for disconnect notification |
+| `last_will.message` | | - | LWT message payload |
+| `last_will.qos` | | `at_most_once` | LWT QoS level |
+| `last_will.retain` | | `false` | LWT retain flag |
+
+**Observability:**
+
+The MQTT source provides lock-free metrics exportable to Prometheus:
+
+```rust
+// Get metrics snapshot
+let snapshot = source.metrics().snapshot();
+
+// Derived metrics
+println!("Throughput: {:.2} msg/s", snapshot.messages_per_second(elapsed));
+println!("Bandwidth: {:.2} B/s", snapshot.bytes_per_second(elapsed));
+println!("Latency: {:.2} ms", snapshot.avg_receive_latency_ms());
+println!("Error rate: {:.2}%", snapshot.error_rate_percent());
+
+// Export to Prometheus
+let prometheus_text = snapshot.to_prometheus_format("myapp");
+```
+
+**Graceful Shutdown:**
+
+```rust
+// Signal shutdown
+source.shutdown();
+
+// Check shutdown state
+if source.is_shutting_down() {
+    println!("Source is terminating...");
+}
+```
 
 ---
 
@@ -801,11 +916,53 @@ sinks:
       acks: all
       compression: lz4
       security:
-        protocol: SASL_SSL
-        mechanism: SCRAM-SHA-512
+        protocol: sasl_ssl
+        mechanism: SCRAM_SHA_512
         username: ${QUEUE_USER}
         password: ${QUEUE_PASSWORD}
 ```
+
+### Kafka Sink
+
+Produce events to Apache Kafka topics. See [Kafka Connector](kafka-connector) for full documentation.
+
+```yaml
+sinks:
+  kafka:
+    connector: kafka-sink
+    topics: [events]              # Rivven topics to consume from
+    consumer_group: kafka-producer
+    config:
+      brokers: ["kafka1:9092"]
+      topic: orders-replica       # Kafka topic (external destination)
+      acks: all
+      compression: lz4
+      idempotent: true
+      security:
+        protocol: sasl_ssl
+        mechanism: PLAIN
+        username: ${KAFKA_USER}
+        password: ${KAFKA_PASSWORD}
+```
+
+| Parameter | Required | Default | Description |
+|:----------|:---------|:--------|:------------|
+| `topics` (outer) | ✓ | - | Rivven topics to consume from |
+| `brokers` | ✓ | - | Kafka broker addresses |
+| `topic` (config) | ✓ | - | Kafka topic to produce to |
+| `acks` | | `all` | `none`, `leader`, `all` |
+| `compression` | | `none` | `none`, `gzip`, `snappy`, `lz4`, `zstd` |
+| `idempotent` | | `false` | Enable idempotent producer |
+| `transactional_id` | | - | Enable exactly-once with transactions |
+
+**Metrics:**
+
+| Metric | Type | Description |
+|:-------|:-----|:------------|
+| `kafka.sink.messages_produced_total` | Counter | Messages produced |
+| `kafka.sink.bytes_produced_total` | Counter | Bytes produced |
+| `kafka.sink.batches_sent_total` | Counter | Batches sent |
+| `kafka.sink.success_rate` | Gauge | Producer success rate |
 
 ---
 

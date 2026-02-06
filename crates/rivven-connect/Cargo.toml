@@ -28,7 +28,7 @@ postgres = ["rivven-cdc/postgres", "tokio-postgres"]
 mysql = ["rivven-cdc/mysql"]
 sqlserver = ["rivven-cdc/sqlserver"]
 tls = ["rivven-client/tls"]
-http = []  # HTTP connector is now built-in, just feature-gated
+http = ["dep:sha2", "dep:rand", "dep:hmac"]  # HTTP connector with signing support
 
 # RDBC connectors (query-based source/sink using rivven-rdbc)
 rdbc = ["dep:rivven-rdbc"]
@@ -38,8 +38,8 @@ rdbc-sqlserver = ["rdbc", "rivven-rdbc/sqlserver"]
 rdbc-full = ["rdbc-postgres", "rdbc-mysql", "rdbc-sqlserver"]
 
 # Queue connectors (message queues)
-kafka = []      # Kafka source/sink
-mqtt = []       # MQTT source
+kafka = ["dep:rskafka"]      # Kafka source/sink (pure Rust client)
+mqtt = ["dep:rumqttc"]       # MQTT source (pure Rust client)
 sqs = []        # AWS SQS source
 pubsub = []     # Google Pub/Sub source
 
@@ -154,11 +154,20 @@ arrow-json = { version = "57", optional = true }
 iceberg = { version = "0.8", optional = true }
 iceberg-catalog-rest = { version = "0.8", optional = true }
 
+# Apache Kafka (pure Rust client - optional)
+rskafka = { version = "0.5", optional = true }
+
+# MQTT client (pure Rust - optional)
+rumqttc = { version = "0.24", optional = true }
+
 # Snowflake (optional)
 jsonwebtoken = { version = "9", optional = true }
 rsa = { version = "0.9", optional = true }
 sha2 = { version = "0.10", optional = true }
 rand = { workspace = true, optional = true }
+
+# HTTP webhook signing (optional)
+hmac = { version = "0.12", optional = true }
 
 # Redshift TLS (optional)
 rustls = { workspace = true, optional = true }

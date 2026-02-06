@@ -580,7 +580,7 @@ impl ConnectConfig {
 
     /// Validate connector-specific configurations using SDK types
     fn validate_connector_configs(&self) -> anyhow::Result<()> {
-        use crate::connectors::postgres_cdc::PostgresCdcConfig;
+        use crate::connectors::cdc::PostgresCdcConfig;
         use crate::connectors::stdout::StdoutSinkConfig;
         use crate::topic_resolver::validate_topic_routing;
         use validator::Validate;

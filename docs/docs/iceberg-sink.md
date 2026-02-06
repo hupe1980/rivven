@@ -30,6 +30,8 @@ The Apache Iceberg connector enables real-time streaming of events from Rivven t
 - **Transaction Support**: Atomic commits via Iceberg SDK Transaction API
 - **Multiple Catalog Types**: REST (Polaris, Tabular, Lakekeeper), Glue, Hive, Memory
 - **Storage Backends**: S3, GCS, Azure, Local filesystem
+- **Lock-Free Metrics**: Atomic counters for observability (records, bytes, latency)
+- **Commit Retry**: Exponential backoff on transaction conflicts (100ms → 200ms → 400ms)
 
 ### Iceberg Table Format Benefits
 
@@ -418,6 +420,116 @@ schema_evolution: add_columns  # strict | add_columns | full
 | `strict` | Error if incoming schema doesn't match table schema |
 | `add_columns` | Automatically add new columns (default) |
 | `full` | Allow column adds, drops, renames, and type changes |
+
+## Metrics & Observability
+
+The Iceberg sink provides lock-free atomic metrics for real-time observability:
+
+| Metric | Description |
+|--------|-------------|
+| `records_written` | Total records successfully written |
+| `records_failed` | Total records failed |
+| `bytes_written` | Total bytes written (estimated) |
+| `commits_success` | Successful transaction commits |
+| `commits_failed` | Failed transaction commits |
+| `commit_retries` | Retries due to conflicts |
+| `files_created` | Total Parquet files created |
+| `batches_flushed` | Total batches flushed |
+| `commit_latency_us` | Cumulative commit latency in microseconds |
+| `write_latency_us` | Cumulative write latency in microseconds |
+| `batch_size_min` | Minimum batch size (records) |
+| `batch_size_max` | Maximum batch size (records) |
+| `batch_size_sum` | Sum of batch sizes (for avg calculation) |
+
+### Computed Metrics
+
+```rust
+// Average commit latency in milliseconds
+let avg_commit_ms = sink.metrics().avg_commit_latency_ms();
+
+// Average write latency in milliseconds
+let avg_write_ms = sink.metrics().avg_write_latency_ms();
+
+// Success rate (0.0 to 1.0)
+let success_rate = sink.metrics().success_rate();
+
+// Commit retry rate
+let retry_rate = sink.metrics().retry_rate();
+
+// Throughput in bytes per second
+let throughput = sink.metrics().bytes_per_second(elapsed_secs);
+
+// Throughput in records per second
+let rps = sink.metrics().records_per_second(elapsed_secs);
+
+// Average batch size
+let avg_batch = snapshot.avg_batch_size();
+```
+
+### Metrics Snapshots
+
+For interval-based reporting, use snapshots to capture point-in-time metrics:
+
+```rust
+// Capture a snapshot (original metrics unchanged)
+let snapshot = sink.metrics().snapshot();
+println!("Records: {}", snapshot.records_written);
+println!("Success rate: {:.1}%", snapshot.success_rate() * 100.0);
+
+// Snapshot and reset atomically (for interval reporting)
+loop {
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    let snapshot = sink.metrics().snapshot_and_reset();
+    reporter.send(snapshot); // Send to Prometheus, DataDog, etc.
+}
+```
+
+### MetricsSnapshot Struct
+
+The `MetricsSnapshot` is a plain struct that can be cloned, serialized, and compared:
+
+```rust
+use rivven_connect::connectors::lakehouse::MetricsSnapshot;
+
+let snapshot: MetricsSnapshot = sink.metrics().snapshot();
+let clone = snapshot.clone();
+assert_eq!(snapshot, clone);
+
+// All computed methods work on snapshots too
+let avg_latency = snapshot.avg_commit_latency_ms();
+let throughput = snapshot.bytes_per_second(10.0);
+
+// JSON serialization
+let json = serde_json::to_string(&snapshot)?;
+```
+
+### Prometheus Export
+
+Export metrics in Prometheus text format for scraping:
+
+```rust
+let snapshot = sink.metrics().snapshot();
+let prometheus_output = snapshot.to_prometheus_format("rivven");
+
+// Output includes:
+// # HELP rivven_iceberg_records_written_total Total records written
+// # TYPE rivven_iceberg_records_written_total counter
+// rivven_iceberg_records_written_total 1000
+// rivven_iceberg_commit_latency_avg_ms 5.234
+// rivven_iceberg_success_rate 0.9950
+// ...
+```
+
+### Commit Retry Strategy
+
+On transaction conflicts (e.g., concurrent writers), the sink automatically retries with exponential backoff:
+
+| Attempt | Backoff |
+|---------|---------|
+| 1 | 100ms |
+| 2 | 200ms |
+| 3 | 400ms |
+| 4 | Fail |
 
 ## Complete Production Example
 

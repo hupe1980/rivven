@@ -26,6 +26,9 @@ postgres-tls = ["postgres", "dep:tokio-postgres-rustls", "dep:rustls", "dep:rust
 mysql-tls = ["mysql", "mysql_async?/rustls-tls"]
 sqlserver-tls = ["sqlserver", "tiberius?/rustls"]
 
+# Diagnostics and tracing
+pool-trace = ["dep:tracing"]
+
 # Full feature set
 full = ["postgres", "mysql", "sqlserver", "tls"]
 
@@ -57,7 +60,7 @@ bigdecimal = { version = "0.4", features = ["serde"] }
 uuid = { workspace = true }
 
 # Logging
-tracing = { workspace = true }
+tracing = { workspace = true, optional = true }
 
 # Metrics
 metrics = { workspace = true }
