@@ -911,8 +911,16 @@ pub struct KafkaSourceConfig {
     #[serde(default = "default_empty_poll_delay_ms")]
     #[validate(range(min = 1, max = 10000))]
     pub empty_poll_delay_ms: u64,
+
+    /// Connection timeout in milliseconds (default: 30000 = 30 seconds)
+    #[serde(default = "default_connect_timeout")]
+    #[validate(range(min = 1000, max = 300000))]
+    pub connect_timeout_ms: u64,
 }
 
+fn default_connect_timeout() -> u64 {
+    30000
+}
 fn default_max_poll_interval() -> u32 {
     300000
 }
@@ -1026,10 +1034,19 @@ impl KafkaSource {
             _ => {}
         }
 
-        // Build the client
-        let client = builder.build().await.map_err(|e| {
-            ConnectorError::Connection(format!("Failed to connect to Kafka: {}", e))
-        })?;
+        // Build the client with connection timeout
+        let timeout_duration = Duration::from_millis(config.connect_timeout_ms);
+        let client = tokio::time::timeout(timeout_duration, builder.build())
+            .await
+            .map_err(|_| {
+                ConnectorError::Connection(format!(
+                    "Connection timeout after {}ms to brokers: {:?}",
+                    config.connect_timeout_ms, config.brokers
+                ))
+            })?
+            .map_err(|e| {
+                ConnectorError::Connection(format!("Failed to connect to Kafka: {}", e))
+            })?;
 
         Ok(client)
     }
@@ -2240,6 +2257,7 @@ mod tests {
             retry_max_ms: 10000,
             retry_multiplier: 2.0,
             empty_poll_delay_ms: 50,
+            connect_timeout_ms: 5000, // Short timeout for test
         };
 
         let result = source.check(&config).await.unwrap();
@@ -2299,6 +2317,7 @@ mod tests {
             retry_max_ms: 10000,
             retry_multiplier: 2.0,
             empty_poll_delay_ms: 50,
+            connect_timeout_ms: 30000,
         };
 
         let client_config = KafkaSource::build_client_config(&config);

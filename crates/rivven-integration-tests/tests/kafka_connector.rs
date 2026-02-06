@@ -130,6 +130,7 @@ async fn test_kafka_source_check() -> Result<()> {
         retry_max_ms: 10000,
         retry_multiplier: 2.0,
         empty_poll_delay_ms: 50,
+        connect_timeout_ms: 30000,
     };
 
     let result = source.check(&config).await?;
@@ -165,6 +166,7 @@ async fn test_kafka_source_discover() -> Result<()> {
         retry_max_ms: 10000,
         retry_multiplier: 2.0,
         empty_poll_delay_ms: 50,
+        connect_timeout_ms: 30000,
     };
 
     let catalog = source.discover(&config).await?;
@@ -219,6 +221,7 @@ async fn test_kafka_source_read() -> Result<()> {
         retry_max_ms: 10000,
         retry_multiplier: 2.0,
         empty_poll_delay_ms: 50,
+        connect_timeout_ms: 30000,
     };
 
     let configured_catalog = ConfiguredCatalog {
@@ -328,6 +331,7 @@ async fn test_kafka_source_metrics() -> Result<()> {
         retry_max_ms: 10000,
         retry_multiplier: 2.0,
         empty_poll_delay_ms: 50,
+        connect_timeout_ms: 30000,
     };
 
     let configured_catalog = ConfiguredCatalog {
@@ -415,6 +419,7 @@ async fn test_kafka_source_shutdown() -> Result<()> {
         retry_max_ms: 10000,
         retry_multiplier: 2.0,
         empty_poll_delay_ms: 50,
+        connect_timeout_ms: 30000,
     };
 
     let configured_catalog = ConfiguredCatalog {
@@ -511,6 +516,7 @@ async fn test_kafka_source_high_throughput() -> Result<()> {
         retry_max_ms: 10000,
         retry_multiplier: 2.0,
         empty_poll_delay_ms: 10,
+        connect_timeout_ms: 30000,
     };
 
     let configured_catalog = ConfiguredCatalog {
@@ -584,6 +590,7 @@ async fn test_kafka_source_nonexistent_topic() -> Result<()> {
         retry_max_ms: 10000,
         retry_multiplier: 2.0,
         empty_poll_delay_ms: 50,
+        connect_timeout_ms: 30000,
     };
 
     // Check should still succeed (topic may be auto-created or check is permissive)
@@ -638,6 +645,7 @@ async fn test_kafka_source_multiple_partitions() -> Result<()> {
         retry_max_ms: 10000,
         retry_multiplier: 2.0,
         empty_poll_delay_ms: 50,
+        connect_timeout_ms: 30000,
     };
 
     let configured_catalog = ConfiguredCatalog {
@@ -914,6 +922,7 @@ async fn test_kafka_source_offset_modes() -> Result<()> {
         retry_max_ms: 10000,
         retry_multiplier: 2.0,
         empty_poll_delay_ms: 50,
+        connect_timeout_ms: 30000,
     };
 
     let result = source_earliest.check(&config_earliest).await?;
@@ -984,6 +993,7 @@ async fn test_kafka_batch_metrics() -> Result<()> {
         retry_max_ms: 10000,
         retry_multiplier: 2.0,
         empty_poll_delay_ms: 50,
+        connect_timeout_ms: 30000,
     };
 
     let configured_catalog = ConfiguredCatalog {
@@ -1058,13 +1068,20 @@ async fn test_kafka_source_invalid_broker() -> Result<()> {
         retry_max_ms: 1000,
         retry_multiplier: 2.0,
         empty_poll_delay_ms: 50,
+        connect_timeout_ms: 5000, // Short timeout for invalid broker test
     };
 
-    // Check should fail with invalid broker
+    // Check should fail with invalid broker - connection timeout will trigger
     let result = source.check(&config).await;
-    // The check may succeed (optimistic) or fail depending on implementation
-    // Just verify it doesn't panic
+
+    // The check should complete (with failure) due to connection timeout
     info!("Invalid broker test result: {:?}", result);
+
+    // Verify we get a failure result
+    assert!(
+        result.is_ok(),
+        "check() should return Ok with failure status, not Err"
+    );
 
     Ok(())
 }
@@ -1096,6 +1113,7 @@ async fn test_kafka_source_empty_topic() -> Result<()> {
         retry_max_ms: 10000,
         retry_multiplier: 2.0,
         empty_poll_delay_ms: 50,
+        connect_timeout_ms: 30000,
     };
 
     let configured_catalog = ConfiguredCatalog {
@@ -1172,6 +1190,7 @@ async fn test_kafka_multiple_consumer_groups() -> Result<()> {
             retry_max_ms: 10000,
             retry_multiplier: 2.0,
             empty_poll_delay_ms: 50,
+            connect_timeout_ms: 30000,
         };
 
         let result = source.check(&config).await?;
