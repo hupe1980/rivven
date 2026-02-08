@@ -12,7 +12,6 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
 use tracing::debug;
 
 /// Configuration for sink rate limiting
@@ -72,6 +71,9 @@ impl Default for RateLimitConfig {
 /// The token bucket algorithm allows for burst traffic while maintaining
 /// a long-term average rate. Tokens are added at a constant rate and
 /// consumed when events are processed.
+///
+/// Fully lock-free implementation: no RwLock or Mutex on the hot path.
+/// Uses AtomicU64 CAS for both token acquisition and time-based refill.
 pub struct TokenBucketRateLimiter {
     /// Current number of available tokens
     tokens: AtomicU64,
@@ -79,8 +81,10 @@ pub struct TokenBucketRateLimiter {
     capacity: u64,
     /// Token refill rate (tokens per second)
     refill_rate: u64,
-    /// Last time tokens were refilled
-    last_refill: RwLock<Instant>,
+    /// Epoch instant (created once at construction time)
+    epoch: Instant,
+    /// Last refill time as nanos since epoch (lock-free CAS)
+    last_refill_nanos: AtomicU64,
     /// Configuration
     config: RateLimitConfig,
     /// Total events rate limited
@@ -98,11 +102,14 @@ impl TokenBucketRateLimiter {
             u64::MAX // Effectively unlimited
         };
 
+        let epoch = Instant::now();
+
         Self {
             tokens: AtomicU64::new(capacity),
             capacity,
             refill_rate: config.events_per_second,
-            last_refill: RwLock::new(Instant::now()),
+            epoch,
+            last_refill_nanos: AtomicU64::new(0),
             config,
             events_throttled: AtomicU64::new(0),
             total_wait_ns: AtomicU64::new(0),
@@ -129,8 +136,8 @@ impl TokenBucketRateLimiter {
         let mut total_wait = Duration::ZERO;
 
         loop {
-            // Refill tokens based on elapsed time
-            self.refill().await;
+            // Refill tokens based on elapsed time (lock-free)
+            self.refill();
 
             // Try to acquire tokens
             let current = self.tokens.load(Ordering::Acquire);
@@ -188,8 +195,8 @@ impl TokenBucketRateLimiter {
             return true;
         }
 
-        // Refill tokens based on elapsed time
-        self.refill().await;
+        // Refill tokens based on elapsed time (lock-free)
+        self.refill();
 
         // Try to acquire tokens
         loop {
@@ -214,28 +221,51 @@ impl TokenBucketRateLimiter {
         }
     }
 
-    /// Refill tokens based on elapsed time
-    async fn refill(&self) {
+    /// Refill tokens based on elapsed time (fully lock-free)
+    ///
+    /// Uses atomic CAS on the last-refill timestamp to ensure exactly one
+    /// thread performs the refill when multiple contend.
+    fn refill(&self) {
         if self.refill_rate == 0 {
             return;
         }
 
-        let mut last = self.last_refill.write().await;
-        let elapsed = last.elapsed();
+        let now_nanos = self.epoch.elapsed().as_nanos() as u64;
+        let last_nanos = self.last_refill_nanos.load(Ordering::Acquire);
+        let elapsed_nanos = now_nanos.saturating_sub(last_nanos);
 
         // Only refill if at least 1ms has passed
-        if elapsed.as_millis() < 1 {
+        if elapsed_nanos < 1_000_000 {
+            return;
+        }
+
+        // Try to claim the refill via CAS — only one thread wins
+        if self
+            .last_refill_nanos
+            .compare_exchange(last_nanos, now_nanos, Ordering::AcqRel, Ordering::Relaxed)
+            .is_err()
+        {
+            // Another thread already refilled
             return;
         }
 
         // Calculate tokens to add
-        let tokens_to_add = (elapsed.as_secs_f64() * self.refill_rate as f64) as u64;
+        let elapsed_secs = elapsed_nanos as f64 / 1_000_000_000.0;
+        let tokens_to_add = (elapsed_secs * self.refill_rate as f64) as u64;
 
         if tokens_to_add > 0 {
-            let current = self.tokens.load(Ordering::Relaxed);
-            let new_tokens = current.saturating_add(tokens_to_add).min(self.capacity);
-            self.tokens.store(new_tokens, Ordering::Release);
-            *last = Instant::now();
+            // Atomic add with capacity cap
+            loop {
+                let current = self.tokens.load(Ordering::Relaxed);
+                let new_tokens = current.saturating_add(tokens_to_add).min(self.capacity);
+                if self
+                    .tokens
+                    .compare_exchange(current, new_tokens, Ordering::Release, Ordering::Relaxed)
+                    .is_ok()
+                {
+                    break;
+                }
+            }
         }
     }
 
@@ -261,7 +291,8 @@ impl TokenBucketRateLimiter {
     #[allow(dead_code)]
     pub async fn reset(&self) {
         self.tokens.store(self.capacity, Ordering::Release);
-        *self.last_refill.write().await = Instant::now();
+        let now_nanos = self.epoch.elapsed().as_nanos() as u64;
+        self.last_refill_nanos.store(now_nanos, Ordering::Release);
         self.events_throttled.store(0, Ordering::Relaxed);
         self.total_wait_ns.store(0, Ordering::Relaxed);
     }

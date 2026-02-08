@@ -218,7 +218,7 @@ use std::sync::Arc;
 
 // Create auth manager with users
 let auth_manager = Arc::new(AuthManager::new());
-auth_manager.create_principal("admin", "secret123", PrincipalType::User, ["admin"])?;
+auth_manager.create_principal("admin", "Secret@123", PrincipalType::User, ["admin"])?;
 
 // Configure server with authentication
 let config = ServerConfig::default()

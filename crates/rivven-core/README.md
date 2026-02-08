@@ -4,7 +4,7 @@
 
 ## Overview
 
-`rivven-core` is the foundational storage engine that powers Rivven's ultra-low-latency message persistence. It implements **hot path optimizations** including zero-copy I/O, io_uring support, lock-free data structures, and cache-aligned memory layouts.
+`rivven-core` is the foundational storage engine that powers Rivven's ultra-low-latency message persistence. It implements **hot path optimizations** including zero-copy I/O, portable async I/O (io_uring-style API), lock-free data structures, and cache-aligned memory layouts.
 
 ## Features
 
@@ -12,11 +12,11 @@
 |:---------|:---------|
 | **Hot Path** | Zero-copy buffers, cache-line alignment, lock-free queues |
 | **Storage** | Log segments, tiered storage (hot/warm/cold), compaction |
-| **I/O** | io_uring (Linux), kqueue (macOS), memory-mapped files |
+| **I/O** | Portable async I/O (io_uring-style API, std::fs fallback), memory-mapped files |
 | **Compression** | LZ4, Zstd, Snappy (streaming-optimized) |
 | **Transactions** | Exactly-once semantics, 2PC protocol |
-| **Batching** | Group commit WAL, vectorized encoding, SIMD checksums |
-| **Security** | TLS 1.3, Cedar authorization, AES-256-GCM encryption |
+| **Batching** | Group commit WAL, vectorized encoding, fast checksums (delegates to crc32fast/memchr) |
+| **Security** | TLS 1.3, Cedar authorization, indexed ACL lookups, AES-256-GCM / ChaCha20-Poly1305 encryption with key rotation, SCRAM-SHA-256 (600K PBKDF2) |
 
 ## Installation
 
@@ -33,7 +33,7 @@ rivven-core = { version = "0.2", features = ["compression", "tls", "metrics"] }
 | Feature | Description | Dependencies |
 |:--------|:------------|:-------------|
 | `compression` | LZ4, Zstd, Snappy codecs | lz4_flex, zstd, snap |
-| `encryption` | AES-256-GCM at-rest encryption | aes-gcm, rand |
+| `encryption` | AES-256-GCM / ChaCha20-Poly1305 at-rest encryption with key rotation | ring, rand |
 | `tls` | TLS 1.3 transport security | rustls, webpki |
 | `metrics` | Prometheus-compatible metrics | metrics, metrics-exporter-prometheus |
 | `cedar` | Cedar policy-based authorization | cedar-policy |
@@ -46,10 +46,10 @@ rivven-core = { version = "0.2", features = ["compression", "tls", "metrics"] }
 rivven-core/
 ├── Hot Path (Ultra-Fast)
 │   ├── zero_copy.rs      # Cache-aligned zero-copy buffers
-│   ├── io_uring.rs       # Linux 5.6+ kernel I/O bypass
+│   ├── io_uring.rs       # Portable async I/O (io_uring-style API, std::fs fallback)
 │   ├── concurrent.rs     # Lock-free MPMC queues, hashmaps
 │   ├── buffer_pool.rs    # Slab-allocated buffer pooling
-│   └── vectorized.rs     # SIMD-accelerated batch processing
+│   └── vectorized.rs     # Batch processing (delegates to crc32fast/memchr for SIMD)
 │
 ├── Storage Engine
 │   ├── storage/
@@ -199,9 +199,9 @@ println!("Hit rate: {:.1}%", stats.hit_rate() * 100.0);
 | Large | 4KB-64KB | Batched records |
 | Huge | 64KB-1MB | Large payloads |
 
-## io_uring Async I/O
+## Async I/O (io_uring-style API)
 
-For Linux 5.6+, rivven-core provides an io_uring backend that eliminates syscall overhead:
+rivven-core provides a portable async I/O layer with an io_uring-style API. The current implementation uses `std::fs::File` behind `parking_lot::Mutex` as a portable fallback. The API is designed so a true io_uring backend can be swapped in on Linux 5.6+ without changing callers:
 
 ```rust
 use rivven_core::io_uring::{IoUringConfig, WalWriter, SegmentReader, IoBatch, BatchExecutor};
@@ -302,7 +302,7 @@ coordinator.commit(&txn).await?;
 
 ## Vectorized Batch Processing
 
-SIMD-accelerated operations for high-throughput workloads:
+Batch processing operations for high-throughput workloads. CRC32 and memory search delegate to `crc32fast` and `memchr` crates respectively, which use SIMD internally when available:
 
 ```rust
 use rivven_core::vectorized::{BatchEncoder, BatchDecoder, crc32_fast, RecordBatch};
@@ -318,7 +318,7 @@ let encoded = encoder.finish();
 let decoder = BatchDecoder::new();
 let messages = decoder.decode_all(&encoded);
 
-// SIMD-accelerated CRC32 (4-8x faster with SSE4.2/AVX2)
+// Fast CRC32 (delegates to crc32fast, which uses SSE4.2/AVX2 when available)
 let checksum = crc32_fast(&data);
 
 // Columnar record batch for analytics
@@ -329,11 +329,11 @@ let filtered = batch.filter(|ts, _, _| ts > cutoff);
 
 **Vectorization Benefits:**
 
-| Operation | Speedup | SIMD Instruction Set |
-|:----------|:--------|:---------------------|
-| CRC32 | 4-8x | SSE4.2, ARM CRC32 |
-| Batch encode | 2-4x | Cache-optimized |
-| Memory search | 3-5x | AVX2 (memchr) |
+| Operation | Speedup | Acceleration |
+|:----------|:--------|:-------------|
+| CRC32 | 4-8x | crc32fast (SSE4.2/AVX2/ARM CRC32 when available) |
+| Batch encode | 2-4x | Cache-optimized sequential processing |
+| Memory search | 3-5x | memchr crate (AVX2/SSE2/NEON when available) |
 
 ## Group Commit WAL
 
@@ -383,6 +383,14 @@ let record = Record::builder()
     .build();
 ```
 
+### Partition Append Optimization
+
+When tiered storage is enabled, the partition pre-serializes the message **once** before consuming it into the segment log. This eliminates both the `message.clone()` and double-serialization that would otherwise occur:
+
+1. Single `message.to_bytes()` for the tiered-storage copy
+2. Owned `message` moved into `log.append()` (zero-copy handoff)
+3. `LogManager::truncate_before()` physically deletes segments below the low-watermark (used by `DeleteRecords`)
+
 ## Storage Engine
 
 The storage engine uses a log-structured design:
@@ -408,7 +416,7 @@ cargo test -p rivven-core --lib
 cargo test -p rivven-core --lib --features "compression,tls,metrics"
 ```
 
-**Current Coverage:** 274 tests (100% passing)
+**Current Coverage:** 282 tests (100% passing)
 
 | Category | Tests | Description |
 |:---------|:------|:------------|
@@ -419,7 +427,7 @@ cargo test -p rivven-core --lib --features "compression,tls,metrics"
 | Transactions | 28 | 2PC, abort, idempotence |
 | Vectorized | 15 | Batch encoding, CRC32, SIMD |
 | TLS | 34 | Certificate validation, handshake |
-| Auth | 25 | RBAC, Cedar policies |
+| Auth | 25 | RBAC, Cedar policies, indexed ACL lookups |
 | Compression | 18 | LZ4, Zstd, Snappy codecs |
 
 ## Documentation

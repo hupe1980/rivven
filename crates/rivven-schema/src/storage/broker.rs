@@ -141,10 +141,14 @@ struct SubjectVersionRecord {
     /// Associated schema ID
     schema_id: u32,
     /// Schema type
+    #[serde(alias = "schemaType")]
     schema_type: SchemaType,
     /// Whether this version is deleted
     #[serde(default)]
     deleted: bool,
+    /// Version state (enabled, deprecated, disabled)
+    #[serde(default)]
+    state: VersionState,
 }
 
 /// ID counter record stored in broker topic
@@ -458,7 +462,7 @@ impl BrokerStorage {
                 schema_id: record.schema_id,
                 schema_type: record.schema_type,
                 deleted: record.deleted,
-                state: VersionState::Enabled, // Default state when loading
+                state: record.state,
             };
 
             let mut versions = self.subjects.entry(record.subject.clone()).or_default();
@@ -887,6 +891,7 @@ impl StorageBackend for BrokerStorage {
             schema_id: schema_id.0,
             schema_type: schema.schema_type,
             deleted: false,
+            state: VersionState::Enabled,
         };
         self.write_subject_version_record(&record).await?;
 
@@ -1016,6 +1021,7 @@ impl StorageBackend for BrokerStorage {
                         schema_id: v.schema_id,
                         schema_type: v.schema_type,
                         deleted: true,
+                        state: v.state,
                     };
                     self.write_subject_version_record(&record).await?;
                 }
@@ -1048,6 +1054,7 @@ impl StorageBackend for BrokerStorage {
                             schema_id: v.schema_id,
                             schema_type: v.schema_type,
                             deleted: true,
+                            state: v.state,
                         };
                         self.write_subject_version_record(&record).await?;
                     }
@@ -1087,6 +1094,7 @@ impl StorageBackend for BrokerStorage {
                         schema_id: v.schema_id,
                         schema_type: v.schema_type,
                         deleted: true,
+                        state: v.state,
                     };
                     self.write_subject_version_record(&record).await?;
 
@@ -1108,6 +1116,7 @@ impl StorageBackend for BrokerStorage {
                         schema_id: v.schema_id,
                         schema_type: v.schema_type,
                         deleted: true,
+                        state: v.state,
                     };
                     self.write_subject_version_record(&record).await?;
 
@@ -1161,12 +1170,23 @@ impl StorageBackend for BrokerStorage {
                 .find(|v| v.version == version.0 && !v.deleted)
             {
                 v.state = state;
-                // TODO: Persist state change to broker topic
+
+                // Persist state change to broker topic
+                let record = SubjectVersionRecord {
+                    subject: subject.0.clone(),
+                    version: version.0,
+                    schema_id: v.schema_id,
+                    schema_type: v.schema_type,
+                    deleted: v.deleted,
+                    state,
+                };
+                self.write_subject_version_record(&record).await?;
+
                 debug!(
                     subject = %subject,
                     version = version.0,
                     state = ?state,
-                    "Updated version state"
+                    "Persisted version state change to broker topic"
                 );
                 return Ok(());
             }
@@ -1226,6 +1246,7 @@ impl StorageBackend for BrokerStorage {
                         schema_id: v.schema_id,
                         schema_type: v.schema_type,
                         deleted: false,
+                        state: v.state,
                     };
                     self.write_subject_version_record(&record).await?;
                 }
@@ -1295,6 +1316,7 @@ mod tests {
             schema_id: 100,
             schema_type: SchemaType::Avro,
             deleted: false,
+            state: VersionState::Enabled,
         };
 
         let json = serde_json::to_string(&record).unwrap();
@@ -1304,6 +1326,16 @@ mod tests {
         assert_eq!(parsed.version, record.version);
         assert_eq!(parsed.schema_id, record.schema_id);
         assert!(!parsed.deleted);
+        assert_eq!(parsed.state, VersionState::Enabled);
+    }
+
+    #[test]
+    fn test_subject_version_record_backward_compat() {
+        // Old records without state field should default to Enabled
+        let json =
+            r#"{"subject":"test","version":1,"schema_id":100,"schemaType":"AVRO","deleted":false}"#;
+        let parsed: SubjectVersionRecord = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.state, VersionState::Enabled);
     }
 
     #[test]

@@ -126,10 +126,175 @@ impl Request {
                 }))
             }
 
-            // For other request types, return an error for now
+            Request::GetClusterMetadata { topics } => Some(RequestType::GetClusterMetadata(
+                proto::GetClusterMetadataRequest {
+                    topics: topics.clone(),
+                },
+            )),
+
+            Request::GetOffsetBounds { topic, partition } => Some(RequestType::GetOffsetBounds(
+                proto::GetOffsetBoundsRequest {
+                    topic: topic.clone(),
+                    partition: *partition,
+                },
+            )),
+
+            Request::ListGroups => Some(RequestType::ListGroups(proto::ListGroupsRequest {})),
+
+            Request::DescribeGroup { consumer_group } => {
+                Some(RequestType::DescribeGroup(proto::DescribeGroupRequest {
+                    consumer_group: consumer_group.clone(),
+                }))
+            }
+
+            Request::DeleteGroup { consumer_group } => {
+                Some(RequestType::DeleteGroup(proto::DeleteGroupRequest {
+                    consumer_group: consumer_group.clone(),
+                }))
+            }
+
+            Request::GetOffsetForTimestamp {
+                topic,
+                partition,
+                timestamp_ms,
+            } => Some(RequestType::GetOffsetForTimestamp(
+                proto::GetOffsetForTimestampRequest {
+                    topic: topic.clone(),
+                    partition: *partition,
+                    timestamp_ms: *timestamp_ms,
+                },
+            )),
+
+            Request::InitProducerId { producer_id } => {
+                Some(RequestType::InitProducerId(proto::InitProducerIdRequest {
+                    producer_id: *producer_id,
+                }))
+            }
+
+            Request::IdempotentPublish {
+                topic,
+                partition,
+                key,
+                value,
+                producer_id,
+                producer_epoch,
+                sequence,
+            } => Some(RequestType::IdempotentPublish(
+                proto::IdempotentPublishRequest {
+                    topic: topic.clone(),
+                    partition: *partition,
+                    record: Some(proto::Record {
+                        key: key.clone().map(|b| b.to_vec()).unwrap_or_default(),
+                        value: value.to_vec(),
+                        headers: vec![],
+                        timestamp: 0,
+                    }),
+                    producer_id: *producer_id,
+                    producer_epoch: *producer_epoch as u32,
+                    sequence: *sequence,
+                },
+            )),
+
+            Request::BeginTransaction {
+                txn_id,
+                producer_id,
+                producer_epoch,
+                timeout_ms,
+            } => Some(RequestType::BeginTransaction(
+                proto::BeginTransactionRequest {
+                    txn_id: txn_id.clone(),
+                    producer_id: *producer_id,
+                    producer_epoch: *producer_epoch as u32,
+                    timeout_ms: *timeout_ms,
+                },
+            )),
+
+            Request::CommitTransaction {
+                txn_id,
+                producer_id,
+                producer_epoch,
+            } => Some(RequestType::CommitTransaction(
+                proto::CommitTransactionRequest {
+                    txn_id: txn_id.clone(),
+                    producer_id: *producer_id,
+                    producer_epoch: *producer_epoch as u32,
+                },
+            )),
+
+            Request::AbortTransaction {
+                txn_id,
+                producer_id,
+                producer_epoch,
+            } => Some(RequestType::AbortTransaction(
+                proto::AbortTransactionRequest {
+                    txn_id: txn_id.clone(),
+                    producer_id: *producer_id,
+                    producer_epoch: *producer_epoch as u32,
+                },
+            )),
+
+            Request::AlterTopicConfig { topic, configs } => Some(RequestType::AlterTopicConfig(
+                proto::AlterTopicConfigRequest {
+                    topic: topic.clone(),
+                    configs: configs
+                        .iter()
+                        .map(|c| proto::TopicConfigEntryProto {
+                            key: c.key.clone(),
+                            value: c.value.clone(),
+                        })
+                        .collect(),
+                },
+            )),
+
+            Request::DescribeTopicConfigs { topics } => Some(RequestType::DescribeTopicConfigs(
+                proto::DescribeTopicConfigsRequest {
+                    topics: topics.clone(),
+                },
+            )),
+
+            Request::CreatePartitions {
+                topic,
+                new_partition_count,
+                ..
+            } => Some(RequestType::CreatePartitions(
+                proto::CreatePartitionsRequest {
+                    topic: topic.clone(),
+                    new_partition_count: *new_partition_count,
+                },
+            )),
+
+            Request::DeleteRecords {
+                topic,
+                partition_offsets,
+            } => Some(RequestType::DeleteRecords(proto::DeleteRecordsRequest {
+                topic: topic.clone(),
+                partition_offsets: partition_offsets
+                    .iter()
+                    .map(|(p, o)| proto::PartitionOffset {
+                        partition: *p,
+                        offset: *o,
+                    })
+                    .collect(),
+            })),
+
+            // SASL/SCRAM variants use the Authenticate proto with mechanism field
+            Request::SaslAuthenticate {
+                mechanism,
+                auth_bytes,
+            } => Some(RequestType::Authenticate(proto::AuthenticateRequest {
+                mechanism: Some(proto::authenticate_request::Mechanism::Scram(
+                    proto::ScramAuth {
+                        mechanism: String::from_utf8_lossy(mechanism).to_string(),
+                        client_first: auth_bytes.to_vec(),
+                    },
+                )),
+            })),
+
+            // SCRAM and transaction variants that don't have dedicated proto types
+            // map to error — these use the native postcard wire format
             _ => {
                 return Err(crate::ProtocolError::Serialization(format!(
-                    "Request type {:?} not yet supported for protobuf",
+                    "Request type {:?} not supported in protobuf wire format (use postcard)",
                     std::mem::discriminant(self)
                 )));
             }
@@ -225,10 +390,115 @@ impl Request {
                         password: auth.password.clone(),
                     })
                 }
+                Some(proto::authenticate_request::Mechanism::Scram(scram)) => {
+                    Ok(Request::SaslAuthenticate {
+                        mechanism: Bytes::from(scram.mechanism.clone()),
+                        auth_bytes: Bytes::from(scram.client_first.clone()),
+                    })
+                }
                 _ => Err(crate::ProtocolError::Serialization(
                     "Unsupported authentication mechanism".into(),
                 )),
             },
+
+            RequestType::GetClusterMetadata(req) => Ok(Request::GetClusterMetadata {
+                topics: req.topics.clone(),
+            }),
+
+            RequestType::GetOffsetBounds(req) => Ok(Request::GetOffsetBounds {
+                topic: req.topic.clone(),
+                partition: req.partition,
+            }),
+
+            RequestType::ListGroups(_) => Ok(Request::ListGroups),
+
+            RequestType::DescribeGroup(req) => Ok(Request::DescribeGroup {
+                consumer_group: req.consumer_group.clone(),
+            }),
+
+            RequestType::DeleteGroup(req) => Ok(Request::DeleteGroup {
+                consumer_group: req.consumer_group.clone(),
+            }),
+
+            RequestType::GetOffsetForTimestamp(req) => Ok(Request::GetOffsetForTimestamp {
+                topic: req.topic.clone(),
+                partition: req.partition,
+                timestamp_ms: req.timestamp_ms,
+            }),
+
+            RequestType::InitProducerId(req) => Ok(Request::InitProducerId {
+                producer_id: req.producer_id,
+            }),
+
+            RequestType::IdempotentPublish(req) => {
+                let record = req
+                    .record
+                    .as_ref()
+                    .ok_or_else(|| crate::ProtocolError::Serialization("Missing record".into()))?;
+                Ok(Request::IdempotentPublish {
+                    topic: req.topic.clone(),
+                    partition: req.partition,
+                    key: if record.key.is_empty() {
+                        None
+                    } else {
+                        Some(Bytes::from(record.key.clone()))
+                    },
+                    value: Bytes::from(record.value.clone()),
+                    producer_id: req.producer_id,
+                    producer_epoch: req.producer_epoch as u16,
+                    sequence: req.sequence,
+                })
+            }
+
+            RequestType::BeginTransaction(req) => Ok(Request::BeginTransaction {
+                txn_id: req.txn_id.clone(),
+                producer_id: req.producer_id,
+                producer_epoch: req.producer_epoch as u16,
+                timeout_ms: req.timeout_ms,
+            }),
+
+            RequestType::CommitTransaction(req) => Ok(Request::CommitTransaction {
+                txn_id: req.txn_id.clone(),
+                producer_id: req.producer_id,
+                producer_epoch: req.producer_epoch as u16,
+            }),
+
+            RequestType::AbortTransaction(req) => Ok(Request::AbortTransaction {
+                txn_id: req.txn_id.clone(),
+                producer_id: req.producer_id,
+                producer_epoch: req.producer_epoch as u16,
+            }),
+
+            RequestType::AlterTopicConfig(req) => Ok(Request::AlterTopicConfig {
+                topic: req.topic.clone(),
+                configs: req
+                    .configs
+                    .iter()
+                    .map(|c| crate::TopicConfigEntry {
+                        key: c.key.clone(),
+                        value: c.value.clone(),
+                    })
+                    .collect(),
+            }),
+
+            RequestType::DescribeTopicConfigs(req) => Ok(Request::DescribeTopicConfigs {
+                topics: req.topics.clone(),
+            }),
+
+            RequestType::CreatePartitions(req) => Ok(Request::CreatePartitions {
+                topic: req.topic.clone(),
+                new_partition_count: req.new_partition_count,
+                assignments: vec![],
+            }),
+
+            RequestType::DeleteRecords(req) => Ok(Request::DeleteRecords {
+                topic: req.topic.clone(),
+                partition_offsets: req
+                    .partition_offsets
+                    .iter()
+                    .map(|po| (po.partition, po.offset))
+                    .collect(),
+            }),
         }
     }
 }
@@ -258,7 +528,7 @@ impl Response {
 
         let response_type = match self {
             Response::Pong => Some(ResponseType::Ping(proto::PingResponse {})),
-            Response::Ok => Some(ResponseType::Ping(proto::PingResponse {})),
+            Response::Ok => Some(ResponseType::Ok(proto::OkResponse {})),
 
             Response::Topics { topics } => {
                 Some(ResponseType::ListTopics(proto::ListTopicsResponse {
@@ -291,11 +561,18 @@ impl Response {
                         .iter()
                         .map(|m| proto::ConsumedRecord {
                             offset: m.offset,
-                            partition: 0,
+                            partition: m.partition,
                             timestamp: m.timestamp,
                             key: m.key.clone().map(|b| b.to_vec()).unwrap_or_default(),
                             value: m.value.to_vec(),
-                            headers: vec![],
+                            headers: m
+                                .headers
+                                .iter()
+                                .map(|(k, v)| proto::RecordHeader {
+                                    key: k.clone(),
+                                    value: v.clone(),
+                                })
+                                .collect(),
                         })
                         .collect(),
                     high_watermark: 0,
@@ -348,9 +625,191 @@ impl Response {
                 }))
             }
 
+            Response::ClusterMetadata {
+                controller_id,
+                brokers,
+                topics,
+            } => Some(ResponseType::GetClusterMetadata(
+                proto::GetClusterMetadataResponse {
+                    controller_id: controller_id.clone(),
+                    brokers: brokers
+                        .iter()
+                        .map(|b| proto::BrokerInfo {
+                            id: b.node_id.parse().unwrap_or(0),
+                            host: b.host.clone(),
+                            port: b.port as u32,
+                            rack: b.rack.clone().unwrap_or_default(),
+                        })
+                        .collect(),
+                    topics: topics
+                        .iter()
+                        .map(|t| proto::TopicMetadata {
+                            name: t.name.clone(),
+                            partitions: t
+                                .partitions
+                                .iter()
+                                .map(|p| proto::PartitionMetadata {
+                                    id: p.partition,
+                                    leader: p
+                                        .leader
+                                        .as_ref()
+                                        .and_then(|l| l.parse().ok())
+                                        .unwrap_or(0),
+                                    replicas: p
+                                        .replicas
+                                        .iter()
+                                        .filter_map(|r| r.parse().ok())
+                                        .collect(),
+                                    isr: p.isr.iter().filter_map(|i| i.parse().ok()).collect(),
+                                })
+                                .collect(),
+                            internal: t.is_internal,
+                        })
+                        .collect(),
+                },
+            )),
+
+            Response::OffsetBounds { earliest, latest } => Some(ResponseType::GetOffsetBounds(
+                proto::GetOffsetBoundsResponse {
+                    earliest: *earliest,
+                    latest: *latest,
+                },
+            )),
+
+            Response::Groups { groups } => {
+                Some(ResponseType::ListGroups(proto::ListGroupsResponse {
+                    groups: groups.clone(),
+                }))
+            }
+
+            Response::GroupDescription {
+                consumer_group,
+                offsets,
+            } => Some(ResponseType::DescribeGroup(proto::DescribeGroupResponse {
+                consumer_group: consumer_group.clone(),
+                topic_offsets: offsets
+                    .iter()
+                    .map(|(topic, partitions)| proto::GroupTopicOffsets {
+                        topic: topic.clone(),
+                        partition_offsets: partitions
+                            .iter()
+                            .map(|(p, o)| proto::GroupPartitionOffset {
+                                partition: *p,
+                                offset: *o,
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            })),
+
+            Response::GroupDeleted => {
+                Some(ResponseType::DeleteGroup(proto::DeleteGroupResponse {}))
+            }
+
+            Response::OffsetForTimestamp { offset } => Some(ResponseType::GetOffsetForTimestamp(
+                proto::GetOffsetForTimestampResponse { offset: *offset },
+            )),
+
+            Response::ProducerIdInitialized {
+                producer_id,
+                producer_epoch,
+            } => Some(ResponseType::InitProducerId(
+                proto::InitProducerIdResponse {
+                    producer_id: *producer_id,
+                    producer_epoch: *producer_epoch as u32,
+                },
+            )),
+
+            Response::IdempotentPublished {
+                offset,
+                partition,
+                duplicate,
+            } => Some(ResponseType::IdempotentPublish(
+                proto::IdempotentPublishResponse {
+                    offset: *offset,
+                    partition: *partition,
+                    duplicate: *duplicate,
+                },
+            )),
+
+            Response::TransactionStarted { txn_id } => Some(ResponseType::BeginTransaction(
+                proto::BeginTransactionResponse {
+                    txn_id: txn_id.clone(),
+                },
+            )),
+
+            Response::TransactionCommitted { txn_id } => Some(ResponseType::CommitTransaction(
+                proto::CommitTransactionResponse {
+                    txn_id: txn_id.clone(),
+                },
+            )),
+
+            Response::TransactionAborted { txn_id } => Some(ResponseType::AbortTransaction(
+                proto::AbortTransactionResponse {
+                    txn_id: txn_id.clone(),
+                },
+            )),
+
+            Response::TopicConfigAltered {
+                topic,
+                changed_count,
+            } => Some(ResponseType::AlterTopicConfig(
+                proto::AlterTopicConfigResponse {
+                    topic: topic.clone(),
+                    changed_count: *changed_count as u32,
+                },
+            )),
+
+            Response::TopicConfigsDescribed { configs } => Some(
+                ResponseType::DescribeTopicConfigs(proto::DescribeTopicConfigsResponse {
+                    configs: configs
+                        .iter()
+                        .map(|c| proto::TopicConfigDescriptionProto {
+                            topic: c.topic.clone(),
+                            entries: c
+                                .configs
+                                .iter()
+                                .map(|(key, cv)| proto::TopicConfigValueProto {
+                                    key: key.clone(),
+                                    value: cv.value.clone(),
+                                    is_default: cv.is_default,
+                                    is_read_only: cv.is_read_only,
+                                    is_sensitive: cv.is_sensitive,
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                }),
+            ),
+
+            Response::PartitionsCreated {
+                topic,
+                new_partition_count,
+            } => Some(ResponseType::CreatePartitions(
+                proto::CreatePartitionsResponse {
+                    topic: topic.clone(),
+                    new_partition_count: *new_partition_count,
+                },
+            )),
+
+            Response::RecordsDeleted { topic, results } => {
+                Some(ResponseType::DeleteRecords(proto::DeleteRecordsResponse {
+                    topic: topic.clone(),
+                    results: results
+                        .iter()
+                        .map(|r| proto::DeleteRecordsResultProto {
+                            partition: r.partition,
+                            low_watermark: r.low_watermark,
+                            error: r.error.clone().unwrap_or_default(),
+                        })
+                        .collect(),
+                }))
+            }
+
+            // Remaining SCRAM/quota/throttle variants use postcard wire format
             _ => {
                 return Err(crate::ProtocolError::Serialization(format!(
-                    "Response type {:?} not yet supported for protobuf",
+                    "Response type {:?} not supported in protobuf wire format (use postcard)",
                     std::mem::discriminant(self)
                 )));
             }
@@ -377,6 +836,7 @@ impl Response {
 
         match response_type {
             ResponseType::Ping(_) => Ok(Response::Pong),
+            ResponseType::Ok(_) => Ok(Response::Ok),
 
             ResponseType::ListTopics(resp) => Ok(Response::Topics {
                 topics: resp.topics.clone(),
@@ -400,6 +860,7 @@ impl Response {
                     .iter()
                     .map(|r| crate::MessageData {
                         offset: r.offset,
+                        partition: r.partition,
                         timestamp: r.timestamp,
                         key: if r.key.is_empty() {
                             None
@@ -407,6 +868,11 @@ impl Response {
                             Some(Bytes::from(r.key.clone()))
                         },
                         value: Bytes::from(r.value.clone()),
+                        headers: r
+                            .headers
+                            .iter()
+                            .map(|h| (h.key.clone(), h.value.clone()))
+                            .collect(),
                     })
                     .collect(),
             }),
@@ -438,6 +904,152 @@ impl Response {
 
             ResponseType::Error(resp) => Ok(Response::Error {
                 message: resp.message.clone(),
+            }),
+
+            ResponseType::GetClusterMetadata(resp) => Ok(Response::ClusterMetadata {
+                controller_id: resp.controller_id.clone(),
+                brokers: resp
+                    .brokers
+                    .iter()
+                    .map(|b| crate::BrokerInfo {
+                        node_id: b.id.to_string(),
+                        host: b.host.clone(),
+                        port: b.port as u16,
+                        rack: if b.rack.is_empty() {
+                            None
+                        } else {
+                            Some(b.rack.clone())
+                        },
+                    })
+                    .collect(),
+                topics: resp
+                    .topics
+                    .iter()
+                    .map(|t| crate::TopicMetadata {
+                        name: t.name.clone(),
+                        is_internal: t.internal,
+                        partitions: t
+                            .partitions
+                            .iter()
+                            .map(|p| crate::PartitionMetadata {
+                                partition: p.id,
+                                leader: if p.leader == 0 {
+                                    None
+                                } else {
+                                    Some(p.leader.to_string())
+                                },
+                                replicas: p.replicas.iter().map(|r| r.to_string()).collect(),
+                                isr: p.isr.iter().map(|i| i.to_string()).collect(),
+                                offline: p.leader == 0 && p.replicas.is_empty(),
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            }),
+
+            ResponseType::GetOffsetBounds(resp) => Ok(Response::OffsetBounds {
+                earliest: resp.earliest,
+                latest: resp.latest,
+            }),
+
+            ResponseType::ListGroups(resp) => Ok(Response::Groups {
+                groups: resp.groups.clone(),
+            }),
+
+            ResponseType::DescribeGroup(resp) => {
+                use std::collections::HashMap;
+                let mut offsets: HashMap<String, HashMap<u32, u64>> = HashMap::new();
+                for to in &resp.topic_offsets {
+                    let partition_map = offsets.entry(to.topic.clone()).or_default();
+                    for po in &to.partition_offsets {
+                        partition_map.insert(po.partition, po.offset);
+                    }
+                }
+                Ok(Response::GroupDescription {
+                    consumer_group: resp.consumer_group.clone(),
+                    offsets,
+                })
+            }
+
+            ResponseType::DeleteGroup(_) => Ok(Response::GroupDeleted),
+
+            ResponseType::GetOffsetForTimestamp(resp) => Ok(Response::OffsetForTimestamp {
+                offset: resp.offset,
+            }),
+
+            ResponseType::InitProducerId(resp) => Ok(Response::ProducerIdInitialized {
+                producer_id: resp.producer_id,
+                producer_epoch: resp.producer_epoch as u16,
+            }),
+
+            ResponseType::IdempotentPublish(resp) => Ok(Response::IdempotentPublished {
+                offset: resp.offset,
+                partition: resp.partition,
+                duplicate: resp.duplicate,
+            }),
+
+            ResponseType::BeginTransaction(resp) => Ok(Response::TransactionStarted {
+                txn_id: resp.txn_id.clone(),
+            }),
+
+            ResponseType::CommitTransaction(resp) => Ok(Response::TransactionCommitted {
+                txn_id: resp.txn_id.clone(),
+            }),
+
+            ResponseType::AbortTransaction(resp) => Ok(Response::TransactionAborted {
+                txn_id: resp.txn_id.clone(),
+            }),
+
+            ResponseType::AlterTopicConfig(resp) => Ok(Response::TopicConfigAltered {
+                topic: resp.topic.clone(),
+                changed_count: resp.changed_count as usize,
+            }),
+
+            ResponseType::DescribeTopicConfigs(resp) => Ok(Response::TopicConfigsDescribed {
+                configs: resp
+                    .configs
+                    .iter()
+                    .map(|c| {
+                        let mut config_map = std::collections::HashMap::new();
+                        for e in &c.entries {
+                            config_map.insert(
+                                e.key.clone(),
+                                crate::TopicConfigValue {
+                                    value: e.value.clone(),
+                                    is_default: e.is_default,
+                                    is_read_only: e.is_read_only,
+                                    is_sensitive: e.is_sensitive,
+                                },
+                            );
+                        }
+                        crate::TopicConfigDescription {
+                            topic: c.topic.clone(),
+                            configs: config_map,
+                        }
+                    })
+                    .collect(),
+            }),
+
+            ResponseType::CreatePartitions(resp) => Ok(Response::PartitionsCreated {
+                topic: resp.topic.clone(),
+                new_partition_count: resp.new_partition_count,
+            }),
+
+            ResponseType::DeleteRecords(resp) => Ok(Response::RecordsDeleted {
+                topic: resp.topic.clone(),
+                results: resp
+                    .results
+                    .iter()
+                    .map(|r| crate::DeleteRecordsResult {
+                        partition: r.partition,
+                        low_watermark: r.low_watermark,
+                        error: if r.error.is_empty() {
+                            None
+                        } else {
+                            Some(r.error.clone())
+                        },
+                    })
+                    .collect(),
             }),
         }
     }

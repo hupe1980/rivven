@@ -111,6 +111,10 @@ pub struct RaftApiState {
     pub http_client: reqwest::Client,
     /// Node address mapping (node_id -> http_addr)
     pub node_addresses: Arc<RwLock<std::collections::HashMap<u64, String>>>,
+    /// Optional shared secret for authenticating cluster API requests.
+    /// When set, all `/api/v1/*` and `/raft/*` endpoints require the
+    /// `Authorization: Bearer <token>` header to match this value.
+    pub cluster_auth_token: Option<Arc<String>>,
 }
 
 impl RaftApiState {
@@ -159,7 +163,15 @@ impl RaftApiState {
             coordinator,
             http_client,
             node_addresses: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            cluster_auth_token: None,
         }
+    }
+
+    /// Set the cluster authentication token. When set, all `/api/v1/*` and
+    /// `/raft/*` endpoints require `Authorization: Bearer <token>`.
+    pub fn with_cluster_auth_token(mut self, token: Option<String>) -> Self {
+        self.cluster_auth_token = token.map(Arc::new);
+        self
     }
 
     /// Register a node's HTTP address for leader forwarding
@@ -286,6 +298,44 @@ pub struct BatchProposalResponse {
 }
 
 // ============================================================================
+// Authentication Middleware
+// ============================================================================
+
+/// Middleware that validates the `Authorization: Bearer <token>` header against
+/// the configured cluster authentication token. Uses constant-time comparison
+/// to prevent timing side-channel attacks.
+async fn cluster_auth_middleware(
+    expected_token: Arc<String>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use subtle::ConstantTimeEq;
+
+    let auth_header = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+
+    match auth_header {
+        Some(value) if value.starts_with("Bearer ") => {
+            let provided = &value[7..];
+            let expected = expected_token.as_bytes();
+            let provided_bytes = provided.as_bytes();
+            if expected.len() == provided_bytes.len() && expected.ct_eq(provided_bytes).into() {
+                next.run(req).await
+            } else {
+                (StatusCode::UNAUTHORIZED, "Invalid cluster token").into_response()
+            }
+        }
+        _ => (
+            StatusCode::UNAUTHORIZED,
+            "Missing Authorization: Bearer <token>",
+        )
+            .into_response(),
+    }
+}
+
+// ============================================================================
 // Router
 // ============================================================================
 
@@ -296,12 +346,15 @@ pub fn create_raft_router(state: RaftApiState) -> Router {
 
 /// Create the base Raft API router without state (for merging)
 fn create_raft_router_base<S: Clone + Send + Sync + 'static>(state: RaftApiState) -> Router<S> {
-    Router::new()
-        // Management APIs
+    // Public endpoints — health/metrics are always accessible
+    let public = Router::new()
         .route("/health", get(health_handler))
-        .route("/metrics", get(prometheus_metrics_handler)) // Prometheus format (production)
-        .route("/metrics/json", get(metrics_handler)) // JSON format (debugging)
-        .route("/membership", get(membership_handler))
+        .route("/metrics", get(prometheus_metrics_handler))
+        .route("/metrics/json", get(metrics_handler))
+        .route("/membership", get(membership_handler));
+
+    // Protected endpoints — require cluster auth token when configured
+    let protected = Router::new()
         // Raft RPCs (internal cluster communication)
         .route("/raft/append", post(append_entries_handler))
         .route("/raft/snapshot", post(install_snapshot_handler))
@@ -321,8 +374,19 @@ fn create_raft_router_base<S: Clone + Send + Sync + 'static>(state: RaftApiState
         .route(
             "/api/v1/metadata/linearizable",
             get(linearizable_metadata_handler),
-        )
-        .with_state(state)
+        );
+
+    // Apply auth middleware if a cluster token is configured
+    let protected = if let Some(ref token) = state.cluster_auth_token {
+        let token = token.clone();
+        protected.layer(axum::middleware::from_fn(move |req, next| {
+            cluster_auth_middleware(token.clone(), req, next)
+        }))
+    } else {
+        protected
+    };
+
+    public.merge(protected).with_state(state)
 }
 
 // ============================================================================
@@ -333,16 +397,32 @@ fn create_raft_router_base<S: Clone + Send + Sync + 'static>(state: RaftApiState
 async fn health_handler(State(state): State<RaftApiState>) -> impl IntoResponse {
     let raft = state.raft_node.read().await;
 
+    // Determine health status based on Raft state
+    let metrics = raft.metrics();
+    let has_leader = raft.leader().is_some();
+    let status = if has_leader {
+        "healthy"
+    } else if metrics.is_some() {
+        "degraded" // Raft initialized but no leader elected yet
+    } else {
+        "unhealthy" // Raft not initialized
+    };
+    let status_code = if status == "healthy" {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
     let response = HealthResponse {
-        status: "healthy".to_string(),
+        status: status.to_string(),
         node_id: raft.node_id(),
         node_id_str: raft.node_id_str().to_string(),
         is_leader: raft.is_leader(),
         leader_id: raft.leader(),
-        cluster_mode: !raft.is_leader() || raft.leader() != Some(raft.node_id()),
+        cluster_mode: raft.leader().is_some_and(|leader| leader != raft.node_id()),
     };
 
-    (StatusCode::OK, Json(response))
+    (status_code, Json(response))
 }
 
 /// Metrics endpoint
@@ -1088,10 +1168,12 @@ pub struct TransferLeadershipRequest {
 /// 2. Wait for new leader to be elected
 /// 3. Stop/update the old leader node
 ///
-/// Note: This doesn't guarantee a specific target wins - use for graceful shutdown
+/// Note: openraft 0.9 does not support targeted transfer. If `target_node_id`
+/// is supplied it is logged but the election outcome depends on Raft protocol
+/// (highest log wins). Use this for graceful shutdown.
 async fn transfer_leadership_handler(
     State(state): State<RaftApiState>,
-    Json(_req): Json<TransferLeadershipRequest>,
+    Json(req): Json<TransferLeadershipRequest>,
 ) -> impl IntoResponse {
     let raft = state.raft_node.read().await;
 
@@ -1108,6 +1190,12 @@ async fn transfer_leadership_handler(
     }
 
     if let Some(raft_instance) = raft.get_raft() {
+        if let Some(ref target) = req.target_node_id {
+            info!(
+                target = %target,
+                "Leadership transfer requested with preferred target (best-effort)"
+            );
+        }
         info!("Initiating leadership step-down for graceful transfer");
 
         // Trigger an election by forcing a heartbeat timeout

@@ -179,13 +179,9 @@ impl Batcher {
         })
     }
 
-    /// Estimate the size of an event in bytes
+    /// Estimate the size of an event in bytes (zero-allocation heuristic)
     fn estimate_size(&self, event: &SourceEvent) -> usize {
-        // Simple estimation based on JSON serialization
-        match serde_json::to_vec(event) {
-            Ok(bytes) => bytes.len(),
-            Err(_) => 256, // Default estimate
-        }
+        event.estimated_size()
     }
 
     /// Get the current number of events in the batch
@@ -224,11 +220,7 @@ impl Batch {
 
     /// Create a batch from events
     pub fn from_events(events: Vec<SourceEvent>) -> Self {
-        let total_bytes: usize = events
-            .iter()
-            .filter_map(|e| serde_json::to_vec(e).ok())
-            .map(|b| b.len())
-            .sum();
+        let total_bytes: usize = events.iter().map(|e| e.estimated_size()).sum();
 
         Self {
             events,

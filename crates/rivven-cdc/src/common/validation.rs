@@ -6,8 +6,8 @@
 //! - Resource exhaustion via size limits
 
 use anyhow::{anyhow, Result};
-use once_cell::sync::Lazy;
 use regex::Regex;
+use std::sync::LazyLock;
 
 /// Maximum allowed identifier length (255 for flexibility)
 const MAX_IDENTIFIER_LENGTH: usize = 255;
@@ -22,8 +22,8 @@ pub const CONNECTION_TIMEOUT_SECS: u64 = 30;
 pub const IO_TIMEOUT_SECS: u64 = 60;
 
 /// Regex for validating SQL identifiers
-static IDENTIFIER_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]{0,254}$").unwrap());
+static IDENTIFIER_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]{0,254}$").unwrap());
 
 /// Validator for CDC inputs
 pub struct Validator;

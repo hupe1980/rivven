@@ -428,10 +428,21 @@ impl TableNamingStrategy for SchemaMapping {
 }
 
 /// Create a schema provider from a connection
-pub fn schema_provider(_conn: &dyn Connection) -> Box<dyn SchemaProvider> {
-    // This would be implemented per-backend
-    // For now, return a placeholder that panics
-    unimplemented!("schema provider implementation is per-backend")
+///
+/// This is a dispatch function that should be called with a backend-specific
+/// connection. Each backend (PostgreSQL, MySQL, etc.) provides its own
+/// `SchemaProvider` implementation via the connection object.
+///
+/// # Errors
+///
+/// Returns an error because schema provider creation must be done through
+/// backend-specific connection methods (e.g., `PostgresConnection::schema_provider()`).
+pub fn schema_provider(_conn: &dyn Connection) -> Result<Box<dyn SchemaProvider>> {
+    Err(crate::error::Error::Unsupported {
+        message: "Schema provider must be created through a backend-specific connection. \
+                  Use the connection's schema_provider() method directly."
+            .into(),
+    })
 }
 
 #[cfg(test)]

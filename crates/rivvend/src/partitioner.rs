@@ -19,9 +19,9 @@
 //! - Lower producer latency
 //! - Still achieves good partition balance over time
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 /// Configuration for sticky partitioner
@@ -117,10 +117,7 @@ impl StickyPartitioner {
     fn sticky_partition(&self, topic: &str, num_partitions: u32) -> u32 {
         // Fast path: check if we need to rotate
         {
-            let states = self
-                .topic_states
-                .read()
-                .expect("sticky partitioner lock poisoned");
+            let states = self.topic_states.read();
             if let Some(state) = states.get(topic) {
                 let should_rotate = self.should_rotate(state);
                 if !should_rotate {
@@ -131,10 +128,7 @@ impl StickyPartitioner {
         }
 
         // Slow path: need to rotate or initialize
-        let mut states = self
-            .topic_states
-            .write()
-            .expect("sticky partitioner lock poisoned");
+        let mut states = self.topic_states.write();
 
         let state = states.entry(topic.to_string()).or_insert_with(|| {
             // Initial partition: round-robin across topics for even distribution
@@ -149,10 +143,7 @@ impl StickyPartitioner {
             let next = (current + 1) % num_partitions;
             state.current_partition.store(next, Ordering::Relaxed);
             state.messages_in_batch.store(0, Ordering::Relaxed);
-            *state
-                .batch_start
-                .write()
-                .expect("batch start lock poisoned") = Instant::now();
+            *state.batch_start.write() = Instant::now();
         }
 
         state.messages_in_batch.fetch_add(1, Ordering::Relaxed);
@@ -170,17 +161,14 @@ impl StickyPartitioner {
         }
 
         // Check time threshold
-        let batch_start = *state.batch_start.read().expect("batch start lock poisoned");
+        let batch_start = *state.batch_start.read();
         batch_start.elapsed() >= self.config.linger_duration
     }
 
     /// Reset state for a topic (useful for testing)
     #[allow(dead_code)]
     pub fn reset_topic(&self, topic: &str) {
-        let mut states = self
-            .topic_states
-            .write()
-            .expect("sticky partitioner lock poisoned");
+        let mut states = self.topic_states.write();
         states.remove(topic);
     }
 }

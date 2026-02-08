@@ -89,6 +89,9 @@ tokio-rustls = "0.26"
 async-trait = "0.1"
 rand = "0.8"
 uuid = { version = "1.6", features = ["v4", "serde"] }
+subtle = "2.6"
+parking_lot = "0.12"
+argon2 = { version = "0.5", features = ["password-hash"] }
 
 # Internal crates
 rivven-core = { version = "0.0.9", path = "crates/rivven-core", default-features = false }

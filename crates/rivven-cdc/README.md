@@ -85,6 +85,7 @@ Internal/advanced types for custom implementations:
 - 📡 **Signal Table** - Runtime control with ad-hoc snapshots and pause/resume
 - 🔄 **Incremental Snapshots** - Re-snapshot tables while streaming continues
 - 🎯 **Format-Agnostic** - No schema registry coupling; serialization handled by consumers
+- 📊 **Avro Serialization** - Built-in `CdcEventSerializer` with JSON and Avro binary formats, Confluent wire format support
 
 ## Supported Versions
 

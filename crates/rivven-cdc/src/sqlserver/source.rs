@@ -836,7 +836,10 @@ async fn run_cdc_poll_loop(
                     transaction: Some(TransactionMetadata {
                         id: change.commit_lsn.to_hex(),
                         lsn: change.change_lsn.to_hex(),
-                        sequence: 0, // TODO: Extract from seqval
+                        sequence: u16::from_be_bytes([
+                            change.change_lsn.bytes[8],
+                            change.change_lsn.bytes[9],
+                        ]) as u64,
                         total_events: 0,
                         commit_ts: change.commit_time,
                         is_last: false,

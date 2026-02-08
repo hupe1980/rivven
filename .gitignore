@@ -38,6 +38,7 @@ _prompts/
 .venv/
 BACKLOG.md 
 CONCEPT.md
+FINDINGS.md
 CDC.md
 .DS_Store
 .pytest_cache/

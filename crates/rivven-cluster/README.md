@@ -10,9 +10,9 @@
 
 | Feature | Description |
 |:--------|:------------|
-| **Raft Consensus** | Leader election and log replication using OpenRaft |
+| **Raft Consensus** | Authenticated leader election and log replication using OpenRaft |
 | **redb Storage** | Pure Rust persistent storage (zero C dependencies) |
-| **SWIM Gossip** | Failure detection and membership management |
+| **SWIM Gossip** | HMAC-authenticated failure detection and membership management |
 | **ISR Replication** | In-Sync Replica tracking with high watermark |
 | **Partitioning** | Consistent hashing with rack awareness |
 | **QUIC Transport** | 0-RTT, multiplexed streams, BBR congestion control |
@@ -89,7 +89,7 @@ node.start().await?;
 
 ### SWIM Gossip
 
-Decentralized failure detection with O(log N) convergence:
+Decentralized failure detection with O(N) protocol-period dissemination:
 
 ```rust
 use rivven_cluster::{Membership, SwimConfig, NodeInfo};

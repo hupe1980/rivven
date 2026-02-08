@@ -41,6 +41,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 // Use the library modules instead of declaring them
 use rivven_connect::{
     broker_client, config, connectors, error, health, metrics, sink_runner, source_runner,
+    telemetry,
 };
 
 use config::ConnectConfig;
@@ -151,6 +152,12 @@ fn init_logging(verbose: bool) {
 async fn run_all(config: ConnectConfig) -> Result<()> {
     info!("Starting rivven-connect");
     info!("Bootstrap servers: {:?}", config.broker.bootstrap_servers);
+
+    // Initialize OpenTelemetry tracing if configured
+    if config.settings.telemetry.enabled {
+        telemetry::init_tracing(&config.settings.telemetry)
+            .map_err(|e| anyhow::anyhow!("Failed to initialize telemetry: {}", e))?;
+    }
 
     let config = Arc::new(config);
     let (shutdown_tx, _) = broadcast::channel::<()>(16);
@@ -342,12 +349,27 @@ async fn run_all(config: ConnectConfig) -> Result<()> {
     Ok(())
 }
 
-/// Wait for a fatal error from any task
-async fn wait_for_fatal_error(_tasks: &mut [tokio::task::JoinHandle<error::Result<()>>]) {
-    // This is a placeholder - in production you'd want more sophisticated
-    // failure handling (restart policies, circuit breakers, etc.)
+/// Wait for a fatal error from any connector task.
+///
+/// Polls all task handles and returns as soon as any task completes (either
+/// successfully or with an error). This allows the select! in main to detect
+/// connector failures and trigger a graceful shutdown.
+async fn wait_for_fatal_error(tasks: &mut [tokio::task::JoinHandle<error::Result<()>>]) {
+    if tasks.is_empty() {
+        // No tasks to monitor — wait forever (Ctrl+C will still work)
+        std::future::pending::<()>().await;
+        return;
+    }
+
     loop {
-        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+        for task in tasks.iter_mut() {
+            if task.is_finished() {
+                // A task has completed — this is always fatal (connectors should run forever)
+                return;
+            }
+        }
+        // Poll every 500ms instead of sleeping forever
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
 }
 

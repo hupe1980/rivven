@@ -113,6 +113,10 @@ pub fn register(registry: &mut SourceRegistry) {
 }
 ```
 
+Once registered, the connector is automatically available at runtime. The `SourceRunner` / `SinkRunner` will use the registry for any connector type not handled by built-in match arms. This means you can add new connectors by simply registering a factory — no changes to runner code required.
+
+Built-in connectors (datagen, postgres-cdc, http) use optimized code paths. All other connectors dispatch through the registry via `AnySource::read_raw()` / `AnySink::write_raw()`, which provides the same pipeline features: rate limiting, backpressure, transforms, and health monitoring.
+
 ## Sink Connectors
 
 ### Basic Structure

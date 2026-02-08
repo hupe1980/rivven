@@ -45,10 +45,10 @@
 //! ```
 //!
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
 /// Default produce bytes per second (50 MB/s)
@@ -57,8 +57,11 @@ pub const DEFAULT_PRODUCE_BYTES_RATE: u64 = 50 * 1024 * 1024;
 /// Default consume bytes per second (100 MB/s)
 pub const DEFAULT_CONSUME_BYTES_RATE: u64 = 100 * 1024 * 1024;
 
-/// Default request rate per second (1000 requests/s)
-pub const DEFAULT_REQUEST_RATE: u64 = 1000;
+/// Default request rate per second (100,000 requests/s)
+///
+/// This is deliberately generous to avoid throttling legitimate workloads.
+/// Configure per-principal quotas for tighter multi-tenant limits.
+pub const DEFAULT_REQUEST_RATE: u64 = 100_000;
 
 /// Unlimited quota marker
 pub const UNLIMITED: u64 = u64::MAX;
@@ -262,19 +265,15 @@ impl SlidingWindow {
 
     /// Record usage and return if quota is exceeded
     fn record(&self, amount: u64, limit: u64) -> Option<Duration> {
-        // Check if window has expired
-        {
-            let mut start = self
-                .window_start
-                .write()
-                .expect("sliding window lock poisoned");
-            let elapsed = start.elapsed();
-            if elapsed >= self.window {
-                // Reset window
-                self.current_value.store(0, Ordering::Relaxed);
-                *start = Instant::now();
-            }
+        // Hold write lock through the entire check-and-add to prevent TOCTOU races
+        let mut start = self.window_start.write();
+        let elapsed = start.elapsed();
+        if elapsed >= self.window {
+            // Reset window
+            self.current_value.store(0, Ordering::Relaxed);
+            *start = Instant::now();
         }
+        drop(start);
 
         // Add to current value
         let new_value = self.current_value.fetch_add(amount, Ordering::Relaxed) + amount;
@@ -295,10 +294,7 @@ impl SlidingWindow {
     }
 
     fn current_rate(&self) -> u64 {
-        let start = self
-            .window_start
-            .read()
-            .expect("sliding window lock poisoned");
+        let start = self.window_start.read();
         let elapsed = start.elapsed().as_secs_f64().max(0.001);
         (self.current_value.load(Ordering::Relaxed) as f64 / elapsed) as u64
     }
@@ -311,10 +307,7 @@ impl SlidingWindow {
     #[allow(dead_code)]
     fn reset(&self) {
         self.current_value.store(0, Ordering::Relaxed);
-        *self
-            .window_start
-            .write()
-            .expect("sliding window lock poisoned") = Instant::now();
+        *self.window_start.write() = Instant::now();
     }
 }
 
@@ -337,18 +330,11 @@ impl EntityQuotaState {
     }
 
     fn touch(&self) {
-        *self
-            .last_activity
-            .write()
-            .expect("entity quota state lock poisoned") = Instant::now();
+        *self.last_activity.write() = Instant::now();
     }
 
     fn is_idle(&self, timeout: Duration) -> bool {
-        self.last_activity
-            .read()
-            .expect("entity quota state lock poisoned")
-            .elapsed()
-            > timeout
+        self.last_activity.read().elapsed() > timeout
     }
 }
 
@@ -490,37 +476,28 @@ impl QuotaManager {
 
     /// Set default quotas
     pub fn set_defaults(&self, config: QuotaConfig) {
-        *self.defaults.write().expect("quota manager lock poisoned") = config;
+        *self.defaults.write() = config;
     }
 
     /// Get current defaults
     pub fn get_defaults(&self) -> QuotaConfig {
-        self.defaults
-            .read()
-            .expect("quota manager lock poisoned")
-            .clone()
+        self.defaults.read().clone()
     }
 
     /// Set quota for a specific entity
     pub fn set_quota(&self, entity: QuotaEntity, config: QuotaConfig) {
-        self.configs
-            .write()
-            .expect("quota manager lock poisoned")
-            .insert(entity, config);
+        self.configs.write().insert(entity, config);
     }
 
     /// Remove quota for an entity (will use defaults)
     pub fn remove_quota(&self, entity: &QuotaEntity) {
-        self.configs
-            .write()
-            .expect("quota manager lock poisoned")
-            .remove(entity);
+        self.configs.write().remove(entity);
     }
 
     /// Get effective quota for an entity
     pub fn get_effective_quota(&self, user: Option<&str>, client_id: Option<&str>) -> QuotaConfig {
-        let configs = self.configs.read().expect("quota manager lock poisoned");
-        let defaults = self.defaults.read().expect("quota manager lock poisoned");
+        let configs = self.configs.read();
+        let defaults = self.defaults.read();
 
         // Resolution order: user+client > user > client > default
         let user_client_key = match (user, client_id) {
@@ -633,10 +610,10 @@ impl QuotaManager {
     ) -> QuotaResult {
         // Get or create state
         {
-            let states = self.states.read().expect("quota states lock poisoned");
+            let states = self.states.read();
             if states.contains_key(entity_key) {
                 drop(states);
-                let states = self.states.read().expect("quota states lock poisoned");
+                let states = self.states.read();
                 if let Some(s) = states.get(entity_key) {
                     s.touch();
                 }
@@ -644,13 +621,12 @@ impl QuotaManager {
                 drop(states);
                 self.states
                     .write()
-                    .expect("quota states lock poisoned")
                     .insert(entity_key.to_string(), EntityQuotaState::new());
             }
         }
 
         // Record in appropriate window
-        let states = self.states.read().expect("quota states lock poisoned");
+        let states = self.states.read();
         if let Some(state) = states.get(entity_key) {
             let throttle = match quota_type {
                 QuotaType::ProduceBytes => state.produce_window.record(amount, limit),
@@ -679,7 +655,7 @@ impl QuotaManager {
         client_id: Option<&str>,
     ) -> Option<EntityQuotaStats> {
         let entity_key = Self::entity_key(user, client_id);
-        let states = self.states.read().expect("quota states lock poisoned");
+        let states = self.states.read();
 
         states.get(&entity_key).map(|state| EntityQuotaStats {
             entity: entity_key.clone(),
@@ -699,7 +675,7 @@ impl QuotaManager {
 
     /// Clean up idle entity states
     pub fn cleanup_idle_entities(&self) -> usize {
-        let mut states = self.states.write().expect("quota states lock poisoned");
+        let mut states = self.states.write();
         let before = states.len();
         states.retain(|_, state| !state.is_idle(self.idle_timeout));
         before - states.len()
@@ -709,7 +685,6 @@ impl QuotaManager {
     pub fn list_quotas(&self) -> Vec<(QuotaEntity, QuotaConfig)> {
         self.configs
             .read()
-            .expect("quota manager lock poisoned")
             .iter()
             .map(|(e, c)| (e.clone(), c.clone()))
             .collect()
@@ -717,10 +692,7 @@ impl QuotaManager {
 
     /// Get number of active entities being tracked
     pub fn active_entity_count(&self) -> usize {
-        self.states
-            .read()
-            .expect("quota states lock poisoned")
-            .len()
+        self.states.read().len()
     }
 }
 

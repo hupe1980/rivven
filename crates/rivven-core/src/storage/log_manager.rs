@@ -78,27 +78,53 @@ impl LogManager {
     }
 
     /// Batch append for high-throughput scenarios
-    /// Uses segment's batch append for efficient I/O
+    /// Splits batches across segment boundaries when needed
     pub async fn append_batch(&mut self, messages: Vec<(u64, Message)>) -> Result<Vec<u64>> {
         if messages.is_empty() {
             return Ok(Vec::new());
         }
 
-        let segment = &mut self.segments[self.active_segment_index];
+        let mut all_positions = Vec::with_capacity(messages.len());
+        let mut remaining = messages.as_slice();
 
-        // Check if we need to roll (estimate batch size)
-        let estimated_size: usize = messages.iter().map(|(_, m)| m.value.len() + 100).sum();
-        if segment.size() + estimated_size as u64 >= self.max_segment_size {
-            // Flush current segment before rolling
-            segment.flush().await?;
-            let first_offset = messages[0].0;
-            let new_segment = Segment::new(&self.dir, first_offset)?;
-            self.segments.push(new_segment);
-            self.active_segment_index += 1;
+        while !remaining.is_empty() {
+            let segment = &mut self.segments[self.active_segment_index];
+
+            // Roll if current segment is already at capacity
+            if segment.size() >= self.max_segment_size {
+                segment.flush().await?;
+                let new_segment = Segment::new(&self.dir, remaining[0].0)?;
+                self.segments.push(new_segment);
+                self.active_segment_index += 1;
+            }
+
+            let segment = &self.segments[self.active_segment_index];
+            let available = self.max_segment_size.saturating_sub(segment.size());
+
+            // Find how many messages fit in the remaining capacity
+            let mut accumulated = 0u64;
+            let mut split_at = 0;
+            for (_, m) in remaining.iter() {
+                let msg_size = (m.value.len() + 100) as u64;
+                if accumulated + msg_size > available && split_at > 0 {
+                    break;
+                }
+                accumulated += msg_size;
+                split_at += 1;
+                // Always include at least one message to guarantee progress
+                if accumulated > available {
+                    break;
+                }
+            }
+
+            let (batch, rest) = remaining.split_at(split_at);
+            let segment = &mut self.segments[self.active_segment_index];
+            let positions = segment.append_batch(batch.to_vec()).await?;
+            all_positions.extend(positions);
+            remaining = rest;
         }
 
-        let segment = &mut self.segments[self.active_segment_index];
-        segment.append_batch(messages).await
+        Ok(all_positions)
     }
 
     pub async fn read(&self, offset: u64, max_bytes: usize) -> Result<Vec<Message>> {
@@ -161,6 +187,52 @@ impl LogManager {
             segment.flush().await?;
         }
         Ok(())
+    }
+
+    /// Physically remove segments whose data is entirely below the given offset.
+    ///
+    /// A segment is eligible for deletion when the *next* segment's `base_offset`
+    /// is ≤ `watermark`, meaning every record in the segment is before the
+    /// watermark. The currently-active segment is never deleted.
+    ///
+    /// Returns the number of segments removed.
+    pub fn truncate_before(&mut self, watermark: u64) -> crate::Result<usize> {
+        if self.segments.len() <= 1 {
+            return Ok(0);
+        }
+
+        // Find how many segments are fully below the watermark.
+        // A segment at index `i` is fully below if the *next* segment's
+        // base_offset <= watermark (all records in segment[i] < base[i+1] <= watermark).
+        let mut remove_count = 0;
+        for i in 0..self.segments.len().saturating_sub(1) {
+            let next_base = self.segments[i + 1].base_offset();
+            if next_base <= watermark {
+                remove_count = i + 1;
+            } else {
+                break;
+            }
+        }
+
+        if remove_count == 0 {
+            return Ok(0);
+        }
+
+        // Delete files for removed segments
+        for seg in self.segments.drain(..remove_count) {
+            if let Err(e) = seg.delete_files() {
+                tracing::warn!(
+                    "Failed to delete segment files at offset {}: {}",
+                    seg.base_offset(),
+                    e
+                );
+            }
+        }
+
+        // Adjust active segment index
+        self.active_segment_index = self.active_segment_index.saturating_sub(remove_count);
+
+        Ok(remove_count)
     }
 
     /// Find the first offset with timestamp >= target_timestamp (milliseconds since epoch)

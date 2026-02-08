@@ -564,7 +564,7 @@ impl Compressor {
             .record_compression(algorithm, data.len(), compressed.len());
 
         // Encode with header
-        self.encode_compressed(algorithm, data.len(), &compressed)
+        self.encode_compressed(algorithm, data.len(), &compressed, data)
     }
 
     /// Compress data with explicit algorithm choice
@@ -583,7 +583,7 @@ impl Compressor {
 
         self.stats
             .record_compression(algorithm, data.len(), compressed.len());
-        self.encode_compressed(algorithm, data.len(), &compressed)
+        self.encode_compressed(algorithm, data.len(), &compressed, data)
     }
 
     /// Decompress data (auto-detects algorithm from header)
@@ -713,11 +713,15 @@ impl Compressor {
     }
 
     /// Encode compressed data with header
+    ///
+    /// `original_data` is used to compute the checksum over the *uncompressed*
+    /// payload, matching what `decompress()` verifies after decompression.
     fn encode_compressed(
         &self,
         algorithm: CompressionAlgorithm,
         original_size: usize,
         compressed: &[u8],
+        original_data: &[u8],
     ) -> Result<Bytes> {
         let has_checksum = self.config.checksum;
         // Header: flags (1) + size (4) + optional checksum (4)
@@ -728,10 +732,9 @@ impl Compressor {
         buf.put_u32_le(original_size as u32);
 
         if has_checksum {
-            // Checksum is of original (uncompressed) data
-            // We don't have it here, so we compute from compressed for integrity
-            // In practice, the caller should provide original data checksum
-            buf.put_u32_le(crc32_checksum(compressed));
+            // Checksum of the original (uncompressed) data — decompress() verifies
+            // against decompressed output, so the checksum must match that.
+            buf.put_u32_le(crc32_checksum(original_data));
         }
 
         buf.put_slice(compressed);

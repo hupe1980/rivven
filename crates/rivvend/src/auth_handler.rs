@@ -553,8 +553,14 @@ impl AuthenticatedHandler {
             };
         }
 
-        // Delegate to base handler
-        self.handler.handle(request).await
+        // ======== Per-principal quota enforcement ========
+        // Delegate to base handler with principal context.
+        // handle_with_principal() checks request, produce, and consume quotas
+        // with the real user identity — no double-counting.
+        let user = session.map(|s| s.principal_name.as_str());
+        self.handler
+            .handle_with_principal(request, user, None)
+            .await
     }
 }
 
@@ -590,7 +596,7 @@ mod tests {
         auth_manager
             .create_principal(
                 "producer",
-                "producer_pass",
+                "Prod@Pass123",
                 PrincipalType::User,
                 producer_roles,
             )
@@ -599,7 +605,7 @@ mod tests {
         let mut admin_roles = HashSet::new();
         admin_roles.insert("admin".to_string());
         auth_manager
-            .create_principal("admin", "admin_pass", PrincipalType::User, admin_roles)
+            .create_principal("admin", "Admin@Pass1", PrincipalType::User, admin_roles)
             .unwrap();
 
         let handler = AuthenticatedHandler::new(base_handler, auth_manager.clone(), require_auth);
@@ -632,7 +638,7 @@ mod tests {
             .handle(
                 Request::Authenticate {
                     username: "producer".to_string(),
-                    password: "producer_pass".to_string(),
+                    password: "Prod@Pass123".to_string(),
                 },
                 &mut conn_auth,
                 "127.0.0.1",
@@ -657,7 +663,7 @@ mod tests {
             .handle(
                 Request::Authenticate {
                     username: "producer".to_string(),
-                    password: "wrong_password".to_string(),
+                    password: "Wrong@Pass1".to_string(),
                 },
                 &mut conn_auth,
                 "127.0.0.1",
@@ -682,7 +688,7 @@ mod tests {
             .handle(
                 Request::Authenticate {
                     username: "producer".to_string(),
-                    password: "producer_pass".to_string(),
+                    password: "Prod@Pass123".to_string(),
                 },
                 &mut conn_auth,
                 "127.0.0.1",
@@ -715,7 +721,7 @@ mod tests {
             .handle(
                 Request::Authenticate {
                     username: "admin".to_string(),
-                    password: "admin_pass".to_string(),
+                    password: "Admin@Pass1".to_string(),
                 },
                 &mut conn_auth,
                 "127.0.0.1",

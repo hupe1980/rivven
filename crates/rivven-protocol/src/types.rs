@@ -55,6 +55,9 @@ impl std::str::FromStr for SchemaType {
 pub struct MessageData {
     /// Message offset in the partition
     pub offset: u64,
+    /// Partition the message belongs to
+    #[serde(default)]
+    pub partition: u32,
     /// Optional message key
     #[serde(with = "crate::serde_utils::option_bytes_serde")]
     pub key: Option<Bytes>,
@@ -63,6 +66,9 @@ pub struct MessageData {
     pub value: Bytes,
     /// Timestamp in milliseconds since epoch
     pub timestamp: i64,
+    /// Record headers (key-value metadata)
+    #[serde(default)]
+    pub headers: Vec<(String, Vec<u8>)>,
 }
 
 impl MessageData {
@@ -70,15 +76,29 @@ impl MessageData {
     pub fn new(offset: u64, value: impl Into<Bytes>, timestamp: i64) -> Self {
         Self {
             offset,
+            partition: 0,
             key: None,
             value: value.into(),
             timestamp,
+            headers: Vec::new(),
         }
     }
 
     /// Set the key
     pub fn with_key(mut self, key: impl Into<Bytes>) -> Self {
         self.key = Some(key.into());
+        self
+    }
+
+    /// Set the partition
+    pub fn with_partition(mut self, partition: u32) -> Self {
+        self.partition = partition;
+        self
+    }
+
+    /// Add a header
+    pub fn with_header(mut self, key: impl Into<String>, value: impl Into<Vec<u8>>) -> Self {
+        self.headers.push((key.into(), value.into()));
         self
     }
 
@@ -92,10 +112,11 @@ impl MessageData {
         self.key.as_ref().map(|k| k.as_ref())
     }
 
-    /// Get the size of this message (key + value)
+    /// Get the size of this message (key + value + headers)
     pub fn size(&self) -> usize {
         let key_size = self.key.as_ref().map(|k| k.len()).unwrap_or(0);
-        key_size + self.value.len()
+        let header_size: usize = self.headers.iter().map(|(k, v)| k.len() + v.len()).sum();
+        key_size + self.value.len() + header_size
     }
 }
 

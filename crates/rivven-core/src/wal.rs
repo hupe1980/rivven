@@ -296,8 +296,8 @@ struct WriteRequest {
     data: Bytes,
     /// Record type
     record_type: RecordType,
-    /// Channel to send completion notification
-    completion: oneshot::Sender<WriteResult>,
+    /// Channel to send completion notification (carries Result so disk errors propagate)
+    completion: oneshot::Sender<Result<WriteResult, String>>,
 }
 
 /// Result of a write operation
@@ -465,7 +465,8 @@ impl GroupCommitWal {
         self.write_notify.notify_one();
 
         rx.await
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "WAL write cancelled"))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "WAL write cancelled"))?
+            .map_err(io::Error::other)
     }
 
     /// Write a batch of records atomically
@@ -494,7 +495,8 @@ impl GroupCommitWal {
         for rx in receivers {
             let result = rx
                 .await
-                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "WAL write cancelled"))?;
+                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "WAL write cancelled"))?
+                .map_err(io::Error::other)?;
             results.push(result);
         }
 
@@ -668,10 +670,19 @@ impl GroupCommitWal {
             batch_buffer.extend_from_slice(&record_bytes);
         }
 
-        // Write batch to disk
+        // Write batch to disk and rotate if file exceeds max_file_size
         let write_result = {
             let mut writer = self.writer.lock().await;
-            writer.write_batch(batch_buffer)
+            let result = writer.write_batch(batch_buffer);
+            if result.is_ok() {
+                // Check rotation after successful write
+                let next_lsn = self.current_lsn.load(Ordering::Acquire) + 1;
+                if let Err(e) = writer.rotate_if_needed(next_lsn) {
+                    tracing::error!("WAL rotation failed: {e}");
+                    // Rotation failure is non-fatal — writes continue to current file
+                }
+            }
+            result
         };
 
         // Update stats
@@ -689,23 +700,14 @@ impl GroupCommitWal {
 
         for (i, request) in pending.drain(..).enumerate() {
             let result = match &write_result {
-                Ok(()) => WriteResult {
+                Ok(()) => Ok(WriteResult {
                     lsn: lsns[i],
                     size: sizes[i],
                     group_commit,
                     group_size,
                     wait_time,
-                },
-                Err(_) => {
-                    // On error, still send a result but it will indicate failure
-                    WriteResult {
-                        lsn: 0,
-                        size: 0,
-                        group_commit: false,
-                        group_size: 0,
-                        wait_time,
-                    }
-                }
+                }),
+                Err(e) => Err(format!("WAL write failed: {e}")),
             };
 
             let _ = request.completion.send(result);
@@ -814,6 +816,54 @@ impl WalWriter {
 
         self.position += data.len() as u64;
         Ok(())
+    }
+
+    /// Rotate the WAL file if the current file exceeds max_file_size.
+    ///
+    /// Flushes and syncs the current file, then creates a new WAL segment
+    /// named after the given LSN. Returns `true` if rotation occurred.
+    fn rotate_if_needed(&mut self, next_lsn: u64) -> io::Result<bool> {
+        if self.config.max_file_size == 0 || self.position < self.config.max_file_size {
+            return Ok(false);
+        }
+
+        // Sync and close current file
+        self.file.flush()?;
+        self.file.get_ref().sync_all()?;
+
+        // Truncate preallocated space to actual data length
+        if self.position < self.file.get_ref().metadata()?.len() {
+            self.file.get_ref().set_len(self.position)?;
+        }
+
+        // Create new WAL file named after the next LSN
+        let new_path = self.config.dir.join(format!("{:020}.wal", next_lsn));
+
+        tracing::info!(
+            old_file = %self.path.display(),
+            new_file = %new_path.display(),
+            old_size = self.position,
+            max_size = self.config.max_file_size,
+            "Rotating WAL file"
+        );
+
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&new_path)?;
+
+        // Pre-allocate new file
+        if self.config.preallocate_size > 0 {
+            file.set_len(self.config.preallocate_size)?;
+        }
+
+        self.file = BufWriter::with_capacity(self.config.max_batch_size, file);
+        self.path = new_path;
+        self.position = 0;
+
+        Ok(true)
     }
 
     fn sync(&mut self) -> io::Result<()> {
@@ -1193,5 +1243,76 @@ mod tests {
         let flags = RecordFlags(RecordFlags::COMPRESSED.0 | RecordFlags::ENCRYPTED.0);
         assert!(flags.is_compressed());
         assert!(flags.is_encrypted());
+    }
+
+    #[tokio::test]
+    async fn test_wal_rotation() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = WalConfig {
+            dir: temp_dir.path().to_path_buf(),
+            group_commit_window: Duration::from_micros(50),
+            max_file_size: 200, // Very small to trigger rotation quickly
+            preallocate_size: 0,
+            ..Default::default()
+        };
+
+        let wal = GroupCommitWal::new(config).await.unwrap();
+
+        // Write enough data to trigger rotation
+        for i in 0..10 {
+            let data = format!("rotation-record-{:04}", i);
+            let result = wal.write(Bytes::from(data)).await.unwrap();
+            assert!(result.lsn > 0);
+        }
+
+        wal.sync().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        wal.shutdown().await.unwrap();
+
+        // Check that multiple WAL files were created (rotation occurred)
+        let wal_files: Vec<_> = std::fs::read_dir(temp_dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "wal"))
+            .collect();
+
+        assert!(
+            wal_files.len() > 1,
+            "Expected multiple WAL files after rotation, got {}",
+            wal_files.len()
+        );
+    }
+
+    #[test]
+    fn test_wal_writer_rotate_if_needed() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = WalConfig {
+            dir: temp_dir.path().to_path_buf(),
+            max_file_size: 100,
+            preallocate_size: 0,
+            ..Default::default()
+        };
+
+        let path = temp_dir.path().join("00000000000000000000.wal");
+        let mut writer = WalWriter::new(path.clone(), config).unwrap();
+
+        // Write some data to push past max_file_size
+        writer.write_batch(&[0u8; 150]).unwrap();
+        assert_eq!(writer.position, 150);
+
+        // Should rotate
+        let rotated = writer.rotate_if_needed(42).unwrap();
+        assert!(rotated, "Expected rotation to occur");
+        assert_eq!(writer.position, 0);
+        assert_ne!(writer.path, path);
+        assert!(writer
+            .path
+            .to_str()
+            .unwrap()
+            .contains("00000000000000000042"));
+
+        // Should not rotate again immediately
+        let rotated = writer.rotate_if_needed(43).unwrap();
+        assert!(!rotated, "Expected no rotation when under max_file_size");
     }
 }

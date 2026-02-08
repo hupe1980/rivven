@@ -20,7 +20,6 @@ rivven-core = { workspace = true, features = ["cedar", "tls"] }
 rivven-cdc = { workspace = true, features = ["postgres", "mysql", "mariadb"] }
 rivven-client = { workspace = true, features = ["tls"] }
 rivven-connect = { workspace = true, features = ["rdbc-postgres", "kafka", "mqtt"] }
-rivven-rdbc = { workspace = true, features = ["postgres"] }
 rivven-protocol = { workspace = true, features = ["protobuf"] }
 rivven-schema = { workspace = true, features = ["server", "avro", "auth"] }
 rivvend = { workspace = true, features = ["tls", "protobuf"] }

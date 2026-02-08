@@ -142,6 +142,14 @@ impl PartitionPlacer {
         }
     }
 
+    /// Check if a node has capacity for more partitions (respects max_partitions_per_node)
+    fn node_has_capacity(&self, info: &NodePlacementInfo) -> bool {
+        if self.config.max_partitions_per_node == 0 {
+            return true; // 0 = unlimited
+        }
+        (info.leader_count + info.replica_count) < self.config.max_partitions_per_node as u32
+    }
+
     /// Assign replicas for a new partition
     pub fn assign_partition(
         &self,
@@ -256,12 +264,13 @@ impl PartitionPlacer {
         partition: u32,
         replication_factor: u16,
     ) -> Result<Vec<NodeId>> {
-        let eligible: Vec<_> = self
+        let mut eligible: Vec<_> = self
             .nodes
             .values()
-            .filter(|n| n.capabilities.replica_eligible)
+            .filter(|n| n.capabilities.replica_eligible && self.node_has_capacity(n))
             .map(|n| n.id.clone())
             .collect();
+        eligible.sort();
 
         if eligible.len() < replication_factor as usize {
             return Err(ClusterError::InvalidReplicationFactor {
@@ -286,7 +295,7 @@ impl PartitionPlacer {
         let mut eligible: Vec<_> = self
             .nodes
             .values()
-            .filter(|n| n.capabilities.replica_eligible)
+            .filter(|n| n.capabilities.replica_eligible && self.node_has_capacity(n))
             .collect();
 
         if eligible.len() < replication_factor as usize {

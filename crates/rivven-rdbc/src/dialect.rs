@@ -1,12 +1,29 @@
 //! SQL dialect abstraction for rivven-rdbc
 //!
-//! Provides vendor-agnostic SQL generation using sea-query:
+//! Provides vendor-agnostic SQL generation using sea-query for type-safe query
+//! building on PostgreSQL and MySQL, with manual SQL for SQL Server (no sea-query backend).
+//!
 //! - SqlDialect: Trait for database-specific SQL generation
-//! - Identifier quoting
+//! - Identifier quoting (handled by sea-query where possible)
 //! - Type mapping
-//! - Upsert strategies
+//! - Upsert strategies (ON CONFLICT, ON DUPLICATE KEY, MERGE)
 
 use crate::types::{ColumnMetadata, TableMetadata};
+use sea_query::{
+    Alias, Asterisk, Expr, IntoIden, MysqlQueryBuilder, OnConflict, Order, PostgresQueryBuilder,
+    Query, TableRef,
+};
+
+// ---------------------------------------------------------------------------
+// Helper: build a sea-query TableRef from optional schema + table name
+// ---------------------------------------------------------------------------
+
+fn sea_table_ref(schema: Option<&str>, table: &str) -> TableRef {
+    match schema {
+        Some(s) => TableRef::SchemaTable(Alias::new(s).into_iden(), Alias::new(table).into_iden()),
+        None => TableRef::Table(Alias::new(table).into_iden()),
+    }
+}
 
 /// SQL dialect for vendor-specific SQL generation
 pub trait SqlDialect: Send + Sync {
@@ -69,6 +86,10 @@ pub trait SqlDialect: Send + Sync {
     ) -> String;
 }
 
+// ===========================================================================
+// PostgreSQL — uses sea-query for upsert / delete / select
+// ===========================================================================
+
 /// PostgreSQL dialect
 #[derive(Debug, Clone, Default)]
 pub struct PostgresDialect;
@@ -97,8 +118,8 @@ impl SqlDialect for PostgresDialect {
     fn list_columns_sql(&self, schema: Option<&str>, table: &str) -> String {
         let schema = schema.unwrap_or("public");
         format!(
-            r#"SELECT 
-                c.column_name, 
+            r#"SELECT
+                c.column_name,
                 c.data_type,
                 c.is_nullable = 'YES' as nullable,
                 c.ordinal_position,
@@ -111,7 +132,7 @@ impl SqlDialect for PostgresDialect {
             LEFT JOIN (
                 SELECT ku.column_name, ku.ordinal_position
                 FROM information_schema.table_constraints tc
-                JOIN information_schema.key_column_usage ku 
+                JOIN information_schema.key_column_usage ku
                     ON tc.constraint_name = ku.constraint_name
                     AND tc.table_schema = ku.table_schema
                     AND tc.table_name = ku.table_name
@@ -126,9 +147,9 @@ impl SqlDialect for PostgresDialect {
     }
 
     fn native_type(&self, column: &ColumnMetadata) -> String {
-        let base_type = match column.type_name.to_uppercase().as_str() {
+        match column.type_name.to_uppercase().as_str() {
             "BOOLEAN" | "BOOL" => "BOOLEAN".to_string(),
-            "TINYINT" | "INT8" => "SMALLINT".to_string(), // Postgres doesn't have TINYINT
+            "TINYINT" | "INT8" => "SMALLINT".to_string(),
             "SMALLINT" | "INT16" => "SMALLINT".to_string(),
             "INTEGER" | "INT" | "INT32" => "INTEGER".to_string(),
             "BIGINT" | "INT64" => "BIGINT".to_string(),
@@ -153,69 +174,49 @@ impl SqlDialect for PostgresDialect {
             "JSON" => "JSON".to_string(),
             "JSONB" => "JSONB".to_string(),
             other => other.to_string(),
-        };
-        base_type
+        }
     }
 
     fn upsert_sql(&self, table: &TableMetadata, pk_columns: &[&str], columns: &[&str]) -> String {
-        let table_name = self.quote_identifier(&table.name);
-        let schema_prefix = table
-            .schema
-            .as_ref()
-            .map(|s| format!("{}.", self.quote_identifier(s)))
-            .unwrap_or_default();
+        let tbl = sea_table_ref(table.schema.as_deref(), &table.name);
 
-        let cols: Vec<_> = columns.iter().map(|c| self.quote_identifier(c)).collect();
-        let placeholders: Vec<_> = (1..=columns.len()).map(|i| self.placeholder(i)).collect();
-
+        let col_idens: Vec<_> = columns.iter().map(|c| Alias::new(*c).into_iden()).collect();
         let update_cols: Vec<_> = columns
             .iter()
             .filter(|c| !pk_columns.contains(c))
-            .map(|c| {
-                format!(
-                    "{} = EXCLUDED.{}",
-                    self.quote_identifier(c),
-                    self.quote_identifier(c)
-                )
-            })
+            .map(|c| Alias::new(*c).into_iden())
             .collect();
-
-        let pk_cols: Vec<_> = pk_columns
+        let pk_idens: Vec<_> = pk_columns
             .iter()
-            .map(|c| self.quote_identifier(c))
+            .map(|c| Alias::new(*c).into_iden())
             .collect();
 
-        format!(
-            "INSERT INTO {}{} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}",
-            schema_prefix,
-            table_name,
-            cols.join(", "),
-            placeholders.join(", "),
-            pk_cols.join(", "),
-            update_cols.join(", ")
-        )
+        let values: Vec<_> = (1..=columns.len())
+            .map(|i| Expr::cust(format!("${}", i)))
+            .collect();
+
+        let mut on_conflict = OnConflict::columns(pk_idens);
+        on_conflict.update_columns(update_cols);
+
+        let mut stmt = Query::insert();
+        stmt.into_table(tbl)
+            .columns(col_idens)
+            .values_panic(values)
+            .on_conflict(on_conflict.to_owned());
+
+        stmt.to_string(PostgresQueryBuilder)
     }
 
     fn delete_sql(&self, table: &TableMetadata, pk_columns: &[&str]) -> String {
-        let table_name = self.quote_identifier(&table.name);
-        let schema_prefix = table
-            .schema
-            .as_ref()
-            .map(|s| format!("{}.", self.quote_identifier(s)))
-            .unwrap_or_default();
+        let tbl = sea_table_ref(table.schema.as_deref(), &table.name);
 
-        let conditions: Vec<_> = pk_columns
-            .iter()
-            .enumerate()
-            .map(|(i, c)| format!("{} = {}", self.quote_identifier(c), self.placeholder(i + 1)))
-            .collect();
+        let mut stmt = Query::delete();
+        stmt.from_table(tbl);
+        for (i, col) in pk_columns.iter().enumerate() {
+            stmt.and_where(Expr::col(Alias::new(*col)).eq(Expr::cust(format!("${}", i + 1))));
+        }
 
-        format!(
-            "DELETE FROM {}{} WHERE {}",
-            schema_prefix,
-            table_name,
-            conditions.join(" AND ")
-        )
+        stmt.to_string(PostgresQueryBuilder)
     }
 
     fn supports_returning(&self) -> bool {
@@ -267,51 +268,46 @@ impl SqlDialect for PostgresDialect {
         limit: Option<u64>,
         offset: Option<u64>,
     ) -> String {
-        let table_name = match schema {
-            Some(s) => format!(
-                "{}.{}",
-                self.quote_identifier(s),
-                self.quote_identifier(table)
-            ),
-            None => self.quote_identifier(table),
-        };
+        let tbl = sea_table_ref(schema, table);
 
-        let cols = if columns.is_empty() {
-            "*".to_string()
+        let mut stmt = Query::select();
+        stmt.from(tbl);
+
+        if columns.is_empty() {
+            stmt.column(Asterisk);
         } else {
-            columns
-                .iter()
-                .map(|c| self.quote_identifier(c))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-
-        let mut sql = format!("SELECT {} FROM {}", cols, table_name);
-
-        if let Some(w) = where_clause {
-            sql.push_str(&format!(" WHERE {}", w));
-        }
-
-        if let Some(orders) = order_by {
-            if !orders.is_empty() {
-                let order_parts: Vec<_> = orders
-                    .iter()
-                    .map(|(col, asc)| {
-                        format!(
-                            "{} {}",
-                            self.quote_identifier(col),
-                            if *asc { "ASC" } else { "DESC" }
-                        )
-                    })
-                    .collect();
-                sql.push_str(&format!(" ORDER BY {}", order_parts.join(", ")));
+            for col in columns {
+                stmt.column(Alias::new(*col));
             }
         }
 
-        sql.push_str(&self.limit_offset_sql(limit, offset));
-        sql
+        if let Some(w) = where_clause {
+            stmt.and_where(Expr::cust(w));
+        }
+
+        if let Some(orders) = order_by {
+            for (col, asc) in orders {
+                stmt.order_by(
+                    Alias::new(*col),
+                    if *asc { Order::Asc } else { Order::Desc },
+                );
+            }
+        }
+
+        if let Some(l) = limit {
+            stmt.limit(l);
+        }
+        if let Some(o) = offset {
+            stmt.offset(o);
+        }
+
+        stmt.to_string(PostgresQueryBuilder)
     }
 }
+
+// ===========================================================================
+// MySQL — uses sea-query for upsert / delete / select
+// ===========================================================================
 
 /// MySQL dialect
 #[derive(Debug, Clone, Default)]
@@ -350,8 +346,8 @@ impl SqlDialect for MySqlDialect {
             .unwrap_or_else(|| "table_schema = DATABASE()".to_string());
 
         format!(
-            r#"SELECT 
-                column_name, 
+            r#"SELECT
+                column_name,
                 data_type,
                 is_nullable = 'YES' as nullable,
                 ordinal_position,
@@ -391,64 +387,42 @@ impl SqlDialect for MySqlDialect {
             "DATE" => "DATE".to_string(),
             "TIME" => "TIME".to_string(),
             "TIMESTAMP" | "DATETIME" | "TIMESTAMPTZ" => "DATETIME".to_string(),
-            "UUID" => "CHAR(36)".to_string(), // MySQL has no native UUID
+            "UUID" => "CHAR(36)".to_string(),
             "JSON" | "JSONB" => "JSON".to_string(),
             other => other.to_string(),
         }
     }
 
     fn upsert_sql(&self, table: &TableMetadata, _pk_columns: &[&str], columns: &[&str]) -> String {
-        // MySQL uses INSERT ... ON DUPLICATE KEY UPDATE
-        let table_name = self.quote_identifier(&table.name);
-        let schema_prefix = table
-            .schema
-            .as_ref()
-            .map(|s| format!("{}.", self.quote_identifier(s)))
-            .unwrap_or_default();
+        let tbl = sea_table_ref(table.schema.as_deref(), &table.name);
 
-        let cols: Vec<_> = columns.iter().map(|c| self.quote_identifier(c)).collect();
-        let placeholders: Vec<_> = columns.iter().map(|_| "?").collect();
+        let col_idens: Vec<_> = columns.iter().map(|c| Alias::new(*c).into_iden()).collect();
+        let update_cols: Vec<_> = columns.iter().map(|c| Alias::new(*c).into_iden()).collect();
 
-        let update_cols: Vec<_> = columns
-            .iter()
-            .map(|c| {
-                format!(
-                    "{} = VALUES({})",
-                    self.quote_identifier(c),
-                    self.quote_identifier(c)
-                )
-            })
-            .collect();
+        let values: Vec<_> = columns.iter().map(|_| Expr::cust("?")).collect();
 
-        format!(
-            "INSERT INTO {}{} ({}) VALUES ({}) ON DUPLICATE KEY UPDATE {}",
-            schema_prefix,
-            table_name,
-            cols.join(", "),
-            placeholders.join(", "),
-            update_cols.join(", ")
-        )
+        let mut on_conflict = OnConflict::new();
+        on_conflict.update_columns(update_cols);
+
+        let mut stmt = Query::insert();
+        stmt.into_table(tbl)
+            .columns(col_idens)
+            .values_panic(values)
+            .on_conflict(on_conflict.to_owned());
+
+        stmt.to_string(MysqlQueryBuilder)
     }
 
     fn delete_sql(&self, table: &TableMetadata, pk_columns: &[&str]) -> String {
-        let table_name = self.quote_identifier(&table.name);
-        let schema_prefix = table
-            .schema
-            .as_ref()
-            .map(|s| format!("{}.", self.quote_identifier(s)))
-            .unwrap_or_default();
+        let tbl = sea_table_ref(table.schema.as_deref(), &table.name);
 
-        let conditions: Vec<_> = pk_columns
-            .iter()
-            .map(|c| format!("{} = ?", self.quote_identifier(c)))
-            .collect();
+        let mut stmt = Query::delete();
+        stmt.from_table(tbl);
+        for col in pk_columns {
+            stmt.and_where(Expr::col(Alias::new(*col)).eq(Expr::cust("?")));
+        }
 
-        format!(
-            "DELETE FROM {}{} WHERE {}",
-            schema_prefix,
-            table_name,
-            conditions.join(" AND ")
-        )
+        stmt.to_string(MysqlQueryBuilder)
     }
 
     fn supports_returning(&self) -> bool {
@@ -467,7 +441,7 @@ impl SqlDialect for MySqlDialect {
         match (limit, offset) {
             (Some(l), Some(o)) => format!(" LIMIT {} OFFSET {}", l, o),
             (Some(l), None) => format!(" LIMIT {}", l),
-            (None, Some(o)) => format!(" LIMIT 18446744073709551615 OFFSET {}", o), // MySQL needs LIMIT with OFFSET
+            (None, Some(o)) => format!(" LIMIT 18446744073709551615 OFFSET {}", o),
             (None, None) => String::new(),
         }
     }
@@ -501,51 +475,46 @@ impl SqlDialect for MySqlDialect {
         limit: Option<u64>,
         offset: Option<u64>,
     ) -> String {
-        let table_name = match schema {
-            Some(s) => format!(
-                "{}.{}",
-                self.quote_identifier(s),
-                self.quote_identifier(table)
-            ),
-            None => self.quote_identifier(table),
-        };
+        let tbl = sea_table_ref(schema, table);
 
-        let cols = if columns.is_empty() {
-            "*".to_string()
+        let mut stmt = Query::select();
+        stmt.from(tbl);
+
+        if columns.is_empty() {
+            stmt.column(Asterisk);
         } else {
-            columns
-                .iter()
-                .map(|c| self.quote_identifier(c))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-
-        let mut sql = format!("SELECT {} FROM {}", cols, table_name);
-
-        if let Some(w) = where_clause {
-            sql.push_str(&format!(" WHERE {}", w));
-        }
-
-        if let Some(orders) = order_by {
-            if !orders.is_empty() {
-                let order_parts: Vec<_> = orders
-                    .iter()
-                    .map(|(col, asc)| {
-                        format!(
-                            "{} {}",
-                            self.quote_identifier(col),
-                            if *asc { "ASC" } else { "DESC" }
-                        )
-                    })
-                    .collect();
-                sql.push_str(&format!(" ORDER BY {}", order_parts.join(", ")));
+            for col in columns {
+                stmt.column(Alias::new(*col));
             }
         }
 
-        sql.push_str(&self.limit_offset_sql(limit, offset));
-        sql
+        if let Some(w) = where_clause {
+            stmt.and_where(Expr::cust(w));
+        }
+
+        if let Some(orders) = order_by {
+            for (col, asc) in orders {
+                stmt.order_by(
+                    Alias::new(*col),
+                    if *asc { Order::Asc } else { Order::Desc },
+                );
+            }
+        }
+
+        if let Some(l) = limit {
+            stmt.limit(l);
+        }
+        if let Some(o) = offset {
+            stmt.offset(o);
+        }
+
+        stmt.to_string(MysqlQueryBuilder)
     }
 }
+
+// ===========================================================================
+// SQL Server — manual SQL (sea-query has no MSSQL backend)
+// ===========================================================================
 
 /// SQL Server dialect
 #[derive(Debug, Clone, Default)]
@@ -575,7 +544,7 @@ impl SqlDialect for SqlServerDialect {
     fn list_columns_sql(&self, schema: Option<&str>, table: &str) -> String {
         let schema = schema.unwrap_or("dbo");
         format!(
-            r#"SELECT 
+            r#"SELECT
                 c.COLUMN_NAME as column_name,
                 c.DATA_TYPE as data_type,
                 CASE c.IS_NULLABLE WHEN 'YES' THEN 1 ELSE 0 END as nullable,
@@ -590,7 +559,7 @@ impl SqlDialect for SqlServerDialect {
             LEFT JOIN (
                 SELECT ku.COLUMN_NAME
                 FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc
-                JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku 
+                JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE ku
                     ON tc.CONSTRAINT_NAME = ku.CONSTRAINT_NAME
                 WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
                     AND tc.TABLE_SCHEMA = '{}'
@@ -626,13 +595,13 @@ impl SqlDialect for SqlServerDialect {
             "TIME" => "TIME".to_string(),
             "TIMESTAMP" | "DATETIME" | "TIMESTAMPTZ" => "DATETIME2".to_string(),
             "UUID" => "UNIQUEIDENTIFIER".to_string(),
-            "JSON" | "JSONB" => "NVARCHAR(MAX)".to_string(), // SQL Server stores JSON as string
+            "JSON" | "JSONB" => "NVARCHAR(MAX)".to_string(),
             other => other.to_string(),
         }
     }
 
     fn upsert_sql(&self, table: &TableMetadata, pk_columns: &[&str], columns: &[&str]) -> String {
-        // SQL Server uses MERGE statement
+        // SQL Server uses MERGE — no sea-query support
         let table_name = self.quote_identifier(&table.name);
         let schema_prefix = table
             .schema
@@ -819,6 +788,10 @@ impl SqlDialect for SqlServerDialect {
     }
 }
 
+// ===========================================================================
+// MariaDB — delegates to MySQL (sea-query), overrides where behaviour differs
+// ===========================================================================
+
 /// MariaDB dialect (inherits from MySQL but adds RETURNING support since 10.5)
 #[derive(Debug, Clone, Default)]
 pub struct MariaDbDialect;
@@ -853,8 +826,6 @@ impl SqlDialect for MariaDbDialect {
     }
 
     fn upsert_sql(&self, table: &TableMetadata, pk_columns: &[&str], columns: &[&str]) -> String {
-        // MariaDB 10.5+ supports INSERT ... ON DUPLICATE KEY UPDATE ... RETURNING
-        // But for upsert we'll use same syntax as MySQL
         MySqlDialect.upsert_sql(table, pk_columns, columns)
     }
 
@@ -863,7 +834,7 @@ impl SqlDialect for MariaDbDialect {
     }
 
     fn supports_returning(&self) -> bool {
-        true // MariaDB 10.5+ supports RETURNING
+        true // MariaDB 10.5+
     }
 
     fn supports_merge(&self) -> bool {
@@ -871,7 +842,7 @@ impl SqlDialect for MariaDbDialect {
     }
 
     fn supports_on_conflict(&self) -> bool {
-        false // Uses ON DUPLICATE KEY like MySQL
+        false
     }
 
     fn limit_offset_sql(&self, limit: Option<u64>, offset: Option<u64>) -> String {
@@ -891,7 +862,7 @@ impl SqlDialect for MariaDbDialect {
             "TRUE"
         } else {
             "FALSE"
-        } // MariaDB supports TRUE/FALSE
+        }
     }
 
     fn build_select(
@@ -934,7 +905,6 @@ mod tests {
     #[test]
     fn test_postgres_dialect() {
         let dialect = PostgresDialect;
-
         assert_eq!(dialect.quote_identifier("users"), "\"users\"");
         assert_eq!(dialect.placeholder(1), "$1");
         assert!(dialect.supports_returning());
@@ -944,7 +914,6 @@ mod tests {
     #[test]
     fn test_mysql_dialect() {
         let dialect = MySqlDialect;
-
         assert_eq!(dialect.quote_identifier("users"), "`users`");
         assert_eq!(dialect.placeholder(1), "?");
         assert!(!dialect.supports_returning());
@@ -954,10 +923,9 @@ mod tests {
     #[test]
     fn test_mariadb_dialect() {
         let dialect = MariaDbDialect;
-
         assert_eq!(dialect.quote_identifier("users"), "`users`");
         assert_eq!(dialect.placeholder(1), "?");
-        assert!(dialect.supports_returning()); // MariaDB 10.5+ supports RETURNING
+        assert!(dialect.supports_returning());
         assert!(!dialect.supports_on_conflict());
         assert_eq!(dialect.boolean_literal(true), "TRUE");
         assert_eq!(dialect.boolean_literal(false), "FALSE");
@@ -967,14 +935,12 @@ mod tests {
     fn test_mariadb_native_uuid() {
         let dialect = MariaDbDialect;
         let col = ColumnMetadata::new("id", "UUID");
-        // MariaDB 10.7+ has native UUID type
         assert_eq!(dialect.native_type(&col), "UUID");
     }
 
     #[test]
     fn test_sqlserver_dialect() {
         let dialect = SqlServerDialect;
-
         assert_eq!(dialect.quote_identifier("users"), "[users]");
         assert_eq!(dialect.placeholder(1), "@p1");
         assert!(dialect.supports_returning());
@@ -984,7 +950,6 @@ mod tests {
     #[test]
     fn test_build_select() {
         let dialect = PostgresDialect;
-
         let sql = dialect.build_select(
             Some("public"),
             "users",
@@ -994,7 +959,6 @@ mod tests {
             Some(10),
             Some(20),
         );
-
         assert!(sql.contains("SELECT"));
         assert!(sql.contains("\"public\".\"users\""));
         assert!(sql.contains("WHERE id > 0"));
@@ -1007,10 +971,8 @@ mod tests {
     fn test_upsert_postgres() {
         let mut table = TableMetadata::new("users");
         table.schema = Some("public".into());
-
         let dialect = PostgresDialect;
         let sql = dialect.upsert_sql(&table, &["id"], &["id", "name", "email"]);
-
         assert!(sql.contains("INSERT INTO"));
         assert!(sql.contains("ON CONFLICT"));
         assert!(sql.contains("DO UPDATE SET"));
@@ -1019,10 +981,8 @@ mod tests {
     #[test]
     fn test_upsert_mysql() {
         let table = TableMetadata::new("users");
-
         let dialect = MySqlDialect;
         let sql = dialect.upsert_sql(&table, &["id"], &["id", "name", "email"]);
-
         assert!(sql.contains("INSERT INTO"));
         assert!(sql.contains("ON DUPLICATE KEY UPDATE"));
     }
@@ -1031,19 +991,27 @@ mod tests {
     fn test_upsert_sqlserver() {
         let mut table = TableMetadata::new("users");
         table.schema = Some("dbo".into());
-
         let dialect = SqlServerDialect;
         let sql = dialect.upsert_sql(&table, &["id"], &["id", "name", "email"]);
-
         assert!(sql.contains("MERGE"));
         assert!(sql.contains("WHEN MATCHED THEN UPDATE"));
         assert!(sql.contains("WHEN NOT MATCHED THEN INSERT"));
     }
 
     #[test]
+    fn test_postgres_delete_sql() {
+        let mut table = TableMetadata::new("users");
+        table.schema = Some("public".into());
+        let dialect = PostgresDialect;
+        let sql = dialect.delete_sql(&table, &["id"]);
+        assert!(sql.contains("DELETE FROM"));
+        assert!(sql.contains("WHERE"));
+        assert!(sql.contains("$1"));
+    }
+
+    #[test]
     fn test_native_types() {
         let col = ColumnMetadata::new("amount", "DECIMAL");
-
         assert_eq!(PostgresDialect.native_type(&col), "NUMERIC");
         assert!(MySqlDialect.native_type(&col).starts_with("DECIMAL"));
         assert!(SqlServerDialect.native_type(&col).starts_with("DECIMAL"));
@@ -1055,5 +1023,57 @@ mod tests {
         assert_eq!(dialect_for("mysql").name(), "MySQL");
         assert_eq!(dialect_for("mariadb").name(), "MariaDB");
         assert_eq!(dialect_for("sqlserver").name(), "SQL Server");
+    }
+
+    // sea-query specific: verify generated SQL is well-formed
+    #[test]
+    fn test_sea_query_postgres_upsert_output() {
+        let mut table = TableMetadata::new("users");
+        table.schema = Some("public".into());
+        let sql = PostgresDialect.upsert_sql(&table, &["id"], &["id", "name", "email"]);
+        assert!(sql.starts_with("INSERT INTO"));
+        assert!(sql.contains("\"public\".\"users\""));
+        assert!(sql.contains("$1"));
+        assert!(sql.contains("$2"));
+        assert!(sql.contains("$3"));
+        assert!(sql.contains("\"name\" = \"excluded\".\"name\""));
+        assert!(sql.contains("\"email\" = \"excluded\".\"email\""));
+    }
+
+    #[test]
+    fn test_sea_query_mysql_upsert_output() {
+        let table = TableMetadata::new("orders");
+        let sql = MySqlDialect.upsert_sql(&table, &["id"], &["id", "total", "status"]);
+        assert!(sql.starts_with("INSERT INTO"));
+        assert!(sql.contains("`orders`"));
+        assert!(sql.contains("VALUES (?, ?, ?)"));
+        assert!(sql.contains("ON DUPLICATE KEY UPDATE"));
+    }
+
+    #[test]
+    fn test_sea_query_postgres_select_wildcard() {
+        let sql = PostgresDialect.build_select(None, "events", &[], None, None, Some(100), None);
+        assert!(sql.contains("SELECT *"));
+        assert!(sql.contains("\"events\""));
+        assert!(sql.contains("LIMIT 100"));
+    }
+
+    #[test]
+    fn test_sea_query_mysql_select_with_order() {
+        let sql = MySqlDialect.build_select(
+            Some("mydb"),
+            "logs",
+            &["ts", "msg"],
+            Some("level = 'ERROR'"),
+            Some(&[("ts", false)]),
+            Some(50),
+            Some(10),
+        );
+        assert!(sql.contains("`mydb`.`logs`"));
+        assert!(sql.contains("level = 'ERROR'"));
+        assert!(sql.contains("ORDER BY"));
+        assert!(sql.contains("DESC"));
+        assert!(sql.contains("LIMIT 50"));
+        assert!(sql.contains("OFFSET 10"));
     }
 }

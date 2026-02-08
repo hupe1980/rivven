@@ -168,15 +168,18 @@ To implement a client in another language:
 
 ### Proto Message Types
 
-| Message Type | Description |
-|:-------------|:------------|
-| `Request` | Wrapper with header + oneof request types |
-| `Response` | Wrapper with header + oneof response types |
-| `Record` | Key, value, headers, timestamp |
-| `BatchPublishRequest` | Grouped by partition for efficiency |
-| `ConsumeResponse` | Records with high watermark |
-| `GetMetadataResponse` | Topic/partition/broker info |
-| `ErrorCode` | Comprehensive error enum |
+The protobuf schema defines 31+ message types covering all major protocol operations:
+
+| Category | Message Types |
+|:---------|:--------------|
+| **Core** | `Request`, `Response`, `Record`, `ErrorCode` |
+| **Publish/Consume** | `PublishRequest`, `BatchPublishRequest`, `ConsumeResponse` |
+| **Metadata** | `GetMetadataResponse`, `GetClusterMetadataResponse`, `GetOffsetBoundsResponse` |
+| **Consumer Groups** | `ListGroupsResponse`, `DescribeGroupResponse`, `DeleteGroupResponse` |
+| **Transactions** | `BeginTransactionResponse`, `CommitTransactionResponse`, `AbortTransactionResponse` |
+| **Idempotent** | `InitProducerIdResponse`, `IdempotentPublishResponse` |
+| **Admin** | `AlterTopicConfigRequest`, `DescribeTopicConfigsResponse`, `CreatePartitionsRequest`, `DeleteRecordsRequest` |
+| **Time Queries** | `GetOffsetForTimestampRequest` / `Response` |
 
 ## License
 

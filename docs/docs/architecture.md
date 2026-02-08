@@ -304,6 +304,15 @@ Optimized for streaming workloads:
 | `ConcurrentHashMap` | Partition lookup | Sharded RwLocks |
 | `AppendOnlyLog` | Sequential writes | Single-writer |
 | `ConcurrentSkipList` | Range queries | Lock-free traversal |
+| `TokenBucketRateLimiter` | Connector throughput control | Fully lock-free (AtomicU64 CAS for refill + acquire) |
+
+#### Partition Append Optimization
+
+The partition append path avoids unnecessary copies:
+
+- **No message clone**: When tiered storage is enabled, the message is serialized once before being consumed by the log manager. The pre-serialized bytes are reused for the tiered storage write path.
+- **Lock-free offset allocation**: Next offset is allocated via `AtomicU64::fetch_add` (AcqRel ordering).
+- **Single-pass consume**: The consume handler combines isolation-level filtering and protocol conversion into a single iterator pass, avoiding intermediate `Vec` allocations.
 
 #### Buffer Pooling
 
@@ -315,11 +324,11 @@ Slab allocation with thread-local caching:
 
 #### Vectorized Batch Processing
 
-SIMD-accelerated operations:
+Accelerated batch operations (delegates to `crc32fast`/`memchr` for SIMD when available):
 
-- **CRC32**: 4-8x faster with SSE4.2/AVX2
-- **Batch Encoding**: 2-4x faster than sequential
-- **Memory Search**: memchr SIMD acceleration
+- **CRC32**: Delegates to crc32fast (uses SSE4.2/AVX2 when available)
+- **Batch Encoding**: 2-4x faster than sequential (cache-optimized)
+- **Memory Search**: Delegates to memchr crate (uses SIMD when available)
 
 #### Group Commit WAL
 
@@ -329,19 +338,19 @@ Write batching for 10-100x throughput improvement:
 - **Batch Size**: Trigger flush at threshold (default: 4 MB)
 - **Pending Writes**: Flush after N writes (default: 1000)
 
-### io_uring Async I/O (Linux)
+### Async I/O (Portable, io_uring-style API)
 
-On Linux 5.6+, Rivven uses **io_uring** for kernel-bypassing async I/O:
+Rivven provides a portable async I/O layer with an io_uring-style API. The current implementation uses `std::fs::File` behind `parking_lot::Mutex` as a portable fallback; the API is designed for a future true io_uring backend on Linux 5.6+:
 
-- **Submission Queue** - Batch I/O operations without syscalls
-- **Completion Queue** - Poll results without context switches
-- **Registered Buffers** - Zero-copy with pre-registered memory
+- **Submission Queue** - Batch I/O operations
+- **Completion Queue** - Poll results
+- **Registered Buffers** - Pre-registered memory for zero-copy
 
 ```
 ┌────────────┐     ┌─────────────────┐     ┌────────────┐
-│ Application│     │    io_uring     │     │   Kernel   │
-│   Thread   │────>│ Submission Ring │────>│  I/O Path  │
-│            │<────│ Completion Ring │<────│            │
+│ Application│     │ Async I/O Layer │     │   Kernel   │
+│   Thread   │────>│  (io_uring API) │────>│  I/O Path  │
+│            │<────│ (std::fs impl)  │<────│            │
 └────────────┘     └─────────────────┘     └────────────┘
 ```
 
@@ -381,11 +390,12 @@ Rivven minimizes data copying throughout the stack:
 
 ### Raft Consensus
 
-For clusters, Rivven uses **Raft** for:
+For clusters, Rivven uses **Raft** (via openraft) for:
 
-- Leader election
+- Leader election (deterministic: lowest node ID wins ties)
 - Log replication
 - Membership changes
+- **Authenticated API**: All Raft management endpoints require authentication middleware
 
 ```
 ┌─────────┐     ┌─────────┐     ┌─────────┐
@@ -403,7 +413,8 @@ For membership and failure detection:
 
 - Epidemic protocol for state propagation
 - Suspicion mechanism for false-positive reduction
-- Efficient O(log n) convergence
+- Efficient O(N) protocol-period dissemination
+- **HMAC-authenticated protocol messages** prevent cluster poisoning
 
 ### ISR Replication
 

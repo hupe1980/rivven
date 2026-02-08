@@ -3,8 +3,8 @@
 //! Provides security validation for identifiers, limits, and configuration.
 //! Used to prevent injection attacks, path traversal, and resource exhaustion.
 
-use once_cell::sync::Lazy;
 use regex::Regex;
+use std::sync::LazyLock;
 
 /// Maximum allowed identifier length (255 for flexibility, matches PostgreSQL)
 pub const MAX_IDENTIFIER_LENGTH: usize = 255;
@@ -19,13 +19,13 @@ pub const MIN_TOPIC_NAME_LENGTH: usize = 1;
 pub const MAX_TOPIC_NAME_LENGTH: usize = 255;
 
 /// Regex for validating SQL-style identifiers
-static IDENTIFIER_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]{0,254}$").unwrap());
+static IDENTIFIER_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]{0,254}$").unwrap());
 
 /// Regex for validating topic names (allows dots, hyphens, underscores)
 /// Matches Kafka topic naming conventions
-static TOPIC_NAME_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,254}$").unwrap());
+static TOPIC_NAME_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,254}$").unwrap());
 
 /// Validation error type
 #[derive(Debug, Clone, PartialEq, Eq)]

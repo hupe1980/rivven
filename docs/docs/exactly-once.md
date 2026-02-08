@@ -136,6 +136,8 @@ Empty ──────> Ongoing ──────> PrepareCommit ────
                  └───────> PrepareAbort ───────> CompleteAbort
 ```
 
+**Limits:** The broker enforces a maximum of 5 concurrent pending transactions per producer to prevent resource exhaustion. Exceeding this limit returns `TooManyTransactions`.
+
 ### API Reference
 
 #### Begin Transaction

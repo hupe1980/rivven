@@ -171,9 +171,16 @@ impl ClusterConfigBuilder {
     pub fn build(self) -> ClusterConfig {
         ClusterConfig {
             mode: ClusterMode::Cluster,
-            node_id: self
-                .node_id
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            node_id: self.node_id.unwrap_or_else(|| {
+                let id = uuid::Uuid::new_v4().to_string();
+                tracing::warn!(
+                    node_id = %id,
+                    "node_id not configured — generated random UUID. \
+                     Restarting without explicit node_id creates a new identity, \
+                     losing all state associated with the previous node."
+                );
+                id
+            }),
             rack: self.rack,
             data_dir: self.data_dir.unwrap_or_else(|| PathBuf::from("./data")),
             client_addr: self
@@ -212,6 +219,13 @@ pub struct SwimConfig {
 
     /// Interval for full state sync
     pub sync_interval: Duration,
+
+    /// Shared secret for HMAC-SHA256 authentication of SWIM messages.
+    /// When set, all outgoing messages include an HMAC tag and all incoming
+    /// messages are verified before processing. Prevents unauthorized nodes
+    /// from joining the cluster or injecting gossip messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_token: Option<String>,
 }
 
 impl Default for SwimConfig {
@@ -223,6 +237,7 @@ impl Default for SwimConfig {
             suspicion_multiplier: 4,
             max_gossip_updates: 10,
             sync_interval: Duration::from_secs(30),
+            auth_token: None,
         }
     }
 }

@@ -14,6 +14,7 @@ use crate::metadata::{MetadataCommand, MetadataStore};
 use crate::node::{NodeId, NodeInfo};
 use crate::partition::{PartitionId, TopicConfig};
 use crate::placement::{PartitionPlacer, PlacementConfig};
+use crate::raft::RaftNode;
 use crate::replication::ReplicationManager;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
@@ -47,8 +48,15 @@ pub struct ClusterCoordinator {
     /// Current coordinator state
     state: RwLock<CoordinatorState>,
 
-    /// Metadata store (Raft-replicated)
+    /// Local metadata store (used in standalone/test mode when no Raft node is wired)
     metadata: Arc<MetadataStore>,
+
+    /// Raft consensus node — when available, ALL state mutations go through Raft
+    /// and reads use the Raft state machine's authoritative metadata.
+    /// This is `None` only in standalone test scenarios (e.g. unit tests).
+    /// Wrapped in Arc<RwLock<Option<...>>> so spawned tasks (e.g. membership event handler)
+    /// can access it even when set_raft_node() is called after start().
+    raft_node: Arc<RwLock<Option<Arc<RwLock<RaftNode>>>>>,
 
     /// Cluster membership (SWIM protocol)
     membership: Option<Arc<Membership>>,
@@ -59,11 +67,11 @@ pub struct ClusterCoordinator {
     /// Replication manager
     replication: Arc<ReplicationManager>,
 
-    /// Current Raft leader
+    /// Current Raft leader (used only when raft_node is None)
     raft_leader: RwLock<Option<NodeId>>,
 
-    /// Whether we are the Raft leader
-    is_leader: RwLock<bool>,
+    /// Whether we are the Raft leader (used only when raft_node is None)
+    is_leader_flag: RwLock<bool>,
 
     /// Shutdown signal
     shutdown_tx: broadcast::Sender<()>,
@@ -98,11 +106,12 @@ impl ClusterCoordinator {
             local_node,
             state: RwLock::new(CoordinatorState::Starting),
             metadata,
+            raft_node: Arc::new(RwLock::new(None)),
             membership: None,
             placer: RwLock::new(placer),
             replication,
             raft_leader: RwLock::new(None),
-            is_leader: RwLock::new(false),
+            is_leader_flag: RwLock::new(false),
             shutdown_tx,
         })
     }
@@ -113,7 +122,7 @@ impl ClusterCoordinator {
 
         // In standalone mode, we are always the leader
         *coordinator.state.write().await = CoordinatorState::Leader;
-        *coordinator.is_leader.write().await = true;
+        *coordinator.is_leader_flag.write().await = true;
 
         // Register ourselves in metadata
         let local_node = coordinator.local_node.clone();
@@ -176,7 +185,7 @@ impl ClusterCoordinator {
         }
 
         *self.state.write().await = CoordinatorState::Leader;
-        *self.is_leader.write().await = true;
+        *self.is_leader_flag.write().await = true;
 
         info!(node_id = %self.config.node_id, "Started in standalone mode");
         Ok(())
@@ -198,11 +207,12 @@ impl ClusterCoordinator {
         let mut events = membership.subscribe();
         let metadata = self.metadata.clone();
         let node_id = self.config.node_id.clone();
+        let raft_node = self.raft_node.clone();
 
         // Spawn membership event handler
         tokio::spawn(async move {
             while let Ok(event) = events.recv().await {
-                Self::handle_membership_event(&metadata, &node_id, event).await;
+                Self::handle_membership_event(&metadata, &node_id, event, &raft_node).await;
             }
         });
 
@@ -214,13 +224,12 @@ impl ClusterCoordinator {
         self.membership = Some(Arc::new(membership));
         *self.state.write().await = CoordinatorState::Follower;
 
-        // Raft consensus is managed by RaftNode which is started separately.
-        // The coordinator tracks local leadership state based on SWIM membership.
-        // For the initial cluster bootstrap, the first node (no seeds) becomes leader.
-        // In steady state, leadership is determined by Raft consensus in RaftNode.
+        // Raft consensus is managed by RaftNode which is wired in via set_raft_node().
+        // The coordinator checks RaftNode.is_leader() for authoritative leadership.
+        // For the initial cluster bootstrap, the first node (no seeds) starts as leader.
         if self.config.seeds.is_empty() {
             *self.state.write().await = CoordinatorState::Leader;
-            *self.is_leader.write().await = true;
+            *self.is_leader_flag.write().await = true;
             info!(node_id = %self.config.node_id, "Started as cluster leader (first node)");
         } else {
             info!(node_id = %self.config.node_id, "Started as cluster follower");
@@ -229,46 +238,32 @@ impl ClusterCoordinator {
         Ok(())
     }
 
-    /// Handle membership events
+    /// Handle membership events.
+    ///
+    /// When Raft is wired, proposes RegisterNode/DeregisterNode through Raft consensus
+    /// for replicated consistency. Falls back to local MetadataStore hints when Raft
+    /// is not yet available (e.g. during bootstrap before set_raft_node() is called).
     async fn handle_membership_event(
         metadata: &MetadataStore,
         _local_node_id: &str,
         event: MembershipEvent,
+        raft_node: &RwLock<Option<Arc<RwLock<RaftNode>>>>,
     ) {
-        // Note: These are local metadata updates triggered by SWIM membership events.
-        // We use index 0 to indicate "locally applied, not Raft-replicated" changes.
-        // These are hints for routing - actual authoritative state comes from Raft.
-        // The Raft consensus layer will replicate proper node registrations with
-        // actual log indices during normal cluster operation.
         match event {
             MembershipEvent::NodeJoined(info) => {
                 info!(node_id = %info.id, "Node joined cluster");
-                // Apply local hint for immediate routing (Raft will replicate authoritatively)
-                metadata
-                    .apply(
-                        0, // Local hint index - Raft replication uses proper indices
-                        MetadataCommand::RegisterNode { info },
-                    )
-                    .await;
+                let cmd = MetadataCommand::RegisterNode { info };
+                Self::apply_membership_command(metadata, cmd, raft_node).await;
             }
             MembershipEvent::NodeLeft(node_id) => {
                 info!(node_id = %node_id, "Node left cluster gracefully");
-                metadata
-                    .apply(
-                        0, // Local hint index
-                        MetadataCommand::DeregisterNode { node_id },
-                    )
-                    .await;
+                let cmd = MetadataCommand::DeregisterNode { node_id };
+                Self::apply_membership_command(metadata, cmd, raft_node).await;
             }
             MembershipEvent::NodeFailed(node_id) => {
                 warn!(node_id = %node_id, "Node failed");
-                // Trigger partition reassignment for failed node
-                metadata
-                    .apply(
-                        0, // Local hint index
-                        MetadataCommand::DeregisterNode { node_id },
-                    )
-                    .await;
+                let cmd = MetadataCommand::DeregisterNode { node_id };
+                Self::apply_membership_command(metadata, cmd, raft_node).await;
             }
             MembershipEvent::NodeSuspected(node_id) => {
                 debug!(node_id = %node_id, "Node suspected");
@@ -282,16 +277,135 @@ impl ClusterCoordinator {
         }
     }
 
+    /// Apply a membership command: through Raft if available (leader only proposes),
+    /// otherwise apply locally as a hint.
+    async fn apply_membership_command(
+        metadata: &MetadataStore,
+        cmd: MetadataCommand,
+        raft_node: &RwLock<Option<Arc<RwLock<RaftNode>>>>,
+    ) {
+        let raft_guard = raft_node.read().await;
+        if let Some(ref raft) = *raft_guard {
+            let raft_lock = raft.read().await;
+            // Only the leader proposes through Raft to avoid duplicate proposals
+            if raft_lock.is_leader() {
+                if let Err(e) = raft_lock.propose(cmd).await {
+                    warn!("Failed to propose membership command through Raft: {e}");
+                }
+                return;
+            }
+            // Followers: apply locally as hint for routing.
+            // The leader's Raft proposal will eventually replicate to all nodes.
+            drop(raft_lock);
+            drop(raft_guard);
+            metadata.apply(0, cmd).await;
+        } else {
+            // No Raft node yet (bootstrap phase): apply locally
+            drop(raft_guard);
+            metadata.apply(0, cmd).await;
+        }
+    }
+
+    /// Wire a Raft consensus node into this coordinator.
+    ///
+    /// When set, all state mutations (create_topic, delete_topic, elect leader) go through
+    /// Raft consensus for replicated consistency. Reads use the Raft state machine's
+    /// authoritative metadata. Without a Raft node, the coordinator falls back to the
+    /// local MetadataStore (standalone/test mode).
+    pub fn set_raft_node(&mut self, raft_node: Arc<RwLock<RaftNode>>) {
+        // Update the shared raft_node so all spawned tasks (membership handler, etc.)
+        // immediately start routing mutations through Raft consensus.
+        // Note: we use try_write() to avoid blocking; falling back to blocking write
+        // since set_raft_node is called once during initialization.
+        let mut guard = self
+            .raft_node
+            .try_write()
+            .expect("raft_node lock not contended during init");
+        *guard = Some(raft_node);
+    }
+
+    /// Apply a metadata command through the appropriate channel.
+    ///
+    /// When Raft is wired, uses Raft consensus for replicated consistency.
+    /// Falls back to local metadata store for standalone/test usage.
+    async fn apply_command(&self, cmd: MetadataCommand) -> Result<()> {
+        let raft_guard = self.raft_node.read().await;
+        if let Some(ref raft_node) = *raft_guard {
+            let raft = raft_node.read().await;
+            raft.propose(cmd).await?;
+        } else {
+            drop(raft_guard);
+            self.metadata.apply(0, cmd).await;
+        }
+        Ok(())
+    }
+
+    /// Execute a closure with read access to the current cluster metadata.
+    ///
+    /// Routes to Raft state machine when available for authoritative reads,
+    /// otherwise uses the local metadata store.
+    async fn with_metadata<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&crate::metadata::ClusterMetadata) -> R,
+    {
+        let raft_guard = self.raft_node.read().await;
+        if let Some(ref raft_node) = *raft_guard {
+            let raft = raft_node.read().await;
+            let meta = raft.metadata().await;
+            f(&meta)
+        } else {
+            drop(raft_guard);
+            let meta = self.metadata.read().await;
+            f(&meta)
+        }
+    }
+
+    /// Check if we are the cluster leader.
+    ///
+    /// When Raft is wired, checks the Raft node's authoritative leadership state.
+    /// Otherwise falls back to the local is_leader flag.
+    async fn check_is_leader(&self) -> bool {
+        let raft_guard = self.raft_node.read().await;
+        if let Some(ref raft_node) = *raft_guard {
+            let raft = raft_node.read().await;
+            raft.is_leader()
+        } else {
+            drop(raft_guard);
+            *self.is_leader_flag.read().await
+        }
+    }
+
+    /// Get current Raft leader node ID.
+    async fn current_leader(&self) -> Option<NodeId> {
+        let raft_guard = self.raft_node.read().await;
+        if let Some(ref raft_node) = *raft_guard {
+            let raft = raft_node.read().await;
+            raft.leader().map(|leader_id| {
+                if leader_id == raft.node_id() {
+                    raft.node_id_str().to_string()
+                } else {
+                    leader_id.to_string()
+                }
+            })
+        } else {
+            drop(raft_guard);
+            self.raft_leader.read().await.clone()
+        }
+    }
+
     /// Create a new topic
     pub async fn create_topic(&self, config: TopicConfig) -> Result<()> {
-        if !*self.is_leader.read().await {
+        if !self.check_is_leader().await {
             return Err(ClusterError::NotLeader {
-                leader: self.raft_leader.read().await.clone(),
+                leader: self.current_leader().await,
             });
         }
 
         // Check if topic already exists
-        if self.metadata.get_topic(&config.name).await.is_some() {
+        let exists = self
+            .with_metadata(|meta| meta.topics.contains_key(&config.name))
+            .await;
+        if exists {
             return Err(ClusterError::TopicAlreadyExists(config.name));
         }
 
@@ -307,34 +421,37 @@ impl ClusterCoordinator {
 
         drop(placer);
 
-        // Apply via Raft
+        // Apply via Raft consensus (or local metadata in standalone)
         let cmd = MetadataCommand::CreateTopic {
             config,
             partition_assignments: assignments,
         };
 
-        self.metadata.apply(0, cmd).await;
+        self.apply_command(cmd).await?;
 
         Ok(())
     }
 
     /// Delete a topic
     pub async fn delete_topic(&self, name: &str) -> Result<()> {
-        if !*self.is_leader.read().await {
+        if !self.check_is_leader().await {
             return Err(ClusterError::NotLeader {
-                leader: self.raft_leader.read().await.clone(),
+                leader: self.current_leader().await,
             });
         }
 
         // Check topic exists
-        if self.metadata.get_topic(name).await.is_none() {
+        let exists = self
+            .with_metadata(|meta| meta.topics.contains_key(name))
+            .await;
+        if !exists {
             return Err(ClusterError::TopicNotFound(name.to_string()));
         }
 
         let cmd = MetadataCommand::DeleteTopic {
             name: name.to_string(),
         };
-        self.metadata.apply(0, cmd).await;
+        self.apply_command(cmd).await?;
 
         Ok(())
     }
@@ -345,32 +462,38 @@ impl ClusterCoordinator {
         topic: &str,
         partition: u32,
     ) -> Result<Option<NodeId>> {
-        let meta = self.metadata.read().await;
-        let leader = meta.find_leader(topic, partition).cloned();
+        let leader = self
+            .with_metadata(|meta| meta.find_leader(topic, partition).cloned())
+            .await;
         Ok(leader)
     }
 
     /// Trigger leader election for a partition
     pub async fn elect_partition_leader(&self, partition_id: &PartitionId) -> Result<NodeId> {
-        if !*self.is_leader.read().await {
+        if !self.check_is_leader().await {
             return Err(ClusterError::NotLeader {
-                leader: self.raft_leader.read().await.clone(),
+                leader: self.current_leader().await,
             });
         }
 
         let partition = self
-            .metadata
-            .get_partition(partition_id)
+            .with_metadata(|meta| {
+                meta.topics
+                    .get(&partition_id.topic)
+                    .and_then(|t| t.partition(partition_id.partition).cloned())
+            })
             .await
             .ok_or_else(|| ClusterError::PartitionNotFound {
                 topic: partition_id.topic.clone(),
                 partition: partition_id.partition,
             })?;
 
-        // Elect from ISR
-        let new_leader = partition
-            .isr
-            .iter()
+        // Deterministic election: pick the lexicographically smallest ISR member
+        // so all nodes agree on the same leader for the same ISR state.
+        let mut sorted_isr: Vec<_> = partition.isr.iter().cloned().collect();
+        sorted_isr.sort();
+        let new_leader = sorted_isr
+            .into_iter()
             .next()
             .ok_or(ClusterError::NotEnoughIsr {
                 required: 1,
@@ -383,9 +506,9 @@ impl ClusterCoordinator {
             epoch: partition.leader_epoch + 1,
         };
 
-        self.metadata.apply(0, cmd).await;
+        self.apply_command(cmd).await?;
 
-        Ok(new_leader.clone())
+        Ok(new_leader)
     }
 
     /// Get current coordinator state
@@ -393,9 +516,9 @@ impl ClusterCoordinator {
         *self.state.read().await
     }
 
-    /// Check if we are the cluster leader
+    /// Check if we are the cluster leader (public API)
     pub async fn is_leader(&self) -> bool {
-        *self.is_leader.read().await
+        self.check_is_leader().await
     }
 
     /// Get metadata store
@@ -434,7 +557,7 @@ impl ClusterCoordinator {
     /// Get cluster health status
     pub async fn health(&self) -> ClusterHealth {
         let state = *self.state.read().await;
-        let is_leader = *self.is_leader.read().await;
+        let is_leader = self.check_is_leader().await;
 
         let (node_count, healthy_nodes) = if let Some(membership) = &self.membership {
             (membership.member_count(), membership.healthy_count())
@@ -442,11 +565,15 @@ impl ClusterCoordinator {
             (1, 1) // Standalone
         };
 
-        let meta = self.metadata.read().await;
-        let topic_count = meta.topics.len();
-        let partition_count: usize = meta.topics.values().map(|t| t.partitions.len()).sum();
-        let offline_partitions = meta.offline_partitions().len();
-        let under_replicated = meta.under_replicated_partitions().len();
+        let (topic_count, partition_count, offline_partitions, under_replicated) = self
+            .with_metadata(|meta| {
+                let tc = meta.topics.len();
+                let pc: usize = meta.topics.values().map(|t| t.partitions.len()).sum();
+                let op = meta.offline_partitions().len();
+                let ur = meta.under_replicated_partitions().len();
+                (tc, pc, op, ur)
+            })
+            .await;
 
         ClusterHealth {
             state,
@@ -467,9 +594,14 @@ impl ClusterCoordinator {
     /// If key is provided, uses consistent hashing
     /// Otherwise, uses round-robin across partitions
     pub async fn select_partition(&self, topic: &str, key: Option<&[u8]>) -> Option<u32> {
-        let meta = self.metadata.read().await;
-        let topic_state = meta.topics.get(topic)?;
-        let partition_count = topic_state.partitions.len();
+        let partition_count = self
+            .with_metadata(|meta| {
+                meta.topics
+                    .get(topic)
+                    .map(|t| t.partitions.len())
+                    .unwrap_or(0)
+            })
+            .await;
 
         if partition_count == 0 {
             return None;
@@ -494,30 +626,31 @@ impl ClusterCoordinator {
 
     /// Get the leader for a partition (async wrapper for routing)
     pub async fn partition_leader(&self, topic: &str, partition: u32) -> Option<String> {
-        let meta = self.metadata.read().await;
-        meta.find_leader(topic, partition).cloned()
+        self.with_metadata(|meta| meta.find_leader(topic, partition).cloned())
+            .await
     }
 
     /// Check if a node is in the ISR for a partition
     pub async fn is_in_isr(&self, topic: &str, partition: u32, node_id: &str) -> bool {
-        let meta = self.metadata.read().await;
-
-        if let Some(topic_state) = meta.topics.get(topic) {
-            if let Some(partition_state) = topic_state.partition(partition) {
-                return partition_state.isr.contains(node_id);
-            }
-        }
-        false
+        self.with_metadata(|meta| {
+            meta.topics
+                .get(topic)
+                .and_then(|t| t.partition(partition))
+                .map(|p| p.isr.contains(node_id))
+                .unwrap_or(false)
+        })
+        .await
     }
 
     /// Get any ISR member for a partition (for read routing)
     pub async fn get_isr_member(&self, topic: &str, partition: u32) -> Option<String> {
-        let meta = self.metadata.read().await;
-
-        meta.topics
-            .get(topic)
-            .and_then(|t| t.partition(partition))
-            .and_then(|p| p.isr.iter().next().cloned())
+        self.with_metadata(|meta| {
+            meta.topics
+                .get(topic)
+                .and_then(|t| t.partition(partition))
+                .and_then(|p| p.isr.iter().next().cloned())
+        })
+        .await
     }
 }
 

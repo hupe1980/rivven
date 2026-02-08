@@ -655,18 +655,29 @@ impl QuicTransport {
         // Build client config with or without client certificate
         let crypto = if tls.skip_verification {
             // Dangerous: skip verification (for testing only)
-            if tls.mtls_mode != MtlsMode::Disabled {
-                // Even with skip verify, present our cert for mTLS
-                rustls::ClientConfig::builder()
-                    .dangerous()
-                    .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
-                    .with_client_auth_cert(tls.cert_chain.clone(), tls.private_key.clone_key())
-                    .map_err(|e| ClusterError::CryptoError(format!("Client cert error: {}", e)))?
-            } else {
-                rustls::ClientConfig::builder()
-                    .dangerous()
-                    .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
-                    .with_no_client_auth()
+            #[cfg(any(test, feature = "dangerous-skip-verify"))]
+            {
+                if tls.mtls_mode != MtlsMode::Disabled {
+                    // Even with skip verify, present our cert for mTLS
+                    rustls::ClientConfig::builder()
+                        .dangerous()
+                        .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
+                        .with_client_auth_cert(tls.cert_chain.clone(), tls.private_key.clone_key())
+                        .map_err(|e| {
+                            ClusterError::CryptoError(format!("Client cert error: {}", e))
+                        })?
+                } else {
+                    rustls::ClientConfig::builder()
+                        .dangerous()
+                        .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
+                        .with_no_client_auth()
+                }
+            }
+            #[cfg(not(any(test, feature = "dangerous-skip-verify")))]
+            {
+                return Err(ClusterError::CryptoError(
+                    "skip_verification requires the 'dangerous-skip-verify' feature".into(),
+                ));
             }
         } else if tls.mtls_mode != MtlsMode::Disabled {
             // Normal verification + present client certificate for mTLS
@@ -930,10 +941,12 @@ impl QuicTransport {
             Ok(bytes) => bytes,
             Err(ClusterError::Timeout) => {
                 self.stats.request_timeouts.fetch_add(1, Ordering::Relaxed);
+                conn.active_streams.fetch_sub(1, Ordering::SeqCst);
                 conn.mark_unhealthy();
                 return Err(ClusterError::Timeout);
             }
             Err(e) => {
+                conn.active_streams.fetch_sub(1, Ordering::SeqCst);
                 conn.mark_unhealthy();
                 return Err(e);
             }
@@ -1006,9 +1019,10 @@ impl QuicTransport {
             .get(node_id)
             .ok_or_else(|| ClusterError::NodeNotFound(node_id.clone()))?;
 
+        let sni_name = addr.ip().to_string();
         let connection = self
             .endpoint
-            .connect(addr, "localhost") // Server name for TLS
+            .connect(addr, &sni_name) // Use peer address for TLS SNI
             .map_err(|e| ClusterError::ConnectionFailed(format!("Connect error: {}", e)))?
             .await
             .map_err(|e| {
@@ -1075,9 +1089,11 @@ impl QuicTransport {
 // ============================================================================
 
 /// Skip server certificate verification (DANGEROUS - testing only)
+#[cfg(any(test, feature = "dangerous-skip-verify"))]
 #[derive(Debug)]
 struct SkipServerVerification;
 
+#[cfg(any(test, feature = "dangerous-skip-verify"))]
 impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
     fn verify_server_cert(
         &self,

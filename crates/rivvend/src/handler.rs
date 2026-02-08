@@ -7,7 +7,7 @@ use bytes::Bytes;
 use rivven_core::{
     IdempotentProducerManager, Message, OffsetManager, QuotaConfig, QuotaEntity, QuotaManager,
     QuotaResult, SequenceResult, TopicConfigManager, TopicManager, TransactionCoordinator,
-    TransactionPartition, TransactionResult, Validator,
+    TransactionMarker, TransactionPartition, TransactionResult, Validator,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -27,6 +27,8 @@ pub struct RequestHandler {
     quota_manager: Arc<QuotaManager>,
     /// Topic configuration manager (Admin API)
     topic_config_manager: Arc<TopicConfigManager>,
+    /// Whether topics are auto-created on first publish (default: true)
+    auto_create_topics: bool,
 }
 
 impl RequestHandler {
@@ -40,6 +42,7 @@ impl RequestHandler {
             transaction_coordinator: Arc::new(TransactionCoordinator::new()),
             quota_manager: Arc::new(QuotaManager::new()),
             topic_config_manager: Arc::new(TopicConfigManager::new()),
+            auto_create_topics: true,
         }
     }
 
@@ -57,6 +60,7 @@ impl RequestHandler {
             transaction_coordinator: Arc::new(TransactionCoordinator::new()),
             quota_manager: Arc::new(QuotaManager::new()),
             topic_config_manager: Arc::new(TopicConfigManager::new()),
+            auto_create_topics: true,
         }
     }
 
@@ -74,6 +78,7 @@ impl RequestHandler {
             transaction_coordinator: Arc::new(TransactionCoordinator::new()),
             quota_manager,
             topic_config_manager: Arc::new(TopicConfigManager::new()),
+            auto_create_topics: true,
         }
     }
 
@@ -87,8 +92,61 @@ impl RequestHandler {
         &self.topic_config_manager
     }
 
-    /// Handle a request and return a response
+    /// Set whether topics are auto-created on first publish
+    pub fn set_auto_create_topics(&mut self, enabled: bool) {
+        self.auto_create_topics = enabled;
+    }
+
+    /// Resolve a topic by name: get or create based on auto_create_topics config
+    async fn resolve_topic(&self, name: String) -> Result<Arc<rivven_core::Topic>, String> {
+        if self.auto_create_topics {
+            self.topic_manager
+                .get_or_create_topic(name)
+                .await
+                .map_err(|e| e.to_string())
+        } else {
+            self.topic_manager.get_topic(&name).await.map_err(|_| {
+                format!(
+                    "UNKNOWN_TOPIC_OR_PARTITION: topic '{}' does not exist",
+                    name
+                )
+            })
+        }
+    }
+
+    /// Handle a request and return a response (anonymous/no-auth path)
     pub async fn handle(&self, request: Request) -> Response {
+        self.handle_with_principal(request, None, None).await
+    }
+
+    /// Handle a request with principal context for per-user quota enforcement
+    ///
+    /// When called from the authenticated path, `user` is the principal name.
+    /// This avoids double-counting quotas when AuthenticatedHandler delegates here.
+    pub async fn handle_with_principal(
+        &self,
+        request: Request,
+        user: Option<&str>,
+        client_id: Option<&str>,
+    ) -> Response {
+        // Per-principal quota enforcement
+        if let Some(throttle) = self.check_request_quota(user, client_id) {
+            return throttle;
+        }
+
+        // Check produce quota for write requests
+        match &request {
+            Request::Publish { value, .. }
+            | Request::IdempotentPublish { value, .. }
+            | Request::TransactionalPublish { value, .. } => {
+                let bytes = value.len() as u64;
+                if let Some(throttle) = self.check_produce_quota(user, client_id, bytes) {
+                    return throttle;
+                }
+            }
+            _ => {}
+        }
+
         match request {
             // Authentication is handled by AuthenticatedHandler, not here
             Request::Authenticate { .. }
@@ -112,8 +170,19 @@ impl RequestHandler {
                 max_messages,
                 isolation_level,
             } => {
-                self.handle_consume(topic, partition, offset, max_messages, isolation_level)
-                    .await
+                let response = self
+                    .handle_consume(topic, partition, offset, max_messages, isolation_level)
+                    .await;
+
+                // Post-fetch consume quota: account for bytes returned
+                if let Response::Messages { ref messages, .. } = response {
+                    let bytes: u64 = messages.iter().map(|m| m.value.len() as u64).sum();
+                    if let Some(throttle) = self.check_consume_quota(user, client_id, bytes) {
+                        return throttle;
+                    }
+                }
+
+                response
             }
 
             Request::CreateTopic { name, partitions } => {
@@ -332,14 +401,12 @@ impl RequestHandler {
             };
         }
 
-        // Get or create topic
-        let topic = match self.topic_manager.get_or_create_topic(topic_name).await {
+        // Get or create topic (respects auto_create_topics setting)
+        let topic = match self.resolve_topic(topic_name).await {
             Ok(t) => t,
             Err(e) => {
-                error!("Failed to get/create topic: {}", e);
-                return Response::Error {
-                    message: e.to_string(),
-                };
+                error!("Failed to resolve topic: {}", e);
+                return Response::Error { message: e };
             }
         };
 
@@ -427,8 +494,8 @@ impl RequestHandler {
 
         match topic.read(partition, offset, max_messages).await {
             Ok(messages) => {
-                // Filter messages based on isolation level
-                let filtered_messages: Vec<_> = if read_committed {
+                // Filter and convert messages in a single pass (avoids intermediate Vec)
+                let message_data: Vec<MessageData> = if read_committed {
                     // For read_committed, filter out:
                     // 1. Messages from aborted transactions
                     // 2. Uncommitted transactional messages (beyond LSO)
@@ -445,12 +512,19 @@ impl RequestHandler {
                                 return true;
                             }
                             // Check if the transactional message is committed
-                            // For now, we check the aborted transaction index
                             if let Some(pid) = msg.producer_id {
                                 !self.transaction_coordinator.is_aborted(pid, msg.offset)
                             } else {
                                 true
                             }
+                        })
+                        .map(|msg| MessageData {
+                            offset: msg.offset,
+                            partition,
+                            key: msg.key,
+                            value: msg.value,
+                            timestamp: msg.timestamp.timestamp_millis(),
+                            headers: Vec::new(),
                         })
                         .collect()
                 } else {
@@ -458,18 +532,16 @@ impl RequestHandler {
                     messages
                         .into_iter()
                         .filter(|msg| !msg.is_control_record())
+                        .map(|msg| MessageData {
+                            offset: msg.offset,
+                            partition,
+                            key: msg.key,
+                            value: msg.value,
+                            timestamp: msg.timestamp.timestamp_millis(),
+                            headers: Vec::new(),
+                        })
                         .collect()
                 };
-
-                let message_data: Vec<MessageData> = filtered_messages
-                    .into_iter()
-                    .map(|msg| MessageData {
-                        offset: msg.offset,
-                        key: msg.key,
-                        value: msg.value,
-                        timestamp: msg.timestamp.timestamp_millis(),
-                    })
-                    .collect();
 
                 Response::Messages {
                     messages: message_data,
@@ -1271,12 +1343,27 @@ impl RequestHandler {
             txn.offset_commits.len()
         );
 
-        // Phase 2: Complete commit
-        // In a full implementation, this would:
-        // 1. Write transaction markers to all affected partitions
-        // 2. Commit consumer offsets
-        // 3. Update transaction log
+        // Write COMMIT markers to all affected partitions
+        for tp in &txn.partitions {
+            if let Ok(topic_obj) = self.topic_manager.get_topic(&tp.topic).await {
+                if let Ok(partition) = topic_obj.partition(tp.partition) {
+                    let marker = Message {
+                        producer_id: Some(producer_id),
+                        transaction_marker: Some(TransactionMarker::Commit),
+                        is_transactional: true,
+                        ..Message::new(Bytes::new())
+                    };
+                    if let Err(e) = partition.append(marker).await {
+                        warn!(
+                            "Failed to write COMMIT marker for txn {} to {}/{}: {}",
+                            txn_id, tp.topic, tp.partition, e
+                        );
+                    }
+                }
+            }
+        }
 
+        // Phase 2: Complete commit
         match self
             .transaction_coordinator
             .complete_commit(&txn_id, producer_id)
@@ -1298,53 +1385,71 @@ impl RequestHandler {
         producer_epoch: u16,
     ) -> Response {
         // Phase 1: Prepare abort
-        match self
-            .transaction_coordinator
-            .prepare_abort(&txn_id, producer_id, producer_epoch)
-        {
-            Ok(txn) => {
-                debug!(
-                    "Aborting transaction {}: {} writes will be discarded",
-                    txn_id,
-                    txn.pending_writes.len()
-                );
-            }
-            Err(TransactionResult::InvalidTransactionId) => {
-                return Response::Error {
-                    message: format!("INVALID_TXN_ID: transaction '{}' not found", txn_id),
-                };
-            }
-            Err(TransactionResult::InvalidTransactionState { current, expected }) => {
-                return Response::Error {
-                    message: format!(
-                        "INVALID_TXN_STATE: transaction in {:?}, expected {}",
-                        current, expected
-                    ),
-                };
-            }
-            Err(TransactionResult::ProducerFenced {
-                expected_epoch,
-                received_epoch,
-            }) => {
-                return Response::Error {
-                    message: format!(
-                        "PRODUCER_FENCED: expected epoch {}, got {}",
-                        expected_epoch, received_epoch
-                    ),
-                };
-            }
-            Err(other) => {
-                return Response::Error {
-                    message: format!("TRANSACTION_ERROR: {:?}", other),
-                };
+        let txn =
+            match self
+                .transaction_coordinator
+                .prepare_abort(&txn_id, producer_id, producer_epoch)
+            {
+                Ok(txn) => {
+                    debug!(
+                        "Aborting transaction {}: {} writes will be discarded",
+                        txn_id,
+                        txn.pending_writes.len()
+                    );
+                    txn
+                }
+                Err(TransactionResult::InvalidTransactionId) => {
+                    return Response::Error {
+                        message: format!("INVALID_TXN_ID: transaction '{}' not found", txn_id),
+                    };
+                }
+                Err(TransactionResult::InvalidTransactionState { current, expected }) => {
+                    return Response::Error {
+                        message: format!(
+                            "INVALID_TXN_STATE: transaction in {:?}, expected {}",
+                            current, expected
+                        ),
+                    };
+                }
+                Err(TransactionResult::ProducerFenced {
+                    expected_epoch,
+                    received_epoch,
+                }) => {
+                    return Response::Error {
+                        message: format!(
+                            "PRODUCER_FENCED: expected epoch {}, got {}",
+                            expected_epoch, received_epoch
+                        ),
+                    };
+                }
+                Err(other) => {
+                    return Response::Error {
+                        message: format!("TRANSACTION_ERROR: {:?}", other),
+                    };
+                }
+            };
+
+        // Write ABORT markers to all affected partitions
+        for tp in &txn.partitions {
+            if let Ok(topic_obj) = self.topic_manager.get_topic(&tp.topic).await {
+                if let Ok(partition) = topic_obj.partition(tp.partition) {
+                    let marker = Message {
+                        producer_id: Some(producer_id),
+                        transaction_marker: Some(TransactionMarker::Abort),
+                        is_transactional: true,
+                        ..Message::new(Bytes::new())
+                    };
+                    if let Err(e) = partition.append(marker).await {
+                        warn!(
+                            "Failed to write ABORT marker for txn {} to {}/{}: {}",
+                            txn_id, tp.topic, tp.partition, e
+                        );
+                    }
+                }
             }
         }
 
         // Phase 2: Complete abort
-        // In a full implementation, this would:
-        // 1. Write abort markers to all affected partitions
-        // 2. Discard pending writes (consumers won't see them with read_committed)
-
         match self
             .transaction_coordinator
             .complete_abort(&txn_id, producer_id)
@@ -1644,22 +1749,25 @@ impl RequestHandler {
             };
         }
 
-        // For now, we need to recreate the topic with more partitions
-        // In a production system, we would dynamically add partitions without data loss
-        // This is a limitation that could be addressed by:
-        // 1. Adding dynamic partition creation to TopicManager
-        // 2. Or using a Raft log entry to coordinate partition creation across cluster
-
-        info!(
-            "CreatePartitions: topic '{}' from {} to {} partitions (note: dynamic partition creation is planned)",
-            topic, current_count, new_partition_count
-        );
-
-        // For now, return success as the configuration is valid
-        // The actual partition creation would be handled by the distributed coordinator
-        Response::PartitionsCreated {
-            topic,
-            new_partition_count,
+        // Dynamically add new partitions
+        match self
+            .topic_manager
+            .add_partitions(&topic, new_partition_count)
+            .await
+        {
+            Ok(added) => {
+                info!(
+                    "CreatePartitions: topic '{}' expanded from {} to {} partitions (+{})",
+                    topic, current_count, new_partition_count, added
+                );
+                Response::PartitionsCreated {
+                    topic,
+                    new_partition_count,
+                }
+            }
+            Err(e) => Response::Error {
+                message: format!("PARTITION_CREATE_FAILED: {}", e),
+            },
         }
     }
 
@@ -1715,15 +1823,13 @@ impl RequestHandler {
                 continue;
             }
 
-            // Note: Actual deletion would truncate the log
-            // For now, we simulate by updating the low watermark
-            // In production, this would:
-            // 1. Update segment metadata
-            // 2. Delete segments entirely below target offset
-            // 3. Truncate partial segments
+            // Set the low watermark — records before this offset will no longer
+            // be served by read(). Also triggers physical segment truncation
+            // to reclaim disk space.
+            partition.set_low_watermark(target_offset).await;
 
             info!(
-                "DeleteRecords: topic '{}' partition {} truncating to offset {} (was {})",
+                "DeleteRecords: topic '{}' partition {} low watermark set to {} (was {})",
                 topic, partition_id, target_offset, earliest
             );
 

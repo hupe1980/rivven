@@ -57,6 +57,10 @@
 //!           └────────────────────────── Prefix (identifies Rivven keys)
 //! ```
 
+use argon2::{
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
+};
 use parking_lot::RwLock;
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
@@ -218,8 +222,23 @@ impl ApiKey {
         Ok((api_key, full_key))
     }
 
-    /// Hash a secret for storage
+    /// Hash a secret for storage using Argon2id
     fn hash_secret(secret: &str) -> String {
+        // Generate a random 16-byte salt and encode as SaltString
+        let rng = SystemRandom::new();
+        let mut salt_bytes = [0u8; 16];
+        rng.fill(&mut salt_bytes)
+            .expect("SystemRandom fill should not fail");
+        let salt = SaltString::encode_b64(&salt_bytes).expect("salt encoding should not fail");
+        let argon2 = Argon2::default();
+        argon2
+            .hash_password(secret.as_bytes(), &salt)
+            .expect("Argon2 hashing should not fail")
+            .to_string()
+    }
+
+    /// Legacy SHA-256 hash (for migration compatibility)
+    fn hash_secret_sha256(secret: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(secret.as_bytes());
         hex::encode(hasher.finalize())
@@ -238,24 +257,35 @@ impl ApiKey {
         Ok((key_id, secret))
     }
 
-    /// Verify a secret against this key
+    /// Verify a secret against this key.
+    ///
+    /// Supports both Argon2id hashes (PHC string format `$argon2id$...`)
+    /// and legacy SHA-256 hex hashes for backward compatibility.
     pub fn verify_secret(&self, secret: &str) -> bool {
-        let provided_hash = Self::hash_secret(secret);
-        // Constant-time comparison using subtle crate pattern
-        // Compare byte-by-byte with constant time to prevent timing attacks
-        if provided_hash.len() != self.secret_hash.len() {
-            return false;
+        if self.secret_hash.starts_with("$argon2") {
+            // Argon2id verification (constant-time internally)
+            match PasswordHash::new(&self.secret_hash) {
+                Ok(parsed_hash) => Argon2::default()
+                    .verify_password(secret.as_bytes(), &parsed_hash)
+                    .is_ok(),
+                Err(_) => false,
+            }
+        } else {
+            // Legacy SHA-256 path — constant-time comparison
+            let provided_hash = Self::hash_secret_sha256(secret);
+            if provided_hash.len() != self.secret_hash.len() {
+                return false;
+            }
+            let mut result = 0u8;
+            for (a, b) in provided_hash
+                .as_bytes()
+                .iter()
+                .zip(self.secret_hash.as_bytes())
+            {
+                result |= a ^ b;
+            }
+            result == 0
         }
-
-        let mut result = 0u8;
-        for (a, b) in provided_hash
-            .as_bytes()
-            .iter()
-            .zip(self.secret_hash.as_bytes())
-        {
-            result |= a ^ b;
-        }
-        result == 0
     }
 
     /// Check if key is valid (not expired, not revoked)
@@ -290,33 +320,56 @@ impl ApiKey {
     }
 
     fn ip_in_cidr(ip: &str, cidr: &str) -> bool {
-        // Simple CIDR check - in production, use a proper IP library
+        use std::net::IpAddr;
+
         let parts: Vec<&str> = cidr.split('/').collect();
         if parts.len() != 2 {
             return false;
         }
 
-        let network = parts[0];
-        let prefix_len: u32 = parts[1].parse().unwrap_or(32);
-
-        // Parse IPs
-        let ip_parts: Vec<u8> = ip.split('.').filter_map(|p| p.parse().ok()).collect();
-        let net_parts: Vec<u8> = network.split('.').filter_map(|p| p.parse().ok()).collect();
-
-        if ip_parts.len() != 4 || net_parts.len() != 4 {
-            return false;
-        }
-
-        let ip_num = u32::from_be_bytes([ip_parts[0], ip_parts[1], ip_parts[2], ip_parts[3]]);
-        let net_num = u32::from_be_bytes([net_parts[0], net_parts[1], net_parts[2], net_parts[3]]);
-
-        let mask = if prefix_len == 0 {
-            0
-        } else {
-            !0u32 << (32 - prefix_len)
+        let prefix_len: u32 = match parts[1].parse() {
+            Ok(v) => v,
+            Err(_) => return false,
         };
 
-        (ip_num & mask) == (net_num & mask)
+        let ip_addr: IpAddr = match ip.parse() {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        let net_addr: IpAddr = match parts[0].parse() {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+
+        match (ip_addr, net_addr) {
+            (IpAddr::V4(ip4), IpAddr::V4(net4)) => {
+                if prefix_len > 32 {
+                    return false;
+                }
+                let mask = if prefix_len == 0 {
+                    0u32
+                } else {
+                    !0u32 << (32 - prefix_len)
+                };
+                let ip_num = u32::from(ip4);
+                let net_num = u32::from(net4);
+                (ip_num & mask) == (net_num & mask)
+            }
+            (IpAddr::V6(ip6), IpAddr::V6(net6)) => {
+                if prefix_len > 128 {
+                    return false;
+                }
+                let ip_bits = u128::from(ip6);
+                let net_bits = u128::from(net6);
+                let mask = if prefix_len == 0 {
+                    0u128
+                } else {
+                    !0u128 << (128 - prefix_len)
+                };
+                (ip_bits & mask) == (net_bits & mask)
+            }
+            _ => false, // IPv4/IPv6 mismatch
+        }
     }
 }
 
@@ -654,10 +707,10 @@ impl ServiceAuthManager {
         // Parse the key
         let (key_id, secret) = ApiKey::parse_key(key_string)?;
 
-        // Look up the key
-        let mut keys = self.api_keys.write();
+        // Look up the key (read lock for validation, only upgrade for last_used_at)
+        let keys = self.api_keys.read();
         let api_key = keys
-            .get_mut(&key_id)
+            .get(&key_id)
             .ok_or_else(|| ServiceAuthError::KeyNotFound(key_id.clone()))?;
 
         // Verify the secret
@@ -697,15 +750,23 @@ impl ServiceAuthManager {
             }
         }
 
-        // Update last used
-        api_key.last_used_at = Some(SystemTime::now());
+        let service_account = api_key.service_account.clone();
+        let permissions = api_key.permissions.clone();
+        drop(keys); // Release read lock
+
+        // Update last used (brief write lock)
+        if let Some(mut keys) = self.api_keys.try_write() {
+            if let Some(api_key) = keys.get_mut(&key_id) {
+                api_key.last_used_at = Some(SystemTime::now());
+            }
+        }
 
         // Create session
         let session = self.create_session(
-            &api_key.service_account,
+            &service_account,
             AuthMethod::ApiKey,
             client_ip,
-            api_key.permissions.clone(),
+            permissions,
             Some(key_id.clone()),
         );
 
@@ -714,7 +775,7 @@ impl ServiceAuthManager {
 
         info!(
             "Authenticated service '{}' via API key '{}' from {}",
-            api_key.service_account, key_id, client_ip
+            service_account, key_id, client_ip
         );
 
         Ok(session)

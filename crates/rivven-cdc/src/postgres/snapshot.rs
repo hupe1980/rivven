@@ -500,6 +500,15 @@ pub async fn discover_tables_with_keys(
         for row in rows {
             let table: String = row.get(0);
             let key: String = row.get(1);
+            if key == "ctid" {
+                tracing::warn!(
+                    "Table {}.{} has no primary key — using ctid as fallback. \
+                     ctid is unstable and may change during VACUUM/UPDATE. \
+                     Consider adding a primary key for reliable CDC.",
+                    schema,
+                    table
+                );
+            }
             results.push((schema.to_string(), table, key));
         }
     }

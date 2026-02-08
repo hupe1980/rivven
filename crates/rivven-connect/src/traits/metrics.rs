@@ -145,6 +145,11 @@ impl Timer {
     pub fn elapsed(&self) -> Duration {
         self.start.elapsed()
     }
+
+    /// Cancel the timer without recording (useful for error paths)
+    pub fn cancel(mut self) {
+        self.stopped = true;
+    }
 }
 
 impl Drop for Timer {
@@ -270,8 +275,8 @@ impl Metrics for MetricsCollector {
     }
 
     fn start_timer(&self, name: &str) -> Timer {
-        // We need to use a dummy Arc here since we can't easily get Arc<Self> from &self
-        // In real usage, you'd use a shared MetricsCollector
+        // Note: This default impl uses NoopMetrics since &self can't be converted to Arc<Self>.
+        // To record real metrics, use `Timer::new_with_collector(name, collector)` directly.
         Timer {
             name: name.to_string(),
             start: Instant::now(),

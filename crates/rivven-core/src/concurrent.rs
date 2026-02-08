@@ -269,31 +269,36 @@ impl Default for AppendLogConfig {
 
 /// A segment in the append-only log
 struct LogSegment {
-    /// Segment data
-    data: Vec<u8>,
+    /// Segment data — UnsafeCell for interior mutability (lock-free writes via CAS)
+    data: UnsafeCell<Vec<u8>>,
     /// Current write position
     write_pos: AtomicUsize,
+    /// Segment capacity (cached to avoid accessing data through UnsafeCell)
+    capacity: usize,
     /// Segment base offset
     base_offset: u64,
     /// Is this segment sealed (no more writes)?
     sealed: AtomicBool,
 }
 
+// SAFETY: All accesses to `data` are coordinated through atomic `write_pos`.
+// The CAS on write_pos guarantees exclusive write access to the reserved range.
+// Reads are bounded by write_pos (Acquire ordering) to prevent torn reads.
+unsafe impl Send for LogSegment {}
+unsafe impl Sync for LogSegment {}
+
 impl LogSegment {
     fn new(base_offset: u64, capacity: usize, preallocate: bool) -> Self {
-        let mut data = if preallocate {
+        let data = if preallocate {
             vec![0u8; capacity]
         } else {
-            Vec::with_capacity(capacity)
+            let v = vec![0; capacity];
+            v
         };
 
-        if !preallocate {
-            // Set len to 0 but capacity is reserved
-            data.clear();
-        }
-
         Self {
-            data,
+            capacity,
+            data: UnsafeCell::new(data),
             write_pos: AtomicUsize::new(0),
             base_offset,
             sealed: AtomicBool::new(false),
@@ -314,7 +319,7 @@ impl LogSegment {
             let current_pos = self.write_pos.load(Ordering::Acquire);
             let new_pos = current_pos + needed;
 
-            if new_pos > self.data.len() {
+            if new_pos > self.capacity {
                 // Segment is full, seal it
                 self.sealed.store(true, Ordering::Release);
                 return None;
@@ -329,9 +334,12 @@ impl LogSegment {
             ) {
                 Ok(_) => {
                     // Space reserved, write data
-                    // SAFETY: We have exclusive access to [current_pos..new_pos]
-                    let ptr = self.data.as_ptr() as *mut u8;
+                    // SAFETY: The CAS above guarantees exclusive access to
+                    // [current_pos..new_pos]. The UnsafeCell provides interior
+                    // mutability. No other writer can touch this range.
                     unsafe {
+                        let buf = &mut *self.data.get();
+                        let ptr = buf.as_mut_ptr();
                         // Write length prefix (big-endian)
                         let len = data.len() as u32;
                         let len_bytes = len.to_be_bytes();
@@ -364,15 +372,19 @@ impl LogSegment {
             return None;
         }
 
+        // SAFETY: position..position+4 is within committed range,
+        // and all data up to committed has been fully written.
+        let buf = unsafe { &*self.data.get() };
+
         // Read length prefix
-        let len_bytes: [u8; 4] = self.data[position..position + 4].try_into().ok()?;
+        let len_bytes: [u8; 4] = buf[position..position + 4].try_into().ok()?;
         let len = u32::from_be_bytes(len_bytes) as usize;
 
         if position + 4 + len > committed {
             return None;
         }
 
-        Some(&self.data[position + 4..position + 4 + len])
+        Some(&buf[position + 4..position + 4 + len])
     }
 
     /// Get committed size
@@ -762,20 +774,23 @@ impl<K: Ord + Clone + Default, V: Clone + Default> ConcurrentSkipList<K, V> {
 
     /// Generate a random level for a new node
     fn random_level(&self) -> usize {
-        // XORShift random number generation
+        // XORShift random number generation with atomic CAS
         let mut level = 1;
-        let mut x = self.rand_state.load(Ordering::Relaxed);
 
-        loop {
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            self.rand_state.store(x, Ordering::Relaxed);
+        let x = self
+            .rand_state
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |mut x| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                Some(x)
+            })
+            .unwrap_or(1);
 
-            if x & 1 == 0 || level >= MAX_HEIGHT {
-                break;
-            }
+        let mut bits = x;
+        while bits & 1 == 0 && level < MAX_HEIGHT {
             level += 1;
+            bits >>= 1;
         }
 
         level

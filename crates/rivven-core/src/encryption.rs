@@ -38,11 +38,12 @@
 //! let plaintext = manager.decrypt(&ciphertext, 12345)?;
 //! ```
 
-use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM};
+use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, CHACHA20_POLY1305};
 use ring::hkdf::{Salt, HKDF_SHA256};
 use ring::rand::{SecureRandom, SystemRandom};
 use secrecy::{ExposeSecret, SecretBox};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -437,9 +438,20 @@ impl ring::hkdf::KeyType for DataKeyLen {
 pub struct EncryptionManager {
     config: EncryptionConfig,
     master_key: MasterKey,
+    /// Current key for encryption (latest version)
     data_key: LessSafeKey,
+    /// All known keys indexed by version (for decrypting old data)
+    key_store: parking_lot::RwLock<HashMap<u32, LessSafeKey>>,
     rng: SystemRandom,
     current_key_version: AtomicU32,
+}
+
+/// Select the ring AEAD algorithm based on our Algorithm enum
+fn ring_algorithm(algo: Algorithm) -> &'static ring::aead::Algorithm {
+    match algo {
+        Algorithm::Aes256Gcm => &AES_256_GCM,
+        Algorithm::ChaCha20Poly1305 => &CHACHA20_POLY1305,
+    }
 }
 
 impl EncryptionManager {
@@ -448,18 +460,65 @@ impl EncryptionManager {
         let master_key = MasterKey::from_provider(&config.key_provider)?;
         let data_key_bytes = master_key.derive_data_key(config.aad_scope.as_bytes())?;
 
-        let unbound_key = UnboundKey::new(&AES_256_GCM, &data_key_bytes)
+        let algo = ring_algorithm(config.algorithm);
+        let unbound_key = UnboundKey::new(algo, &data_key_bytes)
             .map_err(|_| EncryptionError::InvalidKey("failed to create encryption key".into()))?;
-
         let data_key = LessSafeKey::new(unbound_key);
+
+        // Populate the key store with the initial key version
+        let version = master_key.version();
+        let store_unbound = UnboundKey::new(algo, &data_key_bytes)
+            .map_err(|_| EncryptionError::InvalidKey("failed to create store key".into()))?;
+        let mut key_store = HashMap::new();
+        key_store.insert(version, LessSafeKey::new(store_unbound));
 
         Ok(Arc::new(Self {
             config,
-            current_key_version: AtomicU32::new(master_key.version()),
+            current_key_version: AtomicU32::new(version),
             master_key,
             data_key,
+            key_store: parking_lot::RwLock::new(key_store),
             rng: SystemRandom::new(),
         }))
+    }
+
+    /// Rotate the data encryption key, deriving a new key from a new master key.
+    /// Old keys are retained in the key store so existing data can still be decrypted.
+    pub fn rotate_key(&self, new_master: MasterKey) -> Result<()> {
+        let new_version = new_master.version();
+        if new_version <= self.current_key_version.load(Ordering::Relaxed) {
+            return Err(EncryptionError::KeyRotation(
+                "new key version must be greater than current".into(),
+            ));
+        }
+
+        let data_key_bytes = new_master.derive_data_key(self.config.aad_scope.as_bytes())?;
+        let algo = ring_algorithm(self.config.algorithm);
+
+        let new_key = UnboundKey::new(algo, &data_key_bytes)
+            .map_err(|_| EncryptionError::KeyRotation("failed to create new key".into()))?;
+
+        // Add to key store
+        {
+            let mut store = self.key_store.write();
+            store.insert(new_version, LessSafeKey::new(new_key));
+        }
+
+        // Atomically bump the current version — new encryptions will use this version
+        self.current_key_version
+            .store(new_version, Ordering::Release);
+
+        Ok(())
+    }
+
+    /// Get a key by version for decryption
+    fn get_key_for_version(&self, version: u32) -> Result<()> {
+        let store = self.key_store.read();
+        if store.contains_key(&version) {
+            Ok(())
+        } else {
+            Err(EncryptionError::KeyNotFound(version))
+        }
     }
 
     /// Create a no-op encryption manager for when encryption is disabled
@@ -529,18 +588,45 @@ impl EncryptionManager {
 
         let header = EncryptedHeader::from_bytes(ciphertext)?;
 
-        // Verify key version matches (for now, we only support one key)
-        if header.key_version != self.master_key.version() {
-            return Err(EncryptionError::KeyNotFound(header.key_version));
-        }
+        // Look up key by version from the key store (supports rotated keys)
+        self.get_key_for_version(header.key_version)?;
 
         let nonce = Nonce::assume_unique_for_key(header.nonce);
+
+        // Select the correct algorithm from the header (supports cross-algorithm decrypt)
+        let algo = ring_algorithm(header.algorithm);
 
         // Copy ciphertext + tag for in-place decryption
         let mut buffer = ciphertext[EncryptedHeader::SIZE..].to_vec();
 
-        let plaintext = self
-            .data_key
+        // We need to use the key for this specific version
+        let store = self.key_store.read();
+        let key = store
+            .get(&header.key_version)
+            .ok_or(EncryptionError::KeyNotFound(header.key_version))?;
+
+        // Verify the algorithm matches the key
+        if *key.algorithm() != *algo {
+            // Key was created with a different algorithm — re-derive
+            drop(store);
+            // For cross-algorithm decrypt: derive key bytes from master, create a temp key
+            let data_key_bytes = self
+                .master_key
+                .derive_data_key(self.config.aad_scope.as_bytes())?;
+            let unbound = UnboundKey::new(algo, &data_key_bytes)
+                .map_err(|_| EncryptionError::Decryption("key re-derive failed".into()))?;
+            let temp_key = LessSafeKey::new(unbound);
+            let plaintext = temp_key
+                .open_in_place(
+                    nonce,
+                    Aad::from(self.config.aad_scope.as_bytes()),
+                    &mut buffer,
+                )
+                .map_err(|_| EncryptionError::Decryption("authentication failed".into()))?;
+            return Ok(plaintext.to_vec());
+        }
+
+        let plaintext = key
             .open_in_place(
                 nonce,
                 Aad::from(self.config.aad_scope.as_bytes()),
@@ -816,5 +902,59 @@ mod tests {
     fn test_generate_key() {
         let key = MasterKey::generate(1).unwrap();
         assert_eq!(key.version(), 1);
+    }
+
+    #[test]
+    fn test_chacha20_poly1305_encrypt_decrypt() {
+        let config = EncryptionConfig {
+            enabled: true,
+            algorithm: Algorithm::ChaCha20Poly1305,
+            key_provider: KeyProvider::InMemory(vec![0u8; 32]),
+            key_rotation_days: 0,
+            aad_scope: "test".to_string(),
+        };
+        let manager = EncryptionManager::new(config).unwrap();
+        let plaintext = b"ChaCha20-Poly1305 test payload";
+        let lsn = 42u64;
+
+        let ciphertext = manager.encrypt(plaintext, lsn).unwrap();
+        assert_ne!(ciphertext.as_slice(), plaintext.as_slice());
+
+        // Verify header encodes ChaCha20
+        let header = EncryptedHeader::from_bytes(&ciphertext).unwrap();
+        assert_eq!(header.algorithm, Algorithm::ChaCha20Poly1305);
+
+        let decrypted = manager.decrypt(&ciphertext, lsn).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn test_key_rotation() {
+        let config = EncryptionConfig {
+            enabled: true,
+            algorithm: Algorithm::Aes256Gcm,
+            key_provider: KeyProvider::InMemory(vec![1u8; 32]),
+            key_rotation_days: 30,
+            aad_scope: "test".to_string(),
+        };
+        let manager = EncryptionManager::new(config).unwrap();
+
+        // Encrypt with version 1
+        let plaintext = b"data encrypted with key v1";
+        let ct_v1 = manager.encrypt(plaintext, 100).unwrap();
+        assert_eq!(manager.key_version(), 1);
+
+        // Rotate to version 2
+        let new_master = MasterKey::new(vec![2u8; 32], 2).unwrap();
+        manager.rotate_key(new_master).unwrap();
+        assert_eq!(manager.key_version(), 2);
+
+        // Old ciphertext (v1) still decryptable
+        let decrypted = manager.decrypt(&ct_v1, 100).unwrap();
+        assert_eq!(decrypted, plaintext);
+
+        // Rotation with same or lower version should fail
+        let bad_master = MasterKey::new(vec![3u8; 32], 1).unwrap();
+        assert!(manager.rotate_key(bad_master).is_err());
     }
 }

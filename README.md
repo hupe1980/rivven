@@ -75,8 +75,10 @@ Modern event streaming shouldn't require a JVM, ZooKeeper, or a team of dedicate
 
 ### 🔒 Enterprise Security
 - TLS/mTLS transport encryption
-- SCRAM-SHA-256, OIDC, API key auth
+- SCRAM-SHA-256 (600K PBKDF2 iterations), OIDC, API key auth
 - Cedar policy engine for fine-grained RBAC
+- Password complexity enforcement
+- HMAC-authenticated cluster protocol (SWIM gossip)
 - Credential isolation between components
 
 </td>

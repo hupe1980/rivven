@@ -152,7 +152,7 @@ let config = ResilientClientConfig::builder()
 
 ### High-Throughput Pipelined Client
 
-For maximum throughput, use `PipelinedClient` which allows multiple in-flight requests over a single connection:
+For maximum throughput, use `PipelinedClient` which allows multiple in-flight requests over a single connection. Supports optional **TLS** and **authentication**:
 
 ```rust
 use rivven_client::{PipelinedClient, PipelineConfig};
@@ -377,6 +377,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `min.insync.replicas` | Min ISR for acks=all | `2` |
 | `compression.type` | `lz4`, `zstd`, `snappy`, `gzip` | `lz4` |
 ```
+
+### Schema Registration
+
+Register schemas with the Rivven Schema Registry (`rivven-schema`) directly from the client using a lightweight HTTP/1.1 call — no external HTTP dependencies required:
+
+```rust
+use rivven_client::Client;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = Client::connect("localhost:9092").await?;
+
+    // Register an Avro schema with the schema registry
+    let schema_id = client.register_schema(
+        "http://localhost:8081",       // Schema registry URL
+        "users-value",                 // Subject name
+        "AVRO",                        // Schema type: AVRO, PROTOBUF, or JSON
+        r#"{"type":"record","name":"User","fields":[{"name":"id","type":"long"},{"name":"name","type":"string"}]}"#,
+    ).await?;
+
+    println!("Registered schema with ID: {}", schema_id);
+    Ok(())
+}
+```
+
+> **Note:** For advanced schema registry operations (compatibility checks, Glue integration, codec management), use `rivven-connect`'s `SchemaRegistryClient`. The `Client::register_schema()` method is designed for quick schema bootstrapping without additional dependencies.
 
 ### Transactions & Idempotent Producer
 

@@ -22,8 +22,8 @@ pub struct Topic {
     /// Topic name
     name: String,
 
-    /// Partitions in this topic
-    partitions: Vec<Arc<Partition>>,
+    /// Partitions in this topic (growable via add_partitions)
+    partitions: parking_lot::RwLock<Vec<Arc<Partition>>>,
 }
 
 impl Topic {
@@ -54,7 +54,10 @@ impl Topic {
             ));
         }
 
-        Ok(Self { name, partitions })
+        Ok(Self {
+            name,
+            partitions: parking_lot::RwLock::new(partitions),
+        })
     }
 
     /// Get the topic name
@@ -64,12 +67,13 @@ impl Topic {
 
     /// Get the number of partitions
     pub fn num_partitions(&self) -> usize {
-        self.partitions.len()
+        self.partitions.read().len()
     }
 
     /// Get a specific partition
     pub fn partition(&self, partition_id: u32) -> Result<Arc<Partition>> {
         self.partitions
+            .read()
             .get(partition_id as usize)
             .cloned()
             .ok_or(Error::PartitionNotFound(partition_id))
@@ -94,12 +98,13 @@ impl Topic {
 
     /// Get all partitions
     pub fn all_partitions(&self) -> Vec<Arc<Partition>> {
-        self.partitions.clone()
+        self.partitions.read().clone()
     }
 
     /// Flush all partitions to disk ensuring durability
     pub async fn flush(&self) -> Result<()> {
-        for partition in &self.partitions {
+        let partitions = self.partitions.read().clone();
+        for partition in &partitions {
             partition.flush().await?;
         }
         Ok(())
@@ -114,6 +119,43 @@ impl Topic {
     ) -> Result<Option<u64>> {
         let partition = self.partition(partition_id)?;
         partition.find_offset_for_timestamp(target_timestamp).await
+    }
+
+    /// Dynamically add partitions to this topic.
+    ///
+    /// Creates new partitions with IDs from `current_count` to `new_total - 1`.
+    /// Existing partitions and their data are unaffected.
+    pub async fn add_partitions(
+        &self,
+        config: &Config,
+        new_total: u32,
+        tiered_storage: Option<Arc<TieredStorage>>,
+    ) -> Result<u32> {
+        let current_count = self.num_partitions() as u32;
+        if new_total <= current_count {
+            return Err(Error::Other(format!(
+                "New partition count {} must exceed current count {}",
+                new_total, current_count
+            )));
+        }
+
+        let mut new_partitions = Vec::new();
+        for id in current_count..new_total {
+            new_partitions.push(Arc::new(
+                Partition::new_with_tiered_storage(config, &self.name, id, tiered_storage.clone())
+                    .await?,
+            ));
+        }
+
+        let added = new_partitions.len() as u32;
+        self.partitions.write().extend(new_partitions);
+
+        info!(
+            "Added {} partitions to topic '{}' (total: {})",
+            added, self.name, new_total
+        );
+
+        Ok(added)
     }
 }
 
@@ -385,16 +427,32 @@ impl TopicManager {
             .ok_or_else(|| Error::TopicNotFound(name.to_string()))
     }
 
-    /// Get or create a topic
+    /// Get or create a topic (race-safe: uses write lock directly)
     pub async fn get_or_create_topic(&self, name: String) -> Result<Arc<Topic>> {
-        {
-            let topics = self.topics.read().await;
-            if let Some(topic) = topics.get(&name) {
-                return Ok(topic.clone());
-            }
+        // Use write lock to atomically check-and-create, avoiding TOCTOU race
+        let mut topics = self.topics.write().await;
+        if let Some(topic) = topics.get(&name) {
+            return Ok(topic.clone());
         }
 
-        self.create_topic(name, None).await
+        let num_partitions = self.config.default_partitions;
+        let topic = Arc::new(
+            Topic::new_with_tiered_storage(
+                &self.config,
+                name.clone(),
+                num_partitions,
+                self.tiered_storage.clone(),
+            )
+            .await?,
+        );
+
+        topics.insert(name.clone(), topic.clone());
+        drop(topics); // Release lock before persistence
+
+        // Persist metadata asynchronously
+        let _ = self.persist_metadata().await;
+
+        Ok(topic)
     }
 
     /// List all topics
@@ -427,6 +485,32 @@ impl TopicManager {
             topic.flush().await?;
         }
         Ok(())
+    }
+
+    /// Add partitions to an existing topic.
+    ///
+    /// Increases the partition count of the topic to `new_partition_count`.
+    /// Returns the number of partitions actually added.
+    pub async fn add_partitions(&self, name: &str, new_partition_count: u32) -> Result<u32> {
+        let topics = self.topics.read().await;
+        let topic = topics
+            .get(name)
+            .ok_or_else(|| Error::TopicNotFound(name.to_string()))?
+            .clone();
+        drop(topics);
+
+        let added = topic
+            .add_partitions(
+                &self.config,
+                new_partition_count,
+                self.tiered_storage.clone(),
+            )
+            .await?;
+
+        // Update persisted metadata
+        let _ = self.persist_metadata().await;
+
+        Ok(added)
     }
 }
 

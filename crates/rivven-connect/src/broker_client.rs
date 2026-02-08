@@ -427,6 +427,21 @@ impl BrokerClient {
     }
 
     /// Get earliest and latest offsets for a topic/partition
+    /// Get the number of partitions for a topic
+    pub async fn get_topic_partition_count(&self, topic: &str) -> Result<u32> {
+        let mut guard = self.client.lock().await;
+
+        let client = guard
+            .as_mut()
+            .ok_or_else(|| ConnectError::broker("Not connected to broker"))?;
+
+        let (_name, partitions) = client.get_metadata(topic).await.map_err(|e| {
+            ConnectError::broker(format!("Failed to get metadata for '{}': {}", topic, e))
+        })?;
+
+        Ok(partitions)
+    }
+
     ///
     /// Returns (earliest, latest) where:
     /// - earliest: First available offset (messages before this are deleted/compacted)

@@ -901,4 +901,117 @@ mod tests {
             panic!("Expected Published response");
         }
     }
+
+    /// Snapshot test: postcard serializes enum variants by ordinal position.
+    /// If someone reorders variants in Request or Response, this test fails
+    /// because the byte prefix (discriminant) will change, breaking wire compat.
+    #[test]
+    fn test_postcard_wire_stability_request_discriminants() {
+        use bytes::Bytes;
+
+        // Serialize a representative of each variant and check the leading
+        // discriminant byte(s) haven't shifted. Postcard uses varint encoding
+        // for enum discriminants.
+        let test_cases: Vec<(Request, u8)> = vec![
+            // variant 0: Authenticate
+            (
+                Request::Authenticate {
+                    username: "u".into(),
+                    password: "p".into(),
+                },
+                0,
+            ),
+            // variant 4: Publish
+            (
+                Request::Publish {
+                    topic: "t".into(),
+                    partition: None,
+                    key: None,
+                    value: Bytes::from("v"),
+                },
+                4,
+            ),
+            // variant 6: CreateTopic
+            (
+                Request::CreateTopic {
+                    name: "t".into(),
+                    partitions: None,
+                },
+                6,
+            ),
+            // variant 7: ListTopics
+            (Request::ListTopics, 7),
+            // variant 8: DeleteTopic
+            (Request::DeleteTopic { name: "t".into() }, 8),
+            // variant 11: GetMetadata
+            (Request::GetMetadata { topic: "t".into() }, 11),
+            // variant 13: Ping
+            (Request::Ping, 13),
+        ];
+
+        for (request, expected_discriminant) in test_cases {
+            let bytes = request.to_bytes().unwrap();
+            assert_eq!(
+                bytes[0], expected_discriminant,
+                "Wire discriminant changed for {:?} — enum variant order may have shifted!",
+                request
+            );
+        }
+    }
+
+    #[test]
+    fn test_postcard_wire_stability_response_discriminants() {
+        let test_cases: Vec<(Response, u8)> = vec![
+            // variant 0: Authenticated
+            (
+                Response::Authenticated {
+                    session_id: String::new(),
+                    expires_in: 0,
+                },
+                0,
+            ),
+            // variant 3: Published
+            (
+                Response::Published {
+                    offset: 0,
+                    partition: 0,
+                },
+                3,
+            ),
+            // variant 5: TopicCreated
+            (
+                Response::TopicCreated {
+                    name: "t".into(),
+                    partitions: 1,
+                },
+                5,
+            ),
+            // variant 6: Topics
+            (Response::Topics { topics: vec![] }, 6),
+            // variant 7: TopicDeleted
+            (Response::TopicDeleted, 7),
+            // variant 12: Pong
+            (Response::Pong, 12),
+            // variant 14: Groups
+            (Response::Groups { groups: vec![] }, 14),
+            // variant 18: Error
+            (
+                Response::Error {
+                    message: "e".into(),
+                },
+                18,
+            ),
+            // variant 19: Ok
+            (Response::Ok, 19),
+        ];
+
+        for (response, expected_discriminant) in test_cases {
+            let bytes = response.to_bytes().unwrap();
+            assert_eq!(
+                bytes[0], expected_discriminant,
+                "Wire discriminant changed for {:?} — enum variant order may have shifted!",
+                response
+            );
+        }
+    }
 }

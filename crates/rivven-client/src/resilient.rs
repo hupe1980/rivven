@@ -268,18 +268,24 @@ impl CircuitBreaker {
 // Connection Pool
 // ============================================================================
 
-/// Pooled connection wrapper
+/// Pooled connection wrapper.
+///
+/// Holds a semaphore permit from the owning `ConnectionPool`. When this struct
+/// is dropped (e.g. on request timeout), the permit is automatically released,
+/// preventing permanent pool slot exhaustion.
 struct PooledConnection {
     client: Client,
     created_at: Instant,
     last_used: Instant,
+    /// Semaphore permit — released on drop to return the pool slot.
+    _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
 /// Connection pool for a single server
 struct ConnectionPool {
     addr: String,
     connections: Mutex<Vec<PooledConnection>>,
-    semaphore: Semaphore,
+    semaphore: Arc<Semaphore>,
     config: Arc<ResilientClientConfig>,
     circuit_breaker: CircuitBreaker,
 }
@@ -289,7 +295,7 @@ impl ConnectionPool {
         Self {
             addr,
             connections: Mutex::new(Vec::new()),
-            semaphore: Semaphore::new(config.pool_size),
+            semaphore: Arc::new(Semaphore::new(config.pool_size)),
             circuit_breaker: CircuitBreaker::new(config.clone()),
             config,
         }
@@ -301,10 +307,11 @@ impl ConnectionPool {
             return Err(Error::CircuitBreakerOpen(self.addr.clone()));
         }
 
-        // Acquire semaphore permit
-        let _permit = self
+        // Acquire semaphore permit — owned so it can be stored in PooledConnection
+        let permit = self
             .semaphore
-            .acquire()
+            .clone()
+            .acquire_owned()
             .await
             .map_err(|_| Error::ConnectionError("Pool exhausted".to_string()))?;
 
@@ -313,6 +320,7 @@ impl ConnectionPool {
             let mut connections = self.connections.lock().await;
             if let Some(mut conn) = connections.pop() {
                 conn.last_used = Instant::now();
+                conn._permit = permit;
                 return Ok(conn);
             }
         }
@@ -329,6 +337,7 @@ impl ConnectionPool {
             client,
             created_at: Instant::now(),
             last_used: Instant::now(),
+            _permit: permit,
         })
     }
 
@@ -785,6 +794,14 @@ impl ResilientClient {
             total_requests: self.total_requests.load(Ordering::Relaxed),
             total_failures: self.total_failures.load(Ordering::Relaxed),
             servers: pools,
+        }
+    }
+}
+
+impl Drop for ResilientClient {
+    fn drop(&mut self) {
+        if let Some(handle) = self._health_check_handle.take() {
+            handle.abort();
         }
     }
 }

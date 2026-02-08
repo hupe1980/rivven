@@ -615,18 +615,104 @@ impl Client {
         }
     }
 
-    /// Register a schema (supports Avro, Protobuf, JSON Schema)
+    /// Register a schema with the schema registry (via HTTP REST API)
+    ///
+    /// The schema registry runs as a separate service (`rivven-schema`) with a
+    /// Confluent-compatible REST API. This method performs a minimal HTTP/1.1 POST
+    /// to `{registry_url}/subjects/{subject}/versions` without external HTTP deps.
     ///
     /// # Arguments
-    /// * `subject` - The subject name (typically topic-name + "-key" or "-value")
-    /// * `schema_type` - The schema format (Avro, Protobuf, or Json)
+    /// * `registry_url` - Schema registry base URL (e.g., `http://localhost:8081`)
+    /// * `subject` - Subject name (typically `{topic}-key` or `{topic}-value`)
+    /// * `schema_type` - Schema format: `"AVRO"`, `"PROTOBUF"`, or `"JSON"`
     /// * `schema` - The schema definition string
     ///
     /// # Returns
-    /// The global schema ID
-    ///
-    /// # Example
-    /// ```rust,ignore
+    /// The global schema ID on success.
+    pub async fn register_schema(
+        &self,
+        registry_url: &str,
+        subject: &str,
+        schema_type: &str,
+        schema: &str,
+    ) -> Result<u32> {
+        use tokio::net::TcpStream as TokioTcpStream;
+
+        // Parse URL into host:port and path
+        let url = registry_url.trim_end_matches('/');
+        let stripped = url.strip_prefix("http://").ok_or_else(|| {
+            Error::ConnectionError("schema registry URL must start with http://".into())
+        })?;
+        let (host_port, _) = stripped.split_once('/').unwrap_or((stripped, ""));
+        let path = format!("/subjects/{}/versions", subject);
+
+        let body = serde_json::json!({
+            "schema": schema,
+            "schemaType": schema_type,
+        });
+        let body_bytes = serde_json::to_vec(&body)
+            .map_err(|e| Error::ConnectionError(format!("failed to serialize schema: {e}")))?;
+
+        // Minimal HTTP/1.1 POST
+        let request = format!(
+            "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/vnd.schemaregistry.v1+json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            path, host_port, body_bytes.len()
+        );
+
+        let mut stream = TokioTcpStream::connect(host_port).await.map_err(|e| {
+            Error::ConnectionError(format!("failed to connect to schema registry: {e}"))
+        })?;
+
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .map_err(|e| Error::ConnectionError(format!("failed to send request: {e}")))?;
+        stream
+            .write_all(&body_bytes)
+            .await
+            .map_err(|e| Error::ConnectionError(format!("failed to send body: {e}")))?;
+
+        // Read response
+        let mut response_buf = Vec::with_capacity(4096);
+        stream
+            .read_to_end(&mut response_buf)
+            .await
+            .map_err(|e| Error::ConnectionError(format!("failed to read response: {e}")))?;
+
+        let response_str = String::from_utf8_lossy(&response_buf);
+
+        // Parse HTTP status line
+        let status_line = response_str.lines().next().unwrap_or("");
+        let status_code: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+
+        if !(200..300).contains(&status_code) {
+            return Err(Error::ServerError(format!(
+                "schema registry returned HTTP {status_code}"
+            )));
+        }
+
+        // Find JSON body after \r\n\r\n
+        let json_body = response_str
+            .find("\r\n\r\n")
+            .map(|i| &response_str[i + 4..])
+            .unwrap_or("");
+
+        #[derive(serde::Deserialize)]
+        struct RegisterResponse {
+            id: u32,
+        }
+
+        let result: RegisterResponse = serde_json::from_str(json_body.trim()).map_err(|e| {
+            Error::ConnectionError(format!("failed to parse schema registry response: {e}"))
+        })?;
+
+        Ok(result.id)
+    }
+
     /// List all consumer groups
     pub async fn list_groups(&mut self) -> Result<Vec<String>> {
         let request = Request::ListGroups;
@@ -991,7 +1077,10 @@ impl Client {
         producer: &mut ProducerState,
     ) -> Result<(u64, u32, bool)> {
         let sequence = producer.next_sequence;
-        producer.next_sequence += 1;
+        producer.next_sequence = producer.next_sequence.wrapping_add(1);
+        if producer.next_sequence < 0 {
+            producer.next_sequence = 0;
+        }
 
         let request = Request::IdempotentPublish {
             topic: topic.into(),
@@ -1126,7 +1215,10 @@ impl Client {
         producer: &mut ProducerState,
     ) -> Result<(u64, u32, i32)> {
         let sequence = producer.next_sequence;
-        producer.next_sequence += 1;
+        producer.next_sequence = producer.next_sequence.wrapping_add(1);
+        if producer.next_sequence < 0 {
+            producer.next_sequence = 0;
+        }
 
         let request = Request::TransactionalPublish {
             txn_id: txn_id.into(),

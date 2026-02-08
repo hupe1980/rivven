@@ -12,6 +12,16 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// Get system hostname via the `hostname` command, falling back to "unknown".
+fn hostname() -> String {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
 /// Rivven - High-Performance Distributed Event Streaming Platform
 ///
 /// A lightweight, single-binary event streaming platform designed for
@@ -324,7 +334,7 @@ impl Cli {
         self.node_id.clone().unwrap_or_else(|| {
             format!(
                 "{}-{}",
-                gethostname::gethostname().to_string_lossy().into_owned(),
+                hostname(),
                 self.cluster_bind
                     .map(|a| a.port())
                     .unwrap_or(self.bind.port() + 1)

@@ -25,6 +25,10 @@ pub struct Partition {
     /// Current offset (next offset to be assigned)
     /// Lock-free atomic for 5-10x throughput improvement
     next_offset: AtomicU64,
+
+    /// Low watermark: records before this offset are logically deleted.
+    /// Set via `set_low_watermark()` (e.g., from DeleteRecords API).
+    low_watermark: AtomicU64,
 }
 
 impl Partition {
@@ -59,6 +63,7 @@ impl Partition {
             log_manager: Arc::new(RwLock::new(log_manager)),
             tiered_storage,
             next_offset,
+            low_watermark: AtomicU64::new(0),
         })
     }
 
@@ -82,6 +87,9 @@ impl Partition {
     pub async fn append(&self, mut message: Message) -> Result<u64> {
         let timer = Timer::new();
 
+        // Acquire write lock first, then allocate offset to avoid gaps on failure
+        let mut log = self.log_manager.write().await;
+
         // Lock-free offset allocation - single atomic operation
         // Using AcqRel: ensures our write is visible to other threads (Release)
         // and we see all previous writes (Acquire). SeqCst is unnecessary here.
@@ -89,17 +97,37 @@ impl Partition {
 
         message.offset = offset;
 
-        // Write to log manager (primary storage)
-        {
-            let mut log = self.log_manager.write().await;
-            log.append(offset, message.clone()).await?;
-        }
+        // Pre-serialize for tiered storage BEFORE consuming the message,
+        // avoiding a full clone. Only serialize if tiered storage is enabled.
+        let tiered_bytes = if self.tiered_storage.is_some() {
+            match message.to_bytes() {
+                Ok(data) => Some(Bytes::from(data)),
+                Err(e) => {
+                    warn!("Failed to serialize for tiered storage: {} (continuing)", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
-        // Also write to tiered storage if enabled
-        if let Some(tiered) = &self.tiered_storage {
-            let data = message.to_bytes()?;
+        // Write to log manager (primary storage) — consumes message, no clone needed
+        if let Err(e) = log.append(offset, message).await {
+            // Reclaim the offset on failure to prevent gaps
+            let _ = self.next_offset.compare_exchange(
+                offset + 1,
+                offset,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            );
+            return Err(e);
+        }
+        drop(log);
+
+        // Write pre-serialized bytes to tiered storage (no second serialization)
+        if let (Some(tiered), Some(data)) = (&self.tiered_storage, tiered_bytes) {
             if let Err(e) = tiered
-                .write(&self.topic, self.id, offset, offset + 1, Bytes::from(data))
+                .write(&self.topic, self.id, offset, offset + 1, data)
                 .await
             {
                 // Log warning but don't fail - log manager has the authoritative copy
@@ -126,9 +154,13 @@ impl Partition {
     pub async fn read(&self, start_offset: u64, max_messages: usize) -> Result<Vec<Message>> {
         let timer = Timer::new();
 
+        // Respect low watermark — don't serve records before it
+        let wm = self.low_watermark.load(Ordering::Acquire);
+        let effective_offset = start_offset.max(wm);
+
         let log = self.log_manager.read().await;
         // Estimate size: 4KB per message to be safe/generous for the 'max_bytes' parameter of log.read
-        let messages = log.read(start_offset, max_messages * 4096).await?;
+        let messages = log.read(effective_offset, max_messages * 4096).await?;
 
         let result: Vec<Message> = messages.into_iter().take(max_messages).collect();
 
@@ -152,8 +184,49 @@ impl Partition {
     }
 
     pub async fn earliest_offset(&self) -> Option<u64> {
-        let log = self.log_manager.read().await;
-        Some(log.earliest_offset())
+        let log_earliest = {
+            let log = self.log_manager.read().await;
+            log.earliest_offset()
+        };
+        let wm = self.low_watermark.load(Ordering::Acquire);
+        Some(log_earliest.max(wm))
+    }
+
+    /// Set the low watermark for this partition.
+    ///
+    /// Records before this offset are logically deleted and will not be
+    /// returned by `read()`. This implements the DeleteRecords API behavior.
+    /// The watermark can only advance forward (monotonically increasing).
+    ///
+    /// Also triggers physical segment truncation: segments whose data is
+    /// entirely below the watermark are deleted from disk to reclaim space.
+    pub async fn set_low_watermark(&self, offset: u64) {
+        self.low_watermark.fetch_max(offset, Ordering::Release);
+
+        // Physically remove segments that are entirely below the watermark.
+        // This reclaims disk space — the logical watermark alone only hides
+        // records from consumers.
+        let mut log = self.log_manager.write().await;
+        match log.truncate_before(offset) {
+            Ok(0) => {}
+            Ok(n) => {
+                info!(
+                    "Partition {}/{}: truncated {} segment(s) below watermark {}",
+                    self.topic, self.id, n, offset
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "Partition {}/{}: segment truncation failed: {}",
+                    self.topic, self.id, e
+                );
+            }
+        }
+    }
+
+    /// Get the current low watermark
+    pub fn low_watermark(&self) -> u64 {
+        self.low_watermark.load(Ordering::Acquire)
     }
 
     pub async fn message_count(&self) -> usize {

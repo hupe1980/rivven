@@ -1,14 +1,19 @@
 //! Vectorized Batch Processing
 //!
-//! High-performance batch operations using SIMD and cache-optimized algorithms:
-//! - **SIMD CRC32**: Hardware-accelerated checksums
-//! - **Vectorized Compression**: Parallel compression/decompression
-//! - **Batch Message Encoding**: Encode multiple messages in single pass
-//! - **Prefetching**: Predictive data loading
-//! - **Cache-Oblivious Algorithms**: Optimal for any cache size
+//! High-performance batch operations leveraging SIMD-optimized crates:
+//!
+//! - **CRC32**: Hardware-accelerated checksums via [`crc32fast`] (SSE4.2/AVX2/ARMv8)
+//! - **Memory search**: SIMD byte search via [`memchr`] (AVX2/SSE2/NEON)
+//! - **Batch message encoding**: Encode/decode multiple messages in single pass
+//! - **Columnar `RecordBatch`**: Cache-friendly columnar layout for filtering
+//! - **Parallel `BatchProcessor`**: Thread-pool batch map/filter
+//!
+//! The SIMD acceleration is provided by the underlying crates, which auto-detect
+//! and use the best available instruction set at runtime. No hand-written SIMD
+//! intrinsics are needed — the libraries handle platform-specific dispatch.
 //!
 //! Performance characteristics:
-//! - 4-8x faster checksums with SSE4.2/AVX2
+//! - 4-8x faster checksums vs naive loop (via `crc32fast`)
 //! - 2-4x faster batch encoding vs sequential
 //! - Near-zero allocation hot path
 

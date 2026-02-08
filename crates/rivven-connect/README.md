@@ -32,6 +32,22 @@ rivven-connect is designed to scale to **300+ connectors** with:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+### Runtime Registry Dispatch
+
+When `rivven-connect` encounters a connector type that isn't hardcoded (e.g., a community or custom connector), the `SourceRunner` and `SinkRunner` automatically fall back to the **connector registry**. The registry uses type-erased `AnySource`/`AnySink` dispatch so third-party connectors get the same pipeline features as built-in ones:
+
+- **Check → Discover → Read/Write** lifecycle via `SourceFactory`/`SinkFactory`
+- Same rate limiting, backpressure, and transform pipeline as built-in connectors
+- Zero code changes needed — just register your factory in `create_source_registry()` / `create_sink_registry()`
+
+### Lock-Free Rate Limiter
+
+The token-bucket rate limiter on source and sink hot paths is **fully lock-free**. It uses `AtomicU64` with CAS loops for both refill timestamp tracking and token management — zero `RwLock` or `Mutex` contention under concurrent workloads.
+
+### Zero-Allocation Batch Sizing
+
+Batch size estimation uses `SourceEvent::estimated_size()` — a heuristic that walks field lengths without serialization. This eliminates the `serde_json::to_vec()` allocation that was previously required per event during batch splitting, keeping the hot path allocation-free.
+
 ## Security Architecture
 
 `rivven-connect` runs as a **separate process** from the Rivven broker. This design:
@@ -489,7 +505,7 @@ CDC connectors include advanced built-in features for production workloads:
 
 | Feature | Description |
 |---------|-------------|
-| **Field-Level Encryption** | AES-256-GCM encryption for sensitive fields (PII, PCI) |
+| **Field-Level Encryption** | AES-256-GCM / ChaCha20-Poly1305 encryption for sensitive fields (PII, PCI) |
 | **Deduplication** | Hash-based event deduplication with configurable TTL |
 | **Tombstone Handling** | Proper CDC tombstone emission for compacted topics |
 | **Column Masking** | Real-time masking of sensitive data |
@@ -497,7 +513,7 @@ CDC connectors include advanced built-in features for production workloads:
 
 #### Field-Level Encryption
 
-Encrypt sensitive fields at the source using AES-256-GCM encryption. Keys are managed via environment variables or external key providers.
+Encrypt sensitive fields at the source using AES-256-GCM or ChaCha20-Poly1305 encryption with versioned key rotation. Keys are managed via environment variables or external key providers.
 
 ```yaml
 sources:

@@ -15,7 +15,7 @@
 //!
 //! # Safety Requirements
 //!
-//! The `ZeroCopyBuffer` type implements its own reference counting via `ref_count`.
+//! The `ZeroCopyBuffer` type relies on `Arc` for reference counting.
 //! When using `BufferSlice`, the following safety invariants must be maintained:
 //!
 //! 1. **Lifetime**: A `ZeroCopyBuffer` must outlive all `BufferSlice` instances
@@ -23,7 +23,7 @@
 //!    via `ZeroCopyBufferPool`.
 //!
 //! 2. **Reference Counting**: `BufferSlice::drop()` decrements the buffer's
-//!    ref_count. The caller must ensure the buffer is not dropped while slices
+//!    lifetime. `BufferSlice` holds an `Arc<ZeroCopyBuffer>` automatically.
 //!    exist.
 //!
 //! 3. **Thread Safety**: While individual operations are atomic, the caller must
@@ -43,7 +43,7 @@ use bytes::{Bytes, BytesMut};
 use std::alloc::{alloc, dealloc, Layout};
 use std::ops::Deref;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 /// Cache line size for alignment (64 bytes on most modern CPUs)
@@ -52,7 +52,10 @@ const CACHE_LINE_SIZE: usize = 64;
 /// Default buffer size (256 KB - optimal for most workloads)
 const DEFAULT_BUFFER_SIZE: usize = 256 * 1024;
 
-/// A zero-copy buffer with reference counting and memory pooling
+/// A zero-copy buffer with memory pooling
+///
+/// Reference counting is handled by `Arc<ZeroCopyBuffer>` — the internal
+/// `ref_count` field has been removed in favour of a single source of truth.
 #[derive(Debug)]
 pub struct ZeroCopyBuffer {
     /// Raw pointer to the buffer data
@@ -61,8 +64,6 @@ pub struct ZeroCopyBuffer {
     capacity: usize,
     /// Current write position
     write_pos: AtomicUsize,
-    /// Reference count for safe sharing
-    ref_count: AtomicU32,
     /// Buffer ID for tracking
     id: u64,
     /// Layout used for allocation (needed for deallocation)
@@ -99,15 +100,14 @@ impl ZeroCopyBuffer {
             data,
             capacity: aligned_capacity,
             write_pos: AtomicUsize::new(0),
-            ref_count: AtomicU32::new(1),
             id,
             layout,
         }
     }
 
-    /// Get a slice of the buffer for writing
-    /// Returns None if there's not enough space
-    pub fn reserve(&self, len: usize) -> Option<BufferSlice> {
+    /// Get a slice of the buffer for writing.
+    /// Requires an Arc reference to safely create a BufferSlice.
+    pub fn reserve(self: &Arc<Self>, len: usize) -> Option<BufferSlice> {
         loop {
             let current = self.write_pos.load(Ordering::Acquire);
             let new_pos = current + len;
@@ -121,13 +121,7 @@ impl ZeroCopyBuffer {
                 .compare_exchange_weak(current, new_pos, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
-                self.ref_count.fetch_add(1, Ordering::Relaxed);
-
-                return Some(BufferSlice {
-                    buffer: self as *const ZeroCopyBuffer,
-                    offset: current,
-                    len,
-                });
+                return Some(BufferSlice::new(Arc::clone(self), current, len));
             }
             // CAS failed, retry
             std::hint::spin_loop();
@@ -141,13 +135,26 @@ impl ZeroCopyBuffer {
     /// mutability via raw pointers with atomic coordination for lock-free access.
     #[allow(clippy::mut_from_ref)]
     pub unsafe fn get_mut_slice(&self, offset: usize, len: usize) -> &mut [u8] {
-        debug_assert!(offset + len <= self.capacity);
+        assert!(
+            offset + len <= self.capacity,
+            "get_mut_slice out of bounds: offset={} len={} capacity={}",
+            offset,
+            len,
+            self.capacity
+        );
         std::slice::from_raw_parts_mut(self.data.as_ptr().add(offset), len)
     }
 
     /// Get an immutable slice
     pub fn get_slice(&self, offset: usize, len: usize) -> &[u8] {
-        debug_assert!(offset + len <= self.write_pos.load(Ordering::Acquire));
+        let write_pos = self.write_pos.load(Ordering::Acquire);
+        assert!(
+            offset + len <= write_pos,
+            "get_slice out of bounds: offset={} len={} write_pos={}",
+            offset,
+            len,
+            write_pos
+        );
         unsafe { std::slice::from_raw_parts(self.data.as_ptr().add(offset), len) }
     }
 
@@ -176,29 +183,52 @@ impl ZeroCopyBuffer {
         self.id
     }
 
-    /// Reset buffer for reuse (only when ref_count == 1)
+    /// Reset buffer for reuse.
+    ///
+    /// Resets the write position to 0. The caller must ensure exclusive ownership
+    /// (e.g. `Arc::strong_count() == 1`) before calling.
     pub fn reset(&self) -> bool {
-        if self.ref_count.load(Ordering::Acquire) == 1 {
-            self.write_pos.store(0, Ordering::Release);
-            true
-        } else {
-            false
+        self.write_pos.store(0, Ordering::Release);
+        true
+    }
+
+    /// Compatibility shim — ref counting is now handled by `Arc`.
+    #[deprecated(note = "Use Arc::clone instead")]
+    pub fn add_ref(&self) {}
+
+    /// Allocate `len` bytes and advance the write position, returning the start offset.
+    /// Does NOT create a `BufferSlice` — the caller is expected
+    /// to hold an `Arc<ZeroCopyBuffer>` which keeps the buffer alive.
+    pub fn try_allocate(&self, len: usize) -> Option<usize> {
+        loop {
+            let current = self.write_pos.load(Ordering::Acquire);
+            let new_pos = current + len;
+
+            if new_pos > self.capacity {
+                return None;
+            }
+
+            if self
+                .write_pos
+                .compare_exchange_weak(current, new_pos, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                return Some(current);
+            }
+            std::hint::spin_loop();
         }
     }
 
-    /// Increment reference count
-    pub fn add_ref(&self) {
-        self.ref_count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Decrement reference count, returns true if this was the last reference
+    /// Compatibility shim — ref counting is now handled by `Arc`.
+    #[deprecated(note = "Use Arc::strong_count instead")]
     pub fn release(&self) -> bool {
-        self.ref_count.fetch_sub(1, Ordering::AcqRel) == 1
+        false
     }
 
-    /// Get current reference count
+    /// Compatibility shim — ref counting is now handled by `Arc`.
+    #[deprecated(note = "Use Arc::strong_count instead")]
     pub fn ref_count(&self) -> u32 {
-        self.ref_count.load(Ordering::Relaxed)
+        0
     }
 
     /// Convert entire written portion to Bytes (zero-copy if possible)
@@ -223,30 +253,34 @@ impl Drop for ZeroCopyBuffer {
 }
 
 /// A slice view into a ZeroCopyBuffer
-/// Does not copy data, just holds offset and length
-#[derive(Debug)]
+/// Holds an `Arc` to the underlying buffer for safe, reference-counted access.
+#[derive(Debug, Clone)]
 pub struct BufferSlice {
-    buffer: *const ZeroCopyBuffer,
+    buffer: Arc<ZeroCopyBuffer>,
     offset: usize,
     len: usize,
 }
 
-// Safety: BufferSlice only reads from the buffer
-unsafe impl Send for BufferSlice {}
-unsafe impl Sync for BufferSlice {}
-
 impl BufferSlice {
+    /// Create a BufferSlice from an Arc reference
+    pub fn new(buffer: Arc<ZeroCopyBuffer>, offset: usize, len: usize) -> Self {
+        Self {
+            buffer,
+            offset,
+            len,
+        }
+    }
+
     /// Get the slice as bytes
     pub fn as_bytes(&self) -> &[u8] {
-        // Safety: Buffer is valid while slice exists
-        unsafe { &*self.buffer }.get_slice(self.offset, self.len)
+        self.buffer.get_slice(self.offset, self.len)
     }
 
     /// Get a mutable slice for writing
     /// # Safety
     /// Caller must ensure exclusive access to this range
     pub unsafe fn as_mut_bytes(&mut self) -> &mut [u8] {
-        (*self.buffer).get_mut_slice(self.offset, self.len)
+        self.buffer.get_mut_slice(self.offset, self.len)
     }
 
     /// Write data into this slice
@@ -277,15 +311,6 @@ impl BufferSlice {
     /// Convert to Bytes (copies the data)
     pub fn to_bytes(&self) -> Bytes {
         Bytes::copy_from_slice(self.as_bytes())
-    }
-}
-
-impl Drop for BufferSlice {
-    fn drop(&mut self) {
-        // Release reference to buffer
-        unsafe {
-            (*self.buffer).release();
-        }
     }
 }
 
@@ -649,24 +674,24 @@ impl ZeroCopyProducer {
         }
     }
 
-    /// Allocate space in current buffer and return slice for direct writing
+    /// Allocate space in current buffer and return (buffer, offset) for direct writing.
+    ///
+    /// The caller is responsible for writing into the buffer at the returned offset.
+    /// Unlike `reserve()`, this does not create a `BufferSlice` — it increments the
+    /// buffer's write position atomically and returns the raw offset.
     pub fn allocate(&self, size: usize) -> Option<(Arc<ZeroCopyBuffer>, usize)> {
         let mut guard = self.current_buffer.lock();
 
         // Try to reserve in current buffer
         if let Some(ref buffer) = *guard {
-            if let Some(slice) = buffer.reserve(size) {
-                let offset = slice.offset();
-                std::mem::forget(slice); // Don't release ref, we're returning the buffer
+            if let Some(offset) = buffer.try_allocate(size) {
                 return Some((buffer.clone(), offset));
             }
         }
 
         // Need a new buffer
         let buffer = self.buffer_pool.acquire();
-        if let Some(slice) = buffer.reserve(size) {
-            let offset = slice.offset();
-            std::mem::forget(slice);
+        if let Some(offset) = buffer.try_allocate(size) {
             *guard = Some(buffer.clone());
             return Some((buffer, offset));
         }
@@ -861,7 +886,7 @@ mod tests {
 
     #[test]
     fn test_zero_copy_buffer_basic() {
-        let buffer = ZeroCopyBuffer::new(1024);
+        let buffer = Arc::new(ZeroCopyBuffer::new(1024));
         assert_eq!(buffer.len(), 0);
         assert!(buffer.remaining() >= 1024);
 
@@ -873,7 +898,7 @@ mod tests {
 
     #[test]
     fn test_zero_copy_buffer_write() {
-        let buffer = ZeroCopyBuffer::new(1024);
+        let buffer = Arc::new(ZeroCopyBuffer::new(1024));
 
         let mut slice = buffer.reserve(11).unwrap();
         slice.write(b"Hello World");

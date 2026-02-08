@@ -271,9 +271,13 @@ pub struct ConsumerGroup {
     /// Used to recognize returning static members without triggering rebalance
     pub static_members: HashMap<GroupInstanceId, MemberId>,
 
-    /// Pending static members awaiting sync (instance_id → saved assignment)
-    /// Stores assignments for static members that disconnected but haven't timed out
-    pub pending_static_members: HashMap<GroupInstanceId, Vec<PartitionAssignment>>,
+    /// Pending static members awaiting sync (instance_id → (saved assignment, pending_since))
+    /// Stores assignments for static members that disconnected but haven't timed out.
+    /// Skipped during (de)serialization since Instant is not serializable; pending
+    /// members are re-populated at runtime.
+    #[serde(skip)]
+    pub pending_static_members:
+        HashMap<GroupInstanceId, (Vec<PartitionAssignment>, std::time::Instant)>,
 
     /// Partitions awaiting revocation acknowledgment (cooperative protocol)
     /// Maps member_id → partitions that need to be revoked before reassignment
@@ -407,7 +411,9 @@ impl ConsumerGroup {
             }
 
             // Check for pending assignment (member returning after disconnect)
-            if let Some(saved_assignment) = self.pending_static_members.remove(instance_id) {
+            if let Some((saved_assignment, _pending_since)) =
+                self.pending_static_members.remove(instance_id)
+            {
                 // Static member rejoining - restore assignment without rebalance
                 let member = GroupMember {
                     member_id: member_id.clone(),
@@ -498,8 +504,10 @@ impl ConsumerGroup {
             // Save the old member's assignment for potential restoration
             if let Some(old_member) = self.members.get(&old_member_id) {
                 if !old_member.assignment.is_empty() {
-                    self.pending_static_members
-                        .insert(instance_id.clone(), old_member.assignment.clone());
+                    self.pending_static_members.insert(
+                        instance_id.clone(),
+                        (old_member.assignment.clone(), std::time::Instant::now()),
+                    );
                 }
             }
 
@@ -528,8 +536,10 @@ impl ConsumerGroup {
                 if let Some(ref instance_id) = member.group_instance_id {
                     // Save assignment for potential restoration
                     if !member.assignment.is_empty() {
-                        self.pending_static_members
-                            .insert(instance_id.clone(), member.assignment);
+                        self.pending_static_members.insert(
+                            instance_id.clone(),
+                            (member.assignment, std::time::Instant::now()),
+                        );
                     }
                     // Keep the static_members mapping until timeout
                     // This allows the member to rejoin without rebalance
@@ -659,13 +669,26 @@ impl ConsumerGroup {
     /// Their assignments are preserved for potential restoration.
     pub fn check_pending_static_timeouts(
         &mut self,
-        _pending_timeout: Duration,
+        pending_timeout: Duration,
     ) -> Vec<GroupInstanceId> {
-        // This would typically be called periodically to clean up
-        // pending static members that never rejoined.
-        // For now, we just return an empty vec as we don't track
-        // pending timestamps separately (could be enhanced).
-        Vec::new()
+        let now = std::time::Instant::now();
+        let timed_out: Vec<GroupInstanceId> = self
+            .pending_static_members
+            .iter()
+            .filter(|(_, (_, pending_since))| now.duration_since(*pending_since) >= pending_timeout)
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        for id in &timed_out {
+            self.pending_static_members.remove(id);
+            self.static_members.remove(id);
+        }
+
+        if !timed_out.is_empty() && !self.members.is_empty() {
+            self.transition_to_preparing_rebalance();
+        }
+
+        timed_out
     }
 
     // =========================================================================

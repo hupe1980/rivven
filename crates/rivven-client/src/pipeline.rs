@@ -76,6 +76,30 @@ pub struct PipelineConfig {
     pub write_buffer_size: usize,
     /// Request timeout
     pub request_timeout: Duration,
+    /// Optional TLS configuration
+    #[cfg(feature = "tls")]
+    pub tls: Option<PipelineTlsConfig>,
+    /// Optional authentication credentials
+    pub auth: Option<PipelineAuthConfig>,
+}
+
+/// TLS configuration for pipelined client
+#[cfg(feature = "tls")]
+#[derive(Debug, Clone)]
+pub struct PipelineTlsConfig {
+    /// TLS configuration from rivven-core
+    pub tls_config: rivven_core::tls::TlsConfig,
+    /// Server name for TLS SNI
+    pub server_name: String,
+}
+
+/// Authentication configuration for pipelined client
+#[derive(Debug, Clone)]
+pub struct PipelineAuthConfig {
+    /// Username
+    pub username: String,
+    /// Password
+    pub password: String,
 }
 
 impl Default for PipelineConfig {
@@ -87,6 +111,9 @@ impl Default for PipelineConfig {
             read_buffer_size: 64 * 1024,  // 64KB
             write_buffer_size: 64 * 1024, // 64KB
             request_timeout: Duration::from_secs(30),
+            #[cfg(feature = "tls")]
+            tls: None,
+            auth: None,
         }
     }
 }
@@ -106,6 +133,9 @@ impl PipelineConfig {
             read_buffer_size: 256 * 1024,
             write_buffer_size: 256 * 1024,
             request_timeout: Duration::from_secs(60),
+            #[cfg(feature = "tls")]
+            tls: None,
+            auth: None,
         }
     }
 
@@ -118,6 +148,9 @@ impl PipelineConfig {
             read_buffer_size: 16 * 1024,
             write_buffer_size: 16 * 1024,
             request_timeout: Duration::from_secs(10),
+            #[cfg(feature = "tls")]
+            tls: None,
+            auth: None,
         }
     }
 }
@@ -171,6 +204,29 @@ impl PipelineConfigBuilder {
         self
     }
 
+    /// Set TLS configuration for encrypted connections
+    #[cfg(feature = "tls")]
+    pub fn tls(
+        mut self,
+        tls_config: rivven_core::tls::TlsConfig,
+        server_name: impl Into<String>,
+    ) -> Self {
+        self.config.tls = Some(PipelineTlsConfig {
+            tls_config,
+            server_name: server_name.into(),
+        });
+        self
+    }
+
+    /// Set authentication credentials
+    pub fn auth(mut self, username: impl Into<String>, password: impl Into<String>) -> Self {
+        self.config.auth = Some(PipelineAuthConfig {
+            username: username.into(),
+            password: password.into(),
+        });
+        self
+    }
+
     /// Build the configuration
     pub fn build(self) -> PipelineConfig {
         self.config
@@ -216,7 +272,7 @@ struct PipelinedClientInner {
     /// Configuration
     config: PipelineConfig,
     /// Statistics
-    stats: PipelineStats,
+    stats: Arc<PipelineStats>,
     /// Shutdown signal for background tasks
     shutdown: tokio::sync::watch::Sender<bool>,
 }
@@ -241,8 +297,34 @@ impl PipelinedClient {
             .set_nodelay(true)
             .map_err(|e| Error::ConnectionError(format!("Failed to set TCP_NODELAY: {}", e)))?;
 
-        let (read_half, write_half) = stream.into_split();
+        // Optionally upgrade to TLS
+        #[cfg(feature = "tls")]
+        if let Some(tls_cfg) = &config.tls {
+            let connector = rivven_core::tls::TlsConnector::new(&tls_cfg.tls_config)
+                .map_err(|e| Error::ConnectionError(format!("TLS config error: {e}")))?;
+            let tls_stream = connector
+                .connect(stream, &tls_cfg.server_name)
+                .await
+                .map_err(|e| Error::ConnectionError(format!("TLS handshake error: {e}")))?;
+            let (read_half, write_half) = tokio::io::split(tls_stream);
+            return Self::setup_pipeline(addr, config, read_half, write_half).await;
+        }
 
+        let (read_half, write_half) = stream.into_split();
+        Self::setup_pipeline(addr, config, read_half, write_half).await
+    }
+
+    /// Internal method to set up the pipeline tasks from a split stream
+    async fn setup_pipeline<R, W>(
+        _addr: &str,
+        config: PipelineConfig,
+        read_half: R,
+        write_half: W,
+    ) -> Result<Self>
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
         // Create channels
         let (request_tx, request_rx) = mpsc::channel(config.max_in_flight * 2);
         let in_flight_semaphore = Arc::new(Semaphore::new(config.max_in_flight));
@@ -251,10 +333,14 @@ impl PipelinedClient {
         // Create shutdown signal
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
+        // Create shared stats
+        let stats = Arc::new(PipelineStats::new());
+
         // Start writer task
         let writer_config = config.clone();
         let pending_for_writer = Arc::clone(&pending_responses);
         let writer_shutdown = shutdown_rx.clone();
+        let writer_stats = Arc::clone(&stats);
         tokio::spawn(async move {
             writer_task(
                 write_half,
@@ -262,6 +348,7 @@ impl PipelinedClient {
                 pending_for_writer,
                 writer_config,
                 writer_shutdown,
+                writer_stats,
             )
             .await;
         });
@@ -286,7 +373,7 @@ impl PipelinedClient {
                 in_flight_semaphore,
                 next_request_id: AtomicU64::new(1),
                 config,
-                stats: PipelineStats::new(),
+                stats,
                 shutdown: shutdown_tx,
             }),
         })
@@ -407,12 +494,13 @@ impl PipelinedClient {
 // ============================================================================
 
 /// Background task that batches and sends requests
-async fn writer_task(
-    write_half: tokio::net::tcp::OwnedWriteHalf,
+async fn writer_task<W: tokio::io::AsyncWrite + Unpin>(
+    write_half: W,
     mut request_rx: mpsc::Receiver<PipelinedRequest>,
     pending: PendingResponses,
     config: PipelineConfig,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
+    stats: Arc<PipelineStats>,
 ) {
     let mut writer = BufWriter::with_capacity(config.write_buffer_size, write_half);
     let mut batch: Vec<PipelinedRequest> = Vec::with_capacity(config.max_batch_size);
@@ -478,7 +566,7 @@ async fn writer_task(
                     .is_some_and(|t| t.elapsed().as_micros() as u64 >= config.batch_linger_us));
 
         if should_flush && !batch.is_empty() {
-            if let Err(e) = flush_batch(&mut writer, &mut batch, &pending).await {
+            if let Err(e) = flush_batch(&mut writer, &mut batch, &pending, &stats).await {
                 warn!("Failed to flush batch: {}", e);
                 // Notify all pending requests of the error
                 for req in batch.drain(..) {
@@ -493,15 +581,16 @@ async fn writer_task(
 
     // Flush any remaining requests
     if !batch.is_empty() {
-        let _ = flush_batch(&mut writer, &mut batch, &pending).await;
+        let _ = flush_batch(&mut writer, &mut batch, &pending, &stats).await;
     }
 }
 
 /// Flush a batch of requests
-async fn flush_batch(
-    writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>,
+async fn flush_batch<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut BufWriter<W>,
     batch: &mut Vec<PipelinedRequest>,
     pending: &PendingResponses,
+    stats: &PipelineStats,
 ) -> std::io::Result<()> {
     let mut pending_guard = pending.lock().await;
 
@@ -517,6 +606,7 @@ async fn flush_batch(
 
     writer.flush().await?;
     trace!("Flushed batch of {} requests", batch.len());
+    stats.batches_flushed.fetch_add(1, Ordering::Relaxed);
 
     Ok(())
 }
@@ -526,8 +616,8 @@ async fn flush_batch(
 // ============================================================================
 
 /// Background task that reads and dispatches responses
-async fn reader_task(
-    read_half: tokio::net::tcp::OwnedReadHalf,
+async fn reader_task<R: tokio::io::AsyncRead + Unpin>(
+    read_half: R,
     pending: PendingResponses,
     config: PipelineConfig,
     mut shutdown: tokio::sync::watch::Receiver<bool>,

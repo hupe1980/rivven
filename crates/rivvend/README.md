@@ -14,7 +14,7 @@
 | **Protocol** | Native binary protocol, HTTP REST API |
 | **Storage** | Append-only log, tiered storage, log compaction |
 | **Clustering** | Raft consensus, multi-node replication |
-| **Security** | SCRAM-SHA-256, mTLS, API keys, Cedar RBAC |
+| **Security** | SCRAM-SHA-256 (600K PBKDF2), mTLS, API keys, Cedar RBAC, password complexity enforcement |
 | **Observability** | Prometheus metrics, web dashboard |
 
 ## Quick Start
@@ -105,6 +105,15 @@ OPTIONS:
     -h, --help                    Print help
     -V, --version                 Print version
 ```
+
+## Quota Enforcement
+
+All quota enforcement (request, produce, consume) flows through a unified `handle_with_principal()` entry point. The authenticated handler extracts the principal and delegates directly, avoiding double-counting:
+
+| Path | Principal | Enforcement |
+|:-----|:----------|:------------|
+| Authenticated | `session.principal_name` | Per-user quotas |
+| Anonymous | `None` | Global quotas |
 
 ## Metrics
 

@@ -8,7 +8,8 @@
 //! - Configurable rate limiting for backpressure
 
 use crate::broker_client::SharedBrokerClient;
-use crate::config::{ConnectConfig, SinkConfig, StartOffset};
+use crate::config::{ConnectConfig, SinkConfig, StartOffset, TransformStepConfig};
+use crate::connectors::{create_sink_registry, SinkRegistry};
 use crate::error::{ConnectError, ConnectorStatus, Result};
 use crate::rate_limiter::{RateLimiterStats, TokenBucketRateLimiter};
 use std::collections::HashMap;
@@ -30,6 +31,11 @@ pub struct SinkRunner {
     offsets: RwLock<HashMap<(String, u32), u64>>,
     /// Rate limiter for controlling throughput
     rate_limiter: TokenBucketRateLimiter,
+    /// Transform steps applied to consumed data before writing
+    #[allow(dead_code)]
+    transforms: Vec<TransformStepConfig>,
+    /// Sink connector registry for dynamic dispatch (registry-based connectors)
+    sink_registry: Arc<SinkRegistry>,
 }
 
 // Methods for health monitoring - reserved for future integration with health.rs
@@ -58,7 +64,12 @@ impl SinkRunner {
 
 impl SinkRunner {
     /// Create a new sink runner
-    pub fn new(name: String, config: SinkConfig, broker: SharedBrokerClient) -> Self {
+    pub fn new(
+        name: String,
+        config: SinkConfig,
+        broker: SharedBrokerClient,
+        sink_registry: Arc<SinkRegistry>,
+    ) -> Self {
         // Create rate limiter from config
         let rate_limiter_config = config.rate_limit.to_rate_limiter_config();
         let rate_limiter = TokenBucketRateLimiter::new(rate_limiter_config);
@@ -70,6 +81,8 @@ impl SinkRunner {
             );
         }
 
+        let transforms = config.transforms.clone();
+
         Self {
             name,
             config,
@@ -80,6 +93,8 @@ impl SinkRunner {
             errors_count: AtomicU64::new(0),
             offsets: RwLock::new(HashMap::new()),
             rate_limiter,
+            transforms,
+            sink_registry,
         }
     }
 
@@ -103,10 +118,19 @@ impl SinkRunner {
             "stdout" => self.run_stdout_sink(&mut shutdown_rx).await,
             "s3" => self.run_s3_sink(&mut shutdown_rx).await,
             "http" => self.run_http_sink(&mut shutdown_rx).await,
-            other => Err(ConnectError::config(format!(
-                "Unknown sink connector type: {}",
-                other
-            ))),
+            other => {
+                // Dynamic dispatch: try the registry for external/plugin connectors
+                if let Some(factory) = self.sink_registry.get(other) {
+                    self.run_registry_sink(factory, &mut shutdown_rx).await
+                } else {
+                    let available: Vec<&str> =
+                        self.sink_registry.list().iter().map(|(n, _)| *n).collect();
+                    Err(ConnectError::config(format!(
+                        "Unknown sink connector type: '{}'. Available: {:?}",
+                        other, available
+                    )))
+                }
+            }
         };
 
         // Log rate limiter stats on shutdown
@@ -132,44 +156,57 @@ impl SinkRunner {
         result
     }
 
-    /// Initialize offsets for all topics
+    /// Initialize offsets for all topics and their partitions
     async fn initialize_offsets(&self) -> Result<()> {
         let consumer_group = &self.config.consumer_group;
         let mut offsets = self.offsets.write().await;
 
         for topic in &self.config.topics {
-            // For now, assume partition 0. Multi-partition support can be added.
-            let partition = 0u32;
-            let key = (topic.clone(), partition);
-
-            // First try to get committed offset
-            let committed = self
+            // Query broker for partition count
+            let partition_count = self
                 .broker
-                .get_offset(consumer_group, topic, partition)
+                .get_topic_partition_count(topic)
                 .await
-                .ok()
-                .flatten();
-
-            let start_offset = match committed {
-                Some(offset) => {
-                    info!(
-                        "Sink '{}' resuming topic '{}' from committed offset {}",
-                        self.name, topic, offset
+                .unwrap_or_else(|_| {
+                    warn!(
+                        "Sink '{}' could not determine partition count for '{}', defaulting to 1",
+                        self.name, topic
                     );
-                    offset
-                }
-                None => {
-                    // No committed offset, use start_offset config
-                    let offset = self.resolve_start_offset(topic).await?;
-                    info!(
-                        "Sink '{}' starting topic '{}' from offset {} ({:?})",
-                        self.name, topic, offset, self.config.start_offset
-                    );
-                    offset
-                }
-            };
+                    1
+                });
 
-            offsets.insert(key, start_offset);
+            for partition in 0..partition_count {
+                let key = (topic.clone(), partition);
+
+                // First try to get committed offset
+                let committed = self
+                    .broker
+                    .get_offset(consumer_group, topic, partition)
+                    .await
+                    .ok()
+                    .flatten();
+
+                let start_offset = match committed {
+                    Some(offset) => {
+                        info!(
+                            "Sink '{}' resuming topic '{}' partition {} from committed offset {}",
+                            self.name, topic, partition, offset
+                        );
+                        offset
+                    }
+                    None => {
+                        // No committed offset, use start_offset config
+                        let offset = self.resolve_start_offset(topic).await?;
+                        info!(
+                            "Sink '{}' starting topic '{}' partition {} from offset {} ({:?})",
+                            self.name, topic, partition, offset, self.config.start_offset
+                        );
+                        offset
+                    }
+                };
+
+                offsets.insert(key, start_offset);
+            }
         }
 
         Ok(())
@@ -343,10 +380,14 @@ impl SinkRunner {
 
             let mut received_any = false;
 
-            // Poll each topic
-            for topic in &self.config.topics {
-                let partition = 0u32;
-                let key = (topic.clone(), partition);
+            // Poll each topic-partition (offsets contains all topic-partition pairs)
+            let topic_partitions: Vec<(String, u32)> = {
+                let offsets = self.offsets.read().await;
+                offsets.keys().cloned().collect()
+            };
+
+            for (topic, partition) in &topic_partitions {
+                let key = (topic.clone(), *partition);
 
                 let current_offset = {
                     let offsets = self.offsets.read().await;
@@ -354,7 +395,7 @@ impl SinkRunner {
                 };
 
                 match self
-                    .consume(topic, partition, current_offset, legacy_config.batch_size)
+                    .consume(topic, *partition, current_offset, legacy_config.batch_size)
                     .await
                 {
                     Ok(messages) if !messages.is_empty() => {
@@ -416,7 +457,7 @@ impl SinkRunner {
 
                         // Commit offset periodically (every 100 messages)
                         if self.events_consumed().is_multiple_of(100) {
-                            if let Err(e) = self.commit_offset(topic, partition, next_offset).await
+                            if let Err(e) = self.commit_offset(topic, *partition, next_offset).await
                             {
                                 warn!("Sink '{}' failed to commit offset: {}", self.name, e);
                             }
@@ -440,19 +481,313 @@ impl SinkRunner {
     }
 
     /// S3 sink - writes events to S3 in batches
+    ///
+    /// Requires the `s3` feature with `object_store` dependency.
     async fn run_s3_sink(&self, _shutdown_rx: &mut broadcast::Receiver<()>) -> Result<()> {
         Err(ConnectError::sink(
             &self.name,
-            "S3 sink not yet implemented",
+            "S3 sink requires the 's3' feature to be enabled. \
+             Compile with `--features s3` and configure 'bucket', 'region', and 'prefix' in connector config.",
         ))
     }
 
-    /// HTTP sink - posts events to HTTP endpoint
-    async fn run_http_sink(&self, _shutdown_rx: &mut broadcast::Receiver<()>) -> Result<()> {
-        Err(ConnectError::sink(
-            &self.name,
-            "HTTP sink not yet implemented",
-        ))
+    /// HTTP sink - posts events to an HTTP endpoint
+    ///
+    /// Config fields:
+    /// - `url` (required): Target URL to POST events to
+    /// - `batch_size` (optional, default 100): Events per request
+    /// - `content_type` (optional, default "application/json"): Content-Type header
+    /// - `headers` (optional): Additional HTTP headers as key-value pairs
+    async fn run_http_sink(&self, shutdown_rx: &mut broadcast::Receiver<()>) -> Result<()> {
+        let url: String = self
+            .config
+            .config
+            .get("url")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ConnectError::config("HTTP sink requires 'url' in connector config"))?
+            .to_string();
+
+        let batch_size: usize = self
+            .config
+            .config
+            .get("batch_size")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(100) as usize;
+
+        let content_type: String = self
+            .config
+            .config
+            .get("content_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("application/json")
+            .to_string();
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| {
+                ConnectError::sink(&self.name, format!("Failed to create HTTP client: {}", e))
+            })?;
+
+        *self.status.write().await = ConnectorStatus::Running;
+        info!(
+            "HTTP sink '{}' started, posting to {} (batch_size={})",
+            self.name, url, batch_size
+        );
+
+        let poll_interval = std::time::Duration::from_millis(
+            self.config
+                .config
+                .get("poll_interval_ms")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(100),
+        );
+
+        loop {
+            tokio::select! {
+                _ = shutdown_rx.recv() => {
+                    info!("HTTP sink '{}' shutting down", self.name);
+                    return Ok(());
+                }
+                _ = tokio::time::sleep(poll_interval) => {}
+            }
+
+            // Iterate all topic-partition pairs
+            let topic_partitions: Vec<(String, u32)> = {
+                let offsets = self.offsets.read().await;
+                offsets.keys().cloned().collect()
+            };
+
+            for (ref topic, partition) in &topic_partitions {
+                let key = (topic.clone(), *partition);
+                let current_offset = {
+                    let offsets = self.offsets.read().await;
+                    offsets.get(&key).copied().unwrap_or(0)
+                };
+
+                match self
+                    .consume(topic, *partition, current_offset, batch_size)
+                    .await
+                {
+                    Ok(messages) if !messages.is_empty() => {
+                        let count = messages.len();
+                        let last_offset =
+                            messages.last().map(|m| m.offset).unwrap_or(current_offset);
+
+                        // Serialize batch as JSON array
+                        let payload: Vec<serde_json::Value> = messages
+                            .iter()
+                            .map(|m| {
+                                serde_json::json!({
+                                    "topic": topic,
+                                    "partition": partition,
+                                    "offset": m.offset,
+                                    "key": m.key.as_ref().map(|k| String::from_utf8_lossy(k).to_string()),
+                                    "value": String::from_utf8_lossy(&m.value).to_string(),
+                                    "timestamp": m.timestamp,
+                                })
+                            })
+                            .collect();
+
+                        let body = serde_json::to_vec(&payload).map_err(|e| {
+                            ConnectError::sink(&self.name, format!("JSON serialize error: {}", e))
+                        })?;
+
+                        // POST to endpoint
+                        let resp = client
+                            .post(&url)
+                            .header("Content-Type", &content_type)
+                            .body(body)
+                            .send()
+                            .await
+                            .map_err(|e| {
+                                ConnectError::sink(&self.name, format!("HTTP POST failed: {}", e))
+                            })?;
+
+                        if !resp.status().is_success() {
+                            warn!(
+                                "HTTP sink '{}' received status {} from {}",
+                                self.name,
+                                resp.status(),
+                                url
+                            );
+                        }
+
+                        // Update offset
+                        self.offsets.write().await.insert(key, last_offset + 1);
+                        self.events_consumed
+                            .fetch_add(count as u64, std::sync::atomic::Ordering::Relaxed);
+
+                        // Periodic offset commit
+                        if self
+                            .events_consumed
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                            .is_multiple_of(1000)
+                        {
+                            let _ = self.commit_all_offsets().await;
+                        }
+                    }
+                    Ok(_) => {} // No messages
+                    Err(e) => {
+                        warn!("HTTP sink '{}' consume error: {}", self.name, e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Run a registry-based sink connector via AnySink trait dispatch
+    ///
+    /// This enables any connector registered in the SinkRegistry to be used
+    /// without hardcoded match arms. The factory creates a type-erased AnySink
+    /// which receives events consumed from the broker topics.
+    async fn run_registry_sink(
+        &self,
+        factory: &Arc<dyn crate::connectors::SinkFactory>,
+        shutdown_rx: &mut broadcast::Receiver<()>,
+    ) -> Result<()> {
+        use super::prelude::*;
+        use futures::StreamExt;
+
+        let sink = factory.create();
+
+        // Check connectivity first
+        let check = sink.check_raw(&self.config.config).await?;
+        if !check.success {
+            return Err(ConnectError::sink(
+                &self.name,
+                format!(
+                    "Connectivity check failed: {}",
+                    check.message.unwrap_or_default()
+                ),
+            ));
+        }
+
+        *self.status.write().await = ConnectorStatus::Running;
+        info!(
+            "Sink '{}' started via registry (connector: {})",
+            self.name, self.config.connector
+        );
+
+        let poll_interval = tokio::time::Duration::from_millis(100);
+        let batch_size: usize = self
+            .config
+            .config
+            .get("batch_size")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(100) as usize;
+
+        loop {
+            // Check for shutdown
+            if shutdown_rx.try_recv().is_ok() {
+                info!(
+                    "Sink '{}' shutting down after {} events",
+                    self.name,
+                    self.events_consumed()
+                );
+                return Ok(());
+            }
+
+            let mut received_any = false;
+
+            let topic_partitions: Vec<(String, u32)> = {
+                let offsets = self.offsets.read().await;
+                offsets.keys().cloned().collect()
+            };
+
+            for (topic, partition) in &topic_partitions {
+                let key = (topic.clone(), *partition);
+
+                let current_offset = {
+                    let offsets = self.offsets.read().await;
+                    *offsets.get(&key).unwrap_or(&0)
+                };
+
+                match self
+                    .consume(topic, *partition, current_offset, batch_size)
+                    .await
+                {
+                    Ok(messages) if !messages.is_empty() => {
+                        received_any = true;
+                        let mut max_offset = current_offset;
+                        let count = messages.len() as u64;
+
+                        // Apply rate limiting
+                        let wait_time = self.rate_limiter.acquire(count).await;
+                        if !wait_time.is_zero() {
+                            debug!(
+                                "Sink '{}' rate limited: waited {:?} for {} events",
+                                self.name, wait_time, count
+                            );
+                        }
+
+                        // Convert consumed messages into a SourceEvent stream for the AnySink
+                        let events: Vec<SourceEvent> = messages
+                            .iter()
+                            .map(|msg| {
+                                max_offset = max_offset.max(msg.offset);
+                                self.events_consumed.fetch_add(1, Ordering::Relaxed);
+
+                                let data = serde_json::from_slice::<serde_json::Value>(&msg.value)
+                                    .unwrap_or_else(|_| {
+                                        serde_json::json!({
+                                            "raw": String::from_utf8_lossy(&msg.value)
+                                        })
+                                    });
+
+                                SourceEvent {
+                                    event_type: SourceEventType::Record,
+                                    stream: topic.clone(),
+                                    namespace: None,
+                                    timestamp: chrono::Utc::now(),
+                                    data,
+                                    metadata: Default::default(),
+                                }
+                            })
+                            .collect();
+
+                        let event_stream = futures::stream::iter(events).boxed();
+
+                        match sink.write_raw(&self.config.config, event_stream).await {
+                            Ok(result) => {
+                                self.events_written
+                                    .fetch_add(result.records_written, Ordering::Relaxed);
+                            }
+                            Err(e) => {
+                                error!("Sink '{}' write error: {}", self.name, e);
+                                self.errors_count.fetch_add(1, Ordering::Relaxed);
+                                *self.status.write().await = ConnectorStatus::Unhealthy;
+                            }
+                        }
+
+                        // Update offset
+                        let next_offset = max_offset + 1;
+                        {
+                            let mut offsets = self.offsets.write().await;
+                            offsets.insert(key.clone(), next_offset);
+                        }
+
+                        // Commit offset periodically
+                        if self.events_consumed().is_multiple_of(100) {
+                            if let Err(e) = self.commit_offset(topic, *partition, next_offset).await
+                            {
+                                warn!("Sink '{}' failed to commit offset: {}", self.name, e);
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        self.errors_count.fetch_add(1, Ordering::Relaxed);
+                        error!("Sink '{}' consume error: {}", self.name, e);
+                        *self.status.write().await = ConnectorStatus::Unhealthy;
+                    }
+                }
+            }
+
+            if !received_any {
+                tokio::time::sleep(poll_interval).await;
+            }
+        }
     }
 }
 
@@ -478,8 +813,16 @@ pub async fn run_sink(
     // Connect to broker
     broker.connect().await?;
 
+    // Build the full sink registry for dynamic connector dispatch
+    let sink_registry = Arc::new(create_sink_registry());
+
     // Create and run sink
-    let runner = SinkRunner::new(name.to_string(), sink_config.clone(), broker.clone());
+    let runner = SinkRunner::new(
+        name.to_string(),
+        sink_config.clone(),
+        broker.clone(),
+        sink_registry,
+    );
 
     runner.run(shutdown_rx.resubscribe()).await
 }

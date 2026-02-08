@@ -318,6 +318,7 @@ impl SqlServerClient {
                 __$seqval,
                 __$operation,
                 __$update_mask,
+                sys.fn_cdc_map_lsn_to_time(__$start_lsn) AS __commit_time,
                 *
             FROM cdc.fn_cdc_get_all_changes_{capture_instance}(@P2, @P3, N'all update old')
             WHERE __$start_lsn > @P2
@@ -357,6 +358,13 @@ impl SqlServerClient {
                 .map(|b| b.to_vec())
                 .unwrap_or_default();
 
+            // Parse commit timestamp from sys.fn_cdc_map_lsn_to_time (column 4)
+            let commit_time: Option<i64> = row
+                .try_get::<chrono::NaiveDateTime, _>(4)
+                .ok()
+                .flatten()
+                .map(|dt| dt.and_utc().timestamp());
+
             // Convert operation code to CdcOp
             // 1=Delete, 2=Insert, 3=Update (before), 4=Update (after)
             let op = match operation {
@@ -370,8 +378,8 @@ impl SqlServerClient {
                 }
             };
 
-            // Parse data columns (starting from column 4)
-            let data = parse_row_data(&row, &columns, 4);
+            // Parse data columns (starting from column 5, after __commit_time)
+            let data = parse_row_data(&row, &columns, 5);
 
             // Build change record
             let (before, after) = match operation {
@@ -389,7 +397,7 @@ impl SqlServerClient {
                 update_mask,
                 before,
                 after,
-                commit_time: None, // TODO: Get commit timestamp from LSN
+                commit_time,
             });
         }
 

@@ -702,7 +702,7 @@ config:
 
 ## Field-Level Encryption
 
-Encrypt sensitive fields at the source using AES-256-GCM encryption. This provides end-to-end encryption for PII, PCI, and other sensitive data.
+Encrypt sensitive fields at the source using AES-256-GCM or ChaCha20-Poly1305 encryption. This provides end-to-end encryption for PII, PCI, and other sensitive data.
 
 ### Encryption Configuration
 
@@ -735,13 +735,13 @@ sources:
 Encryption keys are managed via environment variables:
 
 ```bash
-# Set the master encryption key (256-bit for AES-256-GCM)
+# Set the master encryption key (256-bit for AES-256-GCM / ChaCha20-Poly1305)
 export RIVVEN_ENCRYPTION_KEY="your-base64-encoded-32-byte-key"
 ```
 
 ### Security Features
 
-- **AES-256-GCM**: Industry-standard authenticated encryption
+- **AES-256-GCM / ChaCha20-Poly1305**: Industry-standard authenticated encryption (algorithm selectable)
 - **Per-field encryption**: Only specified fields are encrypted
 - **Transparent decryption**: Consumers with the same key can decrypt
 - **Key rotation**: Support for versioned keys enables rotation

@@ -497,7 +497,7 @@ pub struct RouterStats {
     events_dead_letter: AtomicU64,
     events_default: AtomicU64,
     destinations_total: AtomicU64,
-    rule_matches: std::sync::RwLock<HashMap<String, u64>>,
+    rule_matches: parking_lot::RwLock<HashMap<String, u64>>,
 }
 
 impl RouterStats {
@@ -528,9 +528,8 @@ impl RouterStats {
     }
 
     pub fn record_rule_match(&self, rule_name: &str) {
-        if let Ok(mut matches) = self.rule_matches.write() {
-            *matches.entry(rule_name.to_string()).or_insert(0) += 1;
-        }
+        let mut matches = self.rule_matches.write();
+        *matches.entry(rule_name.to_string()).or_insert(0) += 1;
     }
 
     pub fn snapshot(&self) -> RouterStatsSnapshot {
@@ -541,11 +540,7 @@ impl RouterStats {
             events_dead_letter: self.events_dead_letter.load(Ordering::Relaxed),
             events_default: self.events_default.load(Ordering::Relaxed),
             destinations_total: self.destinations_total.load(Ordering::Relaxed),
-            rule_matches: self
-                .rule_matches
-                .read()
-                .map(|m| m.clone())
-                .unwrap_or_default(),
+            rule_matches: self.rule_matches.read().clone(),
         }
     }
 }

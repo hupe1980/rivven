@@ -141,8 +141,11 @@ impl PartitionState {
         if self.isr.contains(&self.preferred_leader) {
             self.leader = Some(self.preferred_leader.clone());
         } else {
-            // Otherwise pick first available from ISR
-            self.leader = self.isr.iter().next().cloned();
+            // Deterministic fallback: pick the lexicographically smallest ISR member
+            // so all nodes agree on the same leader for the same ISR state.
+            let mut sorted_isr: Vec<_> = self.isr.iter().collect();
+            sorted_isr.sort();
+            self.leader = sorted_isr.first().map(|n| (*n).clone());
         }
 
         if self.leader.is_some() {
@@ -235,9 +238,11 @@ impl PartitionState {
         self.replicas.iter().map(|r| &r.node_id).collect()
     }
 
-    /// Get ISR nodes
+    /// Get ISR nodes (deterministically sorted)
     pub fn isr_nodes(&self) -> Vec<&NodeId> {
-        self.isr.iter().collect()
+        let mut nodes: Vec<_> = self.isr.iter().collect();
+        nodes.sort();
+        nodes
     }
 
     /// Check if a node is the leader

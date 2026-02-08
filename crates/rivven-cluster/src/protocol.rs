@@ -10,8 +10,21 @@ use std::time::Duration;
 /// Protocol version for compatibility checking
 pub const PROTOCOL_VERSION: u16 = 1;
 
+/// Minimum protocol version we can interoperate with
+pub const MIN_PROTOCOL_VERSION: u16 = 1;
+
 /// Maximum message size (16 MB)
 pub const MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
+
+/// Error codes for protocol-level errors
+pub mod error_codes {
+    /// Unsupported protocol version
+    pub const UNSUPPORTED_VERSION: u16 = 1;
+    /// Message too large
+    pub const MESSAGE_TOO_LARGE: u16 = 2;
+    /// Unknown request type
+    pub const UNKNOWN_REQUEST: u16 = 3;
+}
 
 /// Request header included in all requests
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +52,23 @@ impl RequestHeader {
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout_ms = timeout.as_millis() as u32;
         self
+    }
+
+    /// Validate that the protocol version is supported.
+    /// Returns an error ResponseHeader if the version is out of range.
+    pub fn validate_version(&self) -> std::result::Result<(), ResponseHeader> {
+        if self.version < MIN_PROTOCOL_VERSION || self.version > PROTOCOL_VERSION {
+            Err(ResponseHeader::error(
+                self.correlation_id,
+                error_codes::UNSUPPORTED_VERSION,
+                format!(
+                    "unsupported protocol version {}: supported range [{}, {}]",
+                    self.version, MIN_PROTOCOL_VERSION, PROTOCOL_VERSION
+                ),
+            ))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -414,5 +444,26 @@ mod tests {
         assert_eq!(Acks::None.to_i8(), 0);
         assert_eq!(Acks::Leader.to_i8(), 1);
         assert_eq!(Acks::All.to_i8(), -1);
+    }
+
+    #[test]
+    fn test_version_validation_ok() {
+        let header = RequestHeader::new(1, "node-1".to_string());
+        assert!(header.validate_version().is_ok());
+    }
+
+    #[test]
+    fn test_version_validation_too_high() {
+        let mut header = RequestHeader::new(1, "node-1".to_string());
+        header.version = PROTOCOL_VERSION + 1;
+        let err = header.validate_version().unwrap_err();
+        assert_eq!(err.error_code, error_codes::UNSUPPORTED_VERSION);
+    }
+
+    #[test]
+    fn test_version_validation_zero() {
+        let mut header = RequestHeader::new(1, "node-1".to_string());
+        header.version = 0;
+        assert!(header.validate_version().is_err());
     }
 }

@@ -253,6 +253,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "argon2"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c3610892ee6e0cbce8ae2700349fcf8f98adb0dbfbee85aec3c9179d29cc072"
+dependencies = [
+ "base64ct",
+ "blake2",
+ "cpufeatures",
+ "password-hash",
+]
+
+[[package]]
 name = "array-init"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -897,6 +909,15 @@ dependencies = [
  "radium",
  "tap",
  "wyz",
+]
+
+[[package]]
+name = "blake2"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
+dependencies = [
+ "digest",
 ]
 
 [[package]]
@@ -1780,27 +1801,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 
 [[package]]
-name = "deadpool"
-version = "0.12.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0be2b1d1d6ec8d846f05e137292d0b89133caf95ef33695424c09568bdd39b1b"
-dependencies = [
- "deadpool-runtime",
- "lazy_static",
- "num_cpus",
- "tokio",
-]
-
-[[package]]
-name = "deadpool-runtime"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "092966b41edc516079bdf31ec78a2e0588d1d0c08f78b91d8307215928642b2b"
-dependencies = [
- "tokio",
-]
-
-[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2512,16 +2512,6 @@ dependencies = [
  "typenum",
  "version_check",
  "zeroize",
-]
-
-[[package]]
-name = "gethostname"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0176e0459c2e4a1fe232f984bca6890e681076abb9934f6cea7c326f3fc47818"
-dependencies = [
- "libc",
- "windows-targets 0.48.5",
 ]
 
 [[package]]
@@ -4417,16 +4407,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "num_cpus"
-version = "1.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91df4bbde75afed763b708b7eee1e8e7651e02d97f6d5dd763e89367e957b23b"
-dependencies = [
- "hermit-abi",
- "libc",
-]
-
-[[package]]
 name = "num_threads"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4793,6 +4773,17 @@ dependencies = [
  "regex-syntax",
  "structmeta",
  "syn 2.0.114",
+]
+
+[[package]]
+name = "password-hash"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "346f04948ba92c43e8469c1ee6736c7563d71012b17d40745260fe106aac2166"
+dependencies = [
+ "base64ct",
+ "rand_core 0.6.4",
+ "subtle",
 ]
 
 [[package]]
@@ -5948,6 +5939,7 @@ version = "0.0.9"
 dependencies = [
  "aes-gcm",
  "anyhow",
+ "apache-avro 0.17.0",
  "async-trait",
  "base64 0.22.1",
  "bytes",
@@ -5964,7 +5956,7 @@ dependencies = [
  "md-5",
  "metrics",
  "mysql_async",
- "once_cell",
+ "parking_lot",
  "paste",
  "pbkdf2",
  "postgres-protocol",
@@ -6008,6 +6000,8 @@ dependencies = [
  "rand 0.8.5",
  "rivven-core",
  "rivven-protocol",
+ "serde",
+ "serde_json",
  "sha2",
  "thiserror 2.0.18",
  "tokio",
@@ -6024,6 +6018,7 @@ dependencies = [
  "futures",
  "hashring",
  "hex",
+ "hmac",
  "metrics",
  "metrics-exporter-prometheus",
  "openraft",
@@ -6135,6 +6130,7 @@ dependencies = [
 name = "rivven-core"
 version = "0.0.9"
 dependencies = [
+ "argon2",
  "async-trait",
  "base64 0.22.1",
  "bytes",
@@ -6156,7 +6152,6 @@ dependencies = [
  "metrics-exporter-prometheus",
  "oauth2",
  "object_store",
- "once_cell",
  "openidconnect",
  "parking_lot",
  "postcard",
@@ -6202,7 +6197,6 @@ dependencies = [
  "rivven-connect",
  "rivven-core",
  "rivven-protocol",
- "rivven-rdbc",
  "rivven-schema",
  "rivvend",
  "rskafka",
@@ -6234,7 +6228,6 @@ dependencies = [
  "kube",
  "metrics",
  "metrics-exporter-prometheus",
- "once_cell",
  "regex",
  "rivven-client",
  "schemars 0.8.22",
@@ -6277,17 +6270,11 @@ dependencies = [
 name = "rivven-rdbc"
 version = "0.0.9"
 dependencies = [
- "anyhow",
  "async-trait",
- "bigdecimal",
- "bytes",
  "chrono",
  "criterion",
- "deadpool",
  "flate2",
- "futures",
  "hex",
- "metrics",
  "mysql_async",
  "postgres-types",
  "rust_decimal",
@@ -6309,7 +6296,6 @@ dependencies = [
  "url",
  "uuid",
  "webpki-roots 0.26.11",
- "xxhash-rust",
 ]
 
 [[package]]
@@ -6355,9 +6341,9 @@ dependencies = [
  "axum-server",
  "bytes",
  "clap",
- "gethostname",
  "mime_guess",
  "openraft",
+ "parking_lot",
  "postcard",
  "proptest",
  "reqwest 0.12.28",
@@ -6367,6 +6353,7 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "subtle",
  "tempfile",
  "tokio",
  "tower-http",
@@ -6888,12 +6875,8 @@ version = "0.32.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a5d1c518eaf5eda38e5773f902b26ab6d5e9e9e2bb2349ca6c64cf96f80448c"
 dependencies = [
- "bigdecimal",
- "chrono",
  "inherent",
  "sea-query-derive",
- "serde_json",
- "uuid",
 ]
 
 [[package]]
@@ -9177,12 +9160,6 @@ dependencies = [
  "libc",
  "rustix",
 ]
-
-[[package]]
-name = "xxhash-rust"
-version = "0.8.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdd20c5420375476fbd4394763288da7eb0cc0b8c11deed431a91562af7335d3"
 
 [[package]]
 name = "yansi"

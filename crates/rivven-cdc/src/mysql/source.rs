@@ -8,7 +8,7 @@ use crate::common::{pattern_match, CdcEvent, CdcOp, CdcSource, Result, SnapshotM
 use anyhow::Context;
 use async_trait::async_trait;
 use mysql_async::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
@@ -203,8 +203,8 @@ impl MySqlCdcConfig {
 pub struct SchemaCache {
     /// Map of (schema, table) -> column names in order
     tables: HashMap<(String, String), Vec<String>>,
-    /// Insertion order for FIFO eviction
-    insertion_order: Vec<(String, String)>,
+    /// Insertion order for FIFO eviction (VecDeque for O(1) pop_front)
+    insertion_order: VecDeque<(String, String)>,
     /// Maximum number of entries (default: 1000)
     max_entries: usize,
 }
@@ -222,7 +222,7 @@ impl SchemaCache {
     pub fn new() -> Self {
         Self {
             tables: HashMap::new(),
-            insertion_order: Vec::new(),
+            insertion_order: VecDeque::new(),
             max_entries: Self::DEFAULT_MAX_ENTRIES,
         }
     }
@@ -231,7 +231,7 @@ impl SchemaCache {
     pub fn with_max_entries(max_entries: usize) -> Self {
         Self {
             tables: HashMap::new(),
-            insertion_order: Vec::new(),
+            insertion_order: VecDeque::new(),
             max_entries,
         }
     }
@@ -256,14 +256,17 @@ impl SchemaCache {
             }
             Entry::Vacant(entry) => {
                 // Add new entry
-                self.insertion_order.push(key);
+                self.insertion_order.push_back(key);
                 entry.insert(columns);
 
                 // Evict oldest if over limit
-                while self.tables.len() > self.max_entries && !self.insertion_order.is_empty() {
-                    let oldest = self.insertion_order.remove(0);
-                    self.tables.remove(&oldest);
-                    debug!("Evicted schema cache entry for {}.{}", oldest.0, oldest.1);
+                while self.tables.len() > self.max_entries {
+                    if let Some(oldest) = self.insertion_order.pop_front() {
+                        self.tables.remove(&oldest);
+                        debug!("Evicted schema cache entry for {}.{}", oldest.0, oldest.1);
+                    } else {
+                        break;
+                    }
                 }
             }
         }
@@ -371,11 +374,16 @@ async fn run_mysql_cdc_loop(
     event_sender: Option<mpsc::Sender<CdcEvent>>,
     schema_cache: Arc<RwLock<SchemaCache>>,
 ) -> anyhow::Result<()> {
-    // Create metadata connection URL for schema queries
+    // Create metadata connection URL for schema queries (URL-encode credentials)
+    let encoded_user =
+        url::form_urlencoded::byte_serialize(config.user.as_bytes()).collect::<String>();
+    let encoded_password =
+        url::form_urlencoded::byte_serialize(config.password.as_deref().unwrap_or("").as_bytes())
+            .collect::<String>();
     let metadata_url = format!(
         "mysql://{}:{}@{}:{}/{}",
-        config.user,
-        config.password.as_deref().unwrap_or(""),
+        encoded_user,
+        encoded_password,
         config.host,
         config.port,
         config.database.as_deref().unwrap_or("mysql")

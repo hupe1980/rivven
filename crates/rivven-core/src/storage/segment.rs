@@ -26,8 +26,8 @@ pub struct Segment {
     index_buffer: Vec<(u32, u64)>, // Relative offset -> Position
     /// Position of last index entry (for sparse indexing)
     last_index_position: u64,
-    /// Pending index entries to batch write
-    pending_index_entries: Vec<(u32, u64)>,
+    /// Pending index entries to batch write (behind std::sync::Mutex for &self flush)
+    pending_index_entries: std::sync::Mutex<Vec<(u32, u64)>>,
 }
 
 impl Segment {
@@ -61,7 +61,7 @@ impl Segment {
             current_size,
             index_buffer: Vec::new(),
             last_index_position: 0,
-            pending_index_entries: Vec::new(),
+            pending_index_entries: std::sync::Mutex::new(Vec::new()),
         };
 
         // Load index if exists
@@ -144,7 +144,10 @@ impl Segment {
         // 5. Sparse indexing: only add index entry every INDEX_INTERVAL_BYTES
         if position == 0 || position - self.last_index_position >= INDEX_INTERVAL_BYTES {
             let relative_offset = (offset - self.base_offset) as u32;
-            self.pending_index_entries.push((relative_offset, position));
+            self.pending_index_entries
+                .lock()
+                .unwrap()
+                .push((relative_offset, position));
             self.index_buffer.push((relative_offset, position));
             self.last_index_position = position;
         }
@@ -190,7 +193,10 @@ impl Segment {
             // Sparse indexing
             if position == 0 || position - self.last_index_position >= INDEX_INTERVAL_BYTES {
                 let relative_offset = (offset - self.base_offset) as u32;
-                self.pending_index_entries.push((relative_offset, position));
+                self.pending_index_entries
+                    .lock()
+                    .unwrap()
+                    .push((relative_offset, position));
                 self.index_buffer.push((relative_offset, position));
                 self.last_index_position = position;
             }
@@ -215,16 +221,20 @@ impl Segment {
             writer.get_ref().sync_all()?;
         }
 
-        // Batch write pending index entries
-        if !self.pending_index_entries.is_empty() {
+        // Drain and write pending index entries (uses std::sync::Mutex for &self access)
+        let entries: Vec<(u32, u64)> = {
+            let mut guard = self.pending_index_entries.lock().unwrap();
+            guard.drain(..).collect()
+        };
+
+        if !entries.is_empty() {
             let mut file = OpenOptions::new()
                 .append(true)
                 .create(true)
                 .open(&self.index_path)?;
 
-            let mut buf =
-                BytesMut::with_capacity(self.pending_index_entries.len() * INDEX_ENTRY_SIZE);
-            for (rel_offset, pos) in &self.pending_index_entries {
+            let mut buf = BytesMut::with_capacity(entries.len() * INDEX_ENTRY_SIZE);
+            for (rel_offset, pos) in &entries {
                 buf.put_u32(*rel_offset);
                 buf.put_u64(*pos);
             }
@@ -237,7 +247,12 @@ impl Segment {
 
     /// Flush pending index entries and clear the buffer
     pub async fn flush_index(&mut self) -> Result<()> {
-        if self.pending_index_entries.is_empty() {
+        let entries: Vec<(u32, u64)> = {
+            let mut guard = self.pending_index_entries.lock().unwrap();
+            guard.drain(..).collect()
+        };
+
+        if entries.is_empty() {
             return Ok(());
         }
 
@@ -246,14 +261,14 @@ impl Segment {
             .create(true)
             .open(&self.index_path)?;
 
-        let mut buf = BytesMut::with_capacity(self.pending_index_entries.len() * INDEX_ENTRY_SIZE);
-        for (rel_offset, pos) in &self.pending_index_entries {
+        let mut buf = BytesMut::with_capacity(entries.len() * INDEX_ENTRY_SIZE);
+        for (rel_offset, pos) in &entries {
             buf.put_u32(*rel_offset);
             buf.put_u64(*pos);
         }
         file.write_all(&buf)?;
+        file.sync_all()?;
 
-        self.pending_index_entries.clear();
         Ok(())
     }
 
@@ -356,6 +371,19 @@ impl Segment {
         self.base_offset
     }
 
+    /// Delete the segment's log and index files from disk.
+    ///
+    /// After calling this method, the segment must not be used again.
+    pub fn delete_files(&self) -> Result<()> {
+        if self.log_path.exists() {
+            std::fs::remove_file(&self.log_path)?;
+        }
+        if self.index_path.exists() {
+            std::fs::remove_file(&self.index_path)?;
+        }
+        Ok(())
+    }
+
     pub async fn recover_last_offset(&self) -> Result<Option<u64>> {
         // Flush buffered writes before recovery scan
         {
@@ -391,6 +419,8 @@ impl Segment {
             }
 
             let slice = &mmap[current_pos..];
+            let stored_crc_bytes: [u8; 4] = slice[0..4].try_into().unwrap();
+            let stored_crc = u32::from_be_bytes(stored_crc_bytes);
             let len_bytes: [u8; 4] = slice[4..8].try_into().unwrap();
             let msg_len = u32::from_be_bytes(len_bytes) as usize;
 
@@ -399,6 +429,16 @@ impl Segment {
             }
 
             let payload = &slice[8..8 + msg_len];
+
+            // Validate CRC before accepting this frame
+            let mut hasher = Hasher::new();
+            hasher.update(payload);
+            let computed_crc = hasher.finalize();
+            if computed_crc != stored_crc {
+                // Corrupt frame — stop recovery here
+                break;
+            }
+
             if let Ok(msg) = Message::from_bytes(payload) {
                 last_offset = Some(msg.offset);
             }

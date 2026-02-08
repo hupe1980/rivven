@@ -323,7 +323,6 @@ impl MetadataCache {
     }
 
     /// Update cache for a topic
-    #[allow(dead_code)]
     async fn put(&self, topic: String, partition_count: u32) {
         let mut cache = self.cache.write().await;
         cache.insert(
@@ -336,7 +335,6 @@ impl MetadataCache {
     }
 
     /// Invalidate a topic's cache entry
-    #[allow(dead_code)]
     async fn invalidate(&self, topic: &str) {
         let mut cache = self.cache.write().await;
         cache.remove(topic);
@@ -863,75 +861,80 @@ impl Producer {
     /// This bypasses the cache and always fetches fresh metadata.
     /// Useful after topic reconfiguration or partition expansion.
     pub async fn refresh_metadata(&self, topic: &str) -> Result<u32> {
-        // Connect to bootstrap server for metadata request
-        let addr = &self.inner.config.bootstrap_servers[0];
-        let stream = tokio::time::timeout(
-            self.inner.config.connection_timeout,
-            TcpStream::connect(addr),
-        )
+        // Invalidate existing cache entry so the fetch always goes to the broker
+        self.inner.metadata_cache.invalidate(topic).await;
+        let partitions = fetch_topic_metadata(&self.inner, topic).await?;
+        debug!(
+            "Refreshed metadata for topic '{}': {} partitions",
+            topic, partitions
+        );
+        Ok(partitions)
+    }
+}
+
+// ============================================================================
+// Metadata Fetch Helper
+// ============================================================================
+
+/// Fetch topic metadata from a bootstrap server and cache the result.
+///
+/// Opens a short-lived connection, sends a GetMetadata request, and stores
+/// the partition count in the metadata cache so that subsequent lookups hit
+/// the cache instead of the network.
+async fn fetch_topic_metadata(inner: &ProducerInner, topic: &str) -> Result<u32> {
+    let addr = &inner.config.bootstrap_servers[0];
+    let stream = tokio::time::timeout(inner.config.connection_timeout, TcpStream::connect(addr))
         .await
         .map_err(|_| Error::ConnectionError(format!("Metadata request timeout to {}", addr)))?
         .map_err(|e| Error::ConnectionError(e.to_string()))?;
 
-        stream.set_nodelay(true).ok();
+    stream.set_nodelay(true).ok();
 
-        let (read_half, write_half) = stream.into_split();
-        let mut writer = BufWriter::with_capacity(4096, write_half);
-        let mut reader = BufReader::with_capacity(4096, read_half);
+    let (read_half, write_half) = stream.into_split();
+    let mut writer = BufWriter::with_capacity(4096, write_half);
+    let mut reader = BufReader::with_capacity(4096, read_half);
 
-        // Send metadata request for single topic
-        let request = Request::GetMetadata {
-            topic: topic.to_string(),
-        };
+    let request = Request::GetMetadata {
+        topic: topic.to_string(),
+    };
 
-        let request_bytes = request.to_wire(rivven_protocol::WireFormat::Postcard)?;
-        let len = request_bytes.len() as u32;
-        writer
-            .write_all(&len.to_be_bytes())
-            .await
-            .map_err(|e| Error::IoError(e.to_string()))?;
-        writer
-            .write_all(&request_bytes)
-            .await
-            .map_err(|e| Error::IoError(e.to_string()))?;
-        writer
-            .flush()
-            .await
-            .map_err(|e| Error::IoError(e.to_string()))?;
+    let request_bytes = request.to_wire(rivven_protocol::WireFormat::Postcard)?;
+    let len = request_bytes.len() as u32;
+    writer
+        .write_all(&len.to_be_bytes())
+        .await
+        .map_err(|e| Error::IoError(e.to_string()))?;
+    writer
+        .write_all(&request_bytes)
+        .await
+        .map_err(|e| Error::IoError(e.to_string()))?;
+    writer
+        .flush()
+        .await
+        .map_err(|e| Error::IoError(e.to_string()))?;
 
-        // Read response
-        let mut len_buf = [0u8; 4];
-        reader
-            .read_exact(&mut len_buf)
-            .await
-            .map_err(|e| Error::IoError(e.to_string()))?;
-        let response_len = u32::from_be_bytes(len_buf) as usize;
+    let mut len_buf = [0u8; 4];
+    reader
+        .read_exact(&mut len_buf)
+        .await
+        .map_err(|e| Error::IoError(e.to_string()))?;
+    let response_len = u32::from_be_bytes(len_buf) as usize;
 
-        let mut response_buf = vec![0u8; response_len];
-        reader
-            .read_exact(&mut response_buf)
-            .await
-            .map_err(|e| Error::IoError(e.to_string()))?;
+    let mut response_buf = vec![0u8; response_len];
+    reader
+        .read_exact(&mut response_buf)
+        .await
+        .map_err(|e| Error::IoError(e.to_string()))?;
 
-        let (response, _format) =
-            Response::from_wire(&response_buf).map_err(Error::ProtocolError)?;
+    let (response, _format) = Response::from_wire(&response_buf).map_err(Error::ProtocolError)?;
 
-        match response {
-            Response::Metadata { name, partitions } => {
-                // Cache the result
-                self.inner
-                    .metadata_cache
-                    .put(name.clone(), partitions)
-                    .await;
-                debug!(
-                    "Refreshed metadata for topic '{}': {} partitions",
-                    name, partitions
-                );
-                Ok(partitions)
-            }
-            Response::Error { message } => Err(Error::ServerError(message)),
-            _ => Err(Error::InvalidResponse),
+    match response {
+        Response::Metadata { name, partitions } => {
+            inner.metadata_cache.put(name, partitions).await;
+            Ok(partitions)
         }
+        Response::Error { message } => Err(Error::ServerError(message)),
+        _ => Err(Error::InvalidResponse),
     }
 }
 
@@ -998,8 +1001,23 @@ async fn sender_task(
             let partition = if let Some(p) = record.partition {
                 p
             } else {
-                // Get partition count and compute partition
-                let num_partitions = inner.metadata_cache.get(&record.topic).await.unwrap_or(1);
+                // Get partition count: try cache first, then fetch from broker
+                let num_partitions = match inner.metadata_cache.get(&record.topic).await {
+                    Some(n) => n,
+                    None => {
+                        // Cache miss — fetch from broker and cache the result
+                        match fetch_topic_metadata(&inner, &record.topic).await {
+                            Ok(n) => n,
+                            Err(e) => {
+                                debug!(
+                                        "Failed to fetch metadata for '{}': {}, defaulting to 1 partition",
+                                        record.topic, e
+                                    );
+                                1
+                            }
+                        }
+                    }
+                };
                 inner
                     .partitioner
                     .partition(&record.topic, record.key.as_deref(), num_partitions)

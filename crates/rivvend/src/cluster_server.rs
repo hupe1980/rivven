@@ -167,7 +167,9 @@ impl ClusterServer {
             tracing::warn!("Failed to recover topics from disk: {}", e);
         }
 
-        let offset_manager = OffsetManager::new();
+        let offset_manager = OffsetManager::with_persistence(
+            std::path::PathBuf::from(&core_config.data_dir).join("offsets"),
+        );
 
         let (shutdown_tx, _) = broadcast::channel(1);
 
@@ -203,8 +205,9 @@ impl ClusterServer {
                 transport_config,
             );
 
-            // Create coordinator
-            let coordinator = ClusterCoordinator::new(cluster_config).await?;
+            // Create coordinator and wire in Raft node
+            let mut coordinator = ClusterCoordinator::new(cluster_config).await?;
+            coordinator.set_raft_node(raft_node.clone());
 
             (
                 Some(Arc::new(RwLock::new(coordinator))),
@@ -589,7 +592,9 @@ impl ClusterServer {
                                     });
 
                                     // Track the handle for graceful shutdown
-                                    connections.lock().await.push(handle);
+                                    let mut conns = connections.lock().await;
+                                    conns.retain(|h| !h.is_finished());
+                                    conns.push(handle);
                                 }
                                 Err(crate::rate_limiter::ConnectionResult::TooManyConnectionsFromIp) => {
                                     warn!("Connection from {} rejected: too many connections from IP", addr);
@@ -623,7 +628,7 @@ impl ClusterServer {
 
         // Wait for active connections to complete with timeout
         let drain_timeout = tokio::time::Duration::from_secs(10);
-        let active = active_connections.lock().await;
+        let mut active = active_connections.lock().await;
         let connection_count = active.len();
 
         if connection_count > 0 {
@@ -632,14 +637,15 @@ impl ClusterServer {
                 connection_count
             );
 
-            // Clean up completed handles and wait for remaining
-            let pending: Vec<_> = active.iter().filter(|h| !h.is_finished()).collect();
+            // Drain handles out of the vec so we can await them
+            let pending: Vec<_> = active.drain(..).filter(|h| !h.is_finished()).collect();
 
             if !pending.is_empty() {
                 info!("Draining {} in-flight connections...", pending.len());
                 match tokio::time::timeout(drain_timeout, async {
                     for handle in pending {
-                        let _ = handle;
+                        // Actually await each connection handle to drain it
+                        let _ = handle.await;
                     }
                 })
                 .await

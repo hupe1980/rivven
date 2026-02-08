@@ -9,16 +9,17 @@ keywords = ["database", "sql", "postgres", "mysql", "sqlserver"]
 categories = ["database"]
 
 [package.metadata.cargo-machete]
-# sea-query-binder: Required for prepared statement binding
-ignored = ["sea-query-binder"]
+# prost-build: false positive (build dep behind feature gate)
+# flate2: required by mysql_async for compression (transitive, not directly imported)
+ignored = ["prost-build", "flate2"]
 
 [features]
 default = ["postgres", "mysql", "sqlserver"]
 
 # Database backends
-postgres = ["dep:tokio-postgres", "dep:postgres-types", "sea-query/backend-postgres"]
-mysql = ["dep:mysql_async", "sea-query/backend-mysql"]
-sqlserver = ["dep:tiberius", "dep:tokio-util", "sea-query/backend-sqlite"]
+postgres = ["dep:tokio-postgres", "dep:postgres-types"]
+mysql = ["dep:mysql_async", "dep:flate2"]
+sqlserver = ["dep:tiberius", "dep:tokio-util"]
 
 # TLS support
 tls = ["postgres-tls", "mysql-tls", "sqlserver-tls"]
@@ -35,26 +36,20 @@ full = ["postgres", "mysql", "sqlserver", "tls"]
 [dependencies]
 # Async runtime
 tokio = { workspace = true, features = ["sync", "time", "rt"] }
-futures = { workspace = true }
 async-trait = { workspace = true }
 
 # Error handling
 thiserror = { workspace = true }
-anyhow = { workspace = true }
 
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
-
-# SQL generation (the secret weapon)
-sea-query = { version = "0.32", features = ["derive", "with-json", "with-chrono", "with-uuid", "with-bigdecimal"] }
 
 # Time handling
 chrono = { workspace = true }
 
 # Numeric precision
 rust_decimal = { version = "1.36", features = ["serde", "db-tokio-postgres"] }
-bigdecimal = { version = "0.4", features = ["serde"] }
 
 # UUID support
 uuid = { workspace = true }
@@ -62,11 +57,10 @@ uuid = { workspace = true }
 # Logging
 tracing = { workspace = true, optional = true }
 
-# Metrics
-metrics = { workspace = true }
+# Type-safe SQL query builder (Postgres + MySQL dialects)
+sea-query = { version = "0.32", features = ["backend-postgres", "backend-mysql", "thread-safe"] }
 
-# Bytes
-bytes = { workspace = true }
+
 
 # PostgreSQL backend
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"], optional = true }
@@ -76,7 +70,8 @@ tokio-postgres-rustls = { version = "0.13", optional = true }
 # MySQL backend
 mysql_async = { version = "0.34", default-features = false, optional = true }
 # flate2 required by mysql_async for compression support
-flate2 = { version = "1.0", default-features = true }
+flate2 = { version = "1.0", default-features = true, optional = true }
+
 
 # SQL Server backend
 tiberius = { version = "0.12", default-features = false, features = ["chrono"], optional = true }
@@ -93,11 +88,7 @@ rustls = { workspace = true, optional = true }
 rustls-pemfile = { workspace = true, optional = true }
 webpki-roots = { version = "0.26", optional = true }
 
-# Connection pooling
-deadpool = { version = "0.12", features = ["managed", "rt_tokio_1"] }
 
-# Hashing for idempotent writes
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

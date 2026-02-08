@@ -112,6 +112,7 @@ impl IpState {
         }
     }
 
+    #[allow(dead_code)]
     fn increment_connections(&self) -> u32 {
         self.connections.fetch_add(1, Ordering::Relaxed) + 1
     }
@@ -209,12 +210,24 @@ impl RateLimiter {
     /// Check if a new connection from the given IP should be allowed
     /// Returns a guard that will release the connection on drop
     pub async fn try_connection(&self, ip: IpAddr) -> Result<ConnectionGuard, ConnectionResult> {
-        // Check global limit first
-        let total = self.total_connections.load(Ordering::Relaxed);
-        if total >= self.config.max_total_connections {
-            warn!("Global connection limit reached: {}", total);
-            CoreMetrics::increment_rate_limit_rejections();
-            return Err(ConnectionResult::TooManyTotalConnections);
+        // Atomically try to increment global counter if under limit
+        loop {
+            let total = self.total_connections.load(Ordering::Acquire);
+            if total >= self.config.max_total_connections {
+                warn!("Global connection limit reached: {}", total);
+                CoreMetrics::increment_rate_limit_rejections();
+                return Err(ConnectionResult::TooManyTotalConnections);
+            }
+
+            // Try to atomically increment the counter
+            if self
+                .total_connections
+                .compare_exchange(total, total + 1, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                break;
+            }
+            // Another thread modified the counter, retry
         }
 
         // Get or create IP state
@@ -236,20 +249,35 @@ impl RateLimiter {
             }
         };
 
-        // Check per-IP limit
-        let ip_connections = ip_state.get_connections();
-        if ip_connections >= self.config.max_connections_per_ip {
-            warn!(
-                "Connection limit for {} reached: {} >= {}",
-                ip, ip_connections, self.config.max_connections_per_ip
-            );
-            CoreMetrics::increment_rate_limit_rejections();
-            return Err(ConnectionResult::TooManyConnectionsFromIp);
-        }
+        // Atomically try to increment per-IP counter if under limit
+        loop {
+            let ip_connections = ip_state.connections.load(Ordering::Acquire);
+            if ip_connections >= self.config.max_connections_per_ip {
+                // Rollback global counter since we're rejecting
+                self.total_connections.fetch_sub(1, Ordering::Relaxed);
+                warn!(
+                    "Connection limit for {} reached: {} >= {}",
+                    ip, ip_connections, self.config.max_connections_per_ip
+                );
+                CoreMetrics::increment_rate_limit_rejections();
+                return Err(ConnectionResult::TooManyConnectionsFromIp);
+            }
 
-        // Increment counters
-        ip_state.increment_connections();
-        self.total_connections.fetch_add(1, Ordering::Relaxed);
+            // Try to atomically increment the IP counter
+            if ip_state
+                .connections
+                .compare_exchange(
+                    ip_connections,
+                    ip_connections + 1,
+                    Ordering::AcqRel,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                break;
+            }
+            // Another thread modified the counter, retry
+        }
 
         debug!(
             "Connection accepted from {}: {} connections (total: {})",

@@ -138,7 +138,9 @@ pub use schema_change::{
     SchemaChangeConfigBuilder, SchemaChangeEmitter, SchemaChangeEvent, SchemaChangeStats,
     SchemaChangeStatsSnapshot, SchemaChangeType,
 };
-pub use serialization::{SerializationConfig, SerializationFormat};
+pub use serialization::{
+    CdcEventSerializer, SerializationConfig, SerializationError, SerializationFormat,
+};
 pub use signal::*;
 pub use smt::*;
 pub use snapshot::*;

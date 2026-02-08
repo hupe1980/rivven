@@ -20,6 +20,27 @@ use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, error, info, trace, warn};
 
+#[cfg(feature = "swim")]
+use hmac::{Hmac, Mac};
+#[cfg(feature = "swim")]
+use sha2::Sha256;
+
+/// HMAC tag length in bytes (SHA-256 → 32 bytes)
+const HMAC_TAG_LEN: usize = 32;
+
+/// Maximum gossip items piggybacked per message
+const MAX_GOSSIP_PER_MSG: usize = 8;
+
+/// A gossip item queued for dissemination via piggyback
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GossipItem {
+    /// The state-change message to disseminate
+    message: SwimMessage,
+    /// Number of times this item has been piggybacked
+    #[serde(skip)]
+    transmissions: u32,
+}
+
 /// SWIM message types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SwimMessage {
@@ -95,8 +116,8 @@ pub struct Membership {
     /// Pending pings awaiting ack
     pending_pings: Arc<DashMap<NodeId, Instant>>,
 
-    /// Pending indirect ping requests
-    pending_ping_reqs: Arc<DashMap<(NodeId, NodeId), Instant>>,
+    /// Pending indirect ping requests: key = (requester, target), value = (requester_addr, timestamp)
+    pending_ping_reqs: Arc<DashMap<(NodeId, NodeId), (SocketAddr, Instant)>>,
 
     /// Event broadcaster
     event_tx: broadcast::Sender<MembershipEvent>,
@@ -104,6 +125,12 @@ pub struct Membership {
     /// Shutdown signal receiver (held for lifecycle management)
     #[allow(dead_code)]
     shutdown: broadcast::Receiver<()>,
+
+    /// Pre-validated HMAC key for message authentication (None = no auth)
+    hmac_key: Option<String>,
+
+    /// Gossip dissemination queue — items piggyback on Ping/Ack messages
+    gossip_queue: Arc<tokio::sync::Mutex<Vec<GossipItem>>>,
 }
 
 impl Membership {
@@ -126,17 +153,76 @@ impl Membership {
         self_node.mark_alive(0);
         members.insert(local_node.id.clone(), self_node);
 
+        // Pre-compute HMAC key if auth is configured
+        #[cfg(feature = "swim")]
+        let hmac_key = config
+            .auth_token
+            .as_ref()
+            .map(|token| {
+                Hmac::<Sha256>::new_from_slice(token.as_bytes())
+                    .expect("HMAC can accept key of any length")
+            })
+            .map(|_| config.auth_token.clone().unwrap());
+
+        #[cfg(not(feature = "swim"))]
+        let hmac_key: Option<String> = None;
+
         Ok(Self {
             local_node,
             incarnation: Arc::new(RwLock::new(0)),
-            members,
+            members: members.clone(),
             config,
             socket: Arc::new(socket),
             pending_pings: Arc::new(DashMap::new()),
             pending_ping_reqs: Arc::new(DashMap::new()),
             event_tx,
             shutdown,
+            hmac_key,
+            gossip_queue: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         })
+    }
+
+    /// Send a SWIM message to a target address with optional HMAC authentication
+    async fn send_message(&self, msg: &SwimMessage, addr: SocketAddr) -> Result<()> {
+        let data = postcard::to_allocvec(msg)?;
+        let packet = self.sign_message(&data);
+        self.socket.send_to(&packet, addr).await?;
+        Ok(())
+    }
+
+    /// Sign a serialized message by appending an HMAC-SHA256 tag
+    fn sign_message(&self, data: &[u8]) -> Vec<u8> {
+        #[cfg(feature = "swim")]
+        if let Some(ref key) = self.hmac_key {
+            let mut mac =
+                Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("HMAC key always valid");
+            mac.update(data);
+            let tag = mac.finalize().into_bytes();
+            let mut signed = Vec::with_capacity(data.len() + HMAC_TAG_LEN);
+            signed.extend_from_slice(data);
+            signed.extend_from_slice(&tag);
+            return signed;
+        }
+        data.to_vec()
+    }
+
+    /// Verify and strip an HMAC-SHA256 tag from received data.
+    /// Returns the payload (without tag) on success.
+    fn verify_message<'a>(&self, data: &'a [u8]) -> std::result::Result<&'a [u8], &'static str> {
+        #[cfg(feature = "swim")]
+        if let Some(ref key) = self.hmac_key {
+            if data.len() < HMAC_TAG_LEN {
+                return Err("message too short for HMAC tag");
+            }
+            let (payload, tag) = data.split_at(data.len() - HMAC_TAG_LEN);
+            let mut mac =
+                Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("HMAC key always valid");
+            mac.update(payload);
+            mac.verify_slice(tag)
+                .map_err(|_| "HMAC verification failed")?;
+            return Ok(payload);
+        }
+        Ok(data)
     }
 
     /// Subscribe to membership events
@@ -180,8 +266,6 @@ impl Membership {
         let join_msg = SwimMessage::Join {
             info: self.local_node.clone(),
         };
-        let data = postcard::to_allocvec(&join_msg)?;
-
         let mut joined = false;
         for seed in seeds {
             let addr: SocketAddr = match seed.parse() {
@@ -197,8 +281,8 @@ impl Membership {
                 continue;
             }
 
-            match self.socket.send_to(&data, addr).await {
-                Ok(_) => {
+            match self.send_message(&join_msg, addr).await {
+                Ok(()) => {
                     info!("Sent join request to seed {}", seed);
                     joined = true;
                 }
@@ -226,15 +310,7 @@ impl Membership {
         };
 
         // Broadcast to all known members
-        let data = postcard::to_allocvec(&leave_msg)?;
-        for member in self.members.iter() {
-            if member.key() != &self.local_node.id {
-                let _ = self
-                    .socket
-                    .send_to(&data, member.value().cluster_addr())
-                    .await;
-            }
-        }
+        self.broadcast(&leave_msg).await?;
 
         info!("Sent leave announcements to cluster");
         Ok(())
@@ -246,29 +322,34 @@ impl Membership {
 
         // Spawn receiver task
         let recv_membership = membership.clone();
-        let recv_handle = tokio::spawn(async move { recv_membership.run_receiver().await });
+        let mut recv_handle = tokio::spawn(async move { recv_membership.run_receiver().await });
 
         // Spawn failure detector task
         let detector_membership = membership.clone();
-        let detector_handle =
+        let mut detector_handle =
             tokio::spawn(async move { detector_membership.run_failure_detector().await });
 
         // Spawn sync task
         let sync_membership = membership.clone();
-        let sync_handle = tokio::spawn(async move { sync_membership.run_sync().await });
+        let mut sync_handle = tokio::spawn(async move { sync_membership.run_sync().await });
 
         // Wait for any task to complete
         tokio::select! {
-            r = recv_handle => {
+            r = &mut recv_handle => {
                 error!("Receiver task ended: {:?}", r);
             }
-            r = detector_handle => {
+            r = &mut detector_handle => {
                 error!("Failure detector task ended: {:?}", r);
             }
-            r = sync_handle => {
+            r = &mut sync_handle => {
                 error!("Sync task ended: {:?}", r);
             }
         }
+
+        // Abort all remaining tasks to prevent leaks
+        recv_handle.abort();
+        detector_handle.abort();
+        sync_handle.abort();
 
         Ok(())
     }
@@ -286,7 +367,16 @@ impl Membership {
                 }
             };
 
-            let msg: SwimMessage = match postcard::from_bytes(&buf[..len]) {
+            // Verify HMAC if authentication is enabled
+            let payload = match self.verify_message(&buf[..len]) {
+                Ok(p) => p,
+                Err(reason) => {
+                    warn!("Dropping unauthenticated message from {}: {}", from, reason);
+                    continue;
+                }
+            };
+
+            let msg: SwimMessage = match postcard::from_bytes(payload) {
                 Ok(m) => m,
                 Err(e) => {
                     warn!("Failed to deserialize message from {}: {}", from, e);
@@ -373,8 +463,8 @@ impl Membership {
             source: self.local_node.id.clone(),
             incarnation: our_incarnation,
         };
-        let data = postcard::to_allocvec(&ack)?;
-        self.socket.send_to(&data, from).await?;
+        // Send Ack with piggybacked gossip
+        self.send_with_gossip(&ack, from).await?;
 
         // Update member last seen
         if let Some(mut member) = self.members.get_mut(source) {
@@ -388,6 +478,24 @@ impl Membership {
     async fn handle_ack(&self, source: &NodeId, incarnation: u64) -> Result<()> {
         // Remove from pending pings
         self.pending_pings.remove(source);
+
+        // Forward ack to any requester waiting for an indirect probe result
+        let mut to_remove = Vec::new();
+        for entry in self.pending_ping_reqs.iter() {
+            let (requester, target) = entry.key();
+            if target == source {
+                let (requester_addr, _) = entry.value();
+                let ack = SwimMessage::Ack {
+                    source: source.clone(),
+                    incarnation,
+                };
+                let _ = self.send_message(&ack, *requester_addr).await;
+                to_remove.push((requester.clone(), target.clone()));
+            }
+        }
+        for key in to_remove {
+            self.pending_ping_reqs.remove(&key);
+        }
 
         // Update member state
         if let Some(mut member) = self.members.get_mut(source) {
@@ -405,27 +513,29 @@ impl Membership {
     }
 
     /// Handle indirect ping request
+    ///
+    /// When we receive PingReq{source=A, target=B}, we ping B on A's behalf.
+    /// We use *our own* source ID so the target sends the Ack back to us via UDP,
+    /// and we store A's address so we can forward the Ack.
     async fn handle_ping_req(
         &self,
         source: &NodeId,
         target: &NodeId,
-        incarnation: u64,
-        _from: SocketAddr,
+        _incarnation: u64,
+        from: SocketAddr,
     ) -> Result<()> {
         // Try to ping the target on behalf of the requester
         if let Some(target_node) = self.members.get(target) {
+            let our_incarnation = *self.incarnation.read().await;
             let ping = SwimMessage::Ping {
-                source: source.clone(),
-                incarnation,
+                source: self.local_node.id.clone(),
+                incarnation: our_incarnation,
             };
-            let data = postcard::to_allocvec(&ping)?;
-            self.socket
-                .send_to(&data, target_node.cluster_addr())
-                .await?;
+            self.send_message(&ping, target_node.cluster_addr()).await?;
 
-            // Track that we're doing an indirect ping
+            // Track that we're doing an indirect ping so we can forward acks
             self.pending_ping_reqs
-                .insert((source.clone(), target.clone()), Instant::now());
+                .insert((source.clone(), target.clone()), (from, Instant::now()));
         }
 
         Ok(())
@@ -466,8 +576,7 @@ impl Membership {
             source: self.local_node.id.clone(),
             states,
         };
-        let data = postcard::to_allocvec(&sync)?;
-        self.socket.send_to(&data, info.cluster_addr).await?;
+        self.send_message(&sync, info.cluster_addr).await?;
 
         // Broadcast join event
         let _ = self.event_tx.send(MembershipEvent::NodeJoined(info));
@@ -510,12 +619,12 @@ impl Membership {
             if incarnation >= *our_incarnation {
                 *our_incarnation = incarnation + 1;
 
-                // Broadcast alive message to refute
+                // Enqueue alive message to refute (piggybacked on next Ping/Ack)
                 let alive = SwimMessage::Alive {
                     node_id: self.local_node.id.clone(),
                     incarnation: *our_incarnation,
                 };
-                self.broadcast(&alive).await?;
+                self.enqueue_gossip(alive).await;
             }
             return Ok(());
         }
@@ -621,13 +730,12 @@ impl Membership {
                 let target_id = target_node.id().to_string();
                 let target_addr = target_node.cluster_addr();
 
-                // Send direct ping
+                // Send direct ping with piggybacked gossip
                 let ping = SwimMessage::Ping {
                     source: self.local_node.id.clone(),
                     incarnation: *self.incarnation.read().await,
                 };
-                let data = postcard::to_allocvec(&ping)?;
-                self.socket.send_to(&data, target_addr).await?;
+                self.send_with_gossip(&ping, target_addr).await?;
 
                 // Track pending ping
                 self.pending_pings.insert(target_id.clone(), Instant::now());
@@ -684,12 +792,10 @@ impl Membership {
             target: target.clone(),
             incarnation,
         };
-        let data = postcard::to_allocvec(&ping_req)?;
 
         for intermediate in intermediaries {
             let _ = self
-                .socket
-                .send_to(&data, intermediate.value().cluster_addr())
+                .send_message(&ping_req, intermediate.value().cluster_addr())
                 .await;
         }
 
@@ -702,13 +808,13 @@ impl Membership {
             if member.state == NodeState::Alive {
                 member.mark_suspect();
 
-                // Broadcast suspicion
+                // Enqueue suspicion for piggyback dissemination
                 let suspect = SwimMessage::Suspect {
                     node_id: node_id.clone(),
                     incarnation: member.incarnation,
                     from: self.local_node.id.clone(),
                 };
-                self.broadcast(&suspect).await?;
+                self.enqueue_gossip(suspect).await;
 
                 let _ = self
                     .event_tx
@@ -735,12 +841,12 @@ impl Membership {
             if let Some(mut member) = self.members.get_mut(&node_id) {
                 member.mark_dead();
 
-                // Broadcast death
+                // Enqueue death notice for piggyback dissemination
                 let dead = SwimMessage::Dead {
                     node_id: node_id.clone(),
                     incarnation: member.incarnation,
                 };
-                self.broadcast(&dead).await?;
+                self.enqueue_gossip(dead).await;
 
                 let _ = self.event_tx.send(MembershipEvent::NodeFailed(node_id));
             }
@@ -768,22 +874,66 @@ impl Membership {
                     source: self.local_node.id.clone(),
                     states,
                 };
-                let data = postcard::to_allocvec(&sync)?;
-                let _ = self.socket.send_to(&data, target.cluster_addr()).await;
+                let _ = self.send_message(&sync, target.cluster_addr()).await;
             }
         }
     }
 
-    /// Broadcast a message to all members
-    async fn broadcast(&self, msg: &SwimMessage) -> Result<()> {
-        let data = postcard::to_allocvec(msg)?;
+    /// Enqueue a state-change message for piggyback dissemination.
+    ///
+    /// Instead of O(N) broadcasting, items are piggybacked onto
+    /// routine Ping/Ack messages. Each item is retransmitted up to
+    /// ⌈log₂(N)⌉+1 times before being dropped (SWIM protocol guarantee).
+    async fn enqueue_gossip(&self, msg: SwimMessage) {
+        let mut queue = self.gossip_queue.lock().await;
+        queue.push(GossipItem {
+            message: msg,
+            transmissions: 0,
+        });
+    }
 
+    /// Drain up to `MAX_GOSSIP_PER_MSG` items from the gossip queue,
+    /// incrementing their transmission counter. Items that have been
+    /// transmitted enough times (≥ ⌈log₂(N)⌉+1) are removed.
+    async fn drain_gossip(&self) -> Vec<SwimMessage> {
+        let member_count = self.members.len().max(2) as f64;
+        let max_transmissions = (member_count.log2().ceil() as u32) + 1;
+
+        let mut queue = self.gossip_queue.lock().await;
+        let take = queue.len().min(MAX_GOSSIP_PER_MSG);
+        let mut items = Vec::with_capacity(take);
+
+        for item in queue.iter_mut().take(take) {
+            item.transmissions += 1;
+            items.push(item.message.clone());
+        }
+
+        // Remove items that have been transmitted enough times
+        queue.retain(|item| item.transmissions < max_transmissions);
+
+        items
+    }
+
+    /// Send a primary message with piggybacked gossip items to `addr`.
+    async fn send_with_gossip(&self, msg: &SwimMessage, addr: SocketAddr) -> Result<()> {
+        // Always send the primary message
+        self.send_message(msg, addr).await?;
+
+        // Piggyback pending gossip items
+        let gossip = self.drain_gossip().await;
+        for item in gossip {
+            self.send_message(&item, addr).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Broadcast a message to all members (used only for leave/join announcements
+    /// where immediate dissemination is required).
+    async fn broadcast(&self, msg: &SwimMessage) -> Result<()> {
         for member in self.members.iter() {
             if member.key() != &self.local_node.id {
-                let _ = self
-                    .socket
-                    .send_to(&data, member.value().cluster_addr())
-                    .await;
+                let _ = self.send_message(msg, member.value().cluster_addr()).await;
             }
         }
 
@@ -800,7 +950,7 @@ mod tests {
         let node_info = NodeInfo::new(
             "test-node",
             "127.0.0.1:9092".parse().unwrap(),
-            "127.0.0.1:9093".parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
         );
         let config = SwimConfig::default();
         let (_shutdown_tx, shutdown_rx) = broadcast::channel(1);

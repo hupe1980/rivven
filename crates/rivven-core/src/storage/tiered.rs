@@ -413,24 +413,39 @@ impl HotTier {
     pub async fn insert(&self, topic: &str, partition: u32, base_offset: u64, data: Bytes) -> bool {
         let size = data.len() as u64;
 
-        // Check if it fits
+        // Check if it fits at all
         if size > self.max_size {
             return false;
         }
 
-        // Evict until we have space
-        while self.current_size.load(Ordering::Relaxed) + size > self.max_size {
-            if !self.evict_one().await {
-                break;
+        // Atomically reserve capacity using CAS loop to eliminate TOCTOU race
+        loop {
+            let current = self.current_size.load(Ordering::Acquire);
+            if current + size > self.max_size {
+                // Try to evict to make space
+                if !self.evict_one().await {
+                    return false; // Cannot make space
+                }
+                continue; // Re-check after eviction
             }
+            // Attempt to reserve space atomically
+            if self
+                .current_size
+                .compare_exchange_weak(current, current + size, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                break; // Space successfully reserved
+            }
+            // CAS failed (another concurrent insert modified current_size) — retry
         }
 
         let key = (topic.to_string(), partition, base_offset);
 
-        // Insert data
+        // Insert data — space already reserved via CAS
         {
             let mut segments = self.segments.write().await;
             if let Some(old) = segments.insert(key.clone(), data) {
+                // Replaced an existing entry: release its space (reservation covers new entry)
                 self.current_size
                     .fetch_sub(old.len() as u64, Ordering::Relaxed);
             }
@@ -443,7 +458,6 @@ impl HotTier {
             lru.push_back(key);
         }
 
-        self.current_size.fetch_add(size, Ordering::Relaxed);
         true
     }
 
@@ -565,6 +579,20 @@ impl WarmTier {
         end_offset: u64,
         data: &[u8],
     ) -> Result<()> {
+        let size = data.len() as u64;
+
+        // Enforce max_size: evict oldest segments until we have space
+        while self.current_size.load(Ordering::Relaxed) + size > self.max_size {
+            if !self.evict_oldest().await {
+                // Cannot evict anything more — reject the write
+                return Err(crate::Error::Other(format!(
+                    "warm tier full ({} / {} bytes), cannot store segment",
+                    self.current_size.load(Ordering::Relaxed),
+                    self.max_size
+                )));
+            }
+        }
+
         let path = self.segment_path(topic, partition, base_offset);
 
         // Ensure directory exists
@@ -574,8 +602,6 @@ impl WarmTier {
 
         // Write segment file
         tokio::fs::write(&path, data).await?;
-
-        let size = data.len() as u64;
 
         // Update metadata
         let metadata = Arc::new(SegmentMetadata::new(
@@ -675,6 +701,32 @@ impl WarmTier {
         WarmTierStats {
             current_size: self.current_size.load(Ordering::Relaxed),
             max_size: self.max_size,
+        }
+    }
+
+    /// Evict the oldest (by creation time) segment from warm tier to free space.
+    /// Returns true if a segment was evicted.
+    async fn evict_oldest(&self) -> bool {
+        let to_evict = {
+            let segments = self.segments.read().await;
+            segments
+                .iter()
+                .min_by_key(|(_, meta)| meta.created_at)
+                .map(|(key, _)| key.clone())
+        };
+
+        if let Some((topic, partition, base_offset)) = to_evict {
+            tracing::debug!(
+                topic = %topic,
+                partition,
+                base_offset,
+                "Evicting warm tier segment to free space"
+            );
+            // Ignore removal errors — best effort
+            let _ = self.remove(&topic, partition, base_offset).await;
+            true
+        } else {
+            false
         }
     }
 }
@@ -1821,7 +1873,7 @@ impl TieredStorage {
             if cursor + 4 > data.len() {
                 break;
             }
-            let len = u32::from_le_bytes([
+            let len = u32::from_be_bytes([
                 data[cursor],
                 data[cursor + 1],
                 data[cursor + 2],
@@ -1871,7 +1923,7 @@ impl TieredStorage {
                 key_to_message.insert(msg.key.clone(), msg);
             } else {
                 // Keyless messages use offset as synthetic key to preserve all
-                key_to_message.insert(Some(Bytes::from(msg.offset.to_le_bytes().to_vec())), msg);
+                key_to_message.insert(Some(Bytes::from(msg.offset.to_be_bytes().to_vec())), msg);
             }
         }
 
@@ -1902,7 +1954,7 @@ impl TieredStorage {
 
         for msg in &compacted {
             let msg_bytes = msg.to_bytes()?;
-            compacted_data.extend_from_slice(&(msg_bytes.len() as u32).to_le_bytes());
+            compacted_data.extend_from_slice(&(msg_bytes.len() as u32).to_be_bytes());
             compacted_data.extend_from_slice(&msg_bytes);
             new_end_offset = new_end_offset.max(msg.offset + 1);
         }
@@ -2176,25 +2228,25 @@ mod tests {
         // Message 1: key=A, value=v1
         let msg1 = Message::with_key(Bytes::from("A"), Bytes::from("value1"));
         let msg1_bytes = msg1.to_bytes().unwrap();
-        segment_data.extend_from_slice(&(msg1_bytes.len() as u32).to_le_bytes());
+        segment_data.extend_from_slice(&(msg1_bytes.len() as u32).to_be_bytes());
         segment_data.extend_from_slice(&msg1_bytes);
 
         // Message 2: key=B, value=v1
         let msg2 = Message::with_key(Bytes::from("B"), Bytes::from("value1"));
         let msg2_bytes = msg2.to_bytes().unwrap();
-        segment_data.extend_from_slice(&(msg2_bytes.len() as u32).to_le_bytes());
+        segment_data.extend_from_slice(&(msg2_bytes.len() as u32).to_be_bytes());
         segment_data.extend_from_slice(&msg2_bytes);
 
         // Message 3: key=A, value=v2 (update)
         let msg3 = Message::with_key(Bytes::from("A"), Bytes::from("value2"));
         let msg3_bytes = msg3.to_bytes().unwrap();
-        segment_data.extend_from_slice(&(msg3_bytes.len() as u32).to_le_bytes());
+        segment_data.extend_from_slice(&(msg3_bytes.len() as u32).to_be_bytes());
         segment_data.extend_from_slice(&msg3_bytes);
 
         // Message 4: key=B, value="" (tombstone/delete)
         let msg4 = Message::with_key(Bytes::from("B"), Bytes::from(""));
         let msg4_bytes = msg4.to_bytes().unwrap();
-        segment_data.extend_from_slice(&(msg4_bytes.len() as u32).to_le_bytes());
+        segment_data.extend_from_slice(&(msg4_bytes.len() as u32).to_be_bytes());
         segment_data.extend_from_slice(&msg4_bytes);
 
         // Write segment
@@ -2258,7 +2310,7 @@ mod tests {
             let mut msg = Message::new(Bytes::from(format!("value{}", i)));
             msg.offset = i;
             let msg_bytes = msg.to_bytes().unwrap();
-            segment_data.extend_from_slice(&(msg_bytes.len() as u32).to_le_bytes());
+            segment_data.extend_from_slice(&(msg_bytes.len() as u32).to_be_bytes());
             segment_data.extend_from_slice(&msg_bytes);
         }
 

@@ -207,7 +207,9 @@ impl SecureServer {
             tracing::warn!("Failed to recover topics from disk: {}", e);
         }
 
-        let offset_manager = OffsetManager::new();
+        let offset_manager = OffsetManager::with_persistence(
+            std::path::PathBuf::from(&core_config.data_dir).join("offsets"),
+        );
 
         // Use provided AuthManager or create a new one with default config
         let auth_manager =

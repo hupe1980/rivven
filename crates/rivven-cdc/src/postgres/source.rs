@@ -659,6 +659,23 @@ fn tuple_to_json(tuple: &Tuple, schema: &RelationBody) -> serde_json::Value {
                 }
             };
             map.insert(col_def.name.clone(), value);
+        } else {
+            // Schema mismatch: more columns in tuple than in cached relation schema.
+            // This can happen after ALTER TABLE ADD COLUMN before a new relation message.
+            tracing::warn!(
+                "Column index {} exceeds cached schema ({} columns) — possible schema drift",
+                i,
+                schema.columns.len()
+            );
+            let value = match col_data {
+                TupleData::Null => serde_json::Value::Null,
+                TupleData::Toast => serde_json::Value::String("<toast>".to_string()),
+                TupleData::Text(bytes) => {
+                    let s = String::from_utf8_lossy(bytes);
+                    serde_json::Value::String(s.to_string())
+                }
+            };
+            map.insert(format!("_unknown_col_{}", i), value);
         }
     }
     serde_json::Value::Object(map)

@@ -27,8 +27,8 @@ pub struct TokenBucket {
     tokens: AtomicU64,
     /// Maximum tokens (burst capacity)
     capacity: u64,
-    /// Tokens added per second
-    refill_rate: f64,
+    /// Tokens added per second (stored as f64 bits for atomic updates)
+    refill_rate_bits: AtomicU64,
     /// Creation time for time reference
     created: Instant,
     /// Last refill timestamp (nanoseconds since creation)
@@ -44,7 +44,7 @@ impl TokenBucket {
         Self {
             tokens: AtomicU64::new(capacity),
             capacity,
-            refill_rate,
+            refill_rate_bits: AtomicU64::new(refill_rate.to_bits()),
             created: now,
             last_refill: AtomicU64::new(0),
             stats: TokenBucketStats::new(),
@@ -85,11 +85,23 @@ impl TokenBucket {
         while !self.try_acquire(count) {
             // Calculate wait time
             let tokens_needed = count.saturating_sub(self.tokens.load(Ordering::Relaxed));
-            let wait_secs = tokens_needed as f64 / self.refill_rate;
+            let rate = self.refill_rate();
+            let wait_secs = tokens_needed as f64 / rate;
             let wait_duration = Duration::from_secs_f64(wait_secs.max(0.001));
 
             tokio::time::sleep(wait_duration).await;
         }
+    }
+
+    /// Get the current refill rate (tokens per second)
+    fn refill_rate(&self) -> f64 {
+        f64::from_bits(self.refill_rate_bits.load(Ordering::Relaxed))
+    }
+
+    /// Update the refill rate atomically (for adaptive rate limiting)
+    pub fn update_rate(&self, new_rate: f64) {
+        self.refill_rate_bits
+            .store(new_rate.to_bits(), Ordering::Relaxed);
     }
 
     /// Refill tokens based on elapsed time
@@ -101,8 +113,9 @@ impl TokenBucket {
             return;
         }
 
+        let rate = self.refill_rate();
         let elapsed_secs = (now - last) as f64 / 1_000_000_000.0;
-        let new_tokens = (elapsed_secs * self.refill_rate) as u64;
+        let new_tokens = (elapsed_secs * rate) as u64;
 
         if new_tokens == 0 {
             return;
@@ -400,11 +413,13 @@ impl AdaptiveRateLimiter {
             let new_rate =
                 ((current_rate as f64 * self.multiplicative_decrease) as u64).max(self.min_rate);
             self.rate.store(new_rate, Ordering::Relaxed);
+            self.bucket.update_rate(new_rate as f64);
             self.stats.decreases.fetch_add(1, Ordering::Relaxed);
         } else if p99 < self.target_latency_us / 2 {
             // Increase rate (additive)
             let new_rate = (current_rate + self.additive_increase).min(self.max_rate);
             self.rate.store(new_rate, Ordering::Relaxed);
+            self.bucket.update_rate(new_rate as f64);
             self.stats.increases.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -484,6 +499,8 @@ pub struct CircuitBreaker {
     config: CircuitBreakerConfig,
     /// Statistics
     stats: CircuitBreakerStats,
+    /// Start of current failure window
+    window_start: parking_lot::Mutex<Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -527,6 +544,7 @@ impl CircuitBreaker {
             state: RwLock::new(CircuitState::Closed),
             config,
             stats: CircuitBreakerStats::new(),
+            window_start: parking_lot::Mutex::new(Instant::now()),
         }
     }
 
@@ -591,16 +609,23 @@ impl CircuitBreaker {
 
         match *state {
             CircuitState::Closed => {
-                let failures = self
-                    .stats
-                    .failures_in_window
-                    .fetch_add(1, Ordering::Relaxed)
-                    + 1;
-                if failures >= self.config.failure_threshold as u64 {
-                    *state = CircuitState::Open {
-                        opened_at: Instant::now(),
-                    };
-                    self.stats.opens.fetch_add(1, Ordering::Relaxed);
+                // Check if failure window has expired; if so, reset counter
+                let mut ws = self.window_start.lock();
+                if ws.elapsed() > self.config.failure_window {
+                    self.stats.failures_in_window.store(1, Ordering::Relaxed);
+                    *ws = Instant::now();
+                } else {
+                    let failures = self
+                        .stats
+                        .failures_in_window
+                        .fetch_add(1, Ordering::Relaxed)
+                        + 1;
+                    if failures >= self.config.failure_threshold as u64 {
+                        *state = CircuitState::Open {
+                            opened_at: Instant::now(),
+                        };
+                        self.stats.opens.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
             CircuitState::HalfOpen => {

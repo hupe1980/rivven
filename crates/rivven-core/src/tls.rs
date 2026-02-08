@@ -621,12 +621,21 @@ impl TlsAcceptor {
     }
 
     /// Accept a TLS connection
+    ///
+    /// When hot-reloading is enabled, this uses the latest reloaded ServerConfig
+    /// so that new connections pick up rotated certificates immediately.
     pub async fn accept<IO>(&self, stream: IO) -> TlsResult<TlsServerStream<IO>>
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
-        let tls_stream = self
-            .inner
+        let acceptor = if let Some(ref reloadable) = self.reloadable_config {
+            let config = reloadable.read().clone();
+            tokio_rustls::TlsAcceptor::from(config)
+        } else {
+            self.inner.clone()
+        };
+
+        let tls_stream = acceptor
             .accept(stream)
             .await
             .map_err(|e| TlsError::HandshakeError(e.to_string()))?;
@@ -640,10 +649,16 @@ impl TlsAcceptor {
     }
 
     /// Reload certificates (for hot-reloading)
-    pub fn reload(&self) -> TlsResult<()> {
+    pub fn reload(&mut self) -> TlsResult<()> {
+        let new_config = build_server_config(&self.tls_config)?;
+        let new_config = Arc::new(new_config);
+
+        // Update the active acceptor and config
+        self.inner = tokio_rustls::TlsAcceptor::from(new_config.clone());
+        self.config = new_config.clone();
+
         if let Some(ref reloadable) = self.reloadable_config {
-            let new_config = build_server_config(&self.tls_config)?;
-            *reloadable.write() = Arc::new(new_config);
+            *reloadable.write() = new_config;
         }
         Ok(())
     }

@@ -57,6 +57,22 @@ message Request {
     GetOffsetRequest get_offset = 17;
     AuthenticateRequest authenticate = 20;
     PingRequest ping = 30;
+    // Extended request types
+    GetClusterMetadataRequest get_cluster_metadata = 31;
+    GetOffsetBoundsRequest get_offset_bounds = 32;
+    ListGroupsRequest list_groups = 33;
+    DescribeGroupRequest describe_group = 34;
+    DeleteGroupRequest delete_group = 35;
+    GetOffsetForTimestampRequest get_offset_for_timestamp = 36;
+    InitProducerIdRequest init_producer_id = 40;
+    IdempotentPublishRequest idempotent_publish = 41;
+    BeginTransactionRequest begin_transaction = 50;
+    CommitTransactionRequest commit_transaction = 51;
+    AbortTransactionRequest abort_transaction = 52;
+    AlterTopicConfigRequest alter_topic_config = 60;
+    DescribeTopicConfigsRequest describe_topic_configs = 61;
+    CreatePartitionsRequest create_partitions = 62;
+    DeleteRecordsRequest delete_records = 63;
   }
 }
 
@@ -193,6 +209,23 @@ message Response {
     AuthenticateResponse authenticate = 20;
     PingResponse ping = 30;
     ErrorResponse error = 99;
+    // Extended response types
+    GetClusterMetadataResponse get_cluster_metadata = 31;
+    GetOffsetBoundsResponse get_offset_bounds = 32;
+    ListGroupsResponse list_groups = 33;
+    DescribeGroupResponse describe_group = 34;
+    DeleteGroupResponse delete_group = 35;
+    GetOffsetForTimestampResponse get_offset_for_timestamp = 36;
+    InitProducerIdResponse init_producer_id = 40;
+    IdempotentPublishResponse idempotent_publish = 41;
+    BeginTransactionResponse begin_transaction = 50;
+    CommitTransactionResponse commit_transaction = 51;
+    AbortTransactionResponse abort_transaction = 52;
+    AlterTopicConfigResponse alter_topic_config = 60;
+    DescribeTopicConfigsResponse describe_topic_configs = 61;
+    CreatePartitionsResponse create_partitions = 62;
+    DeleteRecordsResponse delete_records = 63;
+    OkResponse ok = 98;
   }
 }
 
@@ -310,6 +343,230 @@ message ErrorResponse {
   string message = 2;
   // Detailed error info
   map<string, string> details = 3;
+}
+
+// OK response (generic success)
+message OkResponse {}
+
+// ============================================================================
+// Extended Request Types
+// ============================================================================
+
+// Get cluster metadata (all topics or specific ones)
+message GetClusterMetadataRequest {
+  repeated string topics = 1;
+}
+
+// Get offset bounds for a partition
+message GetOffsetBoundsRequest {
+  string topic = 1;
+  uint32 partition = 2;
+}
+
+// List consumer groups
+message ListGroupsRequest {}
+
+// Describe a consumer group
+message DescribeGroupRequest {
+  string consumer_group = 1;
+}
+
+// Delete a consumer group
+message DeleteGroupRequest {
+  string consumer_group = 1;
+}
+
+// Get offset for a timestamp
+message GetOffsetForTimestampRequest {
+  string topic = 1;
+  uint32 partition = 2;
+  int64 timestamp_ms = 3;
+}
+
+// Initialize idempotent producer
+message InitProducerIdRequest {
+  optional uint64 producer_id = 1;
+}
+
+// Idempotent publish
+message IdempotentPublishRequest {
+  string topic = 1;
+  optional uint32 partition = 2;
+  Record record = 3;
+  uint64 producer_id = 4;
+  uint32 producer_epoch = 5;
+  int32 sequence = 6;
+}
+
+// Begin transaction
+message BeginTransactionRequest {
+  string txn_id = 1;
+  uint64 producer_id = 2;
+  uint32 producer_epoch = 3;
+  optional uint64 timeout_ms = 4;
+}
+
+// Commit transaction
+message CommitTransactionRequest {
+  string txn_id = 1;
+  uint64 producer_id = 2;
+  uint32 producer_epoch = 3;
+}
+
+// Abort transaction
+message AbortTransactionRequest {
+  string txn_id = 1;
+  uint64 producer_id = 2;
+  uint32 producer_epoch = 3;
+}
+
+// Alter topic configuration
+message AlterTopicConfigRequest {
+  string topic = 1;
+  repeated TopicConfigEntryProto configs = 2;
+}
+
+message TopicConfigEntryProto {
+  string key = 1;
+  optional string value = 2;
+}
+
+// Describe topic configurations
+message DescribeTopicConfigsRequest {
+  repeated string topics = 1;
+}
+
+// Create additional partitions
+message CreatePartitionsRequest {
+  string topic = 1;
+  uint32 new_partition_count = 2;
+}
+
+// Delete records before offset
+message DeleteRecordsRequest {
+  string topic = 1;
+  repeated PartitionOffset partition_offsets = 2;
+}
+
+message PartitionOffset {
+  uint32 partition = 1;
+  uint64 offset = 2;
+}
+
+// ============================================================================
+// Extended Response Types
+// ============================================================================
+
+// Cluster metadata response
+message GetClusterMetadataResponse {
+  optional string controller_id = 1;
+  repeated BrokerInfo brokers = 2;
+  repeated TopicMetadata topics = 3;
+}
+
+// Offset bounds response
+message GetOffsetBoundsResponse {
+  uint64 earliest = 1;
+  uint64 latest = 2;
+}
+
+// List groups response
+message ListGroupsResponse {
+  repeated string groups = 1;
+}
+
+// Describe group response
+message DescribeGroupResponse {
+  string consumer_group = 1;
+  repeated GroupTopicOffsets topic_offsets = 2;
+}
+
+message GroupTopicOffsets {
+  string topic = 1;
+  repeated GroupPartitionOffset partition_offsets = 2;
+}
+
+message GroupPartitionOffset {
+  uint32 partition = 1;
+  uint64 offset = 2;
+}
+
+// Delete group response
+message DeleteGroupResponse {}
+
+// Offset for timestamp response
+message GetOffsetForTimestampResponse {
+  optional uint64 offset = 1;
+}
+
+// Init producer ID response
+message InitProducerIdResponse {
+  uint64 producer_id = 1;
+  uint32 producer_epoch = 2;
+}
+
+// Idempotent publish response
+message IdempotentPublishResponse {
+  uint64 offset = 1;
+  uint32 partition = 2;
+  bool duplicate = 3;
+}
+
+// Begin transaction response
+message BeginTransactionResponse {
+  string txn_id = 1;
+}
+
+// Commit transaction response
+message CommitTransactionResponse {
+  string txn_id = 1;
+}
+
+// Abort transaction response
+message AbortTransactionResponse {
+  string txn_id = 1;
+}
+
+// Alter topic config response
+message AlterTopicConfigResponse {
+  string topic = 1;
+  uint32 changed_count = 2;
+}
+
+// Describe topic configs response
+message DescribeTopicConfigsResponse {
+  repeated TopicConfigDescriptionProto configs = 1;
+}
+
+message TopicConfigDescriptionProto {
+  string topic = 1;
+  repeated TopicConfigValueProto entries = 2;
+}
+
+message TopicConfigValueProto {
+  string key = 1;
+  string value = 2;
+  bool is_default = 3;
+  bool is_read_only = 4;
+  bool is_sensitive = 5;
+}
+
+// Create partitions response
+message CreatePartitionsResponse {
+  string topic = 1;
+  uint32 new_partition_count = 2;
+}
+
+// Delete records response
+message DeleteRecordsResponse {
+  string topic = 1;
+  repeated DeleteRecordsResultProto results = 2;
+}
+
+message DeleteRecordsResultProto {
+  uint32 partition = 1;
+  uint64 low_watermark = 2;
+  string error = 3;
 }
 
 // ============================================================================

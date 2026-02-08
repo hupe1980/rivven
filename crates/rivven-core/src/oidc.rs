@@ -494,7 +494,27 @@ mod oidc_impl {
                 .map_err(|e| OidcError::InvalidToken(format!("Invalid JWK: {}", e)))?;
 
             // Build validation
-            let mut validation = Validation::new(Algorithm::RS256);
+            // Parse configured algorithms (default to RS256)
+            let algorithms: Vec<Algorithm> = provider
+                .algorithms
+                .iter()
+                .filter_map(|a| match a.as_str() {
+                    "RS256" => Some(Algorithm::RS256),
+                    "RS384" => Some(Algorithm::RS384),
+                    "RS512" => Some(Algorithm::RS512),
+                    "ES256" => Some(Algorithm::ES256),
+                    "ES384" => Some(Algorithm::ES384),
+                    "PS256" => Some(Algorithm::PS256),
+                    "PS384" => Some(Algorithm::PS384),
+                    "PS512" => Some(Algorithm::PS512),
+                    _ => None,
+                })
+                .collect();
+            let primary_alg = algorithms.first().copied().unwrap_or(Algorithm::RS256);
+            let mut validation = Validation::new(primary_alg);
+            if algorithms.len() > 1 {
+                validation.algorithms = algorithms;
+            }
             validation.set_issuer(&[&provider.issuer]);
             validation.set_audience(&[&provider.audience]);
             validation.leeway = provider.clock_skew_seconds;

@@ -44,10 +44,10 @@
 //! - If sequence > expected: OutOfOrderSequence error
 //!
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
 use std::time::{Duration, SystemTime};
 
 /// Producer ID type (unique identifier for each producer instance)
@@ -280,10 +280,7 @@ impl IdempotentProducerManager {
         &self,
         existing_producer_id: Option<ProducerId>,
     ) -> (ProducerId, ProducerEpoch) {
-        let mut producers = self
-            .producers
-            .write()
-            .expect("producer registry lock poisoned");
+        let mut producers = self.producers.write();
 
         if let Some(pid) = existing_producer_id {
             // Reconnecting producer - bump epoch
@@ -315,10 +312,7 @@ impl IdempotentProducerManager {
         sequence: SequenceNumber,
         offset: u64,
     ) -> SequenceResult {
-        let mut producers = self
-            .producers
-            .write()
-            .expect("producer registry lock poisoned");
+        let mut producers = self.producers.write();
 
         if let Some(metadata) = producers.get_mut(&producer_id) {
             metadata.validate_sequence(partition, epoch, sequence, offset)
@@ -338,10 +332,7 @@ impl IdempotentProducerManager {
         sequence: SequenceNumber,
         offset: u64,
     ) {
-        let mut producers = self
-            .producers
-            .write()
-            .expect("producer registry lock poisoned");
+        let mut producers = self.producers.write();
 
         if let Some(metadata) = producers.get_mut(&producer_id) {
             if metadata.epoch == epoch {
@@ -359,37 +350,24 @@ impl IdempotentProducerManager {
 
     /// Get producer metadata (for debugging/monitoring)
     pub fn get_producer(&self, producer_id: ProducerId) -> Option<ProducerMetadata> {
-        self.producers
-            .read()
-            .expect("producer registry lock poisoned")
-            .get(&producer_id)
-            .cloned()
+        self.producers.read().get(&producer_id).cloned()
     }
 
     /// Check if a producer exists
     pub fn has_producer(&self, producer_id: ProducerId) -> bool {
-        self.producers
-            .read()
-            .expect("producer registry lock poisoned")
-            .contains_key(&producer_id)
+        self.producers.read().contains_key(&producer_id)
     }
 
     /// Get number of active producers
     pub fn producer_count(&self) -> usize {
-        self.producers
-            .read()
-            .expect("producer registry lock poisoned")
-            .len()
+        self.producers.read().len()
     }
 
     /// Cleanup idle producers
     ///
     /// Returns the number of producers removed.
     pub fn cleanup_idle_producers(&self) -> usize {
-        let mut producers = self
-            .producers
-            .write()
-            .expect("producer registry lock poisoned");
+        let mut producers = self.producers.write();
         let before = producers.len();
         producers.retain(|_, metadata| !metadata.is_idle(self.idle_timeout));
         before - producers.len()
@@ -397,10 +375,7 @@ impl IdempotentProducerManager {
 
     /// Get statistics
     pub fn stats(&self) -> IdempotentProducerStats {
-        let producers = self
-            .producers
-            .read()
-            .expect("producer registry lock poisoned");
+        let producers = self.producers.read();
         let mut total_partitions = 0;
         let mut oldest_activity = SystemTime::now();
 

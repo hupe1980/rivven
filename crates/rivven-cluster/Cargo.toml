@@ -10,9 +10,10 @@ description = "Distributed clustering for Rivven - SWIM membership, Raft consens
 [features]
 default = ["raft", "swim", "metrics-prometheus", "compression"]
 raft = ["dep:openraft", "dep:redb", "dep:reqwest"]
-swim = []
-quic = ["dep:quinn", "dep:rustls", "dep:rustls-pemfile", "dep:rcgen", "dep:rustls-native-certs", "dep:sha2", "dep:hex", "dep:x509-parser"]
+swim = ["dep:hmac", "dep:sha2"]
+quic = ["dep:quinn", "dep:rustls", "dep:rustls-pemfile", "dep:rcgen", "dep:rustls-native-certs", "dep:sha2", "dep:hmac", "dep:hex", "dep:x509-parser"]
 full = ["raft", "swim", "metrics-prometheus", "compression", "quic"]
+dangerous-skip-verify = []
 
 # Compression (LZ4/Zstd for network and storage)
 compression = ["rivven-core/compression"]
@@ -53,6 +54,7 @@ rustls-pemfile = { workspace = true, optional = true }
 rcgen = { version = "0.13", optional = true }
 rustls-native-certs = { workspace = true, optional = true }
 sha2 = { version = "0.10", optional = true }
+hmac = { version = "0.12", optional = true }
 hex = { version = "0.4", optional = true }
 x509-parser = { version = "0.16", optional = true }
 

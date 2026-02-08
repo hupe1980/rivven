@@ -192,18 +192,18 @@ impl TestSecureBroker {
     /// Start a secure broker with default test users
     ///
     /// Default users created:
-    /// - admin/admin123 with "admin" role
-    /// - producer/producer123 with "producer" role
-    /// - consumer/consumer123 with "consumer" role
-    /// - readonly/readonly123 with "read-only" role
-    /// - noauth/noauth123 with no roles
+    /// - admin/Admin@123 with "admin" role
+    /// - producer/Producer@123 with "producer" role
+    /// - consumer/Consumer@123 with "consumer" role
+    /// - readonly/Readonly@123 with "read-only" role
+    /// - noauth/Noauth@123 with no roles
     pub async fn start() -> Result<Self> {
         let users = vec![
-            TestUser::new("admin", "admin123", &["admin"]),
-            TestUser::new("producer", "producer123", &["producer"]),
-            TestUser::new("consumer", "consumer123", &["consumer"]),
-            TestUser::new("readonly", "readonly123", &["read-only"]),
-            TestUser::new("noauth", "noauth123", &[]),
+            TestUser::new("admin", "Admin@123", &["admin"]),
+            TestUser::new("producer", "Producer@123", &["producer"]),
+            TestUser::new("consumer", "Consumer@123", &["consumer"]),
+            TestUser::new("readonly", "Readonly@123", &["read-only"]),
+            TestUser::new("noauth", "Noauth@123", &[]),
         ];
         Self::start_with_users(users).await
     }
@@ -319,7 +319,7 @@ impl TestSecureBroker {
     pub fn admin_credentials(&self) -> (&str, &str) {
         self.get_user("admin")
             .map(|u| (u.username.as_str(), u.password.as_str()))
-            .unwrap_or(("admin", "admin123"))
+            .unwrap_or(("admin", "Admin@123"))
     }
 
     /// Gracefully shutdown the broker

@@ -466,14 +466,14 @@ async fn test_custom_users() -> Result<()> {
 
     // Create broker with custom users
     let users = vec![
-        TestUser::new("custom-admin", "custompass1", &["admin"]),
-        TestUser::new("custom-user", "custompass2", &["producer", "consumer"]),
+        TestUser::new("custom-admin", "Custom@Adm1", &["admin"]),
+        TestUser::new("custom-user", "Custom@Usr1", &["producer", "consumer"]),
     ];
     let broker = TestSecureBroker::start_with_users(users).await?;
 
     // Authenticate as custom admin
     let mut client = Client::connect(&broker.connection_string()).await?;
-    client.authenticate("custom-admin", "custompass1").await?;
+    client.authenticate("custom-admin", "Custom@Adm1").await?;
 
     let topic = unique_topic_name("custom-user-topic");
     client.create_topic(&topic, Some(1)).await?;
@@ -481,7 +481,7 @@ async fn test_custom_users() -> Result<()> {
 
     // Authenticate as custom user with both producer and consumer roles
     let mut client2 = Client::connect(&broker.connection_string()).await?;
-    client2.authenticate("custom-user", "custompass2").await?;
+    client2.authenticate("custom-user", "Custom@Usr1").await?;
 
     // Should be able to both produce and consume
     client2.publish(&topic, b"custom message".to_vec()).await?;
@@ -513,7 +513,7 @@ async fn test_auth_lockout_after_failures() -> Result<()> {
 
     // After max failures, should be locked out even with correct password
     let mut client = Client::connect(&broker.connection_string()).await?;
-    let result = client.authenticate("admin", "admin123").await;
+    let result = client.authenticate("admin", "Admin@123").await;
 
     // Depending on lockout implementation, this might fail
     if let Err(e) = result {
@@ -560,11 +560,11 @@ async fn test_special_characters_in_credentials() -> Result<()> {
     init_tracing();
 
     // Create user with special characters in password
-    let users = vec![TestUser::new("special-user", "p@ssw0rd!#$%", &["admin"])];
+    let users = vec![TestUser::new("special-user", "P@ssw0rd!#$%", &["admin"])];
     let broker = TestSecureBroker::start_with_users(users).await?;
 
     let mut client = Client::connect(&broker.connection_string()).await?;
-    let result = client.authenticate("special-user", "p@ssw0rd!#$%").await;
+    let result = client.authenticate("special-user", "P@ssw0rd!#$%").await;
 
     assert!(
         result.is_ok(),

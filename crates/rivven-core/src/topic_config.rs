@@ -13,10 +13,11 @@
 //! | `min.insync.replicas` | i32 | 1 | Min replicas for ack |
 //! | `compression.type` | string | "producer" | Compression algorithm |
 
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::RwLock;
 use std::time::Duration;
+use tokio::sync::broadcast;
 
 /// Default retention time (7 days in milliseconds)
 pub const DEFAULT_RETENTION_MS: i64 = 7 * 24 * 60 * 60 * 1000;
@@ -265,12 +266,16 @@ impl TopicConfig {
     pub fn apply(&mut self, key: &str, value: Option<&str>) -> Result<(), String> {
         match key {
             "retention.ms" => {
-                self.retention_ms = match value {
+                let val: i64 = match value {
                     Some(v) => v
                         .parse()
                         .map_err(|e| format!("Invalid retention.ms: {}", e))?,
                     None => DEFAULT_RETENTION_MS,
                 };
+                if val < -1 {
+                    return Err("retention.ms must be >= -1 (-1 = infinite)".into());
+                }
+                self.retention_ms = val;
             }
             "retention.bytes" => {
                 self.retention_bytes = match value {
@@ -281,20 +286,28 @@ impl TopicConfig {
                 };
             }
             "max.message.bytes" => {
-                self.max_message_bytes = match value {
+                let val: i64 = match value {
                     Some(v) => v
                         .parse()
                         .map_err(|e| format!("Invalid max.message.bytes: {}", e))?,
                     None => DEFAULT_MAX_MESSAGE_BYTES,
                 };
+                if val <= 0 {
+                    return Err("max.message.bytes must be > 0".into());
+                }
+                self.max_message_bytes = val;
             }
             "segment.bytes" => {
-                self.segment_bytes = match value {
+                let val: i64 = match value {
                     Some(v) => v
                         .parse()
                         .map_err(|e| format!("Invalid segment.bytes: {}", e))?,
                     None => DEFAULT_SEGMENT_BYTES,
                 };
+                if val < 1024 {
+                    return Err("segment.bytes must be >= 1024".into());
+                }
+                self.segment_bytes = val;
             }
             "segment.ms" => {
                 self.segment_ms = match value {
@@ -311,12 +324,16 @@ impl TopicConfig {
                 };
             }
             "min.insync.replicas" => {
-                self.min_insync_replicas = match value {
+                let val: i32 = match value {
                     Some(v) => v
                         .parse()
                         .map_err(|e| format!("Invalid min.insync.replicas: {}", e))?,
                     None => 1,
                 };
+                if val <= 0 {
+                    return Err("min.insync.replicas must be > 0".into());
+                }
+                self.min_insync_replicas = val;
             }
             "compression.type" => {
                 self.compression_type = match value {
@@ -345,12 +362,24 @@ pub struct ConfigValue {
     pub is_sensitive: bool,
 }
 
+/// Notification about a config change
+#[derive(Debug, Clone)]
+pub struct ConfigChangeEvent {
+    /// Topic name
+    pub topic: String,
+    /// Changed keys
+    pub changed_keys: Vec<String>,
+}
+
 /// Topic configuration manager
 ///
 /// Manages per-topic configurations with thread-safe access.
+/// Supports change notifications via a broadcast channel.
 pub struct TopicConfigManager {
     /// Per-topic configurations
     configs: RwLock<HashMap<String, TopicConfig>>,
+    /// Change notification sender
+    change_tx: broadcast::Sender<ConfigChangeEvent>,
 }
 
 impl Default for TopicConfigManager {
@@ -362,36 +391,41 @@ impl Default for TopicConfigManager {
 impl TopicConfigManager {
     /// Create a new topic config manager
     pub fn new() -> Self {
+        let (change_tx, _) = broadcast::channel(256);
         Self {
             configs: RwLock::new(HashMap::new()),
+            change_tx,
         }
+    }
+
+    /// Subscribe to config change notifications
+    pub fn subscribe(&self) -> broadcast::Receiver<ConfigChangeEvent> {
+        self.change_tx.subscribe()
     }
 
     /// Get or create config for a topic
     pub fn get_or_default(&self, topic: &str) -> TopicConfig {
-        let configs = self
-            .configs
-            .read()
-            .expect("topic config manager lock poisoned");
+        let configs = self.configs.read();
         configs.get(topic).cloned().unwrap_or_default()
     }
 
     /// Get config for a topic
     pub fn get(&self, topic: &str) -> Option<TopicConfig> {
-        let configs = self
-            .configs
-            .read()
-            .expect("topic config manager lock poisoned");
+        let configs = self.configs.read();
         configs.get(topic).cloned()
     }
 
     /// Set config for a topic
     pub fn set(&self, topic: &str, config: TopicConfig) {
-        let mut configs = self
-            .configs
-            .write()
-            .expect("topic config manager lock poisoned");
-        configs.insert(topic.to_string(), config);
+        let keys: Vec<String> = config.to_map().keys().cloned().collect();
+        {
+            let mut configs = self.configs.write();
+            configs.insert(topic.to_string(), config);
+        }
+        let _ = self.change_tx.send(ConfigChangeEvent {
+            topic: topic.to_string(),
+            changed_keys: keys,
+        });
     }
 
     /// Apply configuration changes to a topic
@@ -400,16 +434,24 @@ impl TopicConfigManager {
         topic: &str,
         changes: &[(String, Option<String>)],
     ) -> Result<usize, String> {
-        let mut configs = self
-            .configs
-            .write()
-            .expect("topic config manager lock poisoned");
-        let config = configs.entry(topic.to_string()).or_default();
+        let changed_keys: Vec<String> = changes.iter().map(|(k, _)| k.clone()).collect();
+        let changed = {
+            let mut configs = self.configs.write();
+            let config = configs.entry(topic.to_string()).or_default();
 
-        let mut changed = 0;
-        for (key, value) in changes {
-            config.apply(key, value.as_deref())?;
-            changed += 1;
+            let mut changed = 0;
+            for (key, value) in changes {
+                config.apply(key, value.as_deref())?;
+                changed += 1;
+            }
+            changed
+        };
+
+        if changed > 0 {
+            let _ = self.change_tx.send(ConfigChangeEvent {
+                topic: topic.to_string(),
+                changed_keys,
+            });
         }
 
         Ok(changed)
@@ -417,28 +459,19 @@ impl TopicConfigManager {
 
     /// Remove config for a topic (reverts to defaults)
     pub fn remove(&self, topic: &str) {
-        let mut configs = self
-            .configs
-            .write()
-            .expect("topic config manager lock poisoned");
+        let mut configs = self.configs.write();
         configs.remove(topic);
     }
 
     /// List all configured topics
     pub fn list_topics(&self) -> Vec<String> {
-        let configs = self
-            .configs
-            .read()
-            .expect("topic config manager lock poisoned");
+        let configs = self.configs.read();
         configs.keys().cloned().collect()
     }
 
     /// Describe configurations for topics
     pub fn describe(&self, topics: &[String]) -> Vec<(String, HashMap<String, ConfigValue>)> {
-        let configs = self
-            .configs
-            .read()
-            .expect("topic config manager lock poisoned");
+        let configs = self.configs.read();
 
         if topics.is_empty() {
             // Return all topics
@@ -599,5 +632,35 @@ mod tests {
         let config = TopicConfig::default();
         let duration = config.retention_duration();
         assert_eq!(duration, Duration::from_millis(DEFAULT_RETENTION_MS as u64));
+    }
+
+    #[test]
+    fn test_config_change_notification() {
+        let manager = TopicConfigManager::new();
+        let mut rx = manager.subscribe();
+
+        // Apply changes should send notification
+        let changes = vec![("retention.ms".to_string(), Some("3600000".to_string()))];
+        manager.apply_changes("my-topic", &changes).unwrap();
+
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.topic, "my-topic");
+        assert!(event.changed_keys.contains(&"retention.ms".to_string()));
+    }
+
+    #[test]
+    fn test_config_set_notification() {
+        let manager = TopicConfigManager::new();
+        let mut rx = manager.subscribe();
+
+        let config = TopicConfig {
+            retention_ms: 86400000,
+            ..Default::default()
+        };
+        manager.set("topic-b", config);
+
+        let event = rx.try_recv().unwrap();
+        assert_eq!(event.topic, "topic-b");
+        assert!(!event.changed_keys.is_empty());
     }
 }

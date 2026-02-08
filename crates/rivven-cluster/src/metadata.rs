@@ -257,7 +257,8 @@ impl ClusterMetadata {
 
             for (i, replicas) in new_assignments.into_iter().enumerate() {
                 let partition_id = PartitionId::new(topic, start_idx + i as u32);
-                let partition_state = PartitionState::new(partition_id, replicas);
+                let mut partition_state = PartitionState::new(partition_id, replicas);
+                partition_state.elect_leader();
                 topic_state.partitions.push(partition_state);
             }
 

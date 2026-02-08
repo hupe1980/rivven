@@ -274,6 +274,18 @@ The quota system uses a **sliding window** algorithm for rate tracking:
 3. **Cleanup**: Idle entity state is cleaned up after 1 hour
 4. **Resolution**: Quotas checked from most to least specific
 
+### Enforcement Path
+
+All three quota checks (request rate, produce bytes, consume bytes) are enforced inside `handle_with_principal()`:
+
+- **Anonymous path**: `handle()` delegates to `handle_with_principal(request, None, None)` — quotas tracked against the default entity.
+- **Authenticated path**: `AuthenticatedHandler` extracts the principal name from the auth session and delegates to `handle_with_principal(request, Some(user), client_id)` — quotas tracked against the specific user/client.
+
+This ensures:
+- No double-counting of quotas between auth and handler layers
+- Consume quotas are enforced with the real principal (not just anonymous)
+- All three quota types use the same enforcement point
+
 ```
 ┌─────────────────────────────────────────────────────┐
 │                    QuotaManager                      │

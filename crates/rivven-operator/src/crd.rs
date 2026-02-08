@@ -5,20 +5,20 @@
 
 use k8s_openapi::api::core::v1::ResourceRequirements;
 use kube::CustomResource;
-use once_cell::sync::Lazy;
 use regex::Regex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::LazyLock;
 use validator::{Validate, ValidationError};
 
 /// Regex for validating Kubernetes resource quantities (e.g., "10Gi", "100Mi")
-static QUANTITY_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^[0-9]+(\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$").unwrap());
+static QUANTITY_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[0-9]+(\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$").unwrap());
 
 /// Regex for validating Kubernetes names (RFC 1123 subdomain)
-static NAME_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$").unwrap());
+static NAME_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$").unwrap());
 
 /// Validate a Kubernetes resource quantity string
 fn validate_quantity(value: &str) -> Result<(), ValidationError> {
@@ -584,7 +584,8 @@ pub struct ServiceMonitorSpec {
 
 /// Validate Prometheus duration format (e.g., "30s", "1m", "5m30s")
 fn validate_duration(duration: &str) -> Result<(), ValidationError> {
-    static DURATION_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"^([0-9]+[smh])+$").unwrap());
+    static DURATION_REGEX: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^([0-9]+[smh])+$").unwrap());
     if !DURATION_REGEX.is_match(duration) {
         return Err(ValidationError::new("invalid_duration").with_message(
             format!("'{}' is not a valid duration (e.g., 30s, 1m)", duration).into(),
@@ -631,8 +632,8 @@ fn validate_optional_int_or_percent(value: &str) -> Result<(), ValidationError> 
         return Ok(());
     }
     // Allow integers or percentages
-    static INT_OR_PERCENT_REGEX: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"^([0-9]+|[0-9]+%)$").unwrap());
+    static INT_OR_PERCENT_REGEX: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^([0-9]+|[0-9]+%)$").unwrap());
     if !INT_OR_PERCENT_REGEX.is_match(value) {
         return Err(ValidationError::new("invalid_int_or_percent").with_message(
             format!(
@@ -1615,8 +1616,8 @@ pub struct SourceConnectorSpec {
 #[allow(dead_code)]
 fn validate_connector_type(connector: &str) -> Result<(), ValidationError> {
     // Allow standard connectors and custom ones (must be alphanumeric with hyphens)
-    static CONNECTOR_REGEX: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$").unwrap());
+    static CONNECTOR_REGEX: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$").unwrap());
     if !CONNECTOR_REGEX.is_match(connector) {
         return Err(ValidationError::new("invalid_connector_type")
             .with_message("connector type must be lowercase alphanumeric with hyphens".into()));

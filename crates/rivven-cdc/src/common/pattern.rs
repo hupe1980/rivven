@@ -34,9 +34,9 @@
 //! assert!(matcher.matches_qualified("private", "users"));
 //! ```
 
-use once_cell::sync::Lazy;
 use regex::Regex;
 use std::sync::Arc;
+use std::sync::LazyLock;
 
 /// Pattern syntax type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -261,8 +261,9 @@ fn glob_to_regex(pattern: &str) -> String {
 // ============================================================================
 
 /// Global pattern cache for frequently used patterns
-static PATTERN_CACHE: Lazy<std::sync::RwLock<std::collections::HashMap<String, PatternMatcher>>> =
-    Lazy::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
+static PATTERN_CACHE: LazyLock<
+    parking_lot::RwLock<std::collections::HashMap<String, PatternMatcher>>,
+> = LazyLock::new(|| parking_lot::RwLock::new(std::collections::HashMap::new()));
 
 /// Match a text against a glob pattern (case-insensitive)
 ///
@@ -291,7 +292,7 @@ pub fn pattern_match(pattern: &str, text: &str) -> bool {
 
     // Use cached pattern if available
     {
-        let cache = PATTERN_CACHE.read().unwrap();
+        let cache = PATTERN_CACHE.read();
         if let Some(matcher) = cache.get(pattern) {
             return matcher.matches(text);
         }
@@ -301,7 +302,7 @@ pub fn pattern_match(pattern: &str, text: &str) -> bool {
     if let Ok(matcher) = PatternMatcher::new(pattern) {
         let result = matcher.matches(text);
         // Only cache if the cache isn't too large
-        let mut cache = PATTERN_CACHE.write().unwrap();
+        let mut cache = PATTERN_CACHE.write();
         if cache.len() < 1000 {
             cache.insert(pattern.to_string(), matcher);
         }

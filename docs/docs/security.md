@@ -193,11 +193,12 @@ users:
 
 #### Security Features
 
-- **PBKDF2-HMAC-SHA256**: 4096 iterations for key derivation
+- **PBKDF2-HMAC-SHA256**: 600,000 iterations for key derivation (OWASP recommendation)
 - **32-byte random salt**: Per-user unique salt prevents rainbow tables
 - **Constant-time comparison**: Prevents timing attacks
 - **User enumeration prevention**: Fake salt/iterations for unknown users
 - **Mutual authentication**: Server proves it knows the password too
+- **Password complexity**: Minimum 8 characters, must include uppercase, lowercase, digit, and special character
 
 #### Client Example
 
@@ -257,7 +258,13 @@ roles:
 
 ### ACL Rules
 
-Fine-grained topic ACLs:
+Fine-grained topic ACLs with indexed lookups:
+
+> **Performance note:** ACL entries are stored in an `AclIndex` keyed by
+> principal name. Lookups scan only the entries for the requesting principal
+> plus wildcard rules — O(W + P) average instead of O(N). Wildcard (`*`)
+> principals are kept in a separate list to preserve deny-takes-precedence
+> semantics.
 
 ```bash
 # Allow user to produce to specific topics
@@ -306,7 +313,8 @@ Enable storage encryption:
 storage:
   encryption:
     enabled: true
-    algorithm: aes-256-gcm
+    algorithm: aes-256-gcm  # or chacha20-poly1305
+    key_rotation_days: 90   # automatic key rotation
     key_source: kms  # file, kms, vault
     kms:
       provider: aws

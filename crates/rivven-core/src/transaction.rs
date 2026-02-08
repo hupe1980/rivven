@@ -48,10 +48,10 @@
 //!
 
 use crate::idempotent::{ProducerEpoch, ProducerId};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Unique identifier for a transaction
@@ -407,7 +407,7 @@ impl AbortedTransactionIndex {
 
     /// Record an aborted transaction
     pub fn record_abort(&self, producer_id: ProducerId, first_offset: u64) {
-        let mut aborted = self.aborted.write().expect("aborted index lock poisoned");
+        let mut aborted = self.aborted.write();
         aborted.push(AbortedTransaction {
             producer_id,
             first_offset,
@@ -424,7 +424,7 @@ impl AbortedTransactionIndex {
         start_offset: u64,
         end_offset: u64,
     ) -> Vec<AbortedTransaction> {
-        let aborted = self.aborted.read().expect("aborted index lock poisoned");
+        let aborted = self.aborted.read();
         aborted
             .iter()
             .filter(|a| a.first_offset >= start_offset && a.first_offset <= end_offset)
@@ -434,7 +434,7 @@ impl AbortedTransactionIndex {
 
     /// Check if a specific producer's message at an offset is from an aborted transaction
     pub fn is_aborted(&self, producer_id: ProducerId, offset: u64) -> bool {
-        let aborted = self.aborted.read().expect("aborted index lock poisoned");
+        let aborted = self.aborted.read();
         aborted
             .iter()
             .any(|a| a.producer_id == producer_id && a.first_offset <= offset)
@@ -442,16 +442,13 @@ impl AbortedTransactionIndex {
 
     /// Remove aborted transactions older than a given offset (for log truncation)
     pub fn truncate_before(&self, offset: u64) {
-        let mut aborted = self.aborted.write().expect("aborted index lock poisoned");
+        let mut aborted = self.aborted.write();
         aborted.retain(|a| a.first_offset >= offset);
     }
 
     /// Get count of tracked aborted transactions
     pub fn len(&self) -> usize {
-        self.aborted
-            .read()
-            .expect("aborted index lock poisoned")
-            .len()
+        self.aborted.read().len()
     }
 
     /// Check if index is empty
@@ -610,33 +607,36 @@ impl TransactionCoordinator {
         producer_epoch: ProducerEpoch,
         timeout: Option<Duration>,
     ) -> TransactionResult {
+        // Use write locks from the start to prevent TOCTOU races
+        let mut transactions = self.transactions.write();
+        let mut producer_txns = self.producer_transactions.write();
+
         // Check if producer already has an active transaction
-        {
-            let producer_txns = self
-                .producer_transactions
-                .read()
-                .expect("transaction manager lock poisoned");
-            if let Some(existing_txn_id) = producer_txns.get(&producer_id) {
-                if existing_txn_id != &txn_id {
-                    return TransactionResult::ConcurrentTransaction;
+        if let Some(existing_txn_id) = producer_txns.get(&producer_id) {
+            if existing_txn_id != &txn_id {
+                return TransactionResult::ConcurrentTransaction;
+            }
+            // Same txn_id - check if we're resuming
+            if let Some(txn) = transactions.get(&(producer_id, txn_id.clone())) {
+                if txn.producer_epoch != producer_epoch {
+                    return TransactionResult::ProducerFenced {
+                        expected_epoch: txn.producer_epoch,
+                        received_epoch: producer_epoch,
+                    };
                 }
-                // Same txn_id - check if we're resuming
-                let transactions = self
-                    .transactions
-                    .read()
-                    .expect("transaction manager lock poisoned");
-                if let Some(txn) = transactions.get(&(producer_id, txn_id.clone())) {
-                    if txn.producer_epoch != producer_epoch {
-                        return TransactionResult::ProducerFenced {
-                            expected_epoch: txn.producer_epoch,
-                            received_epoch: producer_epoch,
-                        };
-                    }
-                    if txn.state.is_active() {
-                        return TransactionResult::Ok; // Already active
-                    }
+                if txn.state.is_active() {
+                    return TransactionResult::Ok; // Already active
                 }
             }
+        }
+
+        // Enforce MAX_PENDING_TRANSACTIONS limit
+        let active_count = transactions
+            .values()
+            .filter(|t| t.state.is_active())
+            .count();
+        if active_count >= MAX_PENDING_TRANSACTIONS {
+            return TransactionResult::TooManyTransactions;
         }
 
         // Create new transaction
@@ -647,19 +647,8 @@ impl TransactionCoordinator {
             timeout.unwrap_or(self.default_timeout),
         );
 
-        {
-            let mut transactions = self
-                .transactions
-                .write()
-                .expect("transaction manager lock poisoned");
-            let mut producer_txns = self
-                .producer_transactions
-                .write()
-                .expect("transaction manager lock poisoned");
-
-            transactions.insert((producer_id, txn_id.clone()), txn);
-            producer_txns.insert(producer_id, txn_id);
-        }
+        transactions.insert((producer_id, txn_id.clone()), txn);
+        producer_txns.insert(producer_id, txn_id);
 
         self.stats.record_start();
         TransactionResult::Ok
@@ -673,10 +662,7 @@ impl TransactionCoordinator {
         producer_epoch: ProducerEpoch,
         partitions: Vec<TransactionPartition>,
     ) -> TransactionResult {
-        let mut transactions = self
-            .transactions
-            .write()
-            .expect("transaction manager lock poisoned");
+        let mut transactions = self.transactions.write();
 
         let txn = match transactions.get_mut(&(producer_id, txn_id.clone())) {
             Some(t) => t,
@@ -724,10 +710,7 @@ impl TransactionCoordinator {
         sequence: i32,
         offset: u64,
     ) -> TransactionResult {
-        let mut transactions = self
-            .transactions
-            .write()
-            .expect("transaction manager lock poisoned");
+        let mut transactions = self.transactions.write();
 
         let txn = match transactions.get_mut(&(producer_id, txn_id.clone())) {
             Some(t) => t,
@@ -780,10 +763,7 @@ impl TransactionCoordinator {
         group_id: String,
         offsets: Vec<(TransactionPartition, i64)>,
     ) -> TransactionResult {
-        let mut transactions = self
-            .transactions
-            .write()
-            .expect("transaction manager lock poisoned");
+        let mut transactions = self.transactions.write();
 
         let txn = match transactions.get_mut(&(producer_id, txn_id.clone())) {
             Some(t) => t,
@@ -828,10 +808,7 @@ impl TransactionCoordinator {
         producer_id: ProducerId,
         producer_epoch: ProducerEpoch,
     ) -> Result<Transaction, TransactionResult> {
-        let mut transactions = self
-            .transactions
-            .write()
-            .expect("transaction manager lock poisoned");
+        let mut transactions = self.transactions.write();
 
         let txn = match transactions.get_mut(&(producer_id, txn_id.clone())) {
             Some(t) => t,
@@ -874,14 +851,8 @@ impl TransactionCoordinator {
         txn_id: &TransactionId,
         producer_id: ProducerId,
     ) -> TransactionResult {
-        let mut transactions = self
-            .transactions
-            .write()
-            .expect("transaction manager lock poisoned");
-        let mut producer_txns = self
-            .producer_transactions
-            .write()
-            .expect("transaction manager lock poisoned");
+        let mut transactions = self.transactions.write();
+        let mut producer_txns = self.producer_transactions.write();
 
         let txn = match transactions.get_mut(&(producer_id, txn_id.clone())) {
             Some(t) => t,
@@ -912,10 +883,7 @@ impl TransactionCoordinator {
         producer_id: ProducerId,
         producer_epoch: ProducerEpoch,
     ) -> Result<Transaction, TransactionResult> {
-        let mut transactions = self
-            .transactions
-            .write()
-            .expect("transaction manager lock poisoned");
+        let mut transactions = self.transactions.write();
 
         let txn = match transactions.get_mut(&(producer_id, txn_id.clone())) {
             Some(t) => t,
@@ -951,14 +919,8 @@ impl TransactionCoordinator {
         txn_id: &TransactionId,
         producer_id: ProducerId,
     ) -> TransactionResult {
-        let mut transactions = self
-            .transactions
-            .write()
-            .expect("transaction manager lock poisoned");
-        let mut producer_txns = self
-            .producer_transactions
-            .write()
-            .expect("transaction manager lock poisoned");
+        let mut transactions = self.transactions.write();
+        let mut producer_txns = self.producer_transactions.write();
 
         let txn = match transactions.get_mut(&(producer_id, txn_id.clone())) {
             Some(t) => t,
@@ -994,42 +956,27 @@ impl TransactionCoordinator {
         txn_id: &TransactionId,
         producer_id: ProducerId,
     ) -> Option<Transaction> {
-        let transactions = self
-            .transactions
-            .read()
-            .expect("transaction manager lock poisoned");
+        let transactions = self.transactions.read();
         transactions.get(&(producer_id, txn_id.clone())).cloned()
     }
 
     /// Check if a producer has an active transaction
     pub fn has_active_transaction(&self, producer_id: ProducerId) -> bool {
-        let producer_txns = self
-            .producer_transactions
-            .read()
-            .expect("transaction manager lock poisoned");
+        let producer_txns = self.producer_transactions.read();
         producer_txns.contains_key(&producer_id)
     }
 
     /// Get active transaction ID for a producer
     pub fn get_active_transaction_id(&self, producer_id: ProducerId) -> Option<TransactionId> {
-        let producer_txns = self
-            .producer_transactions
-            .read()
-            .expect("transaction manager lock poisoned");
+        let producer_txns = self.producer_transactions.read();
         producer_txns.get(&producer_id).cloned()
     }
 
     /// Clean up timed-out transactions
     pub fn cleanup_timed_out_transactions(&self) -> Vec<Transaction> {
         let mut timed_out = Vec::new();
-        let mut transactions = self
-            .transactions
-            .write()
-            .expect("transaction manager lock poisoned");
-        let mut producer_txns = self
-            .producer_transactions
-            .write()
-            .expect("transaction manager lock poisoned");
+        let mut transactions = self.transactions.write();
+        let mut producer_txns = self.producer_transactions.write();
 
         let keys_to_remove: Vec<_> = transactions
             .iter()
@@ -1051,10 +998,7 @@ impl TransactionCoordinator {
 
     /// Get number of active transactions
     pub fn active_count(&self) -> usize {
-        let transactions = self
-            .transactions
-            .read()
-            .expect("transaction manager lock poisoned");
+        let transactions = self.transactions.read();
         transactions
             .values()
             .filter(|t| !t.state.is_terminal())

@@ -97,6 +97,35 @@ impl Config {
     pub fn server_address(&self) -> String {
         format!("{}:{}", self.bind_address, self.port)
     }
+
+    /// Validate the configuration, returning an error message if invalid
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if self.default_partitions == 0 {
+            return Err("default_partitions must be > 0".into());
+        }
+        if self.max_segment_size == 0 {
+            return Err("max_segment_size must be > 0".into());
+        }
+        if self.max_segment_size < 1024 {
+            return Err("max_segment_size must be >= 1024 bytes".into());
+        }
+        if self.bind_address.is_empty() {
+            return Err("bind_address must not be empty".into());
+        }
+        if self.enable_persistence && self.data_dir.is_empty() {
+            return Err("data_dir must not be empty when persistence is enabled".into());
+        }
+        if !matches!(
+            self.log_level.as_str(),
+            "trace" | "debug" | "info" | "warn" | "error"
+        ) {
+            return Err(format!(
+                "invalid log_level '{}', expected one of: trace, debug, info, warn, error",
+                self.log_level
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

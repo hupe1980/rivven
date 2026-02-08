@@ -214,6 +214,49 @@ pub struct SourceConfig {
     /// Whether this source is enabled
     #[serde(default = "default_true")]
     pub enabled: bool,
+
+    /// Rate limiting for publish throughput
+    #[serde(default)]
+    pub rate_limit: SourceRateLimitConfig,
+
+    /// Schema registry URL (e.g., "http://localhost:8081"). Blank = disabled.
+    #[serde(default)]
+    pub schema_registry_url: Option<String>,
+
+    /// Transform steps applied after read, before publish (ordered)
+    #[serde(default)]
+    pub transforms: Vec<TransformStepConfig>,
+}
+
+/// Rate limiting configuration for source connectors
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct SourceRateLimitConfig {
+    /// Maximum events per second (0 = unlimited)
+    #[serde(default)]
+    pub events_per_second: u64,
+
+    /// Maximum in-flight (un-acked) publish requests (0 = unlimited)
+    #[serde(default)]
+    pub max_in_flight: usize,
+
+    /// Burst size for token bucket (0 = defaults to events_per_second)
+    #[serde(default)]
+    pub burst_size: u64,
+}
+
+impl SourceRateLimitConfig {
+    pub fn to_rate_limiter_config(&self) -> crate::rate_limiter::RateLimitConfig {
+        if self.events_per_second == 0 {
+            crate::rate_limiter::RateLimitConfig::unlimited()
+        } else if self.burst_size > 0 {
+            crate::rate_limiter::RateLimitConfig::with_burst(
+                self.events_per_second,
+                self.burst_size,
+            )
+        } else {
+            crate::rate_limiter::RateLimitConfig::new(self.events_per_second)
+        }
+    }
 }
 
 /// Per-source topic configuration (overrides global defaults)
@@ -270,6 +313,14 @@ pub struct SinkConfig {
     /// Rate limiting configuration
     #[serde(default)]
     pub rate_limit: SinkRateLimitConfig,
+
+    /// Schema registry URL (e.g., "http://localhost:8081"). Blank = disabled.
+    #[serde(default)]
+    pub schema_registry_url: Option<String>,
+
+    /// Transform steps applied after consume, before write (ordered)
+    #[serde(default)]
+    pub transforms: Vec<TransformStepConfig>,
 }
 
 /// Rate limiting configuration for sinks
@@ -314,6 +365,18 @@ pub enum StartOffset {
     Latest,
     /// Start from a specific timestamp (ISO 8601)
     Timestamp(String),
+}
+
+/// A single transform step in a pipeline
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TransformStepConfig {
+    /// Transform type (e.g., "rename_field", "filter", "add_field", "remove_field")
+    #[serde(rename = "type")]
+    pub transform_type: String,
+
+    /// Transform-specific configuration
+    #[serde(default)]
+    pub config: serde_yaml::Value,
 }
 
 /// Global settings
