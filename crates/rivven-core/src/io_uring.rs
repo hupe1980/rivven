@@ -130,14 +130,12 @@ impl IoUringConfig {
 /// Check if io_uring is available on this system
 #[cfg(target_os = "linux")]
 pub fn is_io_uring_available() -> bool {
-    // Read kernel version from /proc/version_signature or utsname without spawning a subprocess
-    let mut utsname: libc::utsname = unsafe { std::mem::zeroed() };
-    if unsafe { libc::uname(&mut utsname) } != 0 {
-        return false;
-    }
-
-    let release = unsafe { std::ffi::CStr::from_ptr(utsname.release.as_ptr()) };
-    let version = release.to_string_lossy();
+    // Read kernel version from /proc/sys/kernel/osrelease (no libc or subprocess needed)
+    let version = match std::fs::read_to_string("/proc/sys/kernel/osrelease") {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let version = version.trim();
     let parts: Vec<&str> = version.split('.').collect();
 
     if parts.len() < 2 {
