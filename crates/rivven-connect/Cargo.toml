@@ -40,7 +40,7 @@ rdbc-full = ["rdbc-postgres", "rdbc-mysql", "rdbc-sqlserver"]
 # Queue connectors (message queues)
 kafka = ["dep:rskafka"]      # Kafka source/sink (pure Rust client)
 mqtt = ["dep:rumqttc"]       # MQTT source (pure Rust client)
-sqs = []        # AWS SQS source
+sqs = ["dep:aws-sdk-sqs", "dep:aws-config"]  # AWS SQS source (real AWS SDK)
 pubsub = []     # Google Pub/Sub source
 
 # Storage connectors - unified via object_store crate
@@ -137,6 +137,8 @@ lz4 = "1.24"
 object_store = { version = "0.11", optional = true }
 
 # AWS SDK (optional - for SQS, Redshift only; S3 uses object_store)
+aws-sdk-sqs = { version = "1", optional = true }
+aws-config = { version = "1", optional = true }
 # Note: aws-sdk-redshift and aws-credential-types are reserved for future IAM auth
 # Current Redshift impl uses PostgreSQL wire protocol with password auth
 

@@ -160,6 +160,7 @@ rivven-connect run --config rivven-connect.yaml
 | `http-webhook` | `http` | HTTP/HTTPS webhooks with signing |
 | `rdbc-sink` | `rdbc` | Batch database sink (PostgreSQL, MySQL, SQL Server) |
 | `kafka-sink` | `kafka` | Apache Kafka producer (pure Rust, zero C deps) |
+| `sqs-sink` | `sqs` | AWS SQS queue producer (batch sending, FIFO support) |
 | `external-queue` | `external-queue` | External message queue producer |
 | `object-storage` | `cloud-storage` | Unified object storage (S3, GCS, Azure, local) |
 | `s3` | `s3` | Amazon S3 / MinIO / R2 (via object-storage) |

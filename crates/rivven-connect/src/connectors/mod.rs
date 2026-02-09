@@ -123,6 +123,9 @@ pub fn create_sink_registry() -> SinkRegistry {
     #[cfg(feature = "kafka")]
     registry.register("kafka", Arc::new(queue::KafkaSinkFactory));
 
+    #[cfg(feature = "sqs")]
+    registry.register("sqs", Arc::new(queue::SqsSinkFactory));
+
     // Unified object storage sink (replaces separate s3/gcs/azure connectors)
     // Use "object-storage" as the connector type, with "provider" field in config
     #[cfg(feature = "cloud-storage")]

@@ -964,6 +964,64 @@ sinks:
 | `kafka.sink.batches_sent_total` | Counter | Batches sent |
 | `kafka.sink.success_rate` | Gauge | Producer success rate |
 
+### SQS Sink
+
+Produce events to Amazon SQS queues with batch sending. See [SQS Connector](sqs-connector) for full documentation.
+
+```yaml
+sinks:
+  sqs:
+    connector: sqs-sink
+    topics: [events]              # Rivven topics to consume from
+    consumer_group: sqs-producer
+    config:
+      queue_url: https://sqs.us-east-1.amazonaws.com/123456789/my-queue
+      region: us-east-1
+      batch_size: 10
+      batch_timeout_ms: 1000
+      include_metadata: true
+      auth:
+        access_key_id: ${AWS_ACCESS_KEY_ID}
+        secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+```
+
+| Parameter | Required | Default | Description |
+|:----------|:---------|:--------|:------------|
+| `topics` (outer) | ✓ | - | Rivven topics to consume from |
+| `queue_url` | ✓ | - | Full SQS queue URL |
+| `region` | | `us-east-1` | AWS region |
+| `batch_size` | | `10` | Messages per batch (1–10) |
+| `batch_timeout_ms` | | `1000` | Max wait before flush |
+| `message_group_id` | | - | Static group ID for FIFO queues |
+| `message_group_id_field` | | - | Event field for dynamic group ID |
+| `deduplication_id_field` | | - | Event field for deduplication ID |
+| `delay_seconds` | | `0` | Message delay (0–900s) |
+| `include_metadata` | | `true` | Include metadata as message attributes |
+
+**FIFO Queue Example:**
+
+```yaml
+sinks:
+  orders:
+    connector: sqs-sink
+    topics: [orders]
+    config:
+      queue_url: https://sqs.us-east-1.amazonaws.com/123456789/orders.fifo
+      region: us-east-1
+      message_group_id_field: customer_id    # Dynamic grouping by customer
+      deduplication_id_field: order_id       # Deduplication by order ID
+```
+
+**Metrics:**
+
+| Metric | Type | Description |
+|:-------|:-----|:------------|
+| `sqs.sink.messages_sent_total` | Counter | Messages sent |
+| `sqs.sink.bytes_sent_total` | Counter | Bytes sent |
+| `sqs.sink.batches_sent_total` | Counter | Batches sent |
+| `sqs.sink.success_rate` | Gauge | Send success rate |
+| `sqs.sink.messages_failed_total` | Counter | Failed messages |
+
 ---
 
 ## Rate Limiting
