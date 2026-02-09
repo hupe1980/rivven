@@ -39,10 +39,20 @@ impl LogManager {
             segments.push(Segment::new(&dir, 0)?);
         } else {
             for path in paths {
-                let filename = path.file_stem().unwrap().to_str().unwrap();
+                // Handle malformed filenames gracefully (non-UTF8, missing stem, etc.)
+                let Some(stem) = path.file_stem() else {
+                    tracing::warn!(path = ?path, "Skipping segment file with no stem");
+                    continue;
+                };
+                let Some(filename) = stem.to_str() else {
+                    tracing::warn!(path = ?path, "Skipping segment file with non-UTF8 name");
+                    continue;
+                };
                 // Assumes filename is just the offset (e.g. "00000000000000000000")
                 if let Ok(base_offset) = filename.parse::<u64>() {
                     segments.push(Segment::new(&dir, base_offset)?);
+                } else {
+                    tracing::warn!(filename = %filename, "Skipping segment file with unparseable offset");
                 }
             }
         }

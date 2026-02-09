@@ -1,3 +1,20 @@
+//! Log segment storage with memory-mapped reads.
+//!
+//! # Data Directory Exclusivity
+//!
+//! **IMPORTANT**: The Rivven data directory MUST be treated as exclusive to the broker process.
+//! External modification of segment files (e.g., by admin scripts or concurrent processes)
+//! while the broker is running can cause undefined behavior including SIGBUS signals.
+//!
+//! This is a fundamental property of memory-mapped I/O and is true for all production-grade
+//! storage engines (Kafka, Redpanda, RocksDB, etc.).
+//!
+//! Best practices:
+//! - Use dedicated storage volumes for Rivven data directories
+//! - Never modify segment files while the broker is running
+//! - Use the Admin API for all data management operations
+//! - If external tooling is required, stop the broker first
+
 use crate::{Error, Message, Result};
 use bytes::{BufMut, BytesMut};
 use crc32fast::Hasher;

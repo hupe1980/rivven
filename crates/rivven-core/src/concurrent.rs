@@ -743,6 +743,23 @@ impl<K, V> SkipNode<K, V> {
 ///
 /// Provides O(log n) lookups for finding messages by offset, which is
 /// critical for efficient consumer fetching.
+///
+/// # Design: Append-Only
+///
+/// This skip list intentionally does **not** implement `remove()`. It is designed for
+/// append-only offset indexing where:
+///
+/// 1. **Entries are never deleted individually** — the entire skip list is dropped
+///    when the corresponding segment is compacted or deleted
+/// 2. **Memory lifecycle is tied to segment lifetime** — when a segment is removed,
+///    the skip list is dropped via the `Drop` implementation, which properly
+///    deallocates all nodes
+/// 3. **Offset indices are monotonically increasing** — no reuse of keys
+///
+/// This design provides better performance than a skip list with remove support:
+/// - No ABA problem handling required
+/// - Simpler atomic operations (no backlink management)
+/// - Predictable memory layout
 pub struct ConcurrentSkipList<K: Ord + Clone, V: Clone> {
     /// Sentinel head node
     head: *mut SkipNode<K, V>,
@@ -764,12 +781,38 @@ impl<K: Ord + Clone + Default, V: Clone + Default> ConcurrentSkipList<K, V> {
         // Create head sentinel
         let head = SkipNode::new(K::default(), V::default(), MAX_HEIGHT);
 
+        // Use runtime entropy for PRNG seed (process ID, time, address)
+        let seed = Self::generate_seed();
+
         Self {
             head,
             max_level: AtomicUsize::new(1),
             len: AtomicUsize::new(0),
-            rand_state: AtomicU64::new(0x12345678),
+            rand_state: AtomicU64::new(seed),
         }
+    }
+
+    /// Generate a random seed using runtime entropy sources
+    fn generate_seed() -> u64 {
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hasher};
+
+        // RandomState uses OS entropy (getrandom on Linux, arc4random on macOS)
+        let state = RandomState::new();
+        let mut hasher = state.build_hasher();
+
+        // Mix in additional entropy sources
+        hasher.write_u64(std::process::id().into());
+
+        if let Ok(time) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            hasher.write_u64(time.as_nanos() as u64);
+        }
+
+        // Mix in address of the hasher itself for extra entropy
+        hasher.write_usize(&hasher as *const _ as usize);
+
+        // Ensure non-zero (XORShift requires non-zero seed)
+        hasher.finish().max(1)
     }
 
     /// Generate a random level for a new node

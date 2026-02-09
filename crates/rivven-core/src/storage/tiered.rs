@@ -1503,7 +1503,9 @@ impl TieredStorage {
             loop {
                 tokio::select! {
                     Some(task) = rx.recv() => {
-                        let permit = semaphore.clone().acquire_owned().await.unwrap();
+                        // SAFETY: acquire_owned only fails if semaphore is closed, which never
+                        // happens since we own the Arc<Semaphore> in this function scope.
+                        let permit = semaphore.clone().acquire_owned().await.expect("semaphore closed unexpectedly");
                         let storage = self.clone();
 
                         tokio::spawn(async move {
