@@ -98,7 +98,7 @@ pub fn create_source_registry() -> SourceRegistry {
     #[cfg(feature = "sqs")]
     registry.register("sqs", Arc::new(queue::SqsSourceFactory));
 
-    #[cfg(feature = "pubsub")]
+    // Pub/Sub is always available (simulation mode)
     registry.register("pubsub", Arc::new(queue::PubSubSourceFactory));
 
     // RDBC source (query-based, feature-gated)
@@ -302,15 +302,13 @@ pub fn create_connector_inventory() -> ConnectorInventory {
         Arc::new(queue::SqsSourceFactory),
     );
 
-    // Pub/Sub source
-    #[cfg(feature = "pubsub")]
+    // Pub/Sub source (always available, runs in simulation mode)
     inventory.register_source(
         ConnectorMetadata::builder("pubsub")
             .title("Google Pub/Sub")
-            .description("Receive messages from Google Cloud Pub/Sub")
+            .description("Receive messages from Google Cloud Pub/Sub (simulation mode)")
             .source()
             .category(ConnectorCategory::MessagingCloud)
-            .feature("pubsub")
             .tags(["gcp", "google", "pubsub", "cloud", "messaging"])
             .aliases(["gcp-pubsub", "google-pubsub", "cloud-pubsub"])
             .related("sqs")

@@ -482,6 +482,54 @@ if source.is_shutting_down() {
 }
 ```
 
+### Google Cloud Pub/Sub Source
+
+Stream messages from Google Cloud Pub/Sub subscriptions with flow control and batch acknowledgment. See [Pub/Sub Connector](pubsub-connector) for full documentation.
+
+```yaml
+sources:
+  pubsub:
+    connector: pubsub-source
+    topic: events
+    config:
+      project_id: my-gcp-project
+      subscription_id: my-subscription
+      max_messages: 100
+      ack_deadline_seconds: 60
+      flow_control:
+        max_outstanding_messages: 1000
+        max_outstanding_bytes: 104857600
+      auth:
+        credentials_path: /path/to/service-account.json
+```
+
+| Parameter | Required | Default | Description |
+|:----------|:---------|:--------|:------------|
+| `project_id` | ✓ | - | GCP project ID |
+| `subscription_id` | ✓ | - | Pub/Sub subscription ID |
+| `max_messages` | | `100` | Messages per pull (1–1000) |
+| `ack_deadline_seconds` | | `60` | Acknowledgment deadline |
+| `batch_ack_size` | | `50` | Messages before batch ack |
+| `flow_control.max_outstanding_messages` | | `1000` | Max in-flight messages |
+| `flow_control.max_outstanding_bytes` | | `104857600` | Max in-flight bytes (100MB) |
+| `include_attributes` | | `true` | Include message attributes |
+
+**Observability:**
+
+The Pub/Sub source provides lock-free metrics:
+
+```rust
+let snapshot = source.metrics().snapshot();
+
+println!("Messages: {}", snapshot.messages_received);
+println!("In-flight: {}", snapshot.in_flight_messages);
+println!("Avg latency: {:.2}ms", snapshot.avg_poll_latency_ms());
+println!("Empty polls: {:.1}%", snapshot.empty_poll_rate_percent());
+
+// Export to Prometheus
+let prom = snapshot.to_prometheus_format("rivven");
+```
+
 ---
 
 ## Sinks
@@ -1021,6 +1069,64 @@ sinks:
 | `sqs.sink.batches_sent_total` | Counter | Batches sent |
 | `sqs.sink.success_rate` | Gauge | Send success rate |
 | `sqs.sink.messages_failed_total` | Counter | Failed messages |
+
+### Google Cloud Pub/Sub Sink
+
+Publish events to Google Cloud Pub/Sub topics with batching, compression, and ordering. See [Pub/Sub Connector](pubsub-connector) for full documentation.
+
+```yaml
+sinks:
+  pubsub:
+    connector: pubsub-sink
+    topics: [events]              # Rivven topics to consume from
+    consumer_group: pubsub-producer
+    config:
+      project_id: my-gcp-project
+      topic_id: my-topic
+      batch_size: 100
+      batch_timeout_ms: 1000
+      compression: gzip
+      auth:
+        credentials_path: /path/to/service-account.json
+```
+
+| Parameter | Required | Default | Description |
+|:----------|:---------|:--------|:------------|
+| `topics` (outer) | ✓ | - | Rivven topics to consume from |
+| `project_id` | ✓ | - | GCP project ID |
+| `topic_id` | ✓ | - | Pub/Sub topic ID |
+| `batch_size` | | `100` | Messages per batch |
+| `batch_timeout_ms` | | `1000` | Max wait before flush |
+| `compression` | | `none` | `none`, `gzip`, or `zstd` |
+| `body_format` | | `json` | `json`, `raw`, or `base64` |
+| `ordering_key.mode` | | - | `static`, `field`, or `stream` |
+| `oversized_behavior` | | `fail` | `fail`, `skip`, or `truncate` |
+
+**With Ordering Keys:**
+
+```yaml
+sinks:
+  orders:
+    connector: pubsub-sink
+    topics: [orders]
+    config:
+      project_id: my-project
+      topic_id: orders-topic
+      ordering_key:
+        mode: field
+        field_path: customer_id
+        fallback: default
+```
+
+**Metrics:**
+
+| Metric | Type | Description |
+|:-------|:-----|:------------|
+| `pubsub.sink.messages_published_total` | Counter | Messages published |
+| `pubsub.sink.bytes_published_total` | Counter | Bytes published |
+| `pubsub.sink.batches_published_total` | Counter | Batches published |
+| `pubsub.sink.publish_failures_total` | Counter | Failed publishes |
+| `pubsub.sink.compression_savings_bytes` | Counter | Bytes saved by compression |
 
 ---
 

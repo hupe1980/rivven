@@ -1163,7 +1163,7 @@ fn list_connectors() -> Result<()> {
         ("kafka", cfg!(feature = "kafka"), "Kafka source & sink"),
         ("mqtt", cfg!(feature = "mqtt"), "MQTT source"),
         ("sqs", cfg!(feature = "sqs"), "AWS SQS source"),
-        ("pubsub", cfg!(feature = "pubsub"), "Google Pub/Sub source"),
+        ("pubsub", true, "Google Pub/Sub source (simulation mode)"),
         ("s3", cfg!(feature = "s3"), "Amazon S3 sink"),
         ("gcs", cfg!(feature = "gcs"), "Google Cloud Storage sink"),
         ("azure", cfg!(feature = "azure"), "Azure Blob Storage sink"),

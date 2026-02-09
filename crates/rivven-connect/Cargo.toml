@@ -41,7 +41,7 @@ rdbc-full = ["rdbc-postgres", "rdbc-mysql", "rdbc-sqlserver"]
 kafka = ["dep:rskafka"]      # Kafka source/sink (pure Rust client)
 mqtt = ["dep:rumqttc"]       # MQTT source (pure Rust client)
 sqs = ["dep:aws-sdk-sqs", "dep:aws-config"]  # AWS SQS source (real AWS SDK)
-pubsub = []     # Google Pub/Sub source
+pubsub = ["dep:gcloud-pubsub", "dep:gcloud-googleapis", "dep:tokio-util"]  # Google Pub/Sub (real GCP SDK)
 
 # Storage connectors - unified via object_store crate
 cloud-storage = ["dep:object_store"]
@@ -76,6 +76,7 @@ rivven-rdbc = { workspace = true, optional = true }
 # Async
 tokio = { workspace = true }
 tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["rt"], optional = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 
@@ -142,8 +143,10 @@ aws-config = { version = "1", optional = true }
 # Note: aws-sdk-redshift and aws-credential-types are reserved for future IAM auth
 # Current Redshift impl uses PostgreSQL wire protocol with password auth
 
-# Google Cloud (optional - for BigQuery, Pub/Sub only; GCS uses object_store)
+# Google Cloud (optional - for BigQuery, Pub/Sub; GCS uses object_store)
 gcp-bigquery-client = { version = "0.25", optional = true }
+gcloud-pubsub = { version = "1.6", optional = true }
+gcloud-googleapis = { version = "1.3", features = ["pubsub"], package = "gcloud-googleapis", optional = true }
 
 # Apache Parquet - use version 57 to match iceberg crate's internal dependencies
 parquet = { version = "57", optional = true }
