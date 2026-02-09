@@ -40,7 +40,7 @@
 //! Enable with the `sqs` feature:
 //!
 //! ```toml
-//! rivven-connect = { version = "0.0.10", features = ["sqs"] }
+//! rivven-connect = { version = "0.0.11", features = ["sqs"] }
 //! ```
 //!
 //! # Example Configuration

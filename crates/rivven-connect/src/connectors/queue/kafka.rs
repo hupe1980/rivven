@@ -38,7 +38,7 @@
 //! Enable with the `kafka` feature:
 //!
 //! ```toml
-//! rivven-connect = { version = "0.0.10", features = ["kafka"] }
+//! rivven-connect = { version = "0.0.11", features = ["kafka"] }
 //! ```
 //!
 //! # Example Configuration (Source)

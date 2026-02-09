@@ -30,7 +30,7 @@ MQTT client with zero C dependencies:
 Enable with the `mqtt` feature:
 
 ```toml
-rivven-connect = { version = "0.0.10", features = ["mqtt"] }
+rivven-connect = { version = "0.0.11", features = ["mqtt"] }
 ```
 
 ## Use Cases

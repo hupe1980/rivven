@@ -6547,7 +6547,7 @@ dependencies = [
 
 [[package]]
 name = "rivven"
-version = "0.0.10"
+version = "0.0.11"
 dependencies = [
  "anyhow",
  "bytes",
@@ -6560,7 +6560,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-cdc"
-version = "0.0.10"
+version = "0.0.11"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -6616,7 +6616,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-client"
-version = "0.0.10"
+version = "0.0.11"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -6635,7 +6635,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-cluster"
-version = "0.0.10"
+version = "0.0.11"
 dependencies = [
  "bytes",
  "chrono",
@@ -6671,7 +6671,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-connect"
-version = "0.0.10"
+version = "0.0.11"
 dependencies = [
  "anyhow",
  "apache-avro 0.17.0",
@@ -6748,7 +6748,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-connect-derive"
-version = "0.0.10"
+version = "0.0.11"
 dependencies = [
  "darling 0.20.11",
  "proc-macro2",
@@ -6758,7 +6758,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-core"
-version = "0.0.10"
+version = "0.0.11"
 dependencies = [
  "argon2",
  "async-trait",
@@ -6810,7 +6810,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-integration-tests"
-version = "0.0.10"
+version = "0.0.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6848,7 +6848,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-operator"
-version = "0.0.10"
+version = "0.0.11"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6873,7 +6873,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-protocol"
-version = "0.0.10"
+version = "0.0.11"
 dependencies = [
  "bytes",
  "postcard",
@@ -6886,7 +6886,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-python"
-version = "0.0.10"
+version = "0.0.11"
 dependencies = [
  "bytes",
  "pyo3",
@@ -6898,7 +6898,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-rdbc"
-version = "0.0.10"
+version = "0.0.11"
 dependencies = [
  "async-trait",
  "chrono",
@@ -6930,7 +6930,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-schema"
-version = "0.0.10"
+version = "0.0.11"
 dependencies = [
  "anyhow",
  "apache-avro 0.17.0",
@@ -6964,7 +6964,7 @@ dependencies = [
 
 [[package]]
 name = "rivvend"
-version = "0.0.10"
+version = "0.0.11"
 dependencies = [
  "anyhow",
  "axum",
