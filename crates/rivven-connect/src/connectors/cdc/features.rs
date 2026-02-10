@@ -2027,6 +2027,7 @@ mod tests {
             transform_type: SmtTransformType::MaskField,
             name: Some("mask_email".to_string()),
             config: transform_config,
+            predicate: None,
         });
 
         let processor = CdcFeatureProcessor::new(config);
@@ -2201,6 +2202,7 @@ mod tests {
             transform_type: SmtTransformType::MaskField,
             name: Some("mask_pii".to_string()),
             config: HashMap::new(),
+            predicate: None,
         });
 
         let processor = CdcFeatureProcessor::new(config);

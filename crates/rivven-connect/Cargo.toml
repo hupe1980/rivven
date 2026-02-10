@@ -44,10 +44,10 @@ sqs = ["dep:aws-sdk-sqs", "dep:aws-config"]  # AWS SQS source (real AWS SDK)
 pubsub = ["dep:gcloud-pubsub", "dep:gcloud-googleapis", "dep:tokio-util"]  # Google Pub/Sub (real GCP SDK)
 
 # Storage connectors - unified via object_store crate
-cloud-storage = ["dep:object_store"]
-s3 = ["cloud-storage", "object_store/aws"]
-gcs = ["cloud-storage", "object_store/gcp"]
-azure = ["cloud-storage", "object_store/azure"]
+cloud-storage = ["dep:object_store", "rivven-cdc/cloud-storage"]
+s3 = ["cloud-storage", "object_store/aws", "rivven-cdc/s3"]
+gcs = ["cloud-storage", "object_store/gcp", "rivven-cdc/gcs"]
+azure = ["cloud-storage", "object_store/azure", "rivven-cdc/azure"]
 parquet = ["dep:parquet", "dep:arrow", "dep:arrow-array", "dep:arrow-schema", "dep:arrow-json"]
 
 # Warehouse connectors (data warehouse sinks)

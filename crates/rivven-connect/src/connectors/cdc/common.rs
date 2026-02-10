@@ -33,10 +33,161 @@
 //!       format: iso8601
 //! ```
 
-use super::config::{ColumnFilterConfig, SmtTransformConfig, SmtTransformType};
-use rivven_cdc::common::{CdcEvent, CdcOp, FilterCondition, Smt, SmtChain};
+use super::config::{ColumnFilterConfig, SmtPredicateConfig, SmtTransformConfig, SmtTransformType};
+use rivven_cdc::common::{
+    CdcEvent, CdcOp, ConditionalSmt, FilterCondition, Predicate, Smt, SmtChain,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tracing::{debug, warn};
+
+// ============================================================================
+// SMT Predicate Builder
+// ============================================================================
+
+/// Build a Predicate from configuration.
+///
+/// Returns None if the predicate config is empty (no conditions).
+/// Returns Err if the configuration is invalid (e.g., invalid regex).
+fn build_predicate(config: &SmtPredicateConfig) -> Result<Option<Predicate>, String> {
+    // Validate configuration first
+    config.validate()?;
+
+    let mut predicates = Vec::new();
+
+    // Table predicates (single table)
+    if let Some(table) = &config.table {
+        let pred = Predicate::table(table).ok_or_else(|| {
+            format!(
+                "Invalid table regex pattern '{}': check regex syntax",
+                table
+            )
+        })?;
+        predicates.push(pred);
+        debug!(table = %table, "Added table predicate");
+    }
+
+    // Multiple tables (OR'd together)
+    if !config.tables.is_empty() {
+        let mut table_preds = Vec::new();
+        for table in &config.tables {
+            let pred = Predicate::table(table).ok_or_else(|| {
+                format!(
+                    "Invalid table regex pattern '{}': check regex syntax",
+                    table
+                )
+            })?;
+            table_preds.push(pred);
+        }
+        debug!(tables = ?config.tables, "Added multi-table predicate (OR)");
+        if table_preds.len() == 1 {
+            predicates.push(table_preds.remove(0));
+        } else {
+            predicates.push(Predicate::Or(table_preds));
+        }
+    }
+
+    // Schema predicates (single schema)
+    if let Some(schema) = &config.schema {
+        let pred = Predicate::schema(schema).ok_or_else(|| {
+            format!(
+                "Invalid schema regex pattern '{}': check regex syntax",
+                schema
+            )
+        })?;
+        predicates.push(pred);
+        debug!(schema = %schema, "Added schema predicate");
+    }
+
+    // Multiple schemas (OR'd together)
+    if !config.schemas.is_empty() {
+        let mut schema_preds = Vec::new();
+        for schema in &config.schemas {
+            let pred = Predicate::schema(schema).ok_or_else(|| {
+                format!(
+                    "Invalid schema regex pattern '{}': check regex syntax",
+                    schema
+                )
+            })?;
+            schema_preds.push(pred);
+        }
+        debug!(schemas = ?config.schemas, "Added multi-schema predicate (OR)");
+        if schema_preds.len() == 1 {
+            predicates.push(schema_preds.remove(0));
+        } else {
+            predicates.push(Predicate::Or(schema_preds));
+        }
+    }
+
+    // Database predicate
+    if let Some(database) = &config.database {
+        // Use custom predicate since Predicate doesn't have a database variant built-in
+        let db_pattern = database.clone();
+        let pred = Predicate::Custom(Arc::new(move |event: &CdcEvent| {
+            // Simple contains check or regex
+            if let Ok(re) = regex::Regex::new(&db_pattern) {
+                re.is_match(&event.database)
+            } else {
+                event.database == db_pattern
+            }
+        }));
+        predicates.push(pred);
+        debug!(database = %database, "Added database predicate");
+    }
+
+    // Operation predicates
+    if !config.operations.is_empty() {
+        let ops: Vec<CdcOp> = config
+            .operations
+            .iter()
+            .filter_map(|op| match op.to_lowercase().as_str() {
+                "insert" | "c" | "create" => Some(CdcOp::Insert),
+                "update" | "u" => Some(CdcOp::Update),
+                "delete" | "d" => Some(CdcOp::Delete),
+                "snapshot" | "r" | "read" => Some(CdcOp::Snapshot),
+                "truncate" => Some(CdcOp::Truncate),
+                "tombstone" => Some(CdcOp::Tombstone),
+                "schema" | "ddl" => Some(CdcOp::Schema),
+                unknown => {
+                    warn!(operation = %unknown, "Unknown operation in predicate, ignoring");
+                    None
+                }
+            })
+            .collect();
+        if !ops.is_empty() {
+            predicates.push(Predicate::operation(ops.clone()));
+            debug!(operations = ?ops, "Added operation predicate");
+        }
+    }
+
+    // Field exists predicate
+    if let Some(field) = &config.field_exists {
+        predicates.push(Predicate::field_exists(field.clone()));
+        debug!(field = %field, "Added field_exists predicate");
+    }
+
+    // Field value predicate
+    if let Some(fv) = &config.field_value {
+        predicates.push(Predicate::field_equals(fv.field.clone(), fv.value.clone()));
+        debug!(field = %fv.field, value = ?fv.value, "Added field_value predicate");
+    }
+
+    // Combine with AND
+    let combined = match predicates.len() {
+        0 => return Ok(None),
+        1 => predicates.remove(0),
+        _ => Predicate::And(predicates),
+    };
+
+    // Apply negation if requested
+    let final_pred = if config.negate {
+        Predicate::Not(Box::new(combined))
+    } else {
+        combined
+    };
+
+    Ok(Some(final_pred))
+}
 
 // ============================================================================
 // SMT (Single Message Transform) Builder
@@ -56,6 +207,20 @@ use std::sync::Arc;
 /// - `Cast` - Cast field types
 /// - `Flatten` - Flatten nested structures
 ///
+/// ## Predicates
+///
+/// Any transform can have a predicate to conditionally apply it:
+///
+/// ```yaml
+/// transforms:
+///   - type: externalize_blob
+///     predicate:
+///       table: "documents"  # Only apply to documents table
+///     config:
+///       storage_type: s3
+///       bucket: my-blobs
+/// ```
+///
 /// # Example YAML Configuration
 ///
 /// ```yaml
@@ -69,6 +234,27 @@ use std::sync::Arc;
 ///       add_table: true
 /// ```
 pub fn build_smt_transform(config: &SmtTransformConfig) -> Result<Arc<dyn Smt>, String> {
+    // Build the base transform
+    let base_transform = build_base_smt_transform(config)?;
+
+    // Wrap with predicate if configured
+    if let Some(pred_config) = &config.predicate {
+        if !pred_config.is_empty() {
+            if let Some(predicate) = build_predicate(pred_config)? {
+                // Wrap the base transform with ConditionalSmt
+                // We need to use ConditionalSmt::when or ConditionalSmt::unless
+                // The predicate config.negate is already handled in build_predicate
+                let conditional = ConditionalSmt::when_arc(predicate, base_transform);
+                return Ok(Arc::new(conditional));
+            }
+        }
+    }
+
+    Ok(base_transform)
+}
+
+/// Build the base SMT transform (without predicate wrapping).
+fn build_base_smt_transform(config: &SmtTransformConfig) -> Result<Arc<dyn Smt>, String> {
     use rivven_cdc::common::{
         Cast, CastType, ComputeField, ContentRouter, ExtractNewRecordState, Filter, Flatten,
         HeaderSource, HeaderToValue, InsertField, MaskField, NullCondition, RegexRouter,
@@ -510,6 +696,112 @@ pub fn build_smt_transform(config: &SmtTransformConfig) -> Result<Arc<dyn Smt>, 
                 "conditional_smt requires nested transform configs - use filter transform instead"
                     .to_string(),
             )
+        }
+
+        #[cfg(feature = "cloud-storage")]
+        SmtTransformType::ExternalizeBlob => {
+            use rivven_cdc::ExternalizeBlob;
+
+            // Determine storage type and create the appropriate SMT
+            let storage_type = config
+                .config
+                .get("storage_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("local");
+
+            let smt = match storage_type {
+                "local" => {
+                    let path = config
+                        .config
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .ok_or("externalize_blob with storage_type 'local' requires 'path'")?;
+                    ExternalizeBlob::local(std::path::Path::new(path))
+                        .map_err(|e| format!("Failed to create local ExternalizeBlob: {}", e))?
+                }
+                #[cfg(feature = "s3")]
+                "s3" => {
+                    let bucket = config
+                        .config
+                        .get("bucket")
+                        .and_then(|v| v.as_str())
+                        .ok_or("externalize_blob with storage_type 's3' requires 'bucket'")?;
+                    let region = config
+                        .config
+                        .get("region")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("us-east-1");
+                    ExternalizeBlob::s3(bucket, region)
+                        .map_err(|e| format!("Failed to create S3 ExternalizeBlob: {}", e))?
+                }
+                #[cfg(feature = "gcs")]
+                "gcs" => {
+                    let bucket = config
+                        .config
+                        .get("bucket")
+                        .and_then(|v| v.as_str())
+                        .ok_or("externalize_blob with storage_type 'gcs' requires 'bucket'")?;
+                    ExternalizeBlob::gcs(bucket)
+                        .map_err(|e| format!("Failed to create GCS ExternalizeBlob: {}", e))?
+                }
+                #[cfg(feature = "azure")]
+                "azure" => {
+                    let container = config
+                        .config
+                        .get("container")
+                        .and_then(|v| v.as_str())
+                        .ok_or("externalize_blob with storage_type 'azure' requires 'container'")?;
+                    let account = config
+                        .config
+                        .get("account")
+                        .and_then(|v| v.as_str())
+                        .ok_or("externalize_blob with storage_type 'azure' requires 'account'")?;
+                    ExternalizeBlob::azure(account, container)
+                        .map_err(|e| format!("Failed to create Azure ExternalizeBlob: {}", e))?
+                }
+                other => {
+                    #[cfg(not(any(feature = "s3", feature = "gcs", feature = "azure")))]
+                    if other == "s3" || other == "gcs" || other == "azure" {
+                        return Err(format!(
+                            "Storage type '{}' requires the corresponding feature to be enabled (s3, gcs, azure)",
+                            other
+                        ));
+                    }
+                    return Err(format!(
+                        "Unknown storage_type '{}' for externalize_blob. Supported: local{}{}{}",
+                        other,
+                        if cfg!(feature = "s3") { ", s3" } else { "" },
+                        if cfg!(feature = "gcs") { ", gcs" } else { "" },
+                        if cfg!(feature = "azure") {
+                            ", azure"
+                        } else {
+                            ""
+                        },
+                    ));
+                }
+            };
+
+            // Apply optional configuration
+            let mut smt = smt;
+
+            if let Some(threshold) = config.config.get("size_threshold").and_then(|v| v.as_u64()) {
+                smt = smt.size_threshold(threshold as usize);
+            }
+
+            if let Some(prefix) = config.config.get("prefix").and_then(|v| v.as_str()) {
+                smt = smt.prefix(prefix);
+            }
+
+            if let Some(fields) = get_string_array(&config.config, "fields") {
+                smt = smt.fields(fields);
+            }
+
+            Ok(Arc::new(smt))
+        }
+
+        #[cfg(not(feature = "cloud-storage"))]
+        SmtTransformType::ExternalizeBlob => {
+            Err("externalize_blob requires the 'cloud-storage' feature to be enabled".to_string())
         }
 
         SmtTransformType::InsertHeader | SmtTransformType::Custom => Err(format!(

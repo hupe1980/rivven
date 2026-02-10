@@ -97,6 +97,9 @@ pub use common::{
     Unwrap, ValueToKey,
 };
 
+#[cfg(feature = "cloud-storage")]
+pub use common::ExternalizeBlob;
+
 // Deduplication
 pub use common::{Deduplicator, DeduplicatorConfig, KeyStrategy};
 

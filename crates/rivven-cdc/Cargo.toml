@@ -68,6 +68,12 @@ sqlserver-tls = [
 # All CDC sources
 full = ["postgres", "postgres-tls", "mysql", "mysql-tls", "mariadb", "sqlserver", "sqlserver-tls"]
 
+# Object storage for ExternalizeBlob SMT
+cloud-storage = ["dep:object_store", "dep:base64"]
+s3 = ["cloud-storage", "object_store/aws"]
+gcs = ["cloud-storage", "object_store/gcp"]
+azure = ["cloud-storage", "object_store/azure"]
+
 [dependencies]
 tokio = { workspace = true }
 futures = { workspace = true }
@@ -127,6 +133,9 @@ rsa = "0.9"
 rand = { workspace = true }
 # SHA-256 hashing (for SMT hash operations)
 sha2 = "0.10"
+
+# Object storage for ExternalizeBlob SMT (S3/GCS/Azure)
+object_store = { version = "0.11", optional = true }
 
 # Utilities
 uuid = { workspace = true }

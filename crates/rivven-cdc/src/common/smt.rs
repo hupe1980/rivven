@@ -2,7 +2,7 @@
 //!
 //! Message transformations for CDC events.
 //!
-//! ## Built-in Transforms (17 total)
+//! ## Built-in Transforms (17 configurable)
 //!
 //! | Transform | Description |
 //! |-----------|-------------|
@@ -19,10 +19,29 @@
 //! | `RegexRouter` | Route based on regex patterns |
 //! | `ContentRouter` | Route based on field values |
 //! | `ComputeField` | Compute new fields (concat, hash, etc.) |
-//! | `ConditionalSmt` | Apply transforms conditionally (predicates) |
 //! | `HeaderToValue` | Move envelope fields into record |
 //! | `Unwrap` | Extract nested field to top level |
 //! | `SetNull` | Conditionally nullify fields |
+//! | `ExternalizeBlob` | Store large blobs in object storage (S3/GCS/Azure) |
+//!
+//! ## Conditional Application (Predicates)
+//!
+//! Any transform can be applied conditionally using predicates.
+//! In YAML, add a `predicate:` block to any transform — the system
+//! internally wraps it with [`ConditionalSmt`].
+//!
+//! ```yaml
+//! transforms:
+//!   - type: mask_field
+//!     predicate:
+//!       table: "users"          # only apply to users table
+//!       operations: [insert, update]  # only on insert/update
+//!     config:
+//!       fields: [ssn, credit_card]
+//! ```
+//!
+//! `ConditionalSmt` is not a user-facing transform type — it is the
+//! internal wrapper that makes predicates work.
 //!
 //! ## Usage
 //!
@@ -1409,10 +1428,28 @@ impl ConditionalSmt {
         }
     }
 
+    /// Apply transform only when predicate matches (takes Arc directly).
+    pub fn when_arc(predicate: Predicate, transform: Arc<dyn Smt>) -> Self {
+        Self {
+            transform,
+            predicate,
+            negate: false,
+        }
+    }
+
     /// Apply transform only when predicate does NOT match.
     pub fn unless<T: Smt + 'static>(predicate: Predicate, transform: T) -> Self {
         Self {
             transform: Arc::new(transform),
+            predicate,
+            negate: true,
+        }
+    }
+
+    /// Apply transform only when predicate does NOT match (takes Arc directly).
+    pub fn unless_arc(predicate: Predicate, transform: Arc<dyn Smt>) -> Self {
+        Self {
+            transform,
             predicate,
             negate: true,
         }
@@ -2493,6 +2530,401 @@ impl Smt for ComputeField {
 
     fn name(&self) -> &'static str {
         "ComputeField"
+    }
+}
+
+// ============================================================================
+// ExternalizeBlob - Store large blobs in object storage
+// ============================================================================
+
+/// Externalize large blob values to object storage.
+///
+/// This SMT detects fields containing large binary data (base64-encoded strings
+/// or large JSON values) and uploads them to object storage (S3/GCS/Azure/local),
+/// replacing the original value with a reference containing the storage URL.
+///
+/// # Use Cases
+///
+/// - Reduce message size for topics with blob fields (images, documents, binary data)
+/// - Improve Kafka/Rivven throughput by offloading large payloads
+/// - Enable efficient storage of binary data with proper content-type handling
+///
+/// # Configuration Options
+///
+/// - **size_threshold**: Minimum byte size to externalize (default: 10KB)
+/// - **fields**: Specific fields to check, or all if empty
+/// - **prefix**: Object key prefix in storage
+/// - **url_format**: Format for reference URL (s3://, gs://, https://)
+///
+/// # Reference Format
+///
+/// The original field value is replaced with a JSON object:
+///
+/// ```json
+/// {
+///   "__externalized": true,
+///   "url": "s3://bucket/prefix/table/field/abc123.bin",
+///   "size": 1048576,
+///   "content_type": "application/octet-stream",
+///   "sha256": "a1b2c3..."
+/// }
+/// ```
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use rivven_cdc::common::smt::ExternalizeBlob;
+///
+/// // Using pre-configured object store
+/// let smt = ExternalizeBlob::new(object_store)
+///     .size_threshold(1024)  // 1KB minimum
+///     .fields(["image_data", "document"])
+///     .prefix("cdc-blobs/");
+///
+/// let transformed = smt.apply(event);
+/// ```
+///
+/// # Storage Keys
+///
+/// Objects are stored with keys in the format:
+/// `{prefix}/{table}/{field}/{timestamp}_{uuid}.bin`
+///
+/// This ensures uniqueness and allows easy browsing by table/field.
+#[cfg(feature = "cloud-storage")]
+#[derive(Debug, Clone)]
+pub struct ExternalizeBlob {
+    /// Object store backend
+    store: Arc<dyn object_store::ObjectStore>,
+    /// Bucket/container name (for URL generation)
+    bucket: String,
+    /// Minimum size in bytes to externalize (default: 10KB)
+    size_threshold: usize,
+    /// Fields to check (empty = all fields)
+    fields: HashSet<String>,
+    /// Object key prefix
+    prefix: String,
+    /// URL scheme for references (s3://, gs://, https://, etc.)
+    url_scheme: String,
+}
+
+#[cfg(feature = "cloud-storage")]
+impl ExternalizeBlob {
+    /// Create a new ExternalizeBlob SMT with the given object store.
+    ///
+    /// # Arguments
+    ///
+    /// * `store` - The object store backend (S3, GCS, Azure, or local)
+    /// * `bucket` - Bucket/container name for URL generation
+    pub fn new(store: Arc<dyn object_store::ObjectStore>, bucket: impl Into<String>) -> Self {
+        Self {
+            store,
+            bucket: bucket.into(),
+            size_threshold: 10 * 1024, // 10KB default
+            fields: HashSet::new(),
+            prefix: String::new(),
+            url_scheme: "s3://".to_string(),
+        }
+    }
+
+    /// Create an ExternalizeBlob for Amazon S3.
+    #[cfg(feature = "s3")]
+    pub fn s3(
+        bucket: impl Into<String>,
+        region: impl Into<String>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        use object_store::aws::AmazonS3Builder;
+
+        let bucket = bucket.into();
+        let store = AmazonS3Builder::new()
+            .with_bucket_name(&bucket)
+            .with_region(region)
+            .with_allow_http(false)
+            .build()?;
+
+        Ok(Self {
+            store: Arc::new(store),
+            bucket,
+            size_threshold: 10 * 1024,
+            fields: HashSet::new(),
+            prefix: String::new(),
+            url_scheme: "s3://".to_string(),
+        })
+    }
+
+    /// Create an ExternalizeBlob for Google Cloud Storage.
+    #[cfg(feature = "gcs")]
+    pub fn gcs(
+        bucket: impl Into<String>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        use object_store::gcp::GoogleCloudStorageBuilder;
+
+        let bucket = bucket.into();
+        let store = GoogleCloudStorageBuilder::new()
+            .with_bucket_name(&bucket)
+            .build()?;
+
+        Ok(Self {
+            store: Arc::new(store),
+            bucket,
+            size_threshold: 10 * 1024,
+            fields: HashSet::new(),
+            prefix: String::new(),
+            url_scheme: "gs://".to_string(),
+        })
+    }
+
+    /// Create an ExternalizeBlob for Azure Blob Storage.
+    #[cfg(feature = "azure")]
+    pub fn azure(
+        account: impl Into<String>,
+        container: impl Into<String>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        use object_store::azure::MicrosoftAzureBuilder;
+
+        let container = container.into();
+        let store = MicrosoftAzureBuilder::new()
+            .with_account(account)
+            .with_container_name(&container)
+            .build()?;
+
+        Ok(Self {
+            store: Arc::new(store),
+            bucket: container,
+            size_threshold: 10 * 1024,
+            fields: HashSet::new(),
+            prefix: String::new(),
+            url_scheme: "https://".to_string(),
+        })
+    }
+
+    /// Create an ExternalizeBlob using local filesystem (for testing).
+    pub fn local(
+        path: impl Into<std::path::PathBuf>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        use object_store::local::LocalFileSystem;
+
+        let path: std::path::PathBuf = path.into();
+        let store = LocalFileSystem::new_with_prefix(&path)?;
+
+        Ok(Self {
+            store: Arc::new(store),
+            bucket: path.to_string_lossy().to_string(),
+            size_threshold: 10 * 1024,
+            fields: HashSet::new(),
+            prefix: String::new(),
+            url_scheme: "file://".to_string(),
+        })
+    }
+
+    /// Set the minimum size threshold for externalization.
+    ///
+    /// Fields with values below this size will not be externalized.
+    /// Default: 10KB (10240 bytes).
+    pub fn size_threshold(mut self, bytes: usize) -> Self {
+        self.size_threshold = bytes;
+        self
+    }
+
+    /// Specify which fields to check for externalization.
+    ///
+    /// If empty, all fields are checked. Fields not in this list are ignored.
+    pub fn fields<I, S>(mut self, fields: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.fields = fields.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Set the object key prefix.
+    ///
+    /// Objects are stored at: `{prefix}/{table}/{field}/{id}.bin`
+    pub fn prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.prefix = prefix.into();
+        self
+    }
+
+    /// Set the URL scheme for references.
+    ///
+    /// Common values: "s3://", "gs://", "https://", "file://"
+    pub fn url_scheme(mut self, scheme: impl Into<String>) -> Self {
+        self.url_scheme = scheme.into();
+        self
+    }
+
+    /// Check if a field should be externalized.
+    fn should_externalize(&self, field: &str, value: &Value) -> bool {
+        // If fields list is specified, only check those fields
+        if !self.fields.is_empty() && !self.fields.contains(field) {
+            return false;
+        }
+
+        // Check size
+        let size = self.estimate_size(value);
+        size >= self.size_threshold
+    }
+
+    /// Estimate the byte size of a JSON value.
+    fn estimate_size(&self, value: &Value) -> usize {
+        match value {
+            Value::String(s) => s.len(),
+            Value::Object(_) | Value::Array(_) => {
+                // Serialize to get accurate size
+                serde_json::to_vec(value).map(|v| v.len()).unwrap_or(0)
+            }
+            Value::Number(_) => 8,
+            Value::Bool(_) => 1,
+            Value::Null => 0,
+        }
+    }
+
+    /// Decode base64 value if applicable.
+    fn decode_blob(&self, value: &Value) -> Option<Vec<u8>> {
+        match value {
+            Value::String(s) => {
+                // Try base64 decoding
+                use base64::Engine;
+                // Try base64 decoding first, fall back to raw string bytes
+                base64::engine::general_purpose::STANDARD
+                    .decode(s)
+                    .ok()
+                    .or_else(|| Some(s.as_bytes().to_vec()))
+            }
+            _ => {
+                // For non-string values, serialize to JSON bytes
+                serde_json::to_vec(value).ok()
+            }
+        }
+    }
+
+    /// Generate object key for storing the blob.
+    fn generate_key(&self, table: &str, field: &str) -> String {
+        let timestamp = chrono::Utc::now().timestamp_millis();
+        let uuid = uuid::Uuid::new_v4();
+
+        let mut key = String::new();
+        if !self.prefix.is_empty() {
+            key.push_str(&self.prefix);
+            if !self.prefix.ends_with('/') {
+                key.push('/');
+            }
+        }
+        key.push_str(&format!("{}/{}/{}_{}.bin", table, field, timestamp, uuid));
+        key
+    }
+
+    /// Create a reference object for the externalized blob.
+    fn create_reference(&self, url: &str, size: usize, sha256: &str, content_type: &str) -> Value {
+        serde_json::json!({
+            "__externalized": true,
+            "url": url,
+            "size": size,
+            "content_type": content_type,
+            "sha256": sha256
+        })
+    }
+
+    /// Upload blob and return reference.
+    fn externalize_value(&self, table: &str, field: &str, value: &Value) -> Option<Value> {
+        // Decode the blob data
+        let blob_data = self.decode_blob(value)?;
+        let size = blob_data.len();
+
+        // Calculate SHA-256 hash
+        use sha2::{Digest, Sha256};
+        let hash = Sha256::digest(&blob_data);
+        let sha256 = hex::encode(hash);
+
+        // Generate storage key
+        let key = self.generate_key(table, field);
+
+        // Detect content type
+        let content_type = if value.is_string() {
+            "application/octet-stream"
+        } else {
+            "application/json"
+        };
+
+        // Upload using blocking - we're in an async runtime context
+        let store = self.store.clone();
+        let key_path = object_store::path::Path::from(key.clone());
+        let payload = object_store::PutPayload::from(blob_data);
+
+        // Use tokio's Handle to run async code from sync context
+        let upload_result = match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                // We're in an async runtime, use block_in_place
+                tokio::task::block_in_place(|| {
+                    handle.block_on(async { store.put(&key_path, payload).await })
+                })
+            }
+            Err(_) => {
+                // Not in async runtime - create a new one (for testing)
+                let rt = match tokio::runtime::Runtime::new() {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        warn!("Failed to create runtime for blob upload: {}", e);
+                        return None;
+                    }
+                };
+                rt.block_on(async { store.put(&key_path, payload).await })
+            }
+        };
+
+        match upload_result {
+            Ok(_) => {
+                // Generate URL
+                let url = format!("{}{}/{}", self.url_scheme, self.bucket, key);
+                Some(self.create_reference(&url, size, &sha256, content_type))
+            }
+            Err(e) => {
+                warn!("Failed to externalize blob for {}.{}: {}", table, field, e);
+                None
+            }
+        }
+    }
+
+    /// Process a JSON object, externalizing large blobs.
+    fn process_object(&self, table: &str, obj: &mut Map<String, Value>) {
+        let fields_to_process: Vec<String> = obj.keys().cloned().collect();
+
+        for field in fields_to_process {
+            if let Some(value) = obj.get(&field) {
+                if self.should_externalize(&field, value) {
+                    if let Some(reference) = self.externalize_value(table, &field, value) {
+                        obj.insert(field, reference);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "cloud-storage")]
+impl Smt for ExternalizeBlob {
+    fn apply(&self, mut event: CdcEvent) -> Option<CdcEvent> {
+        let table = event.table.clone();
+
+        // Process "after" record (for INSERT/UPDATE)
+        if let Some(after) = &mut event.after {
+            if let Some(obj) = after.as_object_mut() {
+                self.process_object(&table, obj);
+            }
+        }
+
+        // Process "before" record (for UPDATE/DELETE) - optional but consistent
+        if let Some(before) = &mut event.before {
+            if let Some(obj) = before.as_object_mut() {
+                self.process_object(&table, obj);
+            }
+        }
+
+        Some(event)
+    }
+
+    fn name(&self) -> &'static str {
+        "ExternalizeBlob"
     }
 }
 
@@ -4063,5 +4495,351 @@ mod tests {
         // Timezone should be converted (EST is UTC-5)
         let ts = after["created_at"].as_str().unwrap();
         assert!(ts.contains("05:00:00") || ts.contains("-05:00"));
+    }
+}
+
+// ============================================================================
+// ExternalizeBlob Tests (feature-gated)
+// ============================================================================
+
+#[cfg(all(test, feature = "cloud-storage"))]
+mod externalize_blob_tests {
+    use super::*;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    fn make_event(op: CdcOp, before: Option<Value>, after: Option<Value>) -> CdcEvent {
+        CdcEvent {
+            source_type: "postgres".to_string(),
+            database: "testdb".to_string(),
+            schema: "public".to_string(),
+            table: "users".to_string(),
+            op,
+            before,
+            after,
+            timestamp: chrono::Utc::now().timestamp(),
+            transaction: None,
+        }
+    }
+
+    #[test]
+    fn test_externalize_small_value_unchanged() {
+        let temp_dir = TempDir::new().unwrap();
+        let smt = ExternalizeBlob::local(temp_dir.path())
+            .unwrap()
+            .size_threshold(1000); // 1KB threshold
+
+        let event = make_event(
+            CdcOp::Insert,
+            None,
+            Some(json!({
+                "id": 1,
+                "name": "Alice",
+                "small_data": "short string"
+            })),
+        );
+
+        let result = smt.apply(event).unwrap();
+        let after = result.after.unwrap();
+
+        // Small value should not be externalized
+        assert_eq!(after["small_data"], "short string");
+        assert!(after["small_data"].get("__externalized").is_none());
+    }
+
+    #[test]
+    fn test_externalize_large_value() {
+        let temp_dir = TempDir::new().unwrap();
+        let smt = ExternalizeBlob::local(temp_dir.path())
+            .unwrap()
+            .size_threshold(50); // Low threshold for testing
+
+        // Create a large base64-encoded value
+        let large_data = "A".repeat(100);
+
+        let event = make_event(
+            CdcOp::Insert,
+            None,
+            Some(json!({
+                "id": 1,
+                "blob_data": large_data
+            })),
+        );
+
+        let result = smt.apply(event).unwrap();
+        let after = result.after.unwrap();
+
+        // Large value should be externalized
+        let blob_ref = after.get("blob_data").unwrap();
+        assert_eq!(blob_ref["__externalized"], true);
+        assert!(blob_ref["url"].as_str().unwrap().starts_with("file://"));
+        assert!(blob_ref["size"].as_u64().unwrap() > 0);
+        assert!(blob_ref["sha256"].as_str().unwrap().len() == 64);
+        assert_eq!(blob_ref["content_type"], "application/octet-stream");
+    }
+
+    #[test]
+    fn test_externalize_specific_fields_only() {
+        let temp_dir = TempDir::new().unwrap();
+        let smt = ExternalizeBlob::local(temp_dir.path())
+            .unwrap()
+            .size_threshold(10)
+            .fields(["image_data"]); // Only externalize image_data
+
+        let event = make_event(
+            CdcOp::Insert,
+            None,
+            Some(json!({
+                "id": 1,
+                "name": "very long name that exceeds threshold",
+                "image_data": "large image data here..."
+            })),
+        );
+
+        let result = smt.apply(event).unwrap();
+        let after = result.after.unwrap();
+
+        // name should not be externalized (not in fields list)
+        assert_eq!(after["name"], "very long name that exceeds threshold");
+
+        // image_data should be externalized
+        let image_ref = after.get("image_data").unwrap();
+        assert_eq!(image_ref["__externalized"], true);
+    }
+
+    #[test]
+    fn test_externalize_with_prefix() {
+        let temp_dir = TempDir::new().unwrap();
+        let smt = ExternalizeBlob::local(temp_dir.path())
+            .unwrap()
+            .size_threshold(10)
+            .prefix("cdc-blobs/production");
+
+        let large_data = "B".repeat(100);
+        let event = make_event(
+            CdcOp::Insert,
+            None,
+            Some(json!({
+                "document": large_data
+            })),
+        );
+
+        let result = smt.apply(event).unwrap();
+        let after = result.after.unwrap();
+
+        let doc_ref = after.get("document").unwrap();
+        let url = doc_ref["url"].as_str().unwrap();
+        assert!(url.contains("cdc-blobs/production"));
+        assert!(url.contains("users")); // table name
+        assert!(url.contains("document")); // field name
+    }
+
+    #[test]
+    fn test_externalize_base64_data() {
+        use base64::Engine;
+
+        let temp_dir = TempDir::new().unwrap();
+        let smt = ExternalizeBlob::local(temp_dir.path())
+            .unwrap()
+            .size_threshold(10);
+
+        // Valid base64 data
+        let raw_bytes: Vec<u8> = (0..100).collect();
+        let base64_data = base64::engine::general_purpose::STANDARD.encode(&raw_bytes);
+
+        let event = make_event(
+            CdcOp::Insert,
+            None,
+            Some(json!({
+                "binary_field": base64_data
+            })),
+        );
+
+        let result = smt.apply(event).unwrap();
+        let after = result.after.unwrap();
+
+        let blob_ref = after.get("binary_field").unwrap();
+        assert_eq!(blob_ref["__externalized"], true);
+        // Size should reflect decoded bytes
+        assert_eq!(blob_ref["size"].as_u64().unwrap(), 100);
+    }
+
+    #[test]
+    fn test_externalize_json_object() {
+        let temp_dir = TempDir::new().unwrap();
+        let smt = ExternalizeBlob::local(temp_dir.path())
+            .unwrap()
+            .size_threshold(20);
+
+        // Large JSON object
+        let large_obj = json!({
+            "nested": {
+                "data": "large nested object with lots of data here",
+                "more": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+            }
+        });
+
+        let event = make_event(
+            CdcOp::Insert,
+            None,
+            Some(json!({
+                "id": 1,
+                "metadata": large_obj
+            })),
+        );
+
+        let result = smt.apply(event).unwrap();
+        let after = result.after.unwrap();
+
+        let meta_ref = after.get("metadata").unwrap();
+        assert_eq!(meta_ref["__externalized"], true);
+        assert_eq!(meta_ref["content_type"], "application/json");
+    }
+
+    #[test]
+    fn test_externalize_update_event_both_before_after() {
+        let temp_dir = TempDir::new().unwrap();
+        let smt = ExternalizeBlob::local(temp_dir.path())
+            .unwrap()
+            .size_threshold(20);
+
+        let old_data = "X".repeat(50);
+        let new_data = "Y".repeat(50);
+
+        let event = make_event(
+            CdcOp::Update,
+            Some(json!({ "data": old_data })),
+            Some(json!({ "data": new_data })),
+        );
+
+        let result = smt.apply(event).unwrap();
+
+        // Both before and after should be externalized
+        let before = result.before.unwrap();
+        let after = result.after.unwrap();
+
+        assert_eq!(before["data"]["__externalized"], true);
+        assert_eq!(after["data"]["__externalized"], true);
+
+        // URLs should be different
+        let before_url = before["data"]["url"].as_str().unwrap();
+        let after_url = after["data"]["url"].as_str().unwrap();
+        assert_ne!(before_url, after_url);
+    }
+
+    #[test]
+    fn test_externalize_preserves_other_fields() {
+        let temp_dir = TempDir::new().unwrap();
+        let smt = ExternalizeBlob::local(temp_dir.path())
+            .unwrap()
+            .size_threshold(20);
+
+        let large_data = "Z".repeat(100);
+        let event = make_event(
+            CdcOp::Insert,
+            None,
+            Some(json!({
+                "id": 123,
+                "name": "Alice",
+                "active": true,
+                "score": 95.5,
+                "large_blob": large_data
+            })),
+        );
+
+        let result = smt.apply(event).unwrap();
+        let after = result.after.unwrap();
+
+        // Other fields unchanged
+        assert_eq!(after["id"], 123);
+        assert_eq!(after["name"], "Alice");
+        assert_eq!(after["active"], true);
+        assert_eq!(after["score"], 95.5);
+
+        // Large blob externalized
+        assert_eq!(after["large_blob"]["__externalized"], true);
+    }
+
+    #[test]
+    fn test_externalize_smt_name() {
+        let temp_dir = TempDir::new().unwrap();
+        let smt = ExternalizeBlob::local(temp_dir.path()).unwrap();
+        assert_eq!(smt.name(), "ExternalizeBlob");
+    }
+
+    #[test]
+    fn test_externalize_chain_with_other_smts() {
+        let temp_dir = TempDir::new().unwrap();
+
+        let chain = SmtChain::new()
+            // First mask sensitive data
+            .add(MaskField::new(["ssn"]))
+            // Then externalize large blobs
+            .add(
+                ExternalizeBlob::local(temp_dir.path())
+                    .unwrap()
+                    .size_threshold(20),
+            )
+            // Add computed field
+            .add(ComputeField::new().uuid("event_id"));
+
+        let large_data = "A".repeat(50);
+        let event = make_event(
+            CdcOp::Insert,
+            None,
+            Some(json!({
+                "id": 1,
+                "ssn": "123-45-6789",
+                "document": large_data
+            })),
+        );
+
+        let result = chain.apply(event).unwrap();
+        let after = result.after.unwrap();
+
+        // SSN should be masked
+        assert_ne!(after["ssn"], "123-45-6789");
+        // Document should be externalized
+        assert_eq!(after["document"]["__externalized"], true);
+        // Event ID should be added
+        assert!(after["event_id"].as_str().unwrap().contains("-"));
+    }
+
+    #[test]
+    fn test_externalize_file_written_to_disk() {
+        use base64::Engine;
+
+        let temp_dir = TempDir::new().unwrap();
+        let smt = ExternalizeBlob::local(temp_dir.path())
+            .unwrap()
+            .size_threshold(10);
+
+        let raw_bytes: Vec<u8> = vec![
+            0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x57, 0x6f, 0x72, 0x6c, 0x64, 0x21,
+        ]; // "Hello World!"
+        let base64_data = base64::engine::general_purpose::STANDARD.encode(&raw_bytes);
+
+        let event = make_event(
+            CdcOp::Insert,
+            None,
+            Some(json!({
+                "greeting": base64_data
+            })),
+        );
+
+        let result = smt.apply(event).unwrap();
+        let after = result.after.unwrap();
+
+        let blob_ref = after.get("greeting").unwrap();
+        let url = blob_ref["url"].as_str().unwrap();
+
+        // Extract path after file:// and bucket
+        let file_path = url.strip_prefix("file://").unwrap();
+        // The path should exist
+        assert!(std::path::Path::new(file_path).exists());
+
+        // Verify content
+        let content = std::fs::read(file_path).unwrap();
+        assert_eq!(content, raw_bytes);
     }
 }

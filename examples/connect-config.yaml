@@ -52,6 +52,52 @@ sources:
       tables:
         - users
         - orders
+        - documents
+
+      # Single Message Transforms (SMTs)
+      # Transforms are applied in order. Use predicates to target specific tables.
+      transforms:
+        # Mask PII only for users table
+        - type: mask_field
+          name: mask_user_pii
+          predicate:
+            table: "users"
+          config:
+            fields: [ssn, credit_card, phone]
+
+        # Convert timestamps for orders table
+        - type: timestamp_converter
+          predicate:
+            table: "orders"
+          config:
+            fields: [created_at, updated_at, shipped_at]
+            format: iso8601
+
+        # Store large document blobs in S3 (insert/update only)
+        - type: externalize_blob
+          predicate:
+            table: "documents"
+            operations: [insert, update]
+          config:
+            storage_type: s3
+            bucket: ${BLOB_BUCKET}
+            region: ${AWS_REGION}
+            size_threshold: 100000
+            prefix: cdc-blobs
+
+        # Add processing metadata to all events (no predicate = all tables)
+        - type: insert_field
+          config:
+            fields:
+              _processed_by: "rivven-connect"
+              _pipeline: "postgres-cdc-v1"
+
+        # Flatten to top-level for all tables
+        - type: extract_new_record_state
+          config:
+            add_table: true
+            add_op: true
+            add_ts: true
 
 # Sink connectors - consume from broker topics, write to external systems
 sinks:

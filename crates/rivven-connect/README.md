@@ -414,20 +414,20 @@ RDBC connectors expose pool metrics via the Prometheus endpoint (`/metrics`):
 Use the `rdbc-*` features to enable database drivers:
 
 ```toml
-rivven-connect = { version = "0.0.11", features = ["rdbc-postgres"] }       # PostgreSQL
-rivven-connect = { version = "0.0.11", features = ["rdbc-mysql"] }          # MySQL/MariaDB  
-rivven-connect = { version = "0.0.11", features = ["rdbc-sqlserver"] }      # SQL Server
-rivven-connect = { version = "0.0.11", features = ["rdbc-full"] }           # All databases
+rivven-connect = { version = "0.0.12", features = ["rdbc-postgres"] }       # PostgreSQL
+rivven-connect = { version = "0.0.12", features = ["rdbc-mysql"] }          # MySQL/MariaDB  
+rivven-connect = { version = "0.0.12", features = ["rdbc-sqlserver"] }      # SQL Server
+rivven-connect = { version = "0.0.12", features = ["rdbc-full"] }           # All databases
 ```
 
 ### Feature Bundles
 
 ```toml
 # In Cargo.toml
-rivven-connect = { version = "0.0.11", features = ["full"] }
+rivven-connect = { version = "0.0.12", features = ["full"] }
 
 # Or selective features
-rivven-connect = { version = "0.0.11", features = ["postgres", "s3"] }
+rivven-connect = { version = "0.0.12", features = ["postgres", "s3"] }
 ```
 
 | Bundle | Includes |
@@ -441,7 +441,7 @@ rivven-connect = { version = "0.0.11", features = ["postgres", "s3"] }
 
 ### Single Message Transforms (SMT)
 
-CDC connectors support 10 built-in transforms applied via YAML configuration.
+CDC connectors support 17 built-in transforms applied via YAML configuration.
 No code required - fully configurable at deployment time.
 
 | Transform | Description |
@@ -453,9 +453,47 @@ No code required - fully configurable at deployment time.
 | `replace_field` / `rename_field` | Rename, include, or exclude fields |
 | `regex_router` | Route events based on regex patterns |
 | `timestamp_converter` | Convert timestamp formats |
+| `timezone_converter` | Convert between timezones |
 | `filter` | Filter events based on conditions |
 | `cast` | Convert field types |
 | `flatten` | Flatten nested JSON structures |
+| `content_router` | Route based on field content |
+| `header_to_value` | Copy envelope metadata into record |
+| `unwrap` | Extract nested field to top level |
+| `set_null` | Set fields to null conditionally |
+| `compute_field` | Compute new fields (concat, hash, etc.) |
+| `externalize_blob` | Store large blobs in object storage (S3/GCS/Azure/local) |
+
+#### Predicates (Conditional Transforms)
+
+Apply transforms only to events matching specific conditions:
+
+```yaml
+transforms:
+  # Mask SSN only for users table
+  - type: mask_field
+    predicate:
+      table: "users"
+    config:
+      fields: [ssn, credit_card]
+  
+  # Externalize blobs only for documents table
+  - type: externalize_blob
+    predicate:
+      table: "documents"
+      operations: [insert, update]
+    config:
+      storage_type: s3
+      bucket: my-blobs
+```
+
+**Predicate Options:**
+- `table` / `tables` - Filter by table name (regex)
+- `schema` / `schemas` - Filter by schema name (regex)
+- `operations` - Filter by operation (insert, update, delete, snapshot)
+- `field_exists` - Apply only if field exists
+- `field_value` - Apply only if field matches value
+- `negate` - Invert the predicate
 
 **Example Configuration:**
 

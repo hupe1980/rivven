@@ -186,7 +186,7 @@ metadata:
   name: production
 spec:
   replicas: 3
-  version: "0.0.11"
+  version: "0.0.12"
   storage:
     size: 100Gi
     storageClassName: fast-ssd
@@ -476,7 +476,7 @@ spec:
     name: production
   
   replicas: 2
-  version: "0.0.11"
+  version: "0.0.12"
   
   # Server configuration
   server:

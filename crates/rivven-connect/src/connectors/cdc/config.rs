@@ -272,6 +272,120 @@ pub enum WatermarkStrategyConfig {
 // Single Message Transform (SMT) Configuration
 // ============================================================================
 
+/// Predicate configuration for conditional SMT application.
+///
+/// Predicates allow SMTs to be applied only to events matching
+/// certain conditions (e.g., specific tables, schemas, or operations).
+///
+/// Multiple predicates are combined with AND logic.
+///
+/// ## Example
+///
+/// ```yaml
+/// transforms:
+///   - type: externalize_blob
+///     name: externalize_documents
+///     predicate:
+///       table: "documents"  # Only apply to 'documents' table
+///     config:
+///       storage_type: s3
+///       bucket: my-blobs
+///
+///   - type: mask_field
+///     predicate:
+///       tables: ["users", "customers"]  # Apply to multiple tables
+///       operations: ["insert", "update"]  # Only on insert/update
+///     config:
+///       fields: ["ssn"]
+///
+///   - type: filter
+///     predicate:
+///       field_exists: "priority"  # Only if field exists
+///       field_value:
+///         field: "status"
+///         value: "active"
+///     config:
+///       condition: "priority > 5"
+/// ```
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+pub struct SmtPredicateConfig {
+    /// Apply only to events from this table (regex pattern).
+    /// Use `tables` for multiple tables.
+    #[serde(default)]
+    pub table: Option<String>,
+
+    /// Apply only to events from these tables (regex patterns).
+    /// Multiple patterns are OR'd together.
+    #[serde(default)]
+    pub tables: Vec<String>,
+
+    /// Apply only to events from this schema (regex pattern).
+    #[serde(default)]
+    pub schema: Option<String>,
+
+    /// Apply only to events from these schemas (regex patterns).
+    #[serde(default)]
+    pub schemas: Vec<String>,
+
+    /// Apply only to events from this database (regex pattern).
+    #[serde(default)]
+    pub database: Option<String>,
+
+    /// Apply only to these operations: insert, update, delete, snapshot, truncate, tombstone, schema.
+    /// Aliases: c/create=insert, u=update, d=delete, r/read=snapshot, ddl=schema
+    #[serde(default)]
+    pub operations: Vec<String>,
+
+    /// Apply only if this field exists in the event data.
+    #[serde(default)]
+    pub field_exists: Option<String>,
+
+    /// Apply only if field has specific value.
+    /// Format: { "field": "field_name", "value": <json_value> }
+    #[serde(default)]
+    pub field_value: Option<FieldValuePredicate>,
+
+    /// Negate the predicate (apply when conditions DON'T match).
+    #[serde(default)]
+    pub negate: bool,
+}
+
+/// Field value predicate for matching specific field values.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct FieldValuePredicate {
+    /// Field name to check
+    pub field: String,
+    /// Expected value (JSON value)
+    pub value: serde_json::Value,
+}
+
+impl SmtPredicateConfig {
+    /// Check if this predicate is empty (no conditions).
+    pub fn is_empty(&self) -> bool {
+        self.table.is_none()
+            && self.tables.is_empty()
+            && self.schema.is_none()
+            && self.schemas.is_empty()
+            && self.database.is_none()
+            && self.operations.is_empty()
+            && self.field_exists.is_none()
+            && self.field_value.is_none()
+    }
+
+    /// Validate the predicate configuration.
+    pub fn validate(&self) -> Result<(), String> {
+        // Warn if both table and tables are specified
+        if self.table.is_some() && !self.tables.is_empty() {
+            return Err("Cannot specify both 'table' and 'tables' - use one or the other".into());
+        }
+        // Warn if both schema and schemas are specified
+        if self.schema.is_some() && !self.schemas.is_empty() {
+            return Err("Cannot specify both 'schema' and 'schemas' - use one or the other".into());
+        }
+        Ok(())
+    }
+}
+
 /// Configuration for a single message transform
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct SmtTransformConfig {
@@ -282,6 +396,11 @@ pub struct SmtTransformConfig {
     /// Transform name (optional, for logging)
     #[serde(default)]
     pub name: Option<String>,
+
+    /// Predicate for conditional application.
+    /// If specified, the transform only applies to events matching the predicate.
+    #[serde(default)]
+    pub predicate: Option<SmtPredicateConfig>,
 
     /// Transform-specific configuration
     #[serde(default)]
@@ -333,8 +452,23 @@ pub enum SmtTransformType {
     SetNull,
     /// Compute new fields (concat, hash, uppercase, etc.)
     ComputeField,
-    /// Apply transforms conditionally based on predicates
+    /// Apply transforms conditionally based on predicates.
+    ///
+    /// **Note**: This is an internal type — not directly usable in YAML.
+    /// Instead, add a `predicate:` block to any transform. The system
+    /// wraps it with `ConditionalSmt` automatically.
     ConditionalSmt,
+
+    // ===== Storage Transforms =====
+    /// Externalize large blobs to object storage (S3/GCS/Azure/local)
+    ///
+    /// Requires the `cloud-storage` feature. Config options:
+    /// - `storage_type`: "local" | "s3" | "gcs" | "azure"
+    /// - `path` / `bucket`: Storage location
+    /// - `size_threshold`: Minimum size in bytes to externalize (default: 1KB)
+    /// - `prefix`: Custom prefix for object paths
+    /// - `fields`: Optional list of fields to process (default: all string fields)
+    ExternalizeBlob,
 
     // ===== Not Yet Implemented =====
     /// Add/set header fields (planned)

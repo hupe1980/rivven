@@ -1030,6 +1030,297 @@ Transforms are applied in order, allowing powerful event processing pipelines.
 | `unwrap` | Extract nested field to top level |
 | `set_null` | Set fields to null conditionally |
 | `compute_field` | Compute new fields (concat, hash, etc.) |
+| `externalize_blob` | Store large blobs in object storage (S3/GCS/Azure) |
+
+### Conditional Transform Application (Predicates)
+
+Predicates allow you to apply transforms **only to events matching specific conditions**. This is essential when a single CDC connector captures multiple tables but you need different transforms for each table.
+
+{: .important }
+Predicates are evaluated before the transform runs. If the predicate doesn't match, the event passes through **unchanged** (not filtered out).
+
+#### Basic Predicate Options
+
+| Option | Type | Description |
+|:-------|:-----|:------------|
+| `table` | string | Apply only to events from this table (regex pattern) |
+| `tables` | list | Apply to events from any of these tables (OR logic) |
+| `schema` | string | Apply only to events from this schema (regex pattern) |
+| `schemas` | list | Apply to events from any of these schemas (OR logic) |
+| `database` | string | Apply only to events from this database (regex pattern) |
+| `operations` | list | Apply only to these operations: `insert`, `update`, `delete`, `snapshot`, `truncate` |
+| `field_exists` | string | Apply only if this field exists in the event |
+| `field_value` | object | Apply only if field matches value: `{field: "name", value: "val"}` |
+| `negate` | bool | Invert the predicate (apply when conditions DON'T match) |
+
+{: .note }
+When multiple conditions are specified, they are combined with AND logic. Use `negate: true` to invert the entire predicate.
+
+#### Example: Per-Table Transforms
+
+Apply different transforms to different tables in the same CDC stream:
+
+```yaml
+config:
+  # Capture both tables
+  tables:
+    - public.users
+    - public.documents
+  
+  transforms:
+    # Mask SSN only for users table
+    - type: mask_field
+      name: mask_user_pii
+      predicate:
+        table: "users"
+      config:
+        fields:
+          - ssn
+          - credit_card
+
+    # Externalize blobs only for documents table  
+    - type: externalize_blob
+      name: externalize_docs
+      predicate:
+        table: "documents"
+      config:
+        storage_type: s3
+        bucket: my-blobs
+        size_threshold: 100000
+```
+
+#### Example: Multiple Tables with Regex
+
+Apply to tables matching a pattern:
+
+```yaml
+transforms:
+  - type: externalize_blob
+    predicate:
+      table: "^doc.*"  # Matches: documents, doc_archive, docs
+    config:
+      storage_type: s3
+      bucket: doc-blobs
+```
+
+#### Example: Operation-Based Predicates
+
+Apply transform only on specific operations:
+
+```yaml
+transforms:
+  # Externalize only on INSERT and UPDATE (not DELETE)
+  - type: externalize_blob
+    predicate:
+      operations:
+        - insert
+        - update
+    config:
+      storage_type: s3
+      bucket: my-blobs
+```
+
+#### Example: Combined Predicates (AND Logic)
+
+Apply only when ALL conditions match:
+
+```yaml
+transforms:
+  # Externalize documents table on INSERT only
+  - type: externalize_blob
+    predicate:
+      table: "documents"
+      operations:
+        - insert
+    config:
+      storage_type: s3
+      bucket: my-blobs
+```
+
+#### Example: Negated Predicate
+
+Apply to all tables EXCEPT a specific one:
+
+```yaml
+transforms:
+  # Externalize all tables EXCEPT audit_log
+  - type: externalize_blob
+    predicate:
+      table: "audit_log"
+      negate: true  # Invert: apply when table is NOT audit_log
+    config:
+      storage_type: s3
+      bucket: my-blobs
+```
+
+#### Example: Schema-Based Filtering
+
+Apply only to specific schemas:
+
+```yaml
+transforms:
+  # Mask PII only in production schema
+  - type: mask_field
+    predicate:
+      schema: "production"
+    config:
+      fields:
+        - ssn
+        - credit_card
+
+  # Externalize only in archive schema
+  - type: externalize_blob
+    predicate:
+      schemas:
+        - archive
+        - historical
+    config:
+      storage_type: s3
+      bucket: archive-blobs
+```
+
+#### Example: Field-Based Predicates
+
+Apply only when specific fields exist or have certain values:
+
+```yaml
+transforms:
+  # Externalize only if 'large_content' field exists
+  - type: externalize_blob
+    predicate:
+      field_exists: "large_content"
+    config:
+      storage_type: s3
+      bucket: my-blobs
+
+  # Externalize only if status is 'archived'
+  - type: externalize_blob
+    predicate:
+      field_value:
+        field: "status"
+        value: "archived"
+    config:
+      storage_type: s3
+      bucket: archive-blobs
+```
+
+#### Example: Predicates with Different Transform Types
+
+Predicates work with **any** transform type, not just `mask_field` and `externalize_blob`:
+
+```yaml
+sources:
+  ecommerce_cdc:
+    connector: postgres-cdc
+    config:
+      tables:
+        - public.users
+        - public.orders
+        - public.products
+        - public.audit_log
+
+    transforms:
+      # ── Users table: PII protection ──
+      - type: mask_field
+        predicate:
+          table: "users"
+        config:
+          fields: [ssn, credit_card, password_hash]
+
+      - type: replace_field
+        predicate:
+          table: "users"
+        config:
+          exclude: [internal_notes, admin_flags]
+          rename:
+            email_addr: email
+
+      # ── Orders table: timestamp normalization + routing ──
+      - type: timestamp_converter
+        predicate:
+          table: "orders"
+        config:
+          fields: [created_at, updated_at, shipped_at]
+          format: iso8601
+
+      - type: timezone_converter
+        predicate:
+          table: "orders"
+        config:
+          fields: [created_at]
+          from: UTC
+          to: America/New_York
+
+      - type: content_router
+        predicate:
+          table: "orders"
+        config:
+          field: priority
+          routes:
+            high: priority-orders
+            normal: standard-orders
+          default: other-orders
+
+      # ── Products table: computed fields + flatten ──
+      - type: compute_field
+        predicate:
+          table: "products"
+        config:
+          computations:
+            - target: display_name
+              operation: concat
+              fields: [brand, " ", name]
+            - target: price_hash
+              operation: hash
+              fields: [id, price]
+
+      - type: flatten
+        predicate:
+          table: "products"
+        config:
+          delimiter: "_"
+
+      # ── Audit log: nullify empty strings + unwrap ──
+      - type: set_null
+        predicate:
+          table: "audit_log"
+        config:
+          fields: [old_value, new_value]
+          condition: if_empty
+
+      - type: unwrap
+        predicate:
+          table: "audit_log"
+        config:
+          path: payload.data
+
+      # ── Snapshots only: add marker field ──
+      - type: insert_field
+        predicate:
+          operations: [snapshot]
+        config:
+          fields:
+            _is_snapshot: true
+            _loaded_at: "${current_timestamp}"
+
+      # ── All tables: extract envelope + add metadata ──
+      - type: extract_new_record_state
+        config:
+          add_table: true
+          add_op: true
+          add_ts: true
+
+      - type: header_to_value
+        config:
+          fields:
+            - target: __source_db
+              source: database
+            - target: __source_schema
+              source: schema
+```
+
+{: .note }
+Transforms without a `predicate` apply to **all** events. The pipeline executes top-to-bottom — order matters when transforms depend on each other's output.
 
 ### Configuration Reference
 
@@ -1425,6 +1716,97 @@ transforms:
         # Add processing timestamp
         - target: processed_at
           type: timestamp
+```
+
+#### externalize_blob
+
+{: .note }
+Requires the `cloud-storage` feature. Enable with `s3`, `gcs`, or `azure` feature for cloud providers.
+
+Externalize large blob values to object storage (S3/GCS/Azure) and replace them with reference URLs. This reduces message size and improves throughput for topics with binary data.
+
+| Option | Type | Default | Description |
+|:-------|:-----|:--------|:------------|
+| `provider` | enum | required | Storage provider: `s3`, `gcs`, `azure`, `local` |
+| `bucket` | string | required | Bucket/container name |
+| `size_threshold` | usize | `10240` | Minimum bytes to externalize |
+| `fields` | list | `[]` | Fields to check (empty = all fields) |
+| `prefix` | string | `""` | Object key prefix |
+| `url_scheme` | string | `s3://` | URL scheme for references |
+
+**Provider-specific options:**
+
+**S3:**
+```yaml
+transforms:
+  - type: externalize_blob
+    config:
+      provider: s3
+      bucket: my-cdc-blobs
+      region: us-east-1
+      size_threshold: 10240  # 10KB
+      fields:
+        - image_data
+        - document_content
+      prefix: cdc-blobs/production
+```
+
+**GCS:**
+```yaml
+transforms:
+  - type: externalize_blob
+    config:
+      provider: gcs
+      bucket: my-cdc-blobs
+      size_threshold: 10240
+      prefix: cdc-blobs/
+```
+
+**Azure:**
+```yaml
+transforms:
+  - type: externalize_blob
+    config:
+      provider: azure
+      account: mystorageaccount
+      container: my-cdc-blobs
+      size_threshold: 10240
+      prefix: cdc-blobs/
+```
+
+**Reference Format:**
+
+Externalized fields are replaced with a reference object:
+
+```json
+{
+  "__externalized": true,
+  "url": "s3://my-cdc-blobs/cdc-blobs/users/image_data/1704067200000_abc123.bin",
+  "size": 1048576,
+  "content_type": "application/octet-stream",
+  "sha256": "a1b2c3d4e5f6..."
+}
+```
+
+**Object Keys:**
+
+Objects are stored at: `{prefix}/{table}/{field}/{timestamp}_{uuid}.bin`
+
+**Rust API:**
+
+```rust
+use rivven_cdc::ExternalizeBlob;
+
+// Create with S3
+let smt = ExternalizeBlob::s3("my-bucket", "us-east-1")?
+    .size_threshold(10 * 1024)  // 10KB
+    .fields(["image_data", "document"])
+    .prefix("cdc-blobs/");
+
+// Or with pre-configured ObjectStore
+let smt = ExternalizeBlob::new(object_store, "my-bucket")
+    .size_threshold(10 * 1024)
+    .fields(["blob_field"]);
 ```
 
 ### Transform Pipeline Example

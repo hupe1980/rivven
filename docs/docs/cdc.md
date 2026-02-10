@@ -949,7 +949,8 @@ Rivven provides 17 built-in Single Message Transforms (SMTs) for in-flight data 
 | `Unwrap` | Extract nested field to top level |
 | `ComputeField` | Compute new fields |
 | `SetNull` | Conditionally nullify fields |
-| `ConditionalSmt` | Apply transforms conditionally |
+
+Any transform supports a `predicate:` block for conditional application (see [Conditional Transforms](#example-conditional-transforms-predicates) below).
 
 ### Example: Flatten and Mask
 
@@ -981,6 +982,65 @@ transforms:
         normal: standard-orders
       default: other-orders
 ```
+
+### Example: Conditional Transforms (Predicates)
+
+Apply transforms only to events matching specific conditions. This is essential
+when a single connector captures multiple tables with different processing needs:
+
+```yaml
+sources:
+  multi_table_cdc:
+    connector: postgres-cdc
+    topic: cdc.events
+    config:
+      tables:
+        - public.users
+        - public.orders
+        - public.documents
+
+    transforms:
+      # Mask PII only for the users table
+      - type: MaskField
+        predicate:
+          table: "users"
+        config:
+          fields: [ssn, credit_card]
+
+      # Convert timestamps only for orders
+      - type: TimestampConverter
+        predicate:
+          table: "orders"
+        config:
+          fields: [created_at, shipped_at]
+          format: iso8601
+
+      # Externalize large blobs only on insert/update, not delete
+      - type: ExternalizeBlob
+        predicate:
+          table: "documents"
+          operations: [insert, update]
+        config:
+          storage_type: s3
+          bucket: doc-blobs
+
+      # Flatten nested JSON for all tables EXCEPT orders
+      - type: Flatten
+        predicate:
+          table: "orders"
+          negate: true
+        config:
+          delimiter: "."
+
+      # Extract new record state for everything (no predicate)
+      - type: ExtractNewRecordState
+        config:
+          add_table: true
+          add_op: true
+```
+
+{: .note }
+Transforms without a `predicate` apply to **all** events. Predicates support `table`, `schema`, `operations`, `field_exists`, `field_value`, and `negate`. See [CDC Configuration](cdc-configuration.md#conditional-transform-application-predicates) for the full reference.
 
 ---
 

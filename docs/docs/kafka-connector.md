@@ -25,7 +25,7 @@ Kafka client with zero librdkafka or C dependencies:
 Enable with the `kafka` feature:
 
 ```toml
-rivven-connect = { version = "0.0.11", features = ["kafka"] }
+rivven-connect = { version = "0.0.12", features = ["kafka"] }
 ```
 
 ## Use Cases

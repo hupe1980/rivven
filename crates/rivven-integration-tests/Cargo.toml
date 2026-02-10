@@ -17,9 +17,9 @@ path = "src/lib.rs"
 [dependencies]
 # Core crates
 rivven-core = { workspace = true, features = ["cedar", "tls"] }
-rivven-cdc = { workspace = true, features = ["postgres", "mysql", "mariadb"] }
+rivven-cdc = { workspace = true, features = ["postgres", "mysql", "mariadb", "cloud-storage"] }
 rivven-client = { workspace = true, features = ["tls"] }
-rivven-connect = { workspace = true, features = ["rdbc-postgres", "kafka", "mqtt"] }
+rivven-connect = { workspace = true, features = ["rdbc-postgres", "kafka", "mqtt", "cloud-storage"] }
 rivven-protocol = { workspace = true, features = ["protobuf"] }
 rivven-schema = { workspace = true, features = ["server", "avro", "auth"] }
 rivvend = { workspace = true, features = ["tls", "protobuf"] }
@@ -68,6 +68,11 @@ tempfile = "3.10"
 portpicker = "0.1"
 schemars = "0.8"
 validator = { version = "0.20", features = ["derive"] }
+
+# ExternalizeBlob test utilities
+base64 = "0.22"
+sha2 = "0.10"
+hex = "0.4"
 
 [features]
 default = ["schema"]
@@ -156,3 +161,7 @@ path = "tests/kafka_connector.rs"
 [[test]]
 name = "mqtt_connector"
 path = "tests/mqtt_connector.rs"
+
+[[test]]
+name = "externalize_blob"
+path = "tests/externalize_blob.rs"
