@@ -505,7 +505,14 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .sink()
             .category(ConnectorCategory::Warehouse)
             .feature("databricks")
-            .tags(["databricks", "delta", "warehouse", "lakehouse", "zerobus", "streaming"])
+            .tags([
+                "databricks",
+                "delta",
+                "warehouse",
+                "lakehouse",
+                "zerobus",
+                "streaming",
+            ])
             .aliases(["databricks-delta", "databricks-zerobus"])
             .related("snowflake")
             .build(),

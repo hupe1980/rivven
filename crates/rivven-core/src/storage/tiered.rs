@@ -424,7 +424,8 @@ impl HotTier {
 
         // Remove existing entry first (if any) to reclaim its space
         if let Some(old) = entries.swap_remove(&key) {
-            self.current_size.fetch_sub(old.len() as u64, Ordering::Relaxed);
+            self.current_size
+                .fetch_sub(old.len() as u64, Ordering::Relaxed);
         }
 
         // Evict until enough space is available

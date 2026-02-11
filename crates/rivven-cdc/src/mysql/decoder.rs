@@ -960,15 +960,14 @@ impl BinlogDecoder {
                     // Unix epoch → civil time (UTC). Implements the standard algorithm:
                     //   https://howardhinnant.github.io/date_algorithms.html#civil_from_days
                     let secs = ts as i64;
-                    let days_since_epoch = (secs / 86400) as i64;
+                    let days_since_epoch = secs / 86400;
                     let time_of_day = (secs % 86400) as u32;
 
                     // Shift epoch from 1970-01-01 to 0000-03-01 for easier month arithmetic
                     let z = days_since_epoch + 719468;
                     let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
                     let doe = (z - era * 146097) as u32; // day of era [0, 146096]
-                    let yoe =
-                        (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era
+                    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era
                     let y = (yoe as i64) + era * 400;
                     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year
                     let mp = (5 * doy + 2) / 153; // month index [0, 11]

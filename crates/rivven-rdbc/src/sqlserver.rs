@@ -589,15 +589,12 @@ mod tests {
     fn test_sql_param_uuid() {
         let uuid = uuid::Uuid::new_v4();
         let p = SqlParam(Value::Uuid(uuid));
-        assert!(matches!(
-            p.to_sql(),
-            tiberius::ColumnData::Guid(Some(_))
-        ));
+        assert!(matches!(p.to_sql(), tiberius::ColumnData::Guid(Some(_))));
     }
 
     #[test]
     fn test_sql_param_chrono_types() {
-        use chrono::{NaiveDate, NaiveTime, NaiveDateTime, Utc};
+        use chrono::{NaiveDate, NaiveDateTime, NaiveTime, Utc};
 
         let d = NaiveDate::from_ymd_opt(2025, 1, 15).unwrap();
         let _cd = SqlParam(Value::Date(d)).to_sql();

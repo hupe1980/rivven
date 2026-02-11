@@ -188,7 +188,6 @@ impl Default for StickyPartitioner {
 
 /// Murmur2 hash — delegates to the canonical shared implementation
 /// in `rivven_core::hash` to guarantee client/server partition agreement.
-
 #[cfg(test)]
 mod tests {
     use super::*;

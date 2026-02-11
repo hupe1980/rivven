@@ -489,12 +489,7 @@ impl ParquetWriter {
         // Extract the sub-object for each event; null/missing → Value::Null
         let sub_events: Vec<Value> = events
             .iter()
-            .map(|event| {
-                event
-                    .get(field_name)
-                    .cloned()
-                    .unwrap_or(Value::Null)
-            })
+            .map(|event| event.get(field_name).cloned().unwrap_or(Value::Null))
             .collect();
 
         // Recursively build a child array for each struct field

@@ -311,7 +311,10 @@ impl SecureServer {
                                     info!("TLS certificates reloaded successfully");
                                 }
                                 Err(e) => {
-                                    warn!("TLS certificate reload failed (keeping existing): {}", e);
+                                    warn!(
+                                        "TLS certificate reload failed (keeping existing): {}",
+                                        e
+                                    );
                                 }
                             }
                         }

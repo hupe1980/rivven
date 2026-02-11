@@ -1178,9 +1178,7 @@ impl RaftNode {
             let result = raft
                 .client_write(request)
                 .await
-                .map_err(|e| {
-                    ClusterError::RaftStorage(format!("Batch write failed: {}", e))
-                })?;
+                .map_err(|e| ClusterError::RaftStorage(format!("Batch write failed: {}", e)))?;
 
             RaftMetrics::increment_proposals();
             RaftMetrics::increment_commits();

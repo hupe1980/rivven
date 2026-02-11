@@ -85,8 +85,8 @@ use crate::prelude::*;
 use async_trait::async_trait;
 use chrono::Utc;
 use databricks_zerobus_ingest_sdk::{
-    databricks::zerobus::RecordType, AckCallback, JsonString, OffsetId,
-    StreamConfigurationOptions, TableProperties, ZerobusSdk, ZerobusError,
+    databricks::zerobus::RecordType, AckCallback, JsonString, OffsetId, StreamConfigurationOptions,
+    TableProperties, ZerobusError, ZerobusSdk,
 };
 use futures::StreamExt;
 use metrics::{counter, gauge, histogram};
@@ -286,19 +286,19 @@ impl Default for CircuitBreakerConfig {
 // ── Validation helpers ──────────────────────────────────────────────────────
 
 /// Regex for validating fully-qualified table names (`catalog.schema.table`).
-static TABLE_NAME_RE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| regex::Regex::new(r"^[a-zA-Z_]\w*\.[a-zA-Z_]\w*\.[a-zA-Z_]\w*$").unwrap());
+static TABLE_NAME_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"^[a-zA-Z_]\w*\.[a-zA-Z_]\w*\.[a-zA-Z_]\w*$").unwrap()
+});
 
 /// Regex for loose endpoint format validation.
 ///
 /// Matches patterns like `<shard>.zerobus.<region>.cloud.databricks.com` (AWS)
 /// or `<shard>.zerobus.<region>.azuredatabricks.net` (Azure), with optional scheme.
-static ENDPOINT_RE: std::sync::LazyLock<regex::Regex> =
-    std::sync::LazyLock::new(|| {
-        regex::Regex::new(
+static ENDPOINT_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(
             r"(?i)^(https?://)?[\w\-]+\.zerobus\.[\w\-]+\.(cloud\.databricks\.com|azuredatabricks\.net)"
         ).unwrap()
-    });
+});
 
 // ── Default value functions ─────────────────────────────────────────────────
 
@@ -599,7 +599,11 @@ impl AckCallback for MetricsAckCallback {
 
     fn on_error(&self, offset_id: OffsetId, error_message: &str) {
         counter!("databricks.acks.error").increment(1);
-        error!(offset = offset_id, error = error_message, "Server ack error");
+        error!(
+            offset = offset_id,
+            error = error_message,
+            "Server ack error"
+        );
     }
 }
 
@@ -693,16 +697,12 @@ impl DatabricksSink {
     }
 
     /// Build a `ZerobusSdk` from config.
-    fn build_sdk(
-        config: &DatabricksSinkConfig,
-    ) -> std::result::Result<ZerobusSdk, ConnectorError> {
+    fn build_sdk(config: &DatabricksSinkConfig) -> std::result::Result<ZerobusSdk, ConnectorError> {
         ZerobusSdk::builder()
             .endpoint(&config.endpoint)
             .unity_catalog_url(&config.unity_catalog_url)
             .build()
-            .map_err(|e| {
-                ConnectorError::Connection(format!("Failed to build Zerobus SDK: {}", e))
-            })
+            .map_err(|e| ConnectorError::Connection(format!("Failed to build Zerobus SDK: {}", e)))
     }
 }
 
@@ -837,7 +837,7 @@ impl Sink for DatabricksSink {
         // Validate
         config
             .validate_table_name()
-            .map_err(|msg| ConnectorError::Config(msg))?;
+            .map_err(ConnectorError::Config)?;
 
         // Build SDK and create stream with metrics ack callback
         let sdk = Self::build_sdk(config)?;
@@ -1084,8 +1084,7 @@ impl Sink for DatabricksSink {
                             histogram!("databricks.batch.duration_ms")
                                 .record(elapsed.as_millis() as f64);
                             counter!("databricks.batches.success").increment(1);
-                            counter!("databricks.records.written")
-                                .increment(batch_len as u64);
+                            counter!("databricks.records.written").increment(batch_len as u64);
                             total_written += batch_len as u64;
                             total_bytes += bytes_in_batch as u64;
                             if let Some(ref cb) = self.circuit_breaker {
@@ -1098,8 +1097,7 @@ impl Sink for DatabricksSink {
                 } else if let Some(e) = last_err {
                     // All attempts exhausted or non-retryable error
                     let elapsed = batch_start.elapsed();
-                    histogram!("databricks.batch.duration_ms")
-                        .record(elapsed.as_millis() as f64);
+                    histogram!("databricks.batch.duration_ms").record(elapsed.as_millis() as f64);
                     counter!("databricks.batches.failed").increment(1);
                     counter!("databricks.records.failed").increment(batch_len as u64);
                     total_failed += batch_len as u64;
@@ -1224,14 +1222,8 @@ mod tests {
         let spec = DatabricksSink::spec();
         assert_eq!(spec.connector_type, "databricks");
         assert!(spec.config_schema.is_some());
-        assert_eq!(
-            spec.metadata.get("protocol"),
-            Some(&"grpc".to_string())
-        );
-        assert_eq!(
-            spec.metadata.get("auth"),
-            Some(&"oauth2".to_string())
-        );
+        assert_eq!(spec.metadata.get("protocol"), Some(&"grpc".to_string()));
+        assert_eq!(spec.metadata.get("auth"), Some(&"oauth2".to_string()));
     }
 
     #[test]
@@ -1321,10 +1313,12 @@ mod tests {
 
     #[test]
     fn test_table_name_validation() {
-        let mut config = DatabricksSinkConfig::default();
+        let mut config = DatabricksSinkConfig {
+            table_name: "catalog.schema.table".to_string(),
+            ..Default::default()
+        };
 
         // Valid names
-        config.table_name = "catalog.schema.table".to_string();
         assert!(config.validate_table_name().is_ok());
 
         config.table_name = "my_catalog.my_schema.my_table".to_string();
@@ -1352,10 +1346,12 @@ mod tests {
 
     #[test]
     fn test_endpoint_validation() {
-        let mut config = DatabricksSinkConfig::default();
+        let mut config = DatabricksSinkConfig {
+            endpoint: "my-shard.zerobus.us-east-1.cloud.databricks.com".to_string(),
+            ..Default::default()
+        };
 
         // Valid AWS endpoint
-        config.endpoint = "my-shard.zerobus.us-east-1.cloud.databricks.com".to_string();
         assert!(config.validate_endpoint().is_ok());
 
         // Valid AWS endpoint with scheme
@@ -1363,13 +1359,11 @@ mod tests {
         assert!(config.validate_endpoint().is_ok());
 
         // Valid Azure endpoint
-        config.endpoint =
-            "my-shard.zerobus.westeurope.azuredatabricks.net".to_string();
+        config.endpoint = "my-shard.zerobus.westeurope.azuredatabricks.net".to_string();
         assert!(config.validate_endpoint().is_ok());
 
         // Valid Azure endpoint with scheme
-        config.endpoint =
-            "https://my-shard.zerobus.eastus.azuredatabricks.net".to_string();
+        config.endpoint = "https://my-shard.zerobus.eastus.azuredatabricks.net".to_string();
         assert!(config.validate_endpoint().is_ok());
 
         // Invalid: empty

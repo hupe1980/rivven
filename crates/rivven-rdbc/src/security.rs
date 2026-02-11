@@ -147,7 +147,7 @@ mod tests {
         assert!(validate_sql_identifier("x()").is_err());
         // Unicode smuggling
         assert!(validate_sql_identifier("tabl\u{0435}").is_err()); // Cyrillic е
-        // Whitespace
+                                                                   // Whitespace
         assert!(validate_sql_identifier("user name").is_err());
         // Newlines
         assert!(validate_sql_identifier("x\nDROP TABLE").is_err());
@@ -159,7 +159,9 @@ mod tests {
 
     #[test]
     fn test_special_chars_rejected() {
-        for ch in &['.', '-', '@', '#', '$', '!', '%', '&', '*', '[', ']', '"', '`'] {
+        for ch in &[
+            '.', '-', '@', '#', '$', '!', '%', '&', '*', '[', ']', '"', '`',
+        ] {
             let name = format!("a{}", ch);
             assert!(
                 validate_sql_identifier(&name).is_err(),
@@ -191,10 +193,7 @@ mod tests {
             escape_string_literal("x'; DROP TABLE users--"),
             "x''; DROP TABLE users--"
         );
-        assert_eq!(
-            escape_string_literal("' OR '1'='1"),
-            "'' OR ''1''=''1"
-        );
+        assert_eq!(escape_string_literal("' OR '1'='1"), "'' OR ''1''=''1");
     }
 
     #[test]

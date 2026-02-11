@@ -386,10 +386,11 @@ impl CompatibilityChecker {
         let clean_new = strip_comments(new_schema);
 
         // Extract field numbers from both schemas using regex
-        // Pattern matches: optional/repeated/required type field_name = field_number
-        // More precise than bare `\w+ = \d+` to avoid matching option values
+        // Pattern matches: [optional|repeated|required] type field_name = field_number
+        // The label is optional (proto3 omits it), and we require a type word
+        // before the field name to avoid matching option values or reserved numbers.
         let field_pattern =
-            regex::Regex::new(r"(?:optional|repeated|required|^\s*)\s*\w+\s+(\w+)\s*=\s*(\d+)")
+            regex::Regex::new(r"(?:(?:optional|repeated|required)\s+)?\w+\s+(\w+)\s*=\s*(\d+)")
                 .map_err(|e| SchemaError::ParseError(format!("Regex error: {}", e)))?;
 
         let old_fields: HashMap<u32, String> = field_pattern

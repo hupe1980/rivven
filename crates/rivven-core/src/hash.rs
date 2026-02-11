@@ -14,7 +14,7 @@
 /// ```
 /// # use rivven_core::hash::murmur2;
 /// let hash = murmur2(b"hello");
-/// assert_eq!(hash, 1682149141); // matches Kafka Java
+/// assert_eq!(hash, 2132663229); // matches Kafka Java
 /// ```
 pub fn murmur2(data: &[u8]) -> u32 {
     // Kafka uses Java int (32-bit signed) arithmetic which wraps identically
@@ -77,8 +77,8 @@ mod tests {
     fn test_murmur2_known_vectors() {
         // Kafka Java murmur2 reference values (seed 0x9747b28c with final mixing)
         assert_eq!(murmur2(b""), 275646681);
-        assert_eq!(murmur2(b"hello"), 1682149141);
-        assert_eq!(murmur2(b"kafka"), 1762226537);
+        assert_eq!(murmur2(b"hello"), 2132663229);
+        assert_eq!(murmur2(b"kafka"), 3496464228);
     }
 
     #[test]

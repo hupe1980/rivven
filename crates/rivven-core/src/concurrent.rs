@@ -888,6 +888,11 @@ impl<K: Ord + Clone + Default, V: Clone + Default> ConcurrentSkipList<K, V> {
         // link to it, and one's `store` silently overwrites the other — permanently
         // losing a node. The CAS detects this conflict and re-traverses to find
         // the correct predecessor.
+        //
+        // Additionally, the predecessor from the initial traversal (`update[i]`)
+        // may become stale if another thread inserts a node between `pred` and
+        // our key. We validate that `next.key >= key` before each CAS attempt
+        // to ensure correct ordering; if not, we re-traverse first.
         #[allow(clippy::needless_range_loop)]
         for i in 0..height {
             // SAFETY: `pred` is either `self.head` (always valid) or a node from `update`
@@ -904,6 +909,25 @@ impl<K: Ord + Clone + Default, V: Clone + Default> ConcurrentSkipList<K, V> {
 
                 loop {
                     let next = (*pred).forward[i].load(Ordering::Acquire);
+
+                    // Validate that the predecessor is still correct: the next
+                    // node must be null or have a key >= ours. If another thread
+                    // inserted a smaller key after `pred`, `next` would have
+                    // key < ours and we'd break sort order by linking here.
+                    if !next.is_null() && (*next).key < key {
+                        // Predecessor is stale — re-traverse this level.
+                        let mut cur = self.head;
+                        loop {
+                            let n = (*cur).forward[i].load(Ordering::Acquire);
+                            if n.is_null() || (*n).key >= key {
+                                break;
+                            }
+                            cur = n;
+                        }
+                        pred = cur;
+                        continue;
+                    }
+
                     (*new_node).forward[i].store(next, Ordering::Release);
 
                     // Attempt to atomically link: pred.forward[i] = new_node

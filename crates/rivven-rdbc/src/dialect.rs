@@ -363,7 +363,8 @@ impl SqlDialect for MySqlDialect {
             FROM information_schema.columns
             WHERE {} AND table_name = '{}'
             ORDER BY ordinal_position"#,
-            db_filter, escape_string_literal(table)
+            db_filter,
+            escape_string_literal(table)
         )
     }
 

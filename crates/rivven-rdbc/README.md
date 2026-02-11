@@ -189,7 +189,7 @@ let fks = provider.list_foreign_keys(Some("public"), "users").await?;
 
 ```toml
 [dependencies]
-rivven-rdbc = { version = "0.0.13", features = ["postgres", "mysql"] }
+rivven-rdbc = { version = "0.0.14", features = ["postgres", "mysql"] }
 ```
 
 | Feature | Description |

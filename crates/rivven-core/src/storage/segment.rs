@@ -574,9 +574,7 @@ impl Segment {
             drop(mmap);
             drop(file);
 
-            let truncate_file = OpenOptions::new()
-                .write(true)
-                .open(&self.log_path)?;
+            let truncate_file = OpenOptions::new().write(true).open(&self.log_path)?;
             truncate_file.set_len(valid_len)?;
             truncate_file.sync_all()?;
 

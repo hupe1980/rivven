@@ -656,7 +656,8 @@ mod tests {
                     password: "Prod@Pass123".to_string(),
                 },
                 &mut conn_auth,
-                "127.0.0.1", false,
+                "127.0.0.1",
+                false,
             )
             .await;
 
@@ -681,7 +682,8 @@ mod tests {
                     password: "Wrong@Pass1".to_string(),
                 },
                 &mut conn_auth,
-                "127.0.0.1", false,
+                "127.0.0.1",
+                false,
             )
             .await;
 
@@ -706,7 +708,8 @@ mod tests {
                     password: "Prod@Pass123".to_string(),
                 },
                 &mut conn_auth,
-                "127.0.0.1", false,
+                "127.0.0.1",
+                false,
             )
             .await;
 
@@ -718,7 +721,8 @@ mod tests {
                     partitions: Some(1),
                 },
                 &mut conn_auth,
-                "127.0.0.1", false,
+                "127.0.0.1",
+                false,
             )
             .await;
 
@@ -739,7 +743,8 @@ mod tests {
                     password: "Admin@Pass1".to_string(),
                 },
                 &mut conn_auth,
-                "127.0.0.1", false,
+                "127.0.0.1",
+                false,
             )
             .await;
 
@@ -751,7 +756,8 @@ mod tests {
                     partitions: Some(1),
                 },
                 &mut conn_auth,
-                "127.0.0.1", false,
+                "127.0.0.1",
+                false,
             )
             .await;
 

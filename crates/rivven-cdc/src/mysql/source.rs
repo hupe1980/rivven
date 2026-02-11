@@ -743,9 +743,7 @@ async fn run_mysql_cdc_loop(
 /// Uses a separate `mysql_async` connection (not the binlog protocol client) because
 /// `SHOW MASTER STATUS` returns a result set that the binlog protocol client doesn't
 /// support reading. Falls back to `SHOW BINARY LOG STATUS` for MySQL 8.2+.
-async fn get_current_binlog_position(
-    config: &MySqlCdcConfig,
-) -> anyhow::Result<(String, u32)> {
+async fn get_current_binlog_position(config: &MySqlCdcConfig) -> anyhow::Result<(String, u32)> {
     use mysql_async::{Conn, Opts, Row};
 
     let url = if let Some(ref password) = config.password {
@@ -776,10 +774,7 @@ async fn get_current_binlog_position(
 
     if let Some(row) = rows.into_iter().next() {
         let file: String = row.get(0).unwrap_or_default();
-        let pos: u32 = row
-            .get::<u64, _>(1)
-            .map(|p| p as u32)
-            .unwrap_or(4);
+        let pos: u32 = row.get::<u64, _>(1).map(|p| p as u32).unwrap_or(4);
 
         if file.is_empty() {
             anyhow::bail!(

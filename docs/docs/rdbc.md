@@ -24,7 +24,7 @@ Production-grade SQL database connectivity layer for the Rivven event streaming 
 
 ```toml
 [dependencies]
-rivven-rdbc = { version = "0.0.13", features = ["postgres", "mysql"] }
+rivven-rdbc = { version = "0.0.14", features = ["postgres", "mysql"] }
 ```
 
 ### Basic Usage
@@ -459,7 +459,7 @@ match result {
 
 ```toml
 [dependencies]
-rivven-rdbc = { version = "0.0.13", features = ["postgres", "mysql", "sqlserver", "tls"] }
+rivven-rdbc = { version = "0.0.14", features = ["postgres", "mysql", "sqlserver", "tls"] }
 ```
 
 | Feature | Description |
@@ -560,10 +560,10 @@ RDBC connectors expose pool metrics via the Prometheus endpoint (`/metrics`):
 
 ```toml
 # Enable database-specific backends
-rivven-connect = { version = "0.0.13", features = ["rdbc-postgres"] }
-rivven-connect = { version = "0.0.13", features = ["rdbc-mysql"] }
-rivven-connect = { version = "0.0.13", features = ["rdbc-sqlserver"] }
-rivven-connect = { version = "0.0.13", features = ["rdbc-full"] }  # All databases
+rivven-connect = { version = "0.0.14", features = ["rdbc-postgres"] }
+rivven-connect = { version = "0.0.14", features = ["rdbc-mysql"] }
+rivven-connect = { version = "0.0.14", features = ["rdbc-sqlserver"] }
+rivven-connect = { version = "0.0.14", features = ["rdbc-full"] }  # All databases
 ```
 
 ## Testing
