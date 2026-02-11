@@ -167,6 +167,7 @@ rivven-connect run --config rivven-connect.yaml
 | `gcs` | `gcs` | Google Cloud Storage (via object-storage) |
 | `azure-blob` | `azure` | Azure Blob Storage (via object-storage) |
 | `iceberg` | `iceberg` | Apache Iceberg lakehouse format |
+| `delta-lake` | `delta-lake` | Delta Lake with ACID transactions |
 | `snowflake` | `snowflake` | Snowflake Data Cloud |
 | `bigquery` | `bigquery` | Google BigQuery |
 | `redshift` | `redshift` | Amazon Redshift |
@@ -231,6 +232,37 @@ sinks:
 ```
 
 See [docs/ICEBERG_SINK.md](../../docs/ICEBERG_SINK.md) for complete configuration reference.
+
+### Delta Lake
+
+The Delta Lake sink writes events to Delta Lake tables using the **delta-rs** native Rust implementation (`deltalake` crate v0.30). Features include:
+
+- **ACID Transactions**: Every write is atomic with snapshot isolation via the Delta log
+- **No JVM Required**: Pure Rust via delta-rs (3k+ stars)
+- **Storage Backends**: S3, GCS, Azure, local filesystem
+- **RecordBatchWriter**: Arrow-native write path with Parquet compression
+- **Auto Table Creation**: Creates tables on first write with configurable schema
+- **Commit Retry**: Exponential backoff on transaction conflicts
+
+```yaml
+sinks:
+  delta:
+    connector: delta-lake
+    topics: [cdc.events]
+    consumer_group: delta-sink
+    config:
+      table_uri: s3://my-bucket/warehouse/events
+      auto_create_table: true
+      batch_size: 10000
+      flush_interval_secs: 60
+      compression: snappy
+      partition_columns:
+        - event_type
+      s3:
+        region: us-east-1
+```
+
+See [docs/delta-lake-sink.md](../../docs/docs/delta-lake-sink.md) for complete configuration reference.
 
 ### Apache Kafka (Pure Rust)
 
@@ -435,7 +467,7 @@ rivven-connect = { version = "0.0.12", features = ["postgres", "s3"] }
 | `rdbc-full` | rdbc-postgres, rdbc-mysql, rdbc-sqlserver |
 | `queue-full` | mqtt, sqs, pubsub |
 | `storage-full` | s3, gcs, azure, parquet |
-| `lakehouse-full` | iceberg |
+| `lakehouse-full` | iceberg, delta-lake |
 | `warehouse-full` | snowflake, bigquery, redshift |
 | `full` | All connectors (including rdbc-full) |
 

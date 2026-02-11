@@ -51,7 +51,7 @@ Rivven provides a **native connector framework** that scales to 300+ connectors:
 │  └── (snowflake, bigquery, redshift, clickhouse, ...)           │
 │                                                                  │
 │  Lakehouse                                                       │
-│  └── (iceberg, ...)                           │
+│  └── (iceberg, delta-lake, ...)                     │
 │                                                                  │
 │  AI/ML                                                           │
 │  ├── LLM (openai, anthropic, ollama, bedrock, ...)              │
@@ -881,6 +881,56 @@ config:
 
 {: .note }
 > For advanced configuration including partitioning strategies, commit modes, and query examples, see the [Apache Iceberg Sink Guide](iceberg-sink).
+
+### Delta Lake
+
+Write streaming events to Delta Lake tables with ACID transactions. Uses the **delta-rs** native Rust implementation — no JVM required.
+
+- **ACID Transactions**: Atomic commits with snapshot isolation via the Delta log
+- **Multiple Storage Backends**: S3, GCS, Azure, local filesystem
+- **Auto Table Creation**: Creates tables on first write
+- **Commit Retry**: Exponential backoff on transaction conflicts
+- **Compression**: Snappy, Gzip, LZ4, Zstd
+
+```yaml
+sinks:
+  delta:
+    connector: delta-lake
+    topics: [cdc.events]
+    consumer_group: delta-sink
+    config:
+      table_uri: s3://my-bucket/warehouse/events
+      auto_create_table: true
+      batch_size: 10000
+      flush_interval_secs: 60
+      compression: snappy
+      s3:
+        region: us-east-1
+```
+
+**Configuration Reference:**
+
+| Parameter | Required | Default | Description |
+|:----------|:---------|:--------|:------------|
+| `table_uri` | ✓ | - | Delta table location (local, s3://, gs://, az://) |
+| `auto_create_table` | | `true` | Create table if it doesn't exist |
+| `batch_size` | | `10000` | Records per batch |
+| `flush_interval_secs` | | `60` | Max seconds between flushes |
+| `compression` | | `snappy` | snappy, gzip, lz4, zstd, none |
+| `partition_columns` | | `[]` | Hive-style partition columns |
+| `max_commit_retries` | | `3` | Commit retry attempts |
+
+**Metrics:**
+
+| Metric | Type | Description |
+|:-------|:-----|:------------|
+| `delta.records_written` | Counter | Total records written |
+| `delta.commits_success` | Counter | Successful Delta commits |
+| `delta.bytes_written` | Counter | Total bytes written |
+| `delta.commit_latency_us` | Counter | Cumulative commit latency |
+
+{: .note }
+> For advanced configuration including storage backends, partitioning, and query examples, see the [Delta Lake Sink Guide](delta-lake-sink).
 
 ### HTTP Webhook
 

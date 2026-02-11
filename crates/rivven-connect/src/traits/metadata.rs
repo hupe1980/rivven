@@ -71,7 +71,7 @@ pub enum ConnectorCategory {
     Warehouse,
 
     // Lakehouse connectors
-    /// Open table formats (Iceberg, Delta Lake, Hudi)
+    /// Open table formats (Iceberg, Delta Lake)
     Lakehouse,
 
     // AI/ML connectors

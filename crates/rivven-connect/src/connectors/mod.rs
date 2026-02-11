@@ -53,7 +53,7 @@ pub mod storage;
 // Warehouse connectors (Snowflake, BigQuery, Redshift)
 pub mod warehouse;
 
-// Lakehouse connectors (Apache Iceberg, Delta Lake, Hudi)
+// Lakehouse connectors (Apache Iceberg, Delta Lake)
 pub mod lakehouse;
 // Re-export registry types from SDK (now in traits module)
 pub use super::traits::registry::{
@@ -157,6 +157,9 @@ pub fn create_sink_registry() -> SinkRegistry {
     // Lakehouse sinks (feature-gated)
     #[cfg(feature = "iceberg")]
     registry.register("iceberg", Arc::new(lakehouse::IcebergSinkFactory));
+
+    #[cfg(feature = "delta-lake")]
+    registry.register("delta-lake", Arc::new(lakehouse::DeltaLakeSinkFactory));
 
     // RDBC sink (query-based, feature-gated)
     #[cfg(feature = "rdbc")]
@@ -517,6 +520,35 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .related("delta-lake")
             .build(),
         Arc::new(lakehouse::IcebergSinkFactory),
+    );
+
+    // Delta Lake sink
+    #[cfg(feature = "delta-lake")]
+    inventory.register_sink(
+        ConnectorMetadata::builder("delta-lake")
+            .title("Delta Lake")
+            .description(
+                "Write to Delta Lake tables - open-source lakehouse with ACID transactions",
+            )
+            .sink()
+            .category(ConnectorCategory::Lakehouse)
+            .feature("delta-lake")
+            .tags([
+                "delta",
+                "delta-lake",
+                "lakehouse",
+                "table-format",
+                "analytics",
+                "parquet",
+                "s3",
+                "gcs",
+                "azure",
+                "acid",
+            ])
+            .aliases(["delta", "delta-lake-sink", "deltalake"])
+            .related("iceberg")
+            .build(),
+        Arc::new(lakehouse::DeltaLakeSinkFactory),
     );
 
     // ─────────────────────────────────────────────────────────────────
