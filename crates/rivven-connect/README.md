@@ -27,7 +27,7 @@ rivven-connect is designed to scale to **300+ connectors** with:
 │  ├── Database (postgres_cdc, mysql_cdc, sqlserver_cdc, ...).    │
 │  ├── Messaging (mqtt, sqs, pubsub, nats, ...)                   │
 │  ├── Storage (s3, gcs, azure, minio, ...)                       │
-│  ├── Warehouse (snowflake, bigquery, redshift, ...)             │
+│  ├── Warehouse (snowflake, bigquery, redshift, databricks, ...)  │
 │  └── Utility (datagen, stdout, http, ...)                       │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -171,6 +171,7 @@ rivven-connect run --config rivven-connect.yaml
 | `snowflake` | `snowflake` | Snowflake Data Cloud |
 | `bigquery` | `bigquery` | Google BigQuery |
 | `redshift` | `redshift` | Amazon Redshift |
+| `databricks` | `databricks` | Databricks Delta tables via Zerobus |
 
 ### Unified Object Storage
 
@@ -468,7 +469,7 @@ rivven-connect = { version = "0.0.13", features = ["postgres", "s3"] }
 | `queue-full` | mqtt, sqs, pubsub |
 | `storage-full` | s3, gcs, azure, parquet |
 | `lakehouse-full` | iceberg, delta-lake |
-| `warehouse-full` | snowflake, bigquery, redshift |
+| `warehouse-full` | snowflake, bigquery, redshift, databricks |
 | `full` | All connectors (including rdbc-full) |
 
 ### Single Message Transforms (SMT)

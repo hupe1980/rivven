@@ -154,6 +154,9 @@ pub fn create_sink_registry() -> SinkRegistry {
     #[cfg(feature = "redshift")]
     registry.register("redshift", Arc::new(warehouse::RedshiftSinkFactory));
 
+    #[cfg(feature = "databricks")]
+    registry.register("databricks", Arc::new(warehouse::DatabricksSinkFactory));
+
     // Lakehouse sinks (feature-gated)
     #[cfg(feature = "iceberg")]
     registry.register("iceberg", Arc::new(lakehouse::IcebergSinkFactory));
@@ -491,6 +494,22 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .related("snowflake")
             .build(),
         Arc::new(warehouse::RedshiftSinkFactory),
+    );
+
+    // Databricks sink
+    #[cfg(feature = "databricks")]
+    inventory.register_sink(
+        ConnectorMetadata::builder("databricks")
+            .title("Databricks")
+            .description("Stream events into Databricks Delta tables via Zerobus")
+            .sink()
+            .category(ConnectorCategory::Warehouse)
+            .feature("databricks")
+            .tags(["databricks", "delta", "warehouse", "lakehouse", "zerobus", "streaming"])
+            .aliases(["databricks-delta", "databricks-zerobus"])
+            .related("snowflake")
+            .build(),
+        Arc::new(warehouse::DatabricksSinkFactory),
     );
 
     // ─────────────────────────────────────────────────────────────────

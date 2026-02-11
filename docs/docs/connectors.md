@@ -48,7 +48,7 @@ Rivven provides a **native connector framework** that scales to 300+ connectors:
 │  └── File (file, sftp, hdfs, ...)                               │
 │                                                                  │
 │  Warehouse                                                       │
-│  └── (snowflake, bigquery, redshift, clickhouse, ...)           │
+│  └── (snowflake, bigquery, redshift, databricks, clickhouse, ...)│
 │                                                                  │
 │  Lakehouse                                                       │
 │  └── (iceberg, delta-lake, ...)                     │
@@ -776,6 +776,136 @@ The connector exports the following metrics:
 
 {: .note }
 > **Key Format**: The private key must be in **unencrypted PKCS#8 PEM format** (begins with `-----BEGIN PRIVATE KEY-----`). Encrypted keys (PKCS#5) are not supported. Use `openssl pkcs8 -topk8 -nocrypt` to convert.
+
+### Databricks
+
+Stream events into Databricks Delta tables via the **Zerobus Ingest SDK** — a high-performance, async-first gRPC client that handles OAuth 2.0 authentication, retries, stream recovery, and acknowledgment tracking automatically.
+
+**Key features**: Circuit breaker protection, connector-level batch retry with exponential backoff, timer-based flush via `tokio::select!`, full metrics integration (14 counters/gauges/histograms), SDK-native ack callbacks, endpoint format validation, byte-level throughput tracking, error classification (Auth/Timeout/RateLimited/Transient/Fatal).
+
+#### Authentication Setup
+
+Databricks uses **OAuth 2.0 client credentials** with a Unity Catalog service principal.
+
+1. In your Databricks workspace, go to **Settings** > **Identity and Access**
+2. Create a service principal (or use an existing one)
+3. Generate OAuth credentials (client ID and secret)
+4. Grant the service principal these permissions on your target table:
+   - `SELECT` — read table schema
+   - `MODIFY` — write data to the table
+   - `USE CATALOG` and `USE SCHEMA` — access the catalog and schema
+
+#### Configuration
+
+```yaml
+sinks:
+  databricks:
+    connector: databricks
+    topics: [cdc.orders]
+    consumer_group: databricks-sink
+    config:
+      # Zerobus endpoint (region-specific)
+      endpoint: "<shard-id>.zerobus.<region>.cloud.databricks.com"
+      
+      # Unity Catalog workspace URL
+      unity_catalog_url: "https://<workspace>.cloud.databricks.com"
+      
+      # Fully qualified table name
+      table_name: "catalog.schema.orders"
+      
+      # OAuth 2.0 credentials
+      client_id: "${DATABRICKS_CLIENT_ID}"
+      client_secret: "${DATABRICKS_CLIENT_SECRET}"
+      
+      # Batching and performance
+      batch_size: 500                   # Records per batch (all-or-nothing)
+      flush_interval_secs: 5            # Max seconds before flushing partial batch
+      max_inflight_requests: 100000     # Unacknowledged records in flight
+      
+      # Acknowledgment
+      wait_for_ack: true                # Wait for server acknowledgment per batch
+      
+      # Recovery (automatic retry on transient failures)
+      recovery: true                    # Enable automatic stream recovery
+      recovery_retries: 4              # Maximum recovery attempts
+      recovery_timeout_ms: 15000       # Timeout per recovery attempt (ms)
+      recovery_backoff_ms: 2000        # Backoff between recovery retries (ms)
+      server_ack_timeout_ms: 60000     # Server ack timeout before recovery (ms)
+      flush_timeout_ms: 300000         # Timeout for flush operations (ms)
+      
+      # Connector-level batch retry (on top of SDK recovery)
+      max_batch_retries: 2             # Retries per batch on retryable errors
+      initial_backoff_ms: 200          # Initial retry backoff (ms)
+      max_backoff_ms: 5000             # Maximum retry backoff (ms)
+      
+      # Circuit breaker
+      circuit_breaker:
+        enabled: true                   # Protect against cascading failures
+        failure_threshold: 5            # Consecutive failures before opening
+        reset_timeout_secs: 30          # Seconds before half-open test
+        success_threshold: 2            # Successes to close from half-open
+```
+
+| Parameter | Required | Default | Description |
+|:----------|:---------|:--------|:------------|
+| `endpoint` | ✓ | - | Zerobus API endpoint (`<shard>.zerobus.<region>.cloud.databricks.com` or `.azuredatabricks.net`) |
+| `unity_catalog_url` | ✓ | - | Workspace URL for OAuth (`https://<workspace>.cloud.databricks.com`) |
+| `table_name` | ✓ | - | Fully qualified table name (`catalog.schema.table`) |
+| `client_id` | ✓ | - | OAuth 2.0 client ID (service principal) |
+| `client_secret` | ✓ | - | OAuth 2.0 client secret |
+| `batch_size` | | `500` | Records per batch (1–100,000) |
+| `flush_interval_secs` | | `5` | Maximum seconds before flushing partial batch |
+| `max_inflight_requests` | | `100000` | Maximum unacknowledged records in flight |
+| `wait_for_ack` | | `true` | Wait for server acknowledgment per batch |
+| `recovery` | | `true` | Enable automatic stream recovery on transient failures |
+| `recovery_retries` | | `4` | Maximum number of recovery attempts |
+| `recovery_timeout_ms` | | `15000` | Timeout per recovery attempt (ms) |
+| `recovery_backoff_ms` | | `2000` | Backoff between recovery retries (ms) |
+| `server_ack_timeout_ms` | | `60000` | Timeout for server acks before triggering recovery (ms) |
+| `flush_timeout_ms` | | `300000` | Timeout for flush operations (ms) |
+| `max_batch_retries` | | `2` | Connector-level retries per batch (0 to disable) |
+| `initial_backoff_ms` | | `200` | Initial backoff between batch retries (ms) |
+| `max_backoff_ms` | | `5000` | Maximum backoff between batch retries (ms) |
+| `circuit_breaker.enabled` | | `true` | Enable circuit breaker for batch failures |
+| `circuit_breaker.failure_threshold` | | `5` | Consecutive failures before circuit opens |
+| `circuit_breaker.reset_timeout_secs` | | `30` | Seconds before testing half-open |
+| `circuit_breaker.success_threshold` | | `2` | Successes to close from half-open |
+
+#### Cloud Support
+
+| Cloud | Endpoint Format | UC URL Format |
+|:------|:----------------|:--------------|
+| **AWS** | `<shard>.zerobus.<region>.cloud.databricks.com` | `https://<workspace>.cloud.databricks.com` |
+| **Azure** | `<shard>.zerobus.<region>.azuredatabricks.net` | `https://<workspace>.azuredatabricks.net` |
+
+#### Metrics
+
+The connector records the following metrics (via the `metrics` crate):
+
+| Metric | Type | Description |
+|:-------|:-----|:------------|
+| `databricks.batches.success` | Counter | Successfully ingested batches |
+| `databricks.batches.failed` | Counter | Failed batch ingestions |
+| `databricks.batches.retried` | Counter | Batch retry attempts |
+| `databricks.records.written` | Counter | Total records written |
+| `databricks.records.failed` | Counter | Total records failed |
+| `databricks.records.serialization_errors` | Counter | JSON serialization failures |
+| `databricks.acks.success` | Counter | Server-side offset acknowledgments |
+| `databricks.acks.error` | Counter | Server-side ack errors |
+| `databricks.circuit_breaker.rejected` | Counter | Batches rejected by circuit breaker |
+| `databricks.batch.size` | Gauge | Current batch size (records) |
+| `databricks.batch.duration_ms` | Histogram | End-to-end batch ingest latency |
+| `databricks.ack.duration_ms` | Histogram | Server acknowledgment latency |
+
+#### Error Handling
+
+- **Circuit breaker**: After consecutive batch failures, the circuit opens and batches are dropped immediately until the reset timeout. This prevents cascading failures from overwhelming the Zerobus service.
+- **Connector-level batch retry**: If `ingest_records_offset` returns a retryable error, the connector retries the batch up to `max_batch_retries` times with exponential backoff (capped at `max_backoff_ms`). This complements the SDK's stream-level recovery.
+- **Timer-based flush**: Uses `tokio::select!` with an interval timer — partial batches are flushed even when no new events arrive, preventing stale data.
+- **Error classification**: Zerobus errors are classified into Auth, Timeout, RateLimited, Transient, or Fatal categories for precise monitoring and alerting.
+- **Retryable errors**: Network failures, connection timeouts, temporary server errors, stream closed by server. Automatically recovered when `recovery: true`.
+- **Non-retryable errors**: Invalid OAuth credentials, table not found, permission denied, schema mismatch. These abort the connector immediately.
+- **Unacknowledged records**: On stream failure, the connector logs the count of unacked records and adjusts metrics accordingly.
 
 ### Apache Iceberg
 

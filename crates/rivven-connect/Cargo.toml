@@ -54,6 +54,7 @@ parquet = ["dep:parquet", "dep:arrow", "dep:arrow-array", "dep:arrow-schema", "d
 snowflake = ["dep:jsonwebtoken", "dep:rsa", "dep:sha2", "dep:rand", "dep:metrics"]
 bigquery = ["dep:gcp-bigquery-client"]
 redshift = ["dep:rustls", "dep:webpki-roots", "dep:tokio-postgres-rustls"]
+databricks = ["dep:databricks-zerobus-ingest-sdk", "dep:metrics"]
 
 # Lakehouse connectors (open table formats)
 iceberg = ["parquet", "dep:iceberg", "dep:iceberg-catalog-rest"]
@@ -65,7 +66,7 @@ delta-lake-azure = ["delta-lake", "deltalake/azure"]
 # Feature bundles
 queue-full = ["kafka", "mqtt", "sqs", "pubsub"]
 storage-full = ["s3", "gcs", "azure", "parquet"]
-warehouse-full = ["snowflake", "bigquery", "redshift"]
+warehouse-full = ["snowflake", "bigquery", "redshift", "databricks"]
 lakehouse-full = ["iceberg", "delta-lake"]
 full = ["postgres", "mysql", "sqlserver", "tls", "http", "rdbc-full", "queue-full", "storage-full", "warehouse-full", "lakehouse-full"]
 
@@ -185,6 +186,9 @@ hmac = { version = "0.12", optional = true }
 rustls = { workspace = true, optional = true }
 webpki-roots = { version = "0.26", optional = true }
 tokio-postgres-rustls = { version = "0.13", optional = true }
+
+# Databricks Zerobus (optional)
+databricks-zerobus-ingest-sdk = { version = "0.5", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

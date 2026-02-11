@@ -1178,6 +1178,11 @@ fn list_connectors() -> Result<()> {
             cfg!(feature = "redshift"),
             "Amazon Redshift sink",
         ),
+        (
+            "databricks",
+            cfg!(feature = "databricks"),
+            "Databricks Delta table sink",
+        ),
     ];
 
     for (name, enabled, desc) in features {
