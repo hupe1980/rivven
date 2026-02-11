@@ -1078,8 +1078,11 @@ impl Client {
     ) -> Result<(u64, u32, bool)> {
         let sequence = producer.next_sequence;
         producer.next_sequence = producer.next_sequence.wrapping_add(1);
-        if producer.next_sequence < 0 {
-            producer.next_sequence = 0;
+        // After wrapping past i32::MAX, reset to 1 (not 0)
+        // because sequence 0 was used for the first message. Reusing 0
+        // could collide with the broker's dedup window.
+        if producer.next_sequence <= 0 {
+            producer.next_sequence = 1;
         }
 
         let request = Request::IdempotentPublish {
@@ -1216,8 +1219,9 @@ impl Client {
     ) -> Result<(u64, u32, i32)> {
         let sequence = producer.next_sequence;
         producer.next_sequence = producer.next_sequence.wrapping_add(1);
-        if producer.next_sequence < 0 {
-            producer.next_sequence = 0;
+        // Avoid reusing sequence 0 after wrap
+        if producer.next_sequence <= 0 {
+            producer.next_sequence = 1;
         }
 
         let request = Request::TransactionalPublish {

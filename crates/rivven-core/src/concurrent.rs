@@ -880,21 +880,57 @@ impl<K: Ord + Clone + Default, V: Clone + Default> ConcurrentSkipList<K, V> {
             }
         }
 
-        // Insert node at each level
+        // Insert node at each level using compare_exchange (C-4 fix).
+        //
+        // The standard lock-free skip list algorithm (Herlihy & Shavit) requires
+        // a CAS loop for each level's forward pointer update. Without CAS, two
+        // concurrent inserts at the same position both read the same `next`,
+        // link to it, and one's `store` silently overwrites the other — permanently
+        // losing a node. The CAS detects this conflict and re-traverses to find
+        // the correct predecessor.
         #[allow(clippy::needless_range_loop)]
         for i in 0..height {
             // SAFETY: `pred` is either `self.head` (always valid) or a node from `update`
             // which was found during traversal. `new_node` was just allocated above.
-            // Release ordering ensures the new node's data is visible before the pointer.
+            // AcqRel ordering on the CAS ensures:
+            //   - Acquire: we see the latest forward pointer written by other threads
+            //   - Release: the new node's data is fully visible before it's linked in
             unsafe {
-                let pred = if update[i].is_null() {
+                let mut pred = if update[i].is_null() {
                     self.head
                 } else {
                     update[i]
                 };
-                let next = (*pred).forward[i].load(Ordering::Acquire);
-                (*new_node).forward[i].store(next, Ordering::Release);
-                (*pred).forward[i].store(new_node, Ordering::Release);
+
+                loop {
+                    let next = (*pred).forward[i].load(Ordering::Acquire);
+                    (*new_node).forward[i].store(next, Ordering::Release);
+
+                    // Attempt to atomically link: pred.forward[i] = new_node
+                    // This only succeeds if pred.forward[i] still points to `next`
+                    match (*pred).forward[i].compare_exchange(
+                        next,
+                        new_node,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => break, // Successfully linked at this level
+                        Err(_) => {
+                            // Another thread modified pred.forward[i] concurrently.
+                            // Re-traverse this level to find the correct predecessor.
+                            let mut cur = self.head;
+                            loop {
+                                let n = (*cur).forward[i].load(Ordering::Acquire);
+                                if n.is_null() || (*n).key >= key {
+                                    break;
+                                }
+                                cur = n;
+                            }
+                            pred = cur;
+                            // Retry the CAS with the updated predecessor
+                        }
+                    }
+                }
             }
         }
 
@@ -1196,6 +1232,53 @@ mod tests {
         // Should include 150, 160, ..., 350
         for (k, _) in &range {
             assert!(*k >= 150 && *k <= 350);
+        }
+    }
+
+    /// Regression test for C-4: concurrent inserts must not lose nodes.
+    ///
+    /// Before the CAS fix, two threads inserting at the same position would
+    /// race on `pred.forward[i].store()`, causing one node to be silently
+    /// lost. This test verifies that all inserted keys are retrievable.
+    #[test]
+    fn test_skip_list_concurrent_insert_no_lost_nodes() {
+        let list = Arc::new(ConcurrentSkipList::<u64, u64>::new());
+        let per_thread = 500;
+        let num_threads = 8;
+        let mut handles = vec![];
+
+        for t in 0..num_threads {
+            let l = list.clone();
+            handles.push(thread::spawn(move || {
+                for i in 0..per_thread {
+                    // Interleave keys across threads to maximize contention
+                    let key = (i * num_threads + t) as u64;
+                    l.insert(key, key);
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let expected = (num_threads * per_thread) as usize;
+        assert_eq!(
+            list.len(),
+            expected,
+            "Expected {} entries but got {} — nodes were lost under concurrency",
+            expected,
+            list.len()
+        );
+
+        // Verify every single key is retrievable
+        for i in 0..(num_threads * per_thread) {
+            let key = i as u64;
+            assert!(
+                list.get(&key).is_some(),
+                "Key {} was lost under concurrent insertion",
+                key
+            );
         }
     }
 }

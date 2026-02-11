@@ -422,9 +422,12 @@ impl HttpWebhookSink {
         &self.stats
     }
 
-    /// Initialize from config (call before write)
-    #[allow(dead_code)] // Reserved for future configuration-based initialization
-    fn init_from_config(&mut self, config: &HttpWebhookConfig) {
+    /// Initialize circuit breaker and concurrency settings from config.
+    ///
+    /// Previously marked `#[allow(dead_code)]` and never called.
+    /// Call this after construction to wire config-based circuit breaker and
+    /// concurrency settings before the first `write()` invocation.
+    pub fn init_from_config(&mut self, config: &HttpWebhookConfig) {
         // Set up circuit breaker if enabled
         if config.circuit_breaker_threshold > 0 {
             let cb_config = CircuitBreakerConfig {

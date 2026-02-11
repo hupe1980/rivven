@@ -92,6 +92,7 @@ defaults:
 - Fast compression (~800 MB/s at level 1)
 - Moderate compression ratio (2-3x)
 - Block-based format
+- Pure Rust implementation (lz4_flex) — no C dependencies
 
 **Best for**:
 - Real-time streaming
@@ -244,7 +245,7 @@ For sensitive data, consider end-to-end encryption + compression:
 
 ```rust
 // Compress then encrypt (better ratio)
-let compressed = lz4::compress(&plaintext)?;
+let compressed = lz4_flex::block::compress_prepend_size(&plaintext);
 let encrypted = aes_gcm::encrypt(&compressed)?;
 
 producer.send(Record::new()

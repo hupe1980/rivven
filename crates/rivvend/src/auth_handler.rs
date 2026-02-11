@@ -72,6 +72,7 @@ impl AuthenticatedHandler {
         request: Request,
         connection_auth: &mut ConnectionAuth,
         client_ip: &str,
+        is_tls: bool,
     ) -> Response {
         // Handle authentication requests first (don't require existing auth)
         match &request {
@@ -84,6 +85,20 @@ impl AuthenticatedHandler {
                 mechanism,
                 auth_bytes,
             } => {
+                // Refuse SASL/PLAIN on non-TLS connections to prevent
+                // credential exposure via network sniffing.
+                let mechanism_str = String::from_utf8_lossy(mechanism);
+                if mechanism_str == "PLAIN" && !is_tls {
+                    warn!(
+                        "SASL/PLAIN rejected on non-TLS connection from {} — credentials would be exposed",
+                        client_ip
+                    );
+                    return Response::Error {
+                        message: "SASL/PLAIN requires a TLS connection (use SASL_SSL listener). \
+                                  Sending credentials over cleartext is not permitted."
+                            .to_string(),
+                    };
+                }
                 return self
                     .handle_sasl_authenticate(mechanism, auth_bytes, client_ip, connection_auth)
                     .await;
@@ -618,7 +633,7 @@ mod tests {
         let mut conn_auth = ConnectionAuth::Unauthenticated;
 
         let response = handler
-            .handle(Request::ListTopics, &mut conn_auth, "127.0.0.1")
+            .handle(Request::ListTopics, &mut conn_auth, "127.0.0.1", false)
             .await;
 
         match response {
@@ -641,7 +656,7 @@ mod tests {
                     password: "Prod@Pass123".to_string(),
                 },
                 &mut conn_auth,
-                "127.0.0.1",
+                "127.0.0.1", false,
             )
             .await;
 
@@ -666,7 +681,7 @@ mod tests {
                     password: "Wrong@Pass1".to_string(),
                 },
                 &mut conn_auth,
-                "127.0.0.1",
+                "127.0.0.1", false,
             )
             .await;
 
@@ -691,7 +706,7 @@ mod tests {
                     password: "Prod@Pass123".to_string(),
                 },
                 &mut conn_auth,
-                "127.0.0.1",
+                "127.0.0.1", false,
             )
             .await;
 
@@ -703,7 +718,7 @@ mod tests {
                     partitions: Some(1),
                 },
                 &mut conn_auth,
-                "127.0.0.1",
+                "127.0.0.1", false,
             )
             .await;
 
@@ -724,7 +739,7 @@ mod tests {
                     password: "Admin@Pass1".to_string(),
                 },
                 &mut conn_auth,
-                "127.0.0.1",
+                "127.0.0.1", false,
             )
             .await;
 
@@ -736,7 +751,7 @@ mod tests {
                     partitions: Some(1),
                 },
                 &mut conn_auth,
-                "127.0.0.1",
+                "127.0.0.1", false,
             )
             .await;
 
@@ -758,7 +773,7 @@ mod tests {
 
         // Ping should always work
         let response = handler
-            .handle(Request::Ping, &mut conn_auth, "127.0.0.1")
+            .handle(Request::Ping, &mut conn_auth, "127.0.0.1", false)
             .await;
 
         assert!(matches!(response, Response::Pong));
@@ -771,7 +786,7 @@ mod tests {
 
         // Should be able to list topics without auth when not required
         let response = handler
-            .handle(Request::ListTopics, &mut conn_auth, "127.0.0.1")
+            .handle(Request::ListTopics, &mut conn_auth, "127.0.0.1", false)
             .await;
 
         assert!(matches!(response, Response::Topics { .. }));

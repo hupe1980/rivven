@@ -345,13 +345,55 @@ impl CompatibilityChecker {
 
         let mut messages = Vec::new();
 
+        // Strip comments before regex extraction to avoid
+        // matching field numbers in comments or strings.
+        let strip_comments = |s: &str| -> String {
+            let mut result = String::with_capacity(s.len());
+            let mut chars = s.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '/' {
+                    if chars.peek() == Some(&'/') {
+                        // Line comment — skip to end of line
+                        for ch in chars.by_ref() {
+                            if ch == '\n' {
+                                result.push('\n');
+                                break;
+                            }
+                        }
+                        continue;
+                    } else if chars.peek() == Some(&'*') {
+                        // Block comment — skip to */
+                        chars.next(); // consume *
+                        loop {
+                            match chars.next() {
+                                Some('*') if chars.peek() == Some(&'/') => {
+                                    chars.next();
+                                    break;
+                                }
+                                Some(_) => continue,
+                                None => break,
+                            }
+                        }
+                        continue;
+                    }
+                }
+                result.push(c);
+            }
+            result
+        };
+
+        let clean_existing = strip_comments(existing_schema);
+        let clean_new = strip_comments(new_schema);
+
         // Extract field numbers from both schemas using regex
-        // Pattern matches: field_name = field_number
-        let field_pattern = regex::Regex::new(r"(\w+)\s*=\s*(\d+)")
-            .map_err(|e| SchemaError::ParseError(format!("Regex error: {}", e)))?;
+        // Pattern matches: optional/repeated/required type field_name = field_number
+        // More precise than bare `\w+ = \d+` to avoid matching option values
+        let field_pattern =
+            regex::Regex::new(r"(?:optional|repeated|required|^\s*)\s*\w+\s+(\w+)\s*=\s*(\d+)")
+                .map_err(|e| SchemaError::ParseError(format!("Regex error: {}", e)))?;
 
         let old_fields: HashMap<u32, String> = field_pattern
-            .captures_iter(existing_schema)
+            .captures_iter(&clean_existing)
             .filter_map(|cap| {
                 let name = cap.get(1)?.as_str().to_string();
                 let num: u32 = cap.get(2)?.as_str().parse().ok()?;
@@ -360,7 +402,7 @@ impl CompatibilityChecker {
             .collect();
 
         let new_fields: HashMap<u32, String> = field_pattern
-            .captures_iter(new_schema)
+            .captures_iter(&clean_new)
             .filter_map(|cap| {
                 let name = cap.get(1)?.as_str().to_string();
                 let num: u32 = cap.get(2)?.as_str().parse().ok()?;
@@ -385,7 +427,7 @@ impl CompatibilityChecker {
             .map_err(|e| SchemaError::ParseError(format!("Regex error: {}", e)))?;
 
         let old_reserved: HashSet<u32> = reserved_pattern
-            .captures_iter(existing_schema)
+            .captures_iter(&clean_existing)
             .flat_map(|cap| {
                 cap.get(1)
                     .map(|m| {
@@ -412,7 +454,7 @@ impl CompatibilityChecker {
             .map_err(|e| SchemaError::ParseError(format!("Regex error: {}", e)))?;
 
         let old_required: HashSet<&str> = required_pattern
-            .captures_iter(existing_schema)
+            .captures_iter(&clean_existing)
             .filter_map(|cap| cap.get(1).map(|m| m.as_str()))
             .collect();
 

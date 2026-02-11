@@ -358,7 +358,26 @@ impl Membership {
     async fn run_receiver(&self) -> Result<()> {
         let mut buf = vec![0u8; 65536];
 
+        // Rate-limit inbound UDP processing to prevent a flood from
+        // exhausting CPU. 10,000 messages/sec is well above normal SWIM traffic
+        // but caps attack surface during a UDP flood.
+        const MAX_MSGS_PER_SEC: u32 = 10_000;
+        let mut msg_count: u32 = 0;
+        let mut window_start = tokio::time::Instant::now();
+
         loop {
+            // Reset counter every second
+            if window_start.elapsed() >= std::time::Duration::from_secs(1) {
+                msg_count = 0;
+                window_start = tokio::time::Instant::now();
+            }
+
+            if msg_count >= MAX_MSGS_PER_SEC {
+                // Budget exhausted — sleep until next window
+                tokio::time::sleep_until(window_start + std::time::Duration::from_secs(1)).await;
+                continue;
+            }
+
             let (len, from) = match self.socket.recv_from(&mut buf).await {
                 Ok(r) => r,
                 Err(e) => {
@@ -366,6 +385,8 @@ impl Membership {
                     continue;
                 }
             };
+
+            msg_count += 1;
 
             // Verify HMAC if authentication is enabled
             let payload = match self.verify_message(&buf[..len]) {

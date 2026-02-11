@@ -13,7 +13,8 @@
 //! - Pluggable cold storage backends
 
 use bytes::Bytes;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use indexmap::IndexMap;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -386,13 +387,14 @@ impl SegmentMetadata {
     }
 }
 
-/// Hot tier: In-memory LRU cache
+/// Hot tier: In-memory LRU cache with O(1) access, insert, and eviction.
+///
+/// Uses `IndexMap` to maintain insertion-order with O(1) key lookup and
+/// move-to-back promotion. Eviction pops the front (oldest entry).
 #[derive(Debug)]
 pub struct HotTier {
-    /// Segment data keyed by (topic, partition, base_offset)
-    segments: RwLock<HashMap<(String, u32, u64), Bytes>>,
-    /// LRU order tracking
-    lru_order: Mutex<VecDeque<(String, u32, u64)>>,
+    /// Segment data in LRU order — back is most recent, front is eviction candidate
+    entries: Mutex<IndexMap<(String, u32, u64), Bytes>>,
     /// Current size in bytes
     current_size: AtomicU64,
     /// Maximum size in bytes
@@ -402,8 +404,7 @@ pub struct HotTier {
 impl HotTier {
     pub fn new(max_size: u64) -> Self {
         Self {
-            segments: RwLock::new(HashMap::new()),
-            lru_order: Mutex::new(VecDeque::new()),
+            entries: Mutex::new(IndexMap::new()),
             current_size: AtomicU64::new(0),
             max_size,
         }
@@ -418,108 +419,73 @@ impl HotTier {
             return false;
         }
 
-        // Atomically reserve capacity using CAS loop to eliminate TOCTOU race
-        loop {
-            let current = self.current_size.load(Ordering::Acquire);
-            if current + size > self.max_size {
-                // Try to evict to make space
-                if !self.evict_one().await {
-                    return false; // Cannot make space
-                }
-                continue; // Re-check after eviction
-            }
-            // Attempt to reserve space atomically
-            if self
-                .current_size
-                .compare_exchange_weak(current, current + size, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                break; // Space successfully reserved
-            }
-            // CAS failed (another concurrent insert modified current_size) — retry
-        }
-
         let key = (topic.to_string(), partition, base_offset);
+        let mut entries = self.entries.lock().await;
 
-        // Insert data — space already reserved via CAS
-        {
-            let mut segments = self.segments.write().await;
-            if let Some(old) = segments.insert(key.clone(), data) {
-                // Replaced an existing entry: release its space (reservation covers new entry)
+        // Remove existing entry first (if any) to reclaim its space
+        if let Some(old) = entries.swap_remove(&key) {
+            self.current_size.fetch_sub(old.len() as u64, Ordering::Relaxed);
+        }
+
+        // Evict until enough space is available
+        while self.current_size.load(Ordering::Acquire) + size > self.max_size {
+            if let Some((_evicted_key, evicted_data)) = entries.shift_remove_index(0) {
                 self.current_size
-                    .fetch_sub(old.len() as u64, Ordering::Relaxed);
+                    .fetch_sub(evicted_data.len() as u64, Ordering::Relaxed);
+            } else {
+                return false; // Empty but still can't fit — shouldn't happen
             }
         }
 
-        // Update LRU
-        {
-            let mut lru = self.lru_order.lock().await;
-            lru.retain(|k| k != &key);
-            lru.push_back(key);
-        }
+        // Insert at back (most-recently-used position)
+        entries.insert(key, data);
+        self.current_size.fetch_add(size, Ordering::Relaxed);
 
         true
     }
 
-    /// Get data from hot tier
+    /// Get data from hot tier with LRU promotion
     pub async fn get(&self, topic: &str, partition: u32, base_offset: u64) -> Option<Bytes> {
         let key = (topic.to_string(), partition, base_offset);
+        let mut entries = self.entries.lock().await;
 
-        let data = {
-            let segments = self.segments.read().await;
-            segments.get(&key).cloned()
-        };
-
-        if data.is_some() {
-            // Update LRU on access
-            let mut lru = self.lru_order.lock().await;
-            lru.retain(|k| k != &key);
-            lru.push_back(key);
+        // O(1) lookup + promote to back (most-recently-used)
+        if let Some(idx) = entries.get_index_of(&key) {
+            let last = entries.len() - 1;
+            entries.move_index(idx, last);
+            // Access by index (now at `last`) — avoids a second hash lookup
+            let data = entries.get_index(last).unwrap().1.clone();
+            Some(data)
+        } else {
+            None
         }
-
-        data
     }
 
     /// Remove data from hot tier
     pub async fn remove(&self, topic: &str, partition: u32, base_offset: u64) -> Option<Bytes> {
         let key = (topic.to_string(), partition, base_offset);
+        let mut entries = self.entries.lock().await;
 
-        let removed = {
-            let mut segments = self.segments.write().await;
-            segments.remove(&key)
-        };
-
-        if let Some(ref data) = removed {
+        if let Some(data) = entries.swap_remove(&key) {
             self.current_size
                 .fetch_sub(data.len() as u64, Ordering::Relaxed);
-            let mut lru = self.lru_order.lock().await;
-            lru.retain(|k| k != &key);
+            Some(data)
+        } else {
+            None
         }
-
-        removed
     }
 
-    /// Evict least recently used segment
+    /// Evict least recently used segment (front of the map)
+    #[allow(dead_code)]
     async fn evict_one(&self) -> bool {
-        let to_evict = {
-            let mut lru = self.lru_order.lock().await;
-            lru.pop_front()
-        };
-
-        if let Some(key) = to_evict {
-            let removed = {
-                let mut segments = self.segments.write().await;
-                segments.remove(&key)
-            };
-
-            if let Some(data) = removed {
-                self.current_size
-                    .fetch_sub(data.len() as u64, Ordering::Relaxed);
-                return true;
-            }
+        let mut entries = self.entries.lock().await;
+        if let Some((_key, data)) = entries.shift_remove_index(0) {
+            self.current_size
+                .fetch_sub(data.len() as u64, Ordering::Relaxed);
+            true
+        } else {
+            false
         }
-
-        false
     }
 
     /// Get current usage statistics
@@ -623,7 +589,8 @@ impl WarmTier {
         Ok(())
     }
 
-    /// Read segment data using mmap for zero-copy
+    /// Read segment data using mmap — M-7 fix: uses spawn_blocking to avoid
+    /// blocking the Tokio runtime with mmap/file syscalls.
     pub async fn read(
         &self,
         topic: &str,
@@ -636,11 +603,15 @@ impl WarmTier {
             return Ok(None);
         }
 
-        // Memory map the file for efficient reading
-        let file = std::fs::File::open(&path)?;
-        // SAFETY: File is opened read-only and remains valid for mmap lifetime.
-        // The mmap is only used for reading and copied to Bytes before return.
-        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+        // Move blocking mmap + copy off the async runtime thread
+        let data = tokio::task::spawn_blocking(move || -> Result<Bytes> {
+            let file = std::fs::File::open(&path)?;
+            // SAFETY: File is opened read-only and remains valid for mmap lifetime.
+            let mmap = unsafe { memmap2::Mmap::map(&file)? };
+            Ok(Bytes::copy_from_slice(&mmap))
+        })
+        .await
+        .map_err(|e| crate::error::Error::Other(format!("spawn_blocking join: {}", e)))??;
 
         // Update access stats
         let key = (topic.to_string(), partition, base_offset);
@@ -648,9 +619,7 @@ impl WarmTier {
             meta.record_access();
         }
 
-        // Convert to Bytes (this copies, but allows the mmap to be dropped)
-        // For true zero-copy, we'd need to return an Arc<Mmap>
-        Ok(Some(Bytes::copy_from_slice(&mmap)))
+        Ok(Some(data))
     }
 
     /// Remove segment
@@ -1825,6 +1794,12 @@ impl TieredStorage {
     async fn compact_segment(&self, topic: &str, partition: u32, base_offset: u64) -> Result<()> {
         use std::collections::HashMap;
 
+        /// Maximum segment size we'll load into memory for compaction.
+        /// Segments larger than this are skipped with a warning. A streaming
+        /// compaction that processes records in chunks would remove this limit
+        /// but requires a significantly more complex merge-sort approach.
+        const MAX_COMPACTION_BYTES: u64 = 512 * 1024 * 1024; // 512 MB
+
         // Get segment metadata
         let metadata = match self
             .get_segment_metadata(topic, partition, base_offset)
@@ -1841,6 +1816,20 @@ impl TieredStorage {
                 return Ok(());
             }
         };
+
+        // Guard: refuse to load segments that would blow up heap
+        if metadata.size_bytes > MAX_COMPACTION_BYTES {
+            tracing::warn!(
+                "Skipping compaction for {}/{}/{}: segment size {} bytes exceeds \
+                 max compaction size {} bytes",
+                topic,
+                partition,
+                base_offset,
+                metadata.size_bytes,
+                MAX_COMPACTION_BYTES
+            );
+            return Ok(());
+        }
 
         // Read segment data from current tier
         let data = match metadata.tier {

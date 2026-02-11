@@ -32,7 +32,7 @@
 use super::{FormatError, FormatWriter};
 use arrow_array::{
     builder::{BooleanBuilder, Float64Builder, Int64Builder, ListBuilder, StringBuilder},
-    ArrayRef, RecordBatch,
+    ArrayRef, RecordBatch, StructArray,
 };
 use arrow_schema::{DataType, Field, Schema};
 use parquet::{arrow::ArrowWriter, basic::Compression, file::properties::WriterProperties};
@@ -484,29 +484,37 @@ impl ParquetWriter {
         &self,
         events: &[Value],
         field_name: &str,
-        _fields: &arrow_schema::Fields,
+        fields: &arrow_schema::Fields,
     ) -> ParquetResult<ArrayRef> {
-        // For nested structs, serialize to JSON string for now
-        // Full struct support would require recursive builders
-        let mut builder = StringBuilder::with_capacity(events.len(), self.config.max_string_size);
+        // Extract the sub-object for each event; null/missing → Value::Null
+        let sub_events: Vec<Value> = events
+            .iter()
+            .map(|event| {
+                event
+                    .get(field_name)
+                    .cloned()
+                    .unwrap_or(Value::Null)
+            })
+            .collect();
 
-        for event in events {
-            match event.get(field_name) {
-                Some(Value::Object(_)) => {
-                    let s = serde_json::to_string(event.get(field_name).unwrap())
-                        .map_err(|e| ParquetError::Serialization(e.to_string()))?;
-                    builder.append_value(&s);
-                }
-                Some(Value::Null) | None => builder.append_null(),
-                Some(v) => {
-                    let s = serde_json::to_string(v)
-                        .map_err(|e| ParquetError::Serialization(e.to_string()))?;
-                    builder.append_value(&s);
-                }
-            }
+        // Recursively build a child array for each struct field
+        let mut child_arrays: Vec<ArrayRef> = Vec::with_capacity(fields.len());
+        for field in fields.iter() {
+            let child = self.build_array(&sub_events, field.name(), field.data_type())?;
+            child_arrays.push(child);
         }
 
-        Ok(Arc::new(builder.finish()))
+        // Null buffer: struct is null when the source value is null/missing
+        let nulls: Vec<bool> = sub_events.iter().map(|v| !v.is_null()).collect();
+
+        let struct_array = StructArray::try_new(
+            fields.clone(),
+            child_arrays,
+            Some(arrow::buffer::NullBuffer::from(nulls)),
+        )
+        .map_err(|e| ParquetError::Serialization(e.to_string()))?;
+
+        Ok(Arc::new(struct_array))
     }
 }
 

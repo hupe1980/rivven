@@ -570,17 +570,20 @@ impl Transaction for MySqlTransaction {
     }
 
     async fn savepoint(&self, name: &str) -> Result<()> {
+        crate::security::validate_sql_identifier(name)?;
         self.execute(&format!("SAVEPOINT {}", name), &[]).await?;
         Ok(())
     }
 
     async fn rollback_to_savepoint(&self, name: &str) -> Result<()> {
+        crate::security::validate_sql_identifier(name)?;
         self.execute(&format!("ROLLBACK TO SAVEPOINT {}", name), &[])
             .await?;
         Ok(())
     }
 
     async fn release_savepoint(&self, name: &str) -> Result<()> {
+        crate::security::validate_sql_identifier(name)?;
         self.execute(&format!("RELEASE SAVEPOINT {}", name), &[])
             .await?;
         Ok(())

@@ -511,22 +511,44 @@ pub async fn auth_middleware(
     next.run(request).await
 }
 
-/// Validate API Key
+/// Validate API Key (timing-safe).
+///
+/// Standard HashMap::get short-circuits on key mismatch, creating
+/// a timing side-channel that enables brute-force key enumeration. Instead,
+/// we iterate all stored keys and use constant-time byte comparison so that
+/// the response time does not leak which keys exist.
 #[cfg(feature = "auth")]
 fn validate_api_key(
     api_key: &str,
     config: &AuthConfig,
     auth_manager: &AuthManager,
 ) -> Result<AuthState, AuthErrorResponse> {
-    if let Some(entry) = config.api_keys.get(api_key) {
+    // Constant-time scan: check every key even after a match is found
+    let api_key_bytes = api_key.as_bytes();
+    let mut matched_entry = None;
+
+    for (stored_key, entry) in &config.api_keys {
+        let stored_bytes = stored_key.as_bytes();
+        // Length-prefixed constant-time comparison:
+        // XOR accumulator is 0 only if all bytes match
+        if stored_bytes.len() == api_key_bytes.len() {
+            let mut diff: u8 = 0;
+            for (a, b) in stored_bytes.iter().zip(api_key_bytes.iter()) {
+                diff |= a ^ b;
+            }
+            if diff == 0 {
+                matched_entry = Some(entry);
+            }
+        }
+        // Continue scanning even after match to prevent timing leak
+    }
+
+    if let Some(entry) = matched_entry {
         debug!("API Key validated for principal: {}", entry.principal);
 
-        // Create a session for this API key user
-        // Look up the user in auth_manager or create a synthetic session
         if let Some(session) = auth_manager.get_session_by_principal(&entry.principal) {
             Ok(AuthState::authenticated(session))
         } else {
-            // Create synthetic session with roles from API key entry
             let session = auth_manager.create_api_key_session(&entry.principal, &entry.roles);
             Ok(AuthState::authenticated(session))
         }

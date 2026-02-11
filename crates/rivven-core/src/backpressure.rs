@@ -548,28 +548,51 @@ impl CircuitBreaker {
         }
     }
 
-    /// Check if request is allowed
+    /// Check if request is allowed.
+    ///
+    /// Uses a single write lock for the Open→HalfOpen transition
+    /// to eliminate the TOCTOU race where multiple threads could simultaneously
+    /// read `Open`, then all transition to `HalfOpen` and all pass through.
     pub fn allow(&self) -> bool {
-        let state = *self.state.read();
+        // Fast path: read lock for Closed and HalfOpen (common cases)
+        {
+            let state = *self.state.read();
+            match state {
+                CircuitState::Closed => {
+                    self.stats.allowed.fetch_add(1, Ordering::Relaxed);
+                    return true;
+                }
+                CircuitState::HalfOpen => {
+                    self.stats.allowed.fetch_add(1, Ordering::Relaxed);
+                    return true;
+                }
+                CircuitState::Open { opened_at } => {
+                    if opened_at.elapsed() <= self.config.recovery_timeout {
+                        self.stats.rejected.fetch_add(1, Ordering::Relaxed);
+                        return false;
+                    }
+                    // Recovery timeout elapsed — fall through to write lock path
+                }
+            }
+        }
 
-        match state {
-            CircuitState::Closed => {
+        // Slow path: atomically check-and-transition under write lock
+        let mut state = self.state.write();
+        match *state {
+            CircuitState::Open { opened_at }
+                if opened_at.elapsed() > self.config.recovery_timeout =>
+            {
+                *state = CircuitState::HalfOpen;
                 self.stats.allowed.fetch_add(1, Ordering::Relaxed);
                 true
             }
-            CircuitState::Open { opened_at } => {
-                if opened_at.elapsed() > self.config.recovery_timeout {
-                    // Transition to half-open
-                    *self.state.write() = CircuitState::HalfOpen;
-                    self.stats.allowed.fetch_add(1, Ordering::Relaxed);
-                    true
-                } else {
-                    self.stats.rejected.fetch_add(1, Ordering::Relaxed);
-                    false
-                }
+            CircuitState::Open { .. } => {
+                // Another thread may have reset the timer
+                self.stats.rejected.fetch_add(1, Ordering::Relaxed);
+                false
             }
-            CircuitState::HalfOpen => {
-                // Allow limited requests in half-open
+            // State changed between read and write (another thread transitioned)
+            _ => {
                 self.stats.allowed.fetch_add(1, Ordering::Relaxed);
                 true
             }

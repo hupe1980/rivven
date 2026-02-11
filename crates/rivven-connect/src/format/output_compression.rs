@@ -149,8 +149,7 @@ fn compress_snappy(data: &[u8]) -> Result<Vec<u8>, FormatError> {
 }
 
 fn compress_lz4(data: &[u8]) -> Result<Vec<u8>, FormatError> {
-    lz4::block::compress(data, None, false)
-        .map_err(|e| FormatError::Write(format!("LZ4 compression failed: {}", e)))
+    Ok(lz4_flex::block::compress_prepend_size(data))
 }
 
 // ============================================================================

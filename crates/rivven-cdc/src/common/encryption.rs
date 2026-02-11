@@ -214,7 +214,10 @@ impl EncryptionConfigBuilder {
 }
 
 /// Encryption key with metadata.
-#[derive(Clone)]
+///
+/// Key material is zeroized on `Drop` (M-19 fix) to prevent recovery from
+/// core dumps or swap. The `Clone` implementation deliberately copies the
+/// key material (needed for key rotation); callers should minimize clones.
 pub struct EncryptionKey {
     /// Key ID
     pub id: String,
@@ -226,6 +229,31 @@ pub struct EncryptionKey {
     pub created_at: u64,
     /// Whether this key is active for encryption
     pub active: bool,
+}
+
+impl Clone for EncryptionKey {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            version: self.version,
+            key_material: self.key_material.clone(),
+            created_at: self.created_at,
+            active: self.active,
+        }
+    }
+}
+
+impl Drop for EncryptionKey {
+    fn drop(&mut self) {
+        // Securely zeroize key material to prevent recovery from freed memory.
+        // Uses `write_volatile` + compiler fence to prevent the optimizer from
+        // eliding the zeroing (the "dead store elimination" problem).
+        for byte in self.key_material.iter_mut() {
+            // SAFETY: byte is a valid, aligned &mut u8
+            unsafe { std::ptr::write_volatile(byte, 0) };
+        }
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 impl EncryptionKey {

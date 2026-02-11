@@ -522,6 +522,7 @@ impl Transaction for PgTransaction {
     }
 
     async fn savepoint(&self, name: &str) -> Result<()> {
+        crate::security::validate_sql_identifier(name)?;
         let sql = format!("SAVEPOINT {}", name);
         self.client
             .execute(&sql, &[])
@@ -534,6 +535,7 @@ impl Transaction for PgTransaction {
     }
 
     async fn rollback_to_savepoint(&self, name: &str) -> Result<()> {
+        crate::security::validate_sql_identifier(name)?;
         let sql = format!("ROLLBACK TO SAVEPOINT {}", name);
         self.client
             .execute(&sql, &[])
@@ -546,6 +548,7 @@ impl Transaction for PgTransaction {
     }
 
     async fn release_savepoint(&self, name: &str) -> Result<()> {
+        crate::security::validate_sql_identifier(name)?;
         let sql = format!("RELEASE SAVEPOINT {}", name);
         self.client
             .execute(&sql, &[])

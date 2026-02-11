@@ -273,7 +273,18 @@ impl Partition {
         // Write to log manager using optimized batch append
         {
             let mut log = self.log_manager.write().await;
-            log.append_batch(batch_messages).await?;
+            if let Err(e) = log.append_batch(batch_messages).await {
+                // Roll back atomically reserved offsets on failure.
+                // CAS ensures we only roll back if no concurrent append advanced
+                // past our reservation.
+                let _ = self.next_offset.compare_exchange(
+                    start_offset + batch_size as u64,
+                    start_offset,
+                    Ordering::SeqCst,
+                    Ordering::Relaxed,
+                );
+                return Err(e);
+            }
         }
 
         // Also write to tiered storage if enabled

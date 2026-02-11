@@ -81,7 +81,7 @@ fn validate_env_vars(vars: &[k8s_openapi::api::core::v1::EnvVar]) -> Result<(), 
                 .with_message("environment variable name must be 1-256 characters".into()));
         }
         // Check for dangerous env var names that could override security settings
-        let forbidden_prefixes = ["LD_", "DYLD_", "PATH=", "HOME=", "USER="];
+        let forbidden_prefixes = ["LD_", "DYLD_", "PATH", "HOME", "USER"];
         for prefix in forbidden_prefixes {
             if var.name.starts_with(prefix) && var.value.is_some() {
                 return Err(ValidationError::new("forbidden_env_var").with_message(

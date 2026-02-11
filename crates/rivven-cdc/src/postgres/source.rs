@@ -628,6 +628,16 @@ async fn run_cdc_loop(
                 }
             }
             None => {
+                // Log the count of buffered transaction events that
+                // will be lost because the replication stream ended mid-transaction.
+                if !event_buffer.is_empty() {
+                    warn!(
+                        "Replication stream ended with {} uncommitted transaction event(s) — \
+                         these events are lost because the transaction was not committed",
+                        event_buffer.len()
+                    );
+                    event_buffer.clear();
+                }
                 info!("Replication stream ended");
                 break;
             }

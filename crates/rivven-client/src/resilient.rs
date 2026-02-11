@@ -315,13 +315,19 @@ impl ConnectionPool {
             .await
             .map_err(|_| Error::ConnectionError("Pool exhausted".to_string()))?;
 
-        // Try to get existing connection
+        // Try to get existing connection — M-11 fix: also check idle staleness
+        // to avoid reusing connections the server may have already closed.
         {
             let mut connections = self.connections.lock().await;
-            if let Some(mut conn) = connections.pop() {
-                conn.last_used = Instant::now();
-                conn._permit = permit;
-                return Ok(conn);
+            while let Some(conn) = connections.pop() {
+                // Discard connections idle for too long (server may have closed them)
+                if conn.last_used.elapsed() < Duration::from_secs(60) {
+                    let mut conn = conn;
+                    conn.last_used = Instant::now();
+                    conn._permit = permit;
+                    return Ok(conn);
+                }
+                // Drop stale connection, try next one in pool
             }
         }
 
@@ -850,14 +856,13 @@ fn calculate_backoff(
     Duration::from_millis(final_delay as u64)
 }
 
-/// Simple random number generator (0.0 - 1.0)
+/// Random number generator (0.0 - 1.0).
+///
+/// Uses `rand::random::<f64>()` instead of `subsec_nanos()` which
+/// is deterministic within the same millisecond, causing thundering herd
+/// when multiple clients have synchronized clocks.
 fn rand_simple() -> f64 {
-    use std::time::SystemTime;
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap()
-        .subsec_nanos();
-    (nanos % 1000) as f64 / 1000.0
+    rand::random::<f64>()
 }
 
 #[cfg(test)]

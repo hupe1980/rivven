@@ -166,13 +166,24 @@ impl TopicConfig {
     }
 
     /// Get retention duration
+    ///
+    /// -1 is the sentinel for infinite retention. Previously
+    /// `as u64` wrapped it to ~584 million years.
     pub fn retention_duration(&self) -> Duration {
-        Duration::from_millis(self.retention_ms as u64)
+        if self.retention_ms < 0 {
+            Duration::MAX
+        } else {
+            Duration::from_millis(self.retention_ms as u64)
+        }
     }
 
     /// Get segment roll duration
     pub fn segment_roll_duration(&self) -> Duration {
-        Duration::from_millis(self.segment_ms as u64)
+        if self.segment_ms < 0 {
+            Duration::MAX
+        } else {
+            Duration::from_millis(self.segment_ms as u64)
+        }
     }
 
     /// Convert to HashMap for describe response

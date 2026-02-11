@@ -820,10 +820,14 @@ impl ConnectCoordinator {
     // =========================================================================
 
     /// Trigger an immediate rebalance
-    pub fn rebalance(&mut self) -> CoordinatorResult<()> {
+    ///
+    /// Returns the task assignments produced by the rebalance so
+    /// the caller can dispatch them. Previously the assignments were silently
+    /// discarded.
+    pub fn rebalance(&mut self) -> CoordinatorResult<Vec<TaskAssignmentMessage>> {
         self.rebalance_pending = true;
-        self.execute_rebalance();
-        Ok(())
+        let assignments = self.execute_rebalance();
+        Ok(assignments)
     }
 
     /// Get current task assignments as (TaskId, NodeId) pairs

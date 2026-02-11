@@ -137,7 +137,7 @@ prost-reflect = "0.15"
 flate2 = "1"
 zstd = "0.13"
 snap = "1.1"
-lz4 = "1.24"
+lz4_flex = "0.11"
 
 # Unified object storage (optional - replaces individual cloud SDKs)
 object_store = { version = "0.11", optional = true }

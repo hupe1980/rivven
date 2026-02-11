@@ -425,62 +425,16 @@ impl StickyPartitioner {
     }
 }
 
-/// Murmur2 consistent hash (Kafka-compatible)
-///
-/// This is the same algorithm used by Kafka's DefaultPartitioner.
-/// Optimized for performance with unrolled loops for common cases.
+/// Murmur2 consistent hash — delegates to the canonical shared implementation
+/// in `rivven_core::hash` to guarantee client/server partition agreement.
 #[inline]
 fn murmur2_partition(key: &[u8], num_partitions: u32) -> u32 {
-    const SEED: u32 = 0x9747b28c;
-    const M: u32 = 0x5bd1e995;
-    const R: u32 = 24;
-
-    let len = key.len();
-    let mut h: u32 = SEED ^ (len as u32);
-
-    // Process 4-byte chunks
-    let mut i = 0;
-    while i + 4 <= len {
-        // Read 4 bytes as little-endian u32 (more efficient than byte-by-byte)
-        let k = u32::from_le_bytes([key[i], key[i + 1], key[i + 2], key[i + 3]]);
-        let k = k.wrapping_mul(M);
-        let k = k ^ (k >> R);
-        let k = k.wrapping_mul(M);
-        h = h.wrapping_mul(M);
-        h ^= k;
-        i += 4;
-    }
-
-    // Handle remaining bytes
-    let remainder = len - i;
-    if remainder >= 3 {
-        h ^= (key[i + 2] as u32) << 16;
-    }
-    if remainder >= 2 {
-        h ^= (key[i + 1] as u32) << 8;
-    }
-    if remainder >= 1 {
-        h ^= key[i] as u32;
-        h = h.wrapping_mul(M);
-    }
-
-    // Final mixing
-    h ^= h >> 13;
-    h = h.wrapping_mul(M);
-    h ^= h >> 15;
-
-    // Kafka uses toPositive which masks the sign bit
-    (h & 0x7fffffff) % num_partitions
+    rivven_core::hash::murmur2_partition(key, num_partitions)
 }
 
-/// Get a random partition
+/// Get a random partition using a proper PRNG.
 fn rand_partition(num_partitions: u32) -> u32 {
-    use std::time::SystemTime;
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos();
-    nanos % num_partitions
+    (rand::random::<u32>()) % num_partitions
 }
 
 // ============================================================================

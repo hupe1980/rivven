@@ -262,8 +262,13 @@ impl LeaderElection {
         }
 
         if let Some(ref info) = *leader {
+            // Protect against wall-clock backward jumps (NTP corrections).
+            // `(now - last_heartbeat) as u64` wraps a negative difference to a huge
+            // value, immediately triggering spurious failover. Use saturating_sub
+            // so backward jumps produce 0 elapsed, which never exceeds the timeout.
             let now = chrono::Utc::now().timestamp_millis();
-            let elapsed = Duration::from_millis((now - info.last_heartbeat) as u64);
+            let elapsed_ms = (now - info.last_heartbeat).max(0) as u64;
+            let elapsed = Duration::from_millis(elapsed_ms);
 
             if elapsed > self.failure_timeout {
                 return Some(info.node_id.clone());

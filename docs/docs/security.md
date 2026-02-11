@@ -51,6 +51,21 @@ server:
     min_version: "1.3"
 ```
 
+### Automatic Certificate Hot-Reload
+
+Rivven automatically reloads TLS certificate and key files **without restarting the broker or dropping existing connections**. This enables zero-downtime certificate rotation:
+
+- A background task periodically re-reads `cert_path`, `key_path`, and `ca_path`
+- New connections use the updated certificates immediately
+- Existing connections continue with their original certificates until they reconnect
+- No extra configuration — hot-reload is enabled automatically when TLS is active
+
+This is ideal for:
+
+- **cert-manager** (Kubernetes) automatic certificate renewal
+- **Let's Encrypt** / ACME certificate rotation
+- **Short-lived certificates** in zero-trust environments
+
 ### Certificate Generation
 
 Generate certificates with OpenSSL:
@@ -608,6 +623,7 @@ spec:
 ### Production Hardening
 
 - [ ] Enable TLS for all client connections
+- [ ] Set up automatic certificate rotation (cert-manager, ACME)
 - [ ] Use mTLS for service-to-service auth
 - [ ] Configure RBAC with least privilege
 - [ ] Enable audit logging

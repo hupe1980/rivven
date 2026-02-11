@@ -108,9 +108,8 @@ impl StickyPartitioner {
     /// Hash-based partitioning for keyed messages
     /// Uses murmur2-style hash for Kafka compatibility
     fn hash_partition(&self, key: &[u8], num_partitions: u32) -> u32 {
-        let hash = murmur2_hash(key);
-        // Use positive modulo to ensure non-negative result
-        ((hash as i32).unsigned_abs()) % num_partitions
+        // Delegate to the shared canonical implementation
+        rivven_core::hash::murmur2_partition(key, num_partitions)
     }
 
     /// Sticky partitioning for keyless messages
@@ -165,11 +164,19 @@ impl StickyPartitioner {
         batch_start.elapsed() >= self.config.linger_duration
     }
 
-    /// Reset state for a topic (useful for testing)
-    #[allow(dead_code)]
+    /// Remove state for a topic (called on topic deletion to prevent L-9 memory leak)
     pub fn reset_topic(&self, topic: &str) {
         let mut states = self.topic_states.write();
         states.remove(topic);
+    }
+
+    /// Remove state for topics no longer in the active set.
+    ///
+    /// Call periodically or on topic deletion to prevent
+    /// the `topic_states` map from growing without bound.
+    pub fn retain_topics(&self, active_topics: &std::collections::HashSet<String>) {
+        let mut states = self.topic_states.write();
+        states.retain(|topic, _| active_topics.contains(topic));
     }
 }
 
@@ -179,47 +186,8 @@ impl Default for StickyPartitioner {
     }
 }
 
-/// Murmur2 hash function (Kafka-compatible)
-/// This matches Kafka's default partitioner hash function
-/// Based on Kafka's org.apache.kafka.common.utils.Utils.murmur2
-fn murmur2_hash(data: &[u8]) -> u32 {
-    const SEED: i32 = 0x9747b28c_u32 as i32;
-    const M: i32 = 0x5bd1e995;
-    const R: i32 = 24;
-
-    let len = data.len() as i32;
-    let mut h: i32 = SEED ^ len;
-
-    let mut i = 0usize;
-    while i + 4 <= data.len() {
-        let mut k = i32::from_le_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]);
-        k = k.wrapping_mul(M);
-        k ^= k >> R;
-        k = k.wrapping_mul(M);
-        h = h.wrapping_mul(M);
-        h ^= k;
-        i += 4;
-    }
-
-    // Handle remaining bytes
-    let remaining = data.len() - i;
-    if remaining >= 3 {
-        h ^= (data[i + 2] as i32) << 16;
-    }
-    if remaining >= 2 {
-        h ^= (data[i + 1] as i32) << 8;
-    }
-    if remaining >= 1 {
-        h ^= data[i] as i32;
-        h = h.wrapping_mul(M);
-    }
-
-    h ^= (h as u32 >> 13) as i32;
-    h = h.wrapping_mul(M);
-    h ^= (h as u32 >> 15) as i32;
-
-    h as u32
-}
+/// Murmur2 hash — delegates to the canonical shared implementation
+/// in `rivven_core::hash` to guarantee client/server partition agreement.
 
 #[cfg(test)]
 mod tests {
@@ -298,14 +266,14 @@ mod tests {
 
     #[test]
     fn test_murmur2_deterministic() {
-        // Test that same key always produces same hash
+        // Test that same key always produces same hash (using shared impl)
         let key = b"test-key-12345";
-        let h1 = murmur2_hash(key);
-        let h2 = murmur2_hash(key);
+        let h1 = rivven_core::hash::murmur2(key);
+        let h2 = rivven_core::hash::murmur2(key);
         assert_eq!(h1, h2, "Same key should produce same hash");
 
         // Different keys should (likely) produce different hashes
-        let h3 = murmur2_hash(b"different-key");
+        let h3 = rivven_core::hash::murmur2(b"different-key");
         assert_ne!(h1, h3, "Different keys should produce different hashes");
     }
 

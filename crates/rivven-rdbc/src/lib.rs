@@ -60,6 +60,7 @@ pub mod dialect;
 pub mod error;
 pub mod pool;
 pub mod schema;
+pub mod security;
 pub mod sink;
 pub mod source;
 pub mod types;

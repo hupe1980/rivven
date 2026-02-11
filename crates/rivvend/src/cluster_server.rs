@@ -207,7 +207,7 @@ impl ClusterServer {
 
             // Create coordinator and wire in Raft node
             let mut coordinator = ClusterCoordinator::new(cluster_config).await?;
-            coordinator.set_raft_node(raft_node.clone());
+            coordinator.set_raft_node(raft_node.clone()).await;
 
             (
                 Some(Arc::new(RwLock::new(coordinator))),
@@ -315,7 +315,8 @@ impl ClusterServer {
             self.raft_node.clone(),
             self.coordinator.clone(),
             &tls_config,
-        );
+        )
+        .with_cluster_auth_token(self.cli.cluster_auth_token.clone());
         let tls_config_clone = tls_config.clone();
         let mut shutdown_rx_api = self.shutdown_tx.subscribe();
 
@@ -448,6 +449,33 @@ impl ClusterServer {
             self.offset_manager.clone(),
             partitioner_config,
         ));
+
+        // Spawn background transaction reaper that aborts timed-out transactions.
+        // Without this, a client that begins a transaction and disconnects will leak
+        // resources indefinitely, potentially blocking partition progress.
+        {
+            let txn_coordinator = handler.transaction_coordinator().clone();
+            let mut txn_shutdown = self.shutdown_tx.subscribe();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(5));
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            let timed_out = txn_coordinator.cleanup_timed_out_transactions();
+                            if !timed_out.is_empty() {
+                                tracing::warn!(
+                                    count = timed_out.len(),
+                                    "Transaction reaper aborted timed-out transactions"
+                                );
+                            }
+                        }
+                        _ = txn_shutdown.recv() => {
+                            break;
+                        }
+                    }
+                }
+            });
+        }
 
         // Create router for partition-aware request handling
         let router = Arc::new(RequestRouter::new(

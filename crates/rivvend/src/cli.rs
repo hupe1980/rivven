@@ -219,6 +219,13 @@ pub struct Cli {
     /// Require client certificate verification
     #[arg(long, default_value = "false", env = "RIVVEN_TLS_VERIFY_CLIENT")]
     pub tls_verify_client: bool,
+
+    // ============ Cluster Security ============
+    /// Bearer token for authenticating Raft RPCs between cluster nodes.
+    /// **Required** when running in cluster mode. Rejecting startup without
+    /// a token prevents unauthenticated hosts from disrupting consensus.
+    #[arg(long, env = "RIVVEN_CLUSTER_AUTH_TOKEN")]
+    pub cluster_auth_token: Option<String>,
 }
 
 /// Deployment mode for the server
@@ -318,6 +325,16 @@ impl Cli {
                 "raft_election_max_ms ({}) must be >= raft_election_min_ms ({})",
                 self.raft_election_max_ms, self.raft_election_min_ms
             ));
+        }
+
+        // Cluster auth token is mandatory in cluster mode.
+        // An unauthenticated Raft port allows any host to disrupt consensus.
+        if self.mode == DeploymentMode::Cluster && self.cluster_auth_token.is_none() {
+            return Err(
+                "cluster_auth_token (--cluster-auth-token / RIVVEN_CLUSTER_AUTH_TOKEN) is required \
+                 in cluster mode. Raft RPCs without authentication allow any host to disrupt consensus."
+                    .to_string(),
+            );
         }
 
         Ok(())

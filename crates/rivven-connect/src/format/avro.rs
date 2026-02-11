@@ -349,9 +349,30 @@ impl AvroWriter {
                 .map_err(|e| AvroWriterError::SchemaParse(e.to_string()))?
         };
 
-        // Create codec for encoding
+        // When Confluent wire format is requested, produce raw Avro
+        // binary (single datum) with magic byte + schema ID prefix — NOT an OCF
+        // container. Confluent consumers expect `[0x00][4-byte schema_id][raw avro]`.
+        // Wrapping OCF data breaks downstream Confluent-ecosystem readers.
         let codec = AvroCodec::new(schema.clone());
 
+        if self.config.confluent_wire_format {
+            let schema_id = self.config.schema_id.unwrap_or(0);
+
+            let mut result = Vec::new();
+            for event in events {
+                let avro_bytes = codec
+                    .encode(event)
+                    .map_err(|e| AvroWriterError::Serialization(e.to_string()))?;
+                let mut msg = Vec::with_capacity(5 + avro_bytes.len());
+                msg.push(0u8); // Confluent magic byte
+                msg.extend_from_slice(&schema_id.to_be_bytes());
+                msg.extend_from_slice(&avro_bytes);
+                result.extend_from_slice(&msg);
+            }
+            return Ok(result);
+        }
+
+        // Non-Confluent path: produce standard OCF container
         // Create Avro OCF writer using the new() method
         let mut writer = Writer::with_codec(
             schema.inner(),
@@ -380,22 +401,12 @@ impl AvroWriter {
                 .map_err(|e| AvroWriterError::ApacheAvro(e.to_string()))?;
         }
 
-        // Flush and get bytes
+        // Flush and get OCF bytes
         let bytes = writer
             .into_inner()
             .map_err(|e| AvroWriterError::ApacheAvro(e.to_string()))?;
 
-        // Optionally add Confluent wire format header
-        if self.config.confluent_wire_format {
-            let schema_id = self.config.schema_id.unwrap_or(0);
-            let mut result = Vec::with_capacity(5 + bytes.len());
-            result.push(0u8); // Magic byte
-            result.extend_from_slice(&schema_id.to_be_bytes());
-            result.extend_from_slice(&bytes);
-            Ok(result)
-        } else {
-            Ok(bytes)
-        }
+        Ok(bytes)
     }
 
     /// Write a single event to Avro binary (without OCF container)

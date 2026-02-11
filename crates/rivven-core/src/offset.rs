@@ -71,7 +71,10 @@ impl OffsetManager {
         }
     }
 
-    /// Atomically checkpoint offsets to disk (if persistence is enabled)
+    /// Atomically checkpoint offsets to disk (if persistence is enabled).
+    ///
+    /// Filesystem I/O is performed via `spawn_blocking` so that
+    /// the tokio runtime thread is never blocked on synchronous `write`/`rename`.
     async fn checkpoint(&self) {
         if let Some(ref dir) = self.data_dir {
             let offsets = self.offsets.read().await;
@@ -80,13 +83,17 @@ impl OffsetManager {
 
             match serde_json::to_string(&*offsets) {
                 Ok(json) => {
-                    // Atomic write: write to temp file, then rename
-                    if let Err(e) = std::fs::write(&tmp_path, json.as_bytes()) {
-                        warn!("Failed to write offset checkpoint: {}", e);
-                        return;
-                    }
-                    if let Err(e) = std::fs::rename(&tmp_path, &path) {
-                        warn!("Failed to rename offset checkpoint: {}", e);
+                    let tmp = tmp_path.clone();
+                    let dst = path.clone();
+                    let json_clone = json;
+                    if let Err(e) = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+                        std::fs::write(&tmp, json_clone.as_bytes())?;
+                        std::fs::rename(&tmp, &dst)?;
+                        Ok(())
+                    })
+                    .await
+                    {
+                        warn!("Offset checkpoint task failed: {}", e);
                     }
                 }
                 Err(e) => {

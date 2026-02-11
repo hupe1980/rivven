@@ -294,6 +294,32 @@ impl SecureServer {
         // Server state for spawned tasks
         let server = Arc::new(self);
 
+        // Spawn background TLS certificate reload task if configured
+        #[cfg(feature = "tls")]
+        if let Some(ref tls_acceptor) = server.tls_acceptor {
+            let reload_interval = tls_acceptor.cert_reload_interval();
+            if reload_interval > Duration::ZERO {
+                let server_ref = server.clone();
+                tokio::spawn(async move {
+                    let mut ticker = tokio::time::interval(reload_interval);
+                    ticker.tick().await; // skip first immediate tick
+                    loop {
+                        ticker.tick().await;
+                        if let Some(ref acceptor) = server_ref.tls_acceptor {
+                            match acceptor.reload() {
+                                Ok(()) => {
+                                    info!("TLS certificates reloaded successfully");
+                                }
+                                Err(e) => {
+                                    warn!("TLS certificate reload failed (keeping existing): {}", e);
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
         loop {
             // Acquire connection permit
             let permit = match server.connection_semaphore.clone().try_acquire_owned() {
@@ -617,7 +643,7 @@ impl SecureServer {
 
             // Handle request with auth
             let response = auth_handler
-                .handle(request, &mut security_ctx.auth_state, &client_ip)
+                .handle(request, &mut security_ctx.auth_state, &client_ip, has_tls)
                 .await;
 
             // Send response in the same format the client used

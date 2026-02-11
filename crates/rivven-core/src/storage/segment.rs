@@ -45,10 +45,48 @@ pub struct Segment {
     last_index_position: u64,
     /// Pending index entries to batch write (behind std::sync::Mutex for &self flush)
     pending_index_entries: std::sync::Mutex<Vec<(u32, u64)>>,
+    /// Fsync policy for segment writes (H-1 fix).
+    /// Controls durability guarantees: None for OS page cache only,
+    /// EveryWrite for per-append fsync, EveryNWrites for batched fsync.
+    sync_policy: SegmentSyncPolicy,
+    /// Counter for tracking writes between fsyncs (for EveryNWrites policy)
+    writes_since_sync: std::sync::atomic::AtomicU64,
+    /// Cached read-only memory map (H-11/H-12 fix).
+    /// Invalidated on write, lazily re-created on next read.
+    /// Avoids creating a new mmap per read and moves the blocking
+    /// mmap syscall off the hot path for repeat reads.
+    cached_mmap: tokio::sync::RwLock<Option<Arc<Mmap>>>,
+}
+
+/// Fsync policy for segment writes (H-1 fix).
+///
+/// Controls when segment data is flushed to durable storage via fsync/fdatasync.
+/// Mirrors Kafka's `log.flush.interval.messages` concept.
+///
+/// - `None`: No fsync — data lives in OS page cache until kernel writeback (fastest, least durable)
+/// - `EveryWrite`: fsync after every append — maximum durability, equivalent to `acks=all` + sync
+/// - `EveryNWrites(n)`: fsync every N writes — balances throughput and durability
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentSyncPolicy {
+    /// No fsync — relies on OS page cache writeback (fastest)
+    None,
+    /// fsync after every write (maximum durability)
+    EveryWrite,
+    /// fsync every N writes (balanced)
+    EveryNWrites(u64),
 }
 
 impl Segment {
     pub fn new(dir: &Path, base_offset: u64) -> Result<Self> {
+        Self::with_sync_policy(dir, base_offset, SegmentSyncPolicy::None)
+    }
+
+    /// Create a new segment with a configurable fsync policy (H-1 fix).
+    pub fn with_sync_policy(
+        dir: &Path,
+        base_offset: u64,
+        sync_policy: SegmentSyncPolicy,
+    ) -> Result<Self> {
         let log_path = dir.join(format!("{:020}.{}", base_offset, LOG_SUFFIX));
         let index_path = dir.join(format!("{:020}.{}", base_offset, INDEX_SUFFIX));
 
@@ -79,6 +117,9 @@ impl Segment {
             index_buffer: Vec::new(),
             last_index_position: 0,
             pending_index_entries: std::sync::Mutex::new(Vec::new()),
+            sync_policy,
+            writes_since_sync: std::sync::atomic::AtomicU64::new(0),
+            cached_mmap: tokio::sync::RwLock::new(None),
         };
 
         // Load index if exists
@@ -153,10 +194,15 @@ impl Segment {
         {
             let mut writer = self.log_file.lock().await;
             writer.write_all(&frame)?;
-            // Note: BufWriter batches writes, actual disk write happens on flush or buffer full
+
+            // configurable fsync after write for durability
+            self.maybe_sync(&mut writer)?;
         }
 
         self.current_size += frame_len;
+
+        // Invalidate cached mmap since the file has changed
+        *self.cached_mmap.write().await = None;
 
         // 5. Sparse indexing: only add index entry every INDEX_INTERVAL_BYTES
         if position == 0 || position - self.last_index_position >= INDEX_INTERVAL_BYTES {
@@ -223,9 +269,16 @@ impl Segment {
         {
             let mut writer = self.log_file.lock().await;
             writer.write_all(&total_frame)?;
+
+            // configurable fsync after batch write for durability
+            self.maybe_sync(&mut writer)?;
         }
 
         self.current_size += total_frame.len() as u64;
+
+        // Invalidate cached mmap since the file has changed
+        *self.cached_mmap.write().await = None;
+
         Ok(positions)
     }
 
@@ -262,6 +315,33 @@ impl Segment {
         Ok(())
     }
 
+    /// Apply fsync policy after a write (H-1 fix).
+    ///
+    /// Handles the three sync modes:
+    /// - `None`: no-op (fastest, least durable)
+    /// - `EveryWrite`: flush + fdatasync on every write (maximum durability)
+    /// - `EveryNWrites(n)`: flush + fdatasync every N writes (balanced)
+    fn maybe_sync(&self, writer: &mut BufWriter<File>) -> Result<()> {
+        use std::sync::atomic::Ordering::Relaxed;
+
+        match self.sync_policy {
+            SegmentSyncPolicy::None => {}
+            SegmentSyncPolicy::EveryWrite => {
+                writer.flush()?;
+                writer.get_ref().sync_data()?;
+            }
+            SegmentSyncPolicy::EveryNWrites(n) => {
+                let count = self.writes_since_sync.fetch_add(1, Relaxed) + 1;
+                if count >= n {
+                    writer.flush()?;
+                    writer.get_ref().sync_data()?;
+                    self.writes_since_sync.store(0, Relaxed);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Flush pending index entries and clear the buffer
     pub async fn flush_index(&mut self) -> Result<()> {
         let entries: Vec<(u32, u64)> = {
@@ -289,11 +369,14 @@ impl Segment {
         Ok(())
     }
 
-    /// Read a batch of messages starting from a given offset
-    /// Note: Caller should ensure flush() is called before read() for consistency
+    /// Read a batch of messages starting from a given offset.
+    ///
+    /// Uses a cached mmap (H-12) and performs the blocking mmap syscall via
+    /// `spawn_blocking` when a new map is needed (H-11) so the tokio runtime
+    /// thread is never blocked on filesystem I/O.
     pub async fn read(&self, offset: u64, max_bytes: usize) -> Result<Vec<Message>> {
         if offset < self.base_offset {
-            return Ok(Vec::new()); // Or error? LogManager should handle this
+            return Ok(Vec::new());
         }
 
         // Flush buffered writes before reading to ensure data visibility
@@ -315,16 +398,37 @@ impl Segment {
             start_pos = self.index_buffer[idx].1;
         }
 
-        // 2. Mmap the file for reading (Zero clone from kernel cache context)
-        let file = File::open(&self.log_path)?;
-        let file_len = file.metadata()?.len();
-        if file_len == 0 {
-            return Ok(Vec::new());
-        }
+        // 2. Get or create cached mmap (H-11/H-12 fix)
+        let mmap = {
+            // Fast path: check if we have a cached mmap
+            let cached = self.cached_mmap.read().await;
+            if let Some(ref m) = *cached {
+                Arc::clone(m)
+            } else {
+                drop(cached);
 
-        // SAFETY: File is opened read-only and remains valid for mmap lifetime.
-        // We check bounds before all slice accesses below.
-        let mmap = unsafe { Mmap::map(&file)? };
+                // Slow path: create new mmap via spawn_blocking to avoid
+                // blocking the tokio runtime thread
+                let log_path = self.log_path.clone();
+                let new_mmap = tokio::task::spawn_blocking(move || -> Result<Arc<Mmap>> {
+                    let file = File::open(&log_path)?;
+                    let file_len = file.metadata()?.len();
+                    if file_len == 0 {
+                        return Err(Error::Other("Empty segment file".to_string()));
+                    }
+                    // SAFETY: File is opened read-only and remains valid for mmap lifetime.
+                    let mmap = unsafe { Mmap::map(&file)? };
+                    Ok(Arc::new(mmap))
+                })
+                .await
+                .map_err(|e| Error::Other(format!("spawn_blocking failed: {}", e)))??;
+
+                // Cache it for future reads
+                let mut cached = self.cached_mmap.write().await;
+                *cached = Some(Arc::clone(&new_mmap));
+                new_mmap
+            }
+        };
 
         if start_pos >= mmap.len() as u64 {
             return Ok(Vec::new());
@@ -341,10 +445,8 @@ impl Segment {
             }
 
             let slice = &mmap[current_pos..];
-            let _cursor = std::io::Cursor::new(slice);
 
             // Read CRC and Len
-            // Using converting methods
             let crc_bytes: [u8; 4] = slice[0..4].try_into().unwrap();
             let len_bytes: [u8; 4] = slice[4..8].try_into().unwrap();
             let stored_crc = u32::from_be_bytes(crc_bytes);
@@ -461,6 +563,30 @@ impl Segment {
             }
 
             current_pos += 8 + msg_len;
+        }
+
+        // Truncate the segment at the first invalid/incomplete frame.
+        // This ensures the segment is clean for subsequent appends after crash recovery.
+        // Standard Kafka recovery behavior: truncate at first corruption point.
+        let valid_len = current_pos as u64;
+        if valid_len < len {
+            // Must drop the mmap before truncating — can't modify file while mapped
+            drop(mmap);
+            drop(file);
+
+            let truncate_file = OpenOptions::new()
+                .write(true)
+                .open(&self.log_path)?;
+            truncate_file.set_len(valid_len)?;
+            truncate_file.sync_all()?;
+
+            tracing::warn!(
+                "Segment {:020}: truncated from {} to {} bytes during recovery (removed {} bytes of corrupt/incomplete data)",
+                self.base_offset,
+                len,
+                valid_len,
+                len - valid_len
+            );
         }
 
         Ok(last_offset)

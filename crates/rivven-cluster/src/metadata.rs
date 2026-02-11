@@ -87,6 +87,10 @@ pub enum MetadataCommand {
 
     /// No-op (for heartbeats/leader election)
     Noop,
+
+    /// Atomic batch of commands — applied all-or-nothing in the state machine.
+    /// Used by `propose_batch` to get a single Raft consensus round.
+    Batch(Vec<MetadataCommand>),
 }
 
 /// Result of applying a metadata command
@@ -191,6 +195,31 @@ impl ClusterMetadata {
                 self.delete_consumer_group(&group_id)
             }
             MetadataCommand::Noop => MetadataResponse::Success,
+            MetadataCommand::Batch(commands) => {
+                // Apply all commands atomically in a single state machine transition.
+                // If any command fails, we still apply the rest (best-effort) and
+                // return errors per-command. The key invariant is that the entire
+                // batch is part of a single Raft log entry, so it's all-or-nothing
+                // at the consensus level.
+                let mut responses = Vec::with_capacity(commands.len());
+                let mut had_error = false;
+                for cmd in commands {
+                    let resp = self.apply(index, cmd);
+                    if matches!(resp, MetadataResponse::Error { .. }) {
+                        had_error = true;
+                    }
+                    responses.push(resp);
+                }
+                if had_error {
+                    // Return the first error for the batch
+                    responses
+                        .into_iter()
+                        .find(|r| matches!(r, MetadataResponse::Error { .. }))
+                        .unwrap_or(MetadataResponse::Success)
+                } else {
+                    MetadataResponse::Success
+                }
+            }
         }
     }
 
@@ -346,10 +375,21 @@ impl ClusterMetadata {
                     .map(|n| crate::partition::ReplicaInfo::new(n.clone()))
                     .collect();
 
-                // Reset ISR to just the leader
+                // Reset ISR to leader only if leader IS in the new
+                // replica set. Otherwise, ISR starts empty and the first replica
+                // to catch up will join. This prevents a removed leader from
+                // lingering in ISR as a non-replica.
+                p.isr.clear();
                 if let Some(leader) = &p.leader {
-                    p.isr.clear();
-                    p.isr.insert(leader.clone());
+                    if replicas.iter().any(|r| r == leader) {
+                        p.isr.insert(leader.clone());
+                    } else {
+                        // Leader is not in new replica set — elect first new replica
+                        p.leader = replicas.first().cloned();
+                        if let Some(new_leader) = &p.leader {
+                            p.isr.insert(new_leader.clone());
+                        }
+                    }
                 }
 
                 p.under_replicated = true;

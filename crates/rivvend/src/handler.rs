@@ -10,6 +10,7 @@ use rivven_core::{
     TransactionMarker, TransactionPartition, TransactionResult, Validator,
 };
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
@@ -29,10 +30,17 @@ pub struct RequestHandler {
     topic_config_manager: Arc<TopicConfigManager>,
     /// Whether topics are auto-created on first publish (default: true)
     auto_create_topics: bool,
+    /// Backpressure: maximum pending publish bytes before rejecting (default: 256 MB)
+    max_pending_bytes: usize,
+    /// Backpressure: current pending publish bytes counter
+    pending_bytes: Arc<AtomicUsize>,
 }
 
 impl RequestHandler {
     /// Create a new request handler with default partitioner settings
+    /// Default publish backpressure limit: 256 MB
+    const DEFAULT_MAX_PENDING_BYTES: usize = 256 * 1024 * 1024;
+
     pub fn new(topic_manager: TopicManager, offset_manager: OffsetManager) -> Self {
         Self {
             topic_manager,
@@ -43,6 +51,8 @@ impl RequestHandler {
             quota_manager: Arc::new(QuotaManager::new()),
             topic_config_manager: Arc::new(TopicConfigManager::new()),
             auto_create_topics: true,
+            max_pending_bytes: Self::DEFAULT_MAX_PENDING_BYTES,
+            pending_bytes: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -61,6 +71,8 @@ impl RequestHandler {
             quota_manager: Arc::new(QuotaManager::new()),
             topic_config_manager: Arc::new(TopicConfigManager::new()),
             auto_create_topics: true,
+            max_pending_bytes: Self::DEFAULT_MAX_PENDING_BYTES,
+            pending_bytes: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -79,6 +91,8 @@ impl RequestHandler {
             quota_manager,
             topic_config_manager: Arc::new(TopicConfigManager::new()),
             auto_create_topics: true,
+            max_pending_bytes: Self::DEFAULT_MAX_PENDING_BYTES,
+            pending_bytes: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -90,6 +104,11 @@ impl RequestHandler {
     /// Get the topic config manager
     pub fn topic_config_manager(&self) -> &Arc<TopicConfigManager> {
         &self.topic_config_manager
+    }
+
+    /// Get the transaction coordinator (for background reaper task)
+    pub fn transaction_coordinator(&self) -> &Arc<TransactionCoordinator> {
+        &self.transaction_coordinator
     }
 
     /// Set whether topics are auto-created on first publish
@@ -389,6 +408,21 @@ impl RequestHandler {
         key: Option<Bytes>,
         value: Bytes,
     ) -> Response {
+        // Backpressure — reject if pending bytes exceed limit.
+        // This prevents OOM when Raft or followers are slow.
+        let msg_size = value.len() + key.as_ref().map_or(0, |k| k.len());
+        let current = self.pending_bytes.fetch_add(msg_size, Ordering::Relaxed);
+        if current + msg_size > self.max_pending_bytes {
+            self.pending_bytes.fetch_sub(msg_size, Ordering::Relaxed);
+            warn!(
+                "Publish rejected: pending bytes {} + {} exceeds limit {}",
+                current, msg_size, self.max_pending_bytes
+            );
+            return Response::Error {
+                message: "BUFFER_FULL: Server publish buffer is full, retry later".to_string(),
+            };
+        }
+
         // Validate topic name
         if let Err(e) = Validator::validate_topic_name(&topic_name) {
             warn!(
@@ -430,7 +464,7 @@ impl RequestHandler {
         };
 
         // Append to partition
-        match topic.append(partition_id, message).await {
+        let result = match topic.append(partition_id, message).await {
             Ok(offset) => {
                 debug!(
                     "Published to partition {} at offset {}",
@@ -447,7 +481,12 @@ impl RequestHandler {
                     message: e.to_string(),
                 }
             }
-        }
+        };
+
+        // Release backpressure count after write completes
+        self.pending_bytes.fetch_sub(msg_size, Ordering::Relaxed);
+
+        result
     }
 
     async fn handle_consume(

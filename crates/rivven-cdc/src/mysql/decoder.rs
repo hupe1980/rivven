@@ -940,17 +940,52 @@ impl BinlogDecoder {
             }
             ColumnType::Timestamp => Ok(ColumnValue::Timestamp(cursor.get_u32_le())),
             ColumnType::Timestamp2 => {
-                let _ts = cursor.get_u32();
+                let ts = cursor.get_u32();
                 let frac = read_fractional_seconds(cursor, metadata as u8)?;
-                Ok(ColumnValue::DateTime {
-                    year: 0, // Would need to convert from unix timestamp
-                    month: 0,
-                    day: 0,
-                    hour: 0,
-                    minute: 0,
-                    second: 0,
-                    microsecond: frac,
-                })
+                // Convert unix timestamp to DateTime components.
+                // MySQL TIMESTAMP2 stores UTC epoch seconds in big-endian u32.
+                // We convert to year/month/day/hour/minute/second via simple arithmetic
+                // to avoid adding a chrono dependency in the decoder hot path.
+                if ts == 0 {
+                    Ok(ColumnValue::DateTime {
+                        year: 0,
+                        month: 0,
+                        day: 0,
+                        hour: 0,
+                        minute: 0,
+                        second: 0,
+                        microsecond: frac,
+                    })
+                } else {
+                    // Unix epoch → civil time (UTC). Implements the standard algorithm:
+                    //   https://howardhinnant.github.io/date_algorithms.html#civil_from_days
+                    let secs = ts as i64;
+                    let days_since_epoch = (secs / 86400) as i64;
+                    let time_of_day = (secs % 86400) as u32;
+
+                    // Shift epoch from 1970-01-01 to 0000-03-01 for easier month arithmetic
+                    let z = days_since_epoch + 719468;
+                    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+                    let doe = (z - era * 146097) as u32; // day of era [0, 146096]
+                    let yoe =
+                        (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era
+                    let y = (yoe as i64) + era * 400;
+                    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year
+                    let mp = (5 * doy + 2) / 153; // month index [0, 11]
+                    let d = doy - (153 * mp + 2) / 5 + 1; // day [1, 31]
+                    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // month [1, 12]
+                    let y = if m <= 2 { y + 1 } else { y };
+
+                    Ok(ColumnValue::DateTime {
+                        year: y as u16,
+                        month: m as u8,
+                        day: d as u8,
+                        hour: (time_of_day / 3600) as u8,
+                        minute: ((time_of_day % 3600) / 60) as u8,
+                        second: (time_of_day % 60) as u8,
+                        microsecond: frac,
+                    })
+                }
             }
             ColumnType::DateTime2 => {
                 // Packed datetime2

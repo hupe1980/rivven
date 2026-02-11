@@ -144,12 +144,28 @@ impl StateMachine {
     }
 
     /// Create a snapshot
+    ///
+    /// All three fields are read under coordinated locking to produce
+    /// a consistent snapshot. We acquire locks in a fixed order
+    /// (metadata → last_applied → membership) and hold them together
+    /// so that no interleaving `apply` can mutate state between reads.
     async fn create_snapshot(
         &self,
     ) -> std::result::Result<(RaftSnapshotMeta, Vec<u8>), StorageError<NodeId>> {
-        let metadata = self.metadata.read().await.clone();
-        let last_applied = *self.last_applied.read().await;
-        let membership = self.membership.read().await.clone();
+        // Acquire all read locks together to get a consistent view.
+        // Hold them simultaneously so no apply() can interleave.
+        let metadata_guard = self.metadata.read().await;
+        let last_applied_guard = self.last_applied.read().await;
+        let membership_guard = self.membership.read().await;
+
+        let metadata = metadata_guard.clone();
+        let last_applied = *last_applied_guard;
+        let membership = membership_guard.clone();
+
+        // Release all locks before serialization (which can be expensive)
+        drop(membership_guard);
+        drop(last_applied_guard);
+        drop(metadata_guard);
 
         let snapshot_data = SnapshotData {
             metadata: metadata.clone(),
@@ -1151,39 +1167,27 @@ impl RaftNode {
             return Ok(responses);
         }
 
-        // Cluster mode - submit batch as individual entries
-        // openraft will batch these in a single AppendEntries RPC
+        // Cluster mode - submit as a single atomic Batch command
+        // This goes through one Raft consensus round and one fsync
         if let Some(ref raft) = self.raft {
-            let mut responses = Vec::with_capacity(commands.len());
+            let batch_command = MetadataCommand::Batch(commands);
+            let request = RaftRequest {
+                command: batch_command,
+            };
 
-            // Submit all commands concurrently
-            let futures: Vec<_> = commands
-                .into_iter()
-                .map(|command| {
-                    let raft = raft.clone();
-                    async move {
-                        let request = RaftRequest { command };
-                        raft.client_write(request).await
-                    }
-                })
-                .collect();
+            let result = raft
+                .client_write(request)
+                .await
+                .map_err(|e| {
+                    ClusterError::RaftStorage(format!("Batch write failed: {}", e))
+                })?;
 
-            // Wait for all to complete
-            let results = futures::future::join_all(futures).await;
+            RaftMetrics::increment_proposals();
+            RaftMetrics::increment_commits();
 
-            for result in results {
-                match result {
-                    Ok(r) => responses.push(r.data.response),
-                    Err(e) => {
-                        return Err(ClusterError::RaftStorage(format!(
-                            "Batch write failed: {}",
-                            e
-                        )))
-                    }
-                }
-            }
-
-            return Ok(responses);
+            // The batch returns a single response — replicate it for each command
+            let response = result.data.response;
+            return Ok(vec![response; batch_size]);
         }
 
         Err(ClusterError::RaftStorage(

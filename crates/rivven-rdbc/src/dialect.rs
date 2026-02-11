@@ -8,6 +8,7 @@
 //! - Type mapping
 //! - Upsert strategies (ON CONFLICT, ON DUPLICATE KEY, MERGE)
 
+use crate::security::escape_string_literal;
 use crate::types::{ColumnMetadata, TableMetadata};
 use sea_query::{
     Alias, Asterisk, Expr, IntoIden, MysqlQueryBuilder, OnConflict, Order, PostgresQueryBuilder,
@@ -108,7 +109,8 @@ impl SqlDialect for PostgresDialect {
     }
 
     fn table_exists_sql(&self, schema: Option<&str>, table: &str) -> String {
-        let schema = schema.unwrap_or("public");
+        let schema = escape_string_literal(schema.unwrap_or("public"));
+        let table = escape_string_literal(table);
         format!(
             "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema = '{}' AND table_name = '{}')",
             schema, table
@@ -116,7 +118,8 @@ impl SqlDialect for PostgresDialect {
     }
 
     fn list_columns_sql(&self, schema: Option<&str>, table: &str) -> String {
-        let schema = schema.unwrap_or("public");
+        let schema = escape_string_literal(schema.unwrap_or("public"));
+        let table = escape_string_literal(table);
         format!(
             r#"SELECT
                 c.column_name,
@@ -330,19 +333,19 @@ impl SqlDialect for MySqlDialect {
         if let Some(db) = schema {
             format!(
                 "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_schema = '{}' AND table_name = '{}')",
-                db, table
+                escape_string_literal(db), escape_string_literal(table)
             )
         } else {
             format!(
                 "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = '{}' AND table_schema = DATABASE())",
-                table
+                escape_string_literal(table)
             )
         }
     }
 
     fn list_columns_sql(&self, schema: Option<&str>, table: &str) -> String {
         let db_filter = schema
-            .map(|s| format!("table_schema = '{}'", s))
+            .map(|s| format!("table_schema = '{}'", escape_string_literal(s)))
             .unwrap_or_else(|| "table_schema = DATABASE()".to_string());
 
         format!(
@@ -360,7 +363,7 @@ impl SqlDialect for MySqlDialect {
             FROM information_schema.columns
             WHERE {} AND table_name = '{}'
             ORDER BY ordinal_position"#,
-            db_filter, table
+            db_filter, escape_string_literal(table)
         )
     }
 
@@ -534,7 +537,8 @@ impl SqlDialect for SqlServerDialect {
     }
 
     fn table_exists_sql(&self, schema: Option<&str>, table: &str) -> String {
-        let schema = schema.unwrap_or("dbo");
+        let schema = escape_string_literal(schema.unwrap_or("dbo"));
+        let table = escape_string_literal(table);
         format!(
             "SELECT CASE WHEN EXISTS(SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}') THEN 1 ELSE 0 END",
             schema, table
@@ -542,7 +546,8 @@ impl SqlDialect for SqlServerDialect {
     }
 
     fn list_columns_sql(&self, schema: Option<&str>, table: &str) -> String {
-        let schema = schema.unwrap_or("dbo");
+        let schema = escape_string_literal(schema.unwrap_or("dbo"));
+        let table = escape_string_literal(table);
         format!(
             r#"SELECT
                 c.COLUMN_NAME as column_name,

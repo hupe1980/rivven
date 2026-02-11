@@ -490,7 +490,7 @@ async fn run_mysql_cdc_loop(
 
     // Get binlog position if not specified
     let (binlog_file, binlog_pos) = if config.binlog_filename.is_empty() {
-        get_current_binlog_position(&mut client).await?
+        get_current_binlog_position(&config).await?
     } else {
         (config.binlog_filename.clone(), config.binlog_position)
     };
@@ -738,14 +738,62 @@ async fn run_mysql_cdc_loop(
     Ok(())
 }
 
-/// Get current binlog position from MySQL
+/// Get current binlog position from MySQL via `SHOW MASTER STATUS` (H-4 fix).
+///
+/// Uses a separate `mysql_async` connection (not the binlog protocol client) because
+/// `SHOW MASTER STATUS` returns a result set that the binlog protocol client doesn't
+/// support reading. Falls back to `SHOW BINARY LOG STATUS` for MySQL 8.2+.
 async fn get_current_binlog_position(
-    _client: &mut MySqlBinlogClient,
+    config: &MySqlCdcConfig,
 ) -> anyhow::Result<(String, u32)> {
-    // Execute SHOW MASTER STATUS
-    // For now, use a default
-    // A real implementation would parse the result
-    Ok(("mysql-bin.000001".to_string(), 4))
+    use mysql_async::{Conn, Opts, Row};
+
+    let url = if let Some(ref password) = config.password {
+        format!(
+            "mysql://{}:{}@{}:{}/",
+            config.user, password, config.host, config.port
+        )
+    } else {
+        format!("mysql://{}@{}:{}/", config.user, config.host, config.port)
+    };
+
+    let opts = Opts::from_url(&url)
+        .map_err(|e| anyhow::anyhow!("Invalid MySQL URL for binlog position query: {}", e))?;
+    let mut conn = Conn::new(opts)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to connect for binlog position: {}", e))?;
+
+    // Try SHOW BINARY LOG STATUS first (MySQL 8.2+), then fall back to SHOW MASTER STATUS
+    let rows: Vec<Row> = match conn.query("SHOW BINARY LOG STATUS").await {
+        Ok(rows) => rows,
+        Err(_) => conn
+            .query("SHOW MASTER STATUS")
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to query binlog position: {}", e))?,
+    };
+
+    conn.disconnect().await.ok();
+
+    if let Some(row) = rows.into_iter().next() {
+        let file: String = row.get(0).unwrap_or_default();
+        let pos: u32 = row
+            .get::<u64, _>(1)
+            .map(|p| p as u32)
+            .unwrap_or(4);
+
+        if file.is_empty() {
+            anyhow::bail!(
+                "SHOW MASTER STATUS returned empty filename — binary logging may be disabled"
+            );
+        }
+
+        info!("Current binlog position: {}:{}", file, pos);
+        Ok((file, pos))
+    } else {
+        anyhow::bail!(
+            "SHOW MASTER STATUS returned no rows — binary logging may be disabled on the server"
+        )
+    }
 }
 
 /// Process a rows event and convert to CDC events

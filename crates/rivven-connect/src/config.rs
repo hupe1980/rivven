@@ -12,7 +12,7 @@ use std::sync::LazyLock;
 /// Pre-compiled regex for environment variable expansion
 /// Pattern: ${VAR} or ${VAR:-default}
 static ENV_VAR_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"\$\{([A-Z_][A-Z0-9_]*)(?::-([^}]*))?\}")
+    regex::Regex::new(r"\$\{([a-zA-Z_][a-zA-Z0-9_]*)(?::-([^}]*))?\}")
         .expect("env var regex pattern is invalid - this is a bug")
 });
 

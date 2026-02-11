@@ -127,6 +127,8 @@ pub struct MqttSourceMetricsSnapshot {
     pub batch_size_max: u64,
     /// Sum of all batch sizes
     pub batch_size_sum: u64,
+    /// Total number of batches recorded
+    pub batch_count: u64,
 }
 
 impl MqttSourceMetricsSnapshot {
@@ -139,13 +141,13 @@ impl MqttSourceMetricsSnapshot {
         (self.receive_latency_us as f64 / self.messages_received as f64) / 1000.0
     }
 
-    /// Get average batch size
+    /// Divide by batch count, not connection count.
     #[inline]
     pub fn avg_batch_size(&self) -> f64 {
-        if self.connections == 0 {
+        if self.batch_count == 0 {
             return 0.0;
         }
-        self.batch_size_sum as f64 / self.connections as f64
+        self.batch_size_sum as f64 / self.batch_count as f64
     }
 
     /// Get throughput in messages per second
@@ -250,6 +252,8 @@ pub struct MqttSourceMetrics {
     batch_size_max: AtomicU64,
     /// Sum of all batch sizes
     batch_size_sum: AtomicU64,
+    /// Total number of batches recorded
+    batch_count: AtomicU64,
 }
 
 impl MqttSourceMetrics {
@@ -265,6 +269,7 @@ impl MqttSourceMetrics {
             batch_size_min: AtomicU64::new(u64::MAX),
             batch_size_max: AtomicU64::new(0),
             batch_size_sum: AtomicU64::new(0),
+            batch_count: AtomicU64::new(0),
         }
     }
 
@@ -273,6 +278,7 @@ impl MqttSourceMetrics {
     #[inline(always)]
     pub fn record_batch_size(&self, size: u64) {
         self.batch_size_sum.fetch_add(size, Ordering::Relaxed);
+        self.batch_count.fetch_add(1, Ordering::Relaxed);
 
         // Update min using CAS loop
         let mut current_min = self.batch_size_min.load(Ordering::Relaxed);
@@ -319,6 +325,7 @@ impl MqttSourceMetrics {
             batch_size_min: if min_raw == u64::MAX { 0 } else { min_raw },
             batch_size_max: self.batch_size_max.load(Ordering::Relaxed),
             batch_size_sum: self.batch_size_sum.load(Ordering::Relaxed),
+            batch_count: self.batch_count.load(Ordering::Relaxed),
         }
     }
 
@@ -333,6 +340,7 @@ impl MqttSourceMetrics {
         self.batch_size_min.store(u64::MAX, Ordering::Relaxed);
         self.batch_size_max.store(0, Ordering::Relaxed);
         self.batch_size_sum.store(0, Ordering::Relaxed);
+        self.batch_count.store(0, Ordering::Relaxed);
     }
 
     /// Atomically capture a snapshot and reset all counters.
@@ -348,6 +356,7 @@ impl MqttSourceMetrics {
             batch_size_min: if min_raw == u64::MAX { 0 } else { min_raw },
             batch_size_max: self.batch_size_max.swap(0, Ordering::Relaxed),
             batch_size_sum: self.batch_size_sum.swap(0, Ordering::Relaxed),
+            batch_count: self.batch_count.swap(0, Ordering::Relaxed),
         }
     }
 }
@@ -1425,12 +1434,13 @@ mod tests {
             batch_size_min: 10,
             batch_size_max: 100,
             batch_size_sum: 500,
+            batch_count: 10,
         };
 
         // Average latency = 500000us / 1000 messages = 500us = 0.5ms
         assert!((snapshot.avg_receive_latency_ms() - 0.5).abs() < 0.001);
 
-        // Average batch size = 500 / 10 connections = 50
+        // Average batch size = 500 / 10 batches = 50
         assert!((snapshot.avg_batch_size() - 50.0).abs() < 0.001);
 
         // Messages per second with 10 elapsed seconds = 100/s

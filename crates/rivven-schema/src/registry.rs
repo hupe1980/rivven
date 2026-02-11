@@ -868,13 +868,51 @@ fn validate_schema(schema_type: SchemaType, schema: &str) -> SchemaResult<()> {
             Ok(())
         }
         SchemaType::Protobuf => {
-            // Protobuf validation would require a proto parser
-            // For now just ensure it's not empty
-            if schema.trim().is_empty() {
+            // Validate basic protobuf structure instead of just checking non-empty.
+            // A full parser (prost-build / protobuf-parse) would be ideal, but adds a heavy
+            // build-time dependency. This structural check rejects clearly invalid schemas
+            // while allowing valid ones through.
+            let trimmed = schema.trim();
+            if trimmed.is_empty() {
                 return Err(SchemaError::InvalidSchema(
                     "Empty protobuf schema".to_string(),
                 ));
             }
+
+            // Must contain at least one `message` or `enum` definition
+            let has_message = trimmed.contains("message ") || trimmed.contains("message{");
+            let has_enum = trimmed.contains("enum ") || trimmed.contains("enum{");
+            let has_service = trimmed.contains("service ");
+            if !has_message && !has_enum && !has_service {
+                return Err(SchemaError::InvalidSchema(
+                    "Protobuf schema must define at least one message, enum, or service"
+                        .to_string(),
+                ));
+            }
+
+            // Balanced braces check (quick structural validation)
+            let mut depth: i32 = 0;
+            for ch in trimmed.chars() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth < 0 {
+                            return Err(SchemaError::InvalidSchema(
+                                "Protobuf schema has unbalanced braces (extra '}')".to_string(),
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if depth != 0 {
+                return Err(SchemaError::InvalidSchema(format!(
+                    "Protobuf schema has unbalanced braces ({} unclosed '{{' )",
+                    depth
+                )));
+            }
+
             Ok(())
         }
     }

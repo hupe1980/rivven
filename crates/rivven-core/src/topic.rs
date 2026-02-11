@@ -375,12 +375,19 @@ impl TopicManager {
             .collect();
 
         let metadata_path = data_dir.join(TOPIC_METADATA_FILE);
+        let tmp_path = data_dir.join(format!("{}.tmp", TOPIC_METADATA_FILE));
         let content = serde_json::to_string_pretty(&metadata)
             .map_err(|e| Error::Other(format!("Failed to serialize topic metadata: {}", e)))?;
 
-        fs::write(&metadata_path, content)
+        // Atomic write via temp file + rename.
+        // A crash during write only corrupts the temp file; the original
+        // metadata file remains intact for recovery.
+        fs::write(&tmp_path, content)
             .await
-            .map_err(|e| Error::Other(format!("Failed to write topic metadata: {}", e)))?;
+            .map_err(|e| Error::Other(format!("Failed to write topic metadata temp: {}", e)))?;
+        fs::rename(&tmp_path, &metadata_path)
+            .await
+            .map_err(|e| Error::Other(format!("Failed to rename topic metadata: {}", e)))?;
 
         info!("Persisted metadata for {} topics", topics.len());
         Ok(())

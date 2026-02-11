@@ -226,11 +226,16 @@ impl ClusterCoordinator {
 
         // Raft consensus is managed by RaftNode which is wired in via set_raft_node().
         // The coordinator checks RaftNode.is_leader() for authoritative leadership.
-        // For the initial cluster bootstrap, the first node (no seeds) starts as leader.
+        //
+        // Do NOT assume leadership just because seeds is empty.
+        // Even the first node must wait for Raft to confirm leadership via
+        // single-node bootstrap. Setting CoordinatorState::Leader without Raft
+        // causes split-brain when two nodes start simultaneously with no seeds.
         if self.config.seeds.is_empty() {
-            *self.state.write().await = CoordinatorState::Leader;
-            *self.is_leader_flag.write().await = true;
-            info!(node_id = %self.config.node_id, "Started as cluster leader (first node)");
+            info!(
+                node_id = %self.config.node_id,
+                "First node — awaiting Raft bootstrap for leadership confirmation"
+            );
         } else {
             info!(node_id = %self.config.node_id, "Started as cluster follower");
         }
@@ -312,15 +317,10 @@ impl ClusterCoordinator {
     /// Raft consensus for replicated consistency. Reads use the Raft state machine's
     /// authoritative metadata. Without a Raft node, the coordinator falls back to the
     /// local MetadataStore (standalone/test mode).
-    pub fn set_raft_node(&mut self, raft_node: Arc<RwLock<RaftNode>>) {
-        // Update the shared raft_node so all spawned tasks (membership handler, etc.)
-        // immediately start routing mutations through Raft consensus.
-        // Note: we use try_write() to avoid blocking; falling back to blocking write
-        // since set_raft_node is called once during initialization.
-        let mut guard = self
-            .raft_node
-            .try_write()
-            .expect("raft_node lock not contended during init");
+    pub async fn set_raft_node(&mut self, raft_node: Arc<RwLock<RaftNode>>) {
+        // Use .await instead of try_write().expect().
+        // try_write panics if any spawned task holds a read lock.
+        let mut guard = self.raft_node.write().await;
         *guard = Some(raft_node);
     }
 

@@ -510,10 +510,61 @@ impl SourceRunner {
                             let json = serde_json::to_vec(&cdc_event)
                                 .map_err(|e| ConnectError::Serialization(e.to_string()))?;
 
-                            if let Err(e) = self.publish_to_topic(&target_topic, Bytes::from(json)).await {
-                                error!("Source '{}' publish error to '{}': {}", self.name, target_topic, e);
-                                *self.status.write().await = ConnectorStatus::Unhealthy;
-                                // Don't fail, let reconnection logic handle it
+                            // Retry with exponential backoff (C-5 fix).
+                            // CDC events MUST NOT be silently dropped — the CDC stream has
+                            // already advanced past this event, so losing it means permanent
+                            // data loss. We retry up to max_retries with bounded backoff.
+                            let data = Bytes::from(json);
+                            let max_retries: u32 = 10;
+                            let mut backoff_ms: u64 = 100;
+                            let max_backoff_ms: u64 = 30_000;
+                            let backoff_multiplier: f64 = 2.0;
+                            let mut attempt = 0u32;
+                            let mut last_err = None;
+
+                            loop {
+                                match self.publish_to_topic(&target_topic, data.clone()).await {
+                                    Ok(_) => {
+                                        if attempt > 0 {
+                                            info!(
+                                                "Source '{}' publish to '{}' succeeded after {} retries",
+                                                self.name, target_topic, attempt
+                                            );
+                                        }
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        attempt += 1;
+                                        if attempt > max_retries {
+                                            error!(
+                                                "Source '{}' publish to '{}' failed after {} retries: {}. \
+                                                 CDC event LOST — manual recovery required.",
+                                                self.name, target_topic, max_retries, e
+                                            );
+                                            *self.status.write().await = ConnectorStatus::Unhealthy;
+                                            last_err = Some(e);
+                                            break;
+                                        }
+                                        warn!(
+                                            "Source '{}' publish to '{}' failed (attempt {}/{}): {}. \
+                                             Retrying in {}ms...",
+                                            self.name, target_topic, attempt, max_retries, e, backoff_ms
+                                        );
+                                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                                        backoff_ms = ((backoff_ms as f64 * backoff_multiplier) as u64)
+                                            .min(max_backoff_ms);
+                                    }
+                                }
+                            }
+
+                            if let Some(e) = last_err {
+                                // Return error to stop the CDC pipeline cleanly rather than
+                                // silently continuing with missing events. The reconnection
+                                // logic in the outer loop will restart from a safe position.
+                                return Err(ConnectError::Permanent(format!(
+                                    "CDC event permanently lost after {} retries: {}",
+                                    max_retries, e
+                                )));
                             }
 
                             let count = self.events_published();

@@ -22,6 +22,7 @@ use crate::connection::{
     IsolationLevel, PreparedStatement, RowStream, Transaction,
 };
 use crate::error::{Error, Result};
+use crate::security::validate_sql_identifier;
 use crate::types::{Row, Value};
 
 /// SQL Server connection
@@ -124,55 +125,81 @@ impl ConnectionLifecycle for SqlServerConnection {
     }
 }
 
-/// Convert rivven Value to SQL Server parameter format
-fn value_to_string(value: &Value) -> String {
-    match value {
-        Value::Null => "NULL".to_string(),
-        Value::Bool(b) => if *b { "1" } else { "0" }.to_string(),
-        Value::Int8(n) => n.to_string(),
-        Value::Int16(n) => n.to_string(),
-        Value::Int32(n) => n.to_string(),
-        Value::Int64(n) => n.to_string(),
-        Value::Float32(n) => n.to_string(),
-        Value::Float64(n) => n.to_string(),
-        Value::Decimal(d) => d.to_string(),
-        Value::String(s) => format!("N'{}'", s.replace('\'', "''")),
-        Value::Bytes(b) => format!("0x{}", hex::encode(b)),
-        Value::Date(d) => format!("'{}'", d),
-        Value::Time(t) => format!("'{}'", t),
-        Value::DateTime(dt) => format!("'{}'", dt),
-        Value::DateTimeTz(dt) => format!("'{}'", dt),
-        Value::Uuid(u) => format!("'{}'", u),
-        Value::Json(j) => format!("N'{}'", j.to_string().replace('\'', "''")),
-        Value::Array(arr) => {
-            let json = serde_json::to_string(arr).unwrap_or_default();
-            format!("N'{}'", json.replace('\'', "''"))
+/// Owned parameter wrapper for safe, native tiberius parameter binding (C-1 fix).
+///
+/// Converts rivven `Value` to tiberius `ColumnData` for typed TDS protocol binding.
+/// Parameters are **never interpolated into SQL text** — they are sent as typed
+/// protocol-level parameters, making SQL injection impossible regardless of content.
+///
+/// # Security
+///
+/// This replaces the previous `substitute_params()` + `value_to_string()` approach
+/// which performed client-side string interpolation, allowing SQL injection on any
+/// Value that contained SQL metacharacters.
+struct SqlParam(Value);
+
+impl tiberius::ToSql for SqlParam {
+    fn to_sql(&self) -> tiberius::ColumnData<'_> {
+        use std::borrow::Cow;
+        use tiberius::ColumnData;
+        use Value::*;
+
+        match &self.0 {
+            Null => ColumnData::String(None),
+            Bool(b) => ColumnData::Bit(Some(*b)),
+            Int8(n) => ColumnData::I16(Some(*n as i16)), // TDS has no i8
+            Int16(n) => ColumnData::I16(Some(*n)),
+            Int32(n) => ColumnData::I32(Some(*n)),
+            Int64(n) => ColumnData::I64(Some(*n)),
+            Float32(n) => ColumnData::F32(Some(*n)),
+            Float64(n) => ColumnData::F64(Some(*n)),
+            String(s) => ColumnData::String(Some(Cow::Borrowed(s.as_str()))),
+            Bytes(b) => ColumnData::Binary(Some(Cow::Borrowed(b.as_slice()))),
+            Uuid(u) => ColumnData::Guid(Some(*u)),
+            // chrono types → ISO 8601 string representation (SQL Server parses these natively)
+            // Using string parameters is safe: the value is bound as a typed TDS parameter,
+            // not interpolated into SQL text. SQL Server handles the implicit conversion.
+            Date(d) => ColumnData::String(Some(Cow::Owned(d.format("%Y-%m-%d").to_string()))),
+            Time(t) => ColumnData::String(Some(Cow::Owned(t.format("%H:%M:%S%.f").to_string()))),
+            DateTime(dt) => ColumnData::String(Some(Cow::Owned(
+                dt.format("%Y-%m-%dT%H:%M:%S%.f").to_string(),
+            ))),
+            DateTimeTz(dt) => ColumnData::String(Some(Cow::Owned(
+                dt.format("%Y-%m-%dT%H:%M:%S%.f%:z").to_string(),
+            ))),
+            // Types without direct TDS mapping → string representation
+            Decimal(d) => ColumnData::String(Some(Cow::Owned(d.to_string()))),
+            Json(j) => ColumnData::String(Some(Cow::Owned(j.to_string()))),
+            Enum(s) => ColumnData::String(Some(Cow::Borrowed(s.as_str()))),
+            Array(arr) => {
+                let json = serde_json::to_string(arr).unwrap_or_default();
+                ColumnData::String(Some(Cow::Owned(json)))
+            }
+            Composite(map) => {
+                let json = serde_json::to_string(map).unwrap_or_default();
+                ColumnData::String(Some(Cow::Owned(json)))
+            }
+            Interval(micros) => ColumnData::I64(Some(*micros)),
+            Bit(bits) => ColumnData::Binary(Some(Cow::Borrowed(bits.as_slice()))),
+            Geometry(wkb) | Geography(wkb) => {
+                ColumnData::Binary(Some(Cow::Borrowed(wkb.as_slice())))
+            }
+            Range { .. } => ColumnData::String(None), // ranges not natively supported in SQL Server
+            Custom { data, .. } => ColumnData::Binary(Some(Cow::Borrowed(data.as_slice()))),
         }
-        Value::Interval(micros) => micros.to_string(),
-        Value::Bit(bits) => format!("0x{}", hex::encode(bits)),
-        Value::Enum(s) => format!("N'{}'", s.replace('\'', "''")),
-        Value::Geometry(wkb) | Value::Geography(wkb) => format!("0x{}", hex::encode(wkb)),
-        Value::Range { .. } => "NULL".to_string(),
-        Value::Composite(map) => {
-            let json = serde_json::to_string(map).unwrap_or_default();
-            format!("N'{}'", json.replace('\'', "''"))
-        }
-        Value::Custom { data, .. } => format!("0x{}", hex::encode(data)),
     }
 }
 
-/// Substitute parameters in SQL query
-fn substitute_params(sql: &str, params: &[Value]) -> String {
-    let mut result = sql.to_string();
-    for (i, param) in params.iter().enumerate() {
-        let placeholder = format!("@P{}", i + 1);
-        result = result.replacen(&placeholder, &value_to_string(param), 1);
-    }
-    // Also handle ? placeholders
-    for param in params {
-        result = result.replacen('?', &value_to_string(param), 1);
-    }
-    result
+/// Build a slice of tiberius parameter references from owned SqlParams.
+///
+/// Returns the param_refs vector. Caller must keep `tib_params` alive
+/// for the duration of the query call since `param_refs` borrows from them.
+#[inline]
+fn param_refs(tib_params: &[SqlParam]) -> Vec<&dyn tiberius::ToSql> {
+    tib_params
+        .iter()
+        .map(|p| p as &dyn tiberius::ToSql)
+        .collect()
 }
 
 /// Convert tiberius column value to rivven Value
@@ -233,11 +260,12 @@ impl Connection for SqlServerConnection {
     async fn execute(&self, query: &str, params: &[Value]) -> Result<u64> {
         self.update_last_used().await;
 
-        let sql = substitute_params(query, params);
+        let tib_params: Vec<SqlParam> = params.iter().cloned().map(SqlParam).collect();
+        let refs = param_refs(&tib_params);
         let mut client = self.client.lock().await;
 
         let result = client
-            .execute(sql, &[])
+            .execute(query, &refs)
             .await
             .map_err(|e| Error::execution(format!("Execute failed: {}", e)))?;
 
@@ -247,11 +275,12 @@ impl Connection for SqlServerConnection {
     async fn query(&self, query: &str, params: &[Value]) -> Result<Vec<Row>> {
         self.update_last_used().await;
 
-        let sql = substitute_params(query, params);
+        let tib_params: Vec<SqlParam> = params.iter().cloned().map(SqlParam).collect();
+        let refs = param_refs(&tib_params);
         let mut client = self.client.lock().await;
 
         let stream = client
-            .query(sql, &[])
+            .query(query, &refs)
             .await
             .map_err(|e| Error::execution(format!("Query failed: {}", e)))?;
 
@@ -347,11 +376,12 @@ pub struct SqlServerTransaction {
 #[async_trait]
 impl Transaction for SqlServerTransaction {
     async fn query(&self, sql: &str, params: &[Value]) -> Result<Vec<Row>> {
-        let query = substitute_params(sql, params);
+        let tib_params: Vec<SqlParam> = params.iter().cloned().map(SqlParam).collect();
+        let refs = param_refs(&tib_params);
         let mut client = self.client.lock().await;
 
         let stream = client
-            .query(query, &[])
+            .query(sql, &refs)
             .await
             .map_err(|e| Error::execution(format!("Query failed: {}", e)))?;
 
@@ -364,11 +394,12 @@ impl Transaction for SqlServerTransaction {
     }
 
     async fn execute(&self, sql: &str, params: &[Value]) -> Result<u64> {
-        let query = substitute_params(sql, params);
+        let tib_params: Vec<SqlParam> = params.iter().cloned().map(SqlParam).collect();
+        let refs = param_refs(&tib_params);
         let mut client = self.client.lock().await;
 
         let result = client
-            .execute(query, &[])
+            .execute(sql, &refs)
             .await
             .map_err(|e| Error::execution(format!("Execute failed: {}", e)))?;
 
@@ -433,6 +464,7 @@ impl Transaction for SqlServerTransaction {
     }
 
     async fn savepoint(&self, name: &str) -> Result<()> {
+        validate_sql_identifier(name)?;
         let mut client = self.client.lock().await;
         client
             .execute(format!("SAVE TRANSACTION {}", name), &[])
@@ -442,6 +474,7 @@ impl Transaction for SqlServerTransaction {
     }
 
     async fn rollback_to_savepoint(&self, name: &str) -> Result<()> {
+        validate_sql_identifier(name)?;
         let mut client = self.client.lock().await;
         client
             .execute(format!("ROLLBACK TRANSACTION {}", name), &[])
@@ -483,43 +516,123 @@ impl ConnectionFactory for SqlServerConnectionFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tiberius::ToSql;
 
     #[test]
-    fn test_substitute_params() {
-        let sql = "SELECT * FROM users WHERE id = @P1 AND name = @P2";
-        let params = vec![Value::Int32(1), Value::String("test".to_string())];
-        let result = substitute_params(sql, &params);
-        assert_eq!(
-            result,
-            "SELECT * FROM users WHERE id = 1 AND name = N'test'"
-        );
+    fn test_sql_param_null() {
+        let p = SqlParam(Value::Null);
+        let cd = p.to_sql();
+        // Null string → None variant
+        assert!(matches!(cd, tiberius::ColumnData::String(None)));
     }
 
     #[test]
-    fn test_substitute_params_question_marks() {
-        let sql = "SELECT * FROM users WHERE id = ? AND name = ?";
-        let params = vec![Value::Int32(1), Value::String("test".to_string())];
-        let result = substitute_params(sql, &params);
-        assert_eq!(
-            result,
-            "SELECT * FROM users WHERE id = 1 AND name = N'test'"
-        );
+    fn test_sql_param_bool() {
+        let p = SqlParam(Value::Bool(true));
+        let cd = p.to_sql();
+        assert!(matches!(cd, tiberius::ColumnData::Bit(Some(true))));
     }
 
     #[test]
-    fn test_value_to_string() {
-        assert_eq!(value_to_string(&Value::Null), "NULL");
-        assert_eq!(value_to_string(&Value::Bool(true)), "1");
-        assert_eq!(value_to_string(&Value::Bool(false)), "0");
-        assert_eq!(value_to_string(&Value::Int32(42)), "42");
-        assert_eq!(
-            value_to_string(&Value::String("hello".to_string())),
-            "N'hello'"
-        );
-        assert_eq!(
-            value_to_string(&Value::String("don't".to_string())),
-            "N'don''t'"
-        );
+    fn test_sql_param_integers() {
+        assert!(matches!(
+            SqlParam(Value::Int8(42)).to_sql(),
+            tiberius::ColumnData::I16(Some(42))
+        ));
+        assert!(matches!(
+            SqlParam(Value::Int16(1000)).to_sql(),
+            tiberius::ColumnData::I16(Some(1000))
+        ));
+        assert!(matches!(
+            SqlParam(Value::Int32(100_000)).to_sql(),
+            tiberius::ColumnData::I32(Some(100_000))
+        ));
+        assert!(matches!(
+            SqlParam(Value::Int64(1_000_000_000)).to_sql(),
+            tiberius::ColumnData::I64(Some(1_000_000_000))
+        ));
+    }
+
+    #[test]
+    fn test_sql_param_string() {
+        let p = SqlParam(Value::String("hello".into()));
+        if let tiberius::ColumnData::String(Some(cow)) = p.to_sql() {
+            assert_eq!(&*cow, "hello");
+        } else {
+            panic!("Expected String ColumnData");
+        }
+    }
+
+    #[test]
+    fn test_sql_param_string_with_injection_chars() {
+        // SQL metacharacters are harmless because the value is bound as a typed
+        // parameter — never interpolated into SQL text
+        let p = SqlParam(Value::String("x'; DROP TABLE users--".into()));
+        if let tiberius::ColumnData::String(Some(cow)) = p.to_sql() {
+            assert_eq!(&*cow, "x'; DROP TABLE users--");
+        } else {
+            panic!("Expected String ColumnData");
+        }
+    }
+
+    #[test]
+    fn test_sql_param_bytes() {
+        let p = SqlParam(Value::Bytes(vec![0xDE, 0xAD]));
+        if let tiberius::ColumnData::Binary(Some(cow)) = p.to_sql() {
+            assert_eq!(&*cow, &[0xDE, 0xAD]);
+        } else {
+            panic!("Expected Binary ColumnData");
+        }
+    }
+
+    #[test]
+    fn test_sql_param_uuid() {
+        let uuid = uuid::Uuid::new_v4();
+        let p = SqlParam(Value::Uuid(uuid));
+        assert!(matches!(
+            p.to_sql(),
+            tiberius::ColumnData::Guid(Some(_))
+        ));
+    }
+
+    #[test]
+    fn test_sql_param_chrono_types() {
+        use chrono::{NaiveDate, NaiveTime, NaiveDateTime, Utc};
+
+        let d = NaiveDate::from_ymd_opt(2025, 1, 15).unwrap();
+        let _cd = SqlParam(Value::Date(d)).to_sql();
+
+        let t = NaiveTime::from_hms_opt(12, 30, 45).unwrap();
+        let _cd = SqlParam(Value::Time(t)).to_sql();
+
+        let dt = NaiveDateTime::new(d, t);
+        let _cd = SqlParam(Value::DateTime(dt)).to_sql();
+
+        let dtz = Utc::now();
+        let _cd = SqlParam(Value::DateTimeTz(dtz)).to_sql();
+    }
+
+    #[test]
+    fn test_sql_param_json() {
+        let j = serde_json::json!({"key": "value"});
+        let p = SqlParam(Value::Json(j));
+        if let tiberius::ColumnData::String(Some(cow)) = p.to_sql() {
+            assert!(cow.contains("key"));
+        } else {
+            panic!("Expected String ColumnData for JSON");
+        }
+    }
+
+    #[test]
+    fn test_savepoint_name_validation() {
+        // Valid names succeed
+        assert!(validate_sql_identifier("sp1").is_ok());
+        assert!(validate_sql_identifier("my_savepoint").is_ok());
+
+        // Injection attempts are rejected
+        assert!(validate_sql_identifier("x; DROP TABLE users--").is_err());
+        assert!(validate_sql_identifier("").is_err());
+        assert!(validate_sql_identifier("x' OR '1'='1").is_err());
     }
 
     #[test]

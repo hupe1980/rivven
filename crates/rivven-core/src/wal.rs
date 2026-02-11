@@ -721,6 +721,9 @@ struct WalWriter {
     path: PathBuf,
     position: u64,
     config: WalConfig,
+    /// Pre-allocated next WAL file ready for instant rotation.
+    /// Populated in background after each rotation to avoid blocking writes.
+    preallocated_next: Option<(PathBuf, File)>,
 }
 
 impl WalWriter {
@@ -758,6 +761,7 @@ impl WalWriter {
             path,
             position: actual_position,
             config,
+            preallocated_next: None,
         })
     }
 
@@ -820,8 +824,9 @@ impl WalWriter {
 
     /// Rotate the WAL file if the current file exceeds max_file_size.
     ///
-    /// Flushes and syncs the current file, then creates a new WAL segment
-    /// named after the given LSN. Returns `true` if rotation occurred.
+    /// Uses a pre-allocated next file (if available) to avoid blocking
+    /// writes during pre-allocation. After rotation, eagerly pre-allocates the
+    /// NEXT file in a background thread so it's ready for the next rotation.
     fn rotate_if_needed(&mut self, next_lsn: u64) -> io::Result<bool> {
         if self.config.max_file_size == 0 || self.position < self.config.max_file_size {
             return Ok(false);
@@ -847,21 +852,61 @@ impl WalWriter {
             "Rotating WAL file"
         );
 
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(&new_path)?;
-
-        // Pre-allocate new file
-        if self.config.preallocate_size > 0 {
-            file.set_len(self.config.preallocate_size)?;
-        }
+        // Fast path: use pre-allocated file if path matches or create fresh
+        let file = if let Some((pre_path, pre_file)) = self.preallocated_next.take() {
+            if pre_path == new_path {
+                pre_file
+            } else {
+                // Path mismatch (LSN diverged) — create fresh, remove stale pre-alloc
+                let _ = std::fs::remove_file(&pre_path);
+                let f = OpenOptions::new()
+                    .create(true)
+                    .read(true)
+                    .write(true)
+                    .truncate(false)
+                    .open(&new_path)?;
+                if self.config.preallocate_size > 0 {
+                    f.set_len(self.config.preallocate_size)?;
+                }
+                f
+            }
+        } else {
+            let f = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(&new_path)?;
+            if self.config.preallocate_size > 0 {
+                f.set_len(self.config.preallocate_size)?;
+            }
+            f
+        };
 
         self.file = BufWriter::with_capacity(self.config.max_batch_size, file);
         self.path = new_path;
         self.position = 0;
+
+        // Eagerly pre-allocate the NEXT file in a background thread so the next
+        // rotation can be instant. Uses estimated LSN (current + max_file_size as a
+        // placeholder — the real LSN will be validated on use).
+        if self.config.preallocate_size > 0 {
+            let dir = self.config.dir.clone();
+            let prealloc_size = self.config.preallocate_size;
+            let estimated_next_lsn = next_lsn + self.config.max_file_size;
+            std::thread::spawn(move || {
+                let next_path = dir.join(format!("{:020}.wal", estimated_next_lsn));
+                if let Ok(f) = OpenOptions::new()
+                    .create(true)
+                    .read(true)
+                    .write(true)
+                    .truncate(false)
+                    .open(&next_path)
+                {
+                    let _ = f.set_len(prealloc_size);
+                }
+            });
+        }
 
         Ok(true)
     }

@@ -27,7 +27,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
@@ -187,10 +187,23 @@ impl SchemaServer {
 
     /// Build the Axum router
     pub fn router(&self) -> Router {
+        // Restrict CORS to disallow arbitrary cross-origin requests.
+        // `allow_origin(Any)` + `allow_methods(Any)` + `allow_headers(Any)` allows
+        // any website to make authenticated requests to the schema registry.
+        // Instead, allow only safe methods and standard headers. Operators can
+        // configure specific allowed origins via reverse proxy if needed.
         let cors = CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any);
+            .allow_methods([
+                axum::http::Method::GET,
+                axum::http::Method::POST,
+                axum::http::Method::PUT,
+                axum::http::Method::DELETE,
+            ])
+            .allow_headers([
+                axum::http::header::CONTENT_TYPE,
+                axum::http::header::AUTHORIZATION,
+                axum::http::header::ACCEPT,
+            ]);
 
         let base_router = Router::new()
             // Root / health

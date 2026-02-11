@@ -426,26 +426,16 @@ impl CompressionConfigBuilder {
 // Core Compression Functions
 // ============================================================================
 
-/// Compress data using LZ4
-fn compress_lz4(data: &[u8], level: CompressionLevel) -> Result<Vec<u8>> {
-    // LZ4 block compression
-    let mode = match level {
-        CompressionLevel::Fast => lz4::block::CompressionMode::FAST(65537),
-        CompressionLevel::Default => lz4::block::CompressionMode::DEFAULT,
-        CompressionLevel::Best => lz4::block::CompressionMode::HIGHCOMPRESSION(9),
-        CompressionLevel::Custom(n) if n > 0 => lz4::block::CompressionMode::FAST(n),
-        CompressionLevel::Custom(n) => lz4::block::CompressionMode::HIGHCOMPRESSION(-n),
-    };
-
-    lz4::block::compress(data, Some(mode), false)
-        .map_err(|e| CompressionError::Lz4Error(e.to_string()))
+/// Compress data using LZ4 (pure Rust via lz4_flex)
+fn compress_lz4(data: &[u8], _level: CompressionLevel) -> Result<Vec<u8>> {
+    // lz4_flex uses the standard LZ4 block format at maximum speed.
+    // Compression level is not configurable — LZ4 is designed for speed.
+    Ok(lz4_flex::block::compress_prepend_size(data))
 }
 
 /// Decompress LZ4 data
-fn decompress_lz4(data: &[u8], original_size: Option<usize>) -> Result<Vec<u8>> {
-    let uncompressed_size = original_size.unwrap_or(data.len() * 4); // Estimate 4x expansion
-
-    lz4::block::decompress(data, Some(uncompressed_size as i32))
+fn decompress_lz4(data: &[u8], _original_size: Option<usize>) -> Result<Vec<u8>> {
+    lz4_flex::block::decompress_size_prepended(data)
         .map_err(|e| CompressionError::Lz4Error(e.to_string()))
 }
 
@@ -998,7 +988,7 @@ pub struct StreamingCompressor<W: Write> {
 }
 
 enum StreamingEncoder<W: Write> {
-    Lz4(lz4::Encoder<W>),
+    Lz4(lz4_flex::frame::FrameEncoder<W>),
     Zstd(zstd::Encoder<'static, W>),
     Snappy(Box<snap::write::FrameEncoder<W>>),
     None(W),
@@ -1014,10 +1004,7 @@ impl<W: Write> StreamingCompressor<W> {
         let encoder = match algorithm {
             CompressionAlgorithm::None => StreamingEncoder::None(writer),
             CompressionAlgorithm::Lz4 => {
-                let encoder = lz4::EncoderBuilder::new()
-                    .level(level.lz4_acceleration().try_into().unwrap_or(4))
-                    .build(writer)
-                    .map_err(|e| CompressionError::Lz4Error(e.to_string()))?;
+                let encoder = lz4_flex::frame::FrameEncoder::new(writer);
                 StreamingEncoder::Lz4(encoder)
             }
             CompressionAlgorithm::Zstd => {
@@ -1048,11 +1035,9 @@ impl<W: Write> StreamingCompressor<W> {
     pub fn finish(self) -> Result<W> {
         match self.encoder {
             StreamingEncoder::None(w) => Ok(w),
-            StreamingEncoder::Lz4(e) => {
-                let (w, result) = e.finish();
-                result.map_err(|e| CompressionError::Lz4Error(e.to_string()))?;
-                Ok(w)
-            }
+            StreamingEncoder::Lz4(e) => e
+                .finish()
+                .map_err(|e| CompressionError::Lz4Error(e.to_string())),
             StreamingEncoder::Zstd(e) => e
                 .finish()
                 .map_err(|e| CompressionError::ZstdError(e.to_string())),
@@ -1069,7 +1054,7 @@ pub struct StreamingDecompressor<R: Read> {
 }
 
 enum StreamingDecoder<R: Read> {
-    Lz4(lz4::Decoder<R>),
+    Lz4(lz4_flex::frame::FrameDecoder<R>),
     Zstd(zstd::Decoder<'static, std::io::BufReader<R>>),
     Snappy(snap::read::FrameDecoder<R>),
     None(R),
@@ -1081,8 +1066,7 @@ impl<R: Read> StreamingDecompressor<R> {
         let decoder = match algorithm {
             CompressionAlgorithm::None => StreamingDecoder::None(reader),
             CompressionAlgorithm::Lz4 => {
-                let decoder = lz4::Decoder::new(reader)
-                    .map_err(|e| CompressionError::Lz4Error(e.to_string()))?;
+                let decoder = lz4_flex::frame::FrameDecoder::new(reader);
                 StreamingDecoder::Lz4(decoder)
             }
             CompressionAlgorithm::Zstd => {

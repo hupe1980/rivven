@@ -6,6 +6,7 @@ pub mod concurrent;
 pub mod config;
 pub mod consumer_group;
 pub mod error;
+pub mod hash;
 pub mod idempotent;
 pub mod io_uring;
 pub mod message;

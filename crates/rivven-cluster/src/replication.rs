@@ -324,7 +324,9 @@ impl PartitionReplication {
                 Ok(())
             }
             Acks::All => {
-                // Need all ISR to acknowledge
+                // Read ISR size and insert pending ack atomically
+                // under the same lock to prevent TOCTOU race where ISR changes
+                // between reading the count and inserting the ack.
                 let isr = self.isr.read().await;
                 let required = isr.len();
 
@@ -333,7 +335,7 @@ impl PartitionReplication {
                     return Ok(());
                 }
 
-                // Create pending ack
+                // Create pending ack while still holding ISR lock
                 let (tx, rx) = oneshot::channel();
                 let mut acked = HashSet::new();
                 acked.insert(self.local_node.clone());
@@ -349,6 +351,8 @@ impl PartitionReplication {
                     },
                 );
 
+                // Now safe to drop ISR lock — the pending ack's required count
+                // is consistent with the ISR snapshot taken above.
                 drop(isr);
 
                 // Wait for completion or timeout
@@ -771,16 +775,46 @@ impl FollowerFetcher {
 
     /// Apply fetched records to local storage
     async fn apply_records(&mut self, records: &[u8]) -> Result<()> {
-        // For now, we just track that we received records
-        // In production, this would:
-        // 1. Deserialize records batch
-        // 2. Write to local log segment
-        // 3. Update fetch_offset to end of applied batch
+        // Properly deserialize the record batch instead of estimating
+        // offsets from byte count. Each record is length-prefixed (4-byte BE u32).
+        let mut cursor = 0;
+        let mut last_offset: Option<u64> = None;
 
-        // Simulate advancing offset based on records received
-        // In real implementation, this comes from parsing the batch
-        let estimated_count = records.len() / 100; // Rough estimate
-        self.fetch_offset += estimated_count as u64;
+        while cursor + 4 <= records.len() {
+            let len = u32::from_be_bytes([
+                records[cursor],
+                records[cursor + 1],
+                records[cursor + 2],
+                records[cursor + 3],
+            ]) as usize;
+            cursor += 4;
+
+            if cursor + len > records.len() {
+                tracing::warn!(
+                    "Truncated record at byte {} in apply_records (expected {} bytes, have {})",
+                    cursor,
+                    len,
+                    records.len() - cursor
+                );
+                break;
+            }
+
+            match rivven_core::Message::from_bytes(&records[cursor..cursor + len]) {
+                Ok(msg) => {
+                    last_offset = Some(msg.offset);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to deserialize record at byte {}: {}", cursor, e);
+                    break;
+                }
+            }
+            cursor += len;
+        }
+
+        // Advance fetch_offset to one past the last successfully parsed record
+        if let Some(offset) = last_offset {
+            self.fetch_offset = offset + 1;
+        }
 
         Ok(())
     }

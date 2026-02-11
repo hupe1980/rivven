@@ -598,7 +598,7 @@ pub struct TlsAcceptor {
     inner: tokio_rustls::TlsAcceptor,
     /// Configuration for hot-reloading
     tls_config: TlsConfig,
-    /// Reloadable config handle
+    /// Reloadable config handle — shared with the background reload task
     reloadable_config: Option<Arc<RwLock<Arc<ServerConfig>>>>,
 }
 
@@ -648,19 +648,24 @@ impl TlsAcceptor {
         self.accept(stream).await
     }
 
-    /// Reload certificates (for hot-reloading)
-    pub fn reload(&mut self) -> TlsResult<()> {
+    /// Reload certificates from the original config sources.
+    ///
+    /// Rebuilds the rustls `ServerConfig` and atomically swaps it into the
+    /// reloadable handle so that subsequent `accept()` calls use the new
+    /// certificates. Safe to call from a background task via `&self`.
+    pub fn reload(&self) -> TlsResult<()> {
         let new_config = build_server_config(&self.tls_config)?;
         let new_config = Arc::new(new_config);
-
-        // Update the active acceptor and config
-        self.inner = tokio_rustls::TlsAcceptor::from(new_config.clone());
-        self.config = new_config.clone();
 
         if let Some(ref reloadable) = self.reloadable_config {
             *reloadable.write() = new_config;
         }
         Ok(())
+    }
+
+    /// Get the configured certificate reload interval (Duration::ZERO = disabled)
+    pub fn cert_reload_interval(&self) -> Duration {
+        self.tls_config.cert_reload_interval
     }
 
     /// Get the underlying rustls ServerConfig

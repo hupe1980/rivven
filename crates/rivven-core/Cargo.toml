@@ -14,7 +14,7 @@ ignored = ["humantime-serde", "oauth2", "openidconnect"]
 
 [features]
 default = ["compression", "cedar", "tls", "metrics", "encryption"]
-compression = ["dep:lz4", "dep:zstd", "dep:snap"]
+compression = ["dep:lz4_flex", "dep:zstd", "dep:snap"]
 cedar = ["dep:cedar-policy"]
 encryption = ["dep:secrecy"]
 oidc = ["dep:openidconnect", "dep:oauth2", "dep:jsonwebtoken", "dep:reqwest"]
@@ -46,6 +46,7 @@ parking_lot = "0.12"
 crossbeam-channel = "0.5"
 memchr = "2.7"
 regex = "1.11"
+indexmap = "2"
 
 # Metrics - unified observability
 metrics = { workspace = true }
@@ -80,8 +81,8 @@ rcgen = { version = "0.13", optional = true, features = ["aws_lc_rs"] }
 x509-parser = { version = "0.16", optional = true }
 humantime-serde = { version = "1.1", optional = true }
 
-# Compression (high-performance)
-lz4 = { version = "1.24", optional = true }
+# Compression (high-performance, pure Rust)
+lz4_flex = { version = "0.11", optional = true }
 zstd = { version = "0.13", features = ["zstdmt"], optional = true }
 snap = { version = "1.1", optional = true }
 
