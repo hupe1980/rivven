@@ -69,28 +69,24 @@ jobs:
         uses: Swatinem/rust-cache@v2
       
       # ============================================================
-      # Publish crates in STRICT dependency order
+      # Publish crates in STRICT topological dependency order
       # ============================================================
       
-      # Layer 1: No internal dependencies
+      # Layer 0: No workspace dependencies (leaf crates)
       - name: Publish rivven-core
         run: cargo publish -p rivven-core --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true  # Skip if already published
-      
-      - name: Publish rivven-connect-derive
-        run: cargo publish -p rivven-connect-derive --token ${{ secrets.CRATES_IO_TOKEN }}
-        continue-on-error: true
       
       - name: Publish rivven-protocol
         run: cargo publish -p rivven-protocol --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
       
-      - name: Wait for crates.io index
-        run: sleep 30
+      - name: Publish rivven-connect-derive
+        run: cargo publish -p rivven-connect-derive --token ${{ secrets.CRATES_IO_TOKEN }}
+        continue-on-error: true
       
-      # Layer 2: Depends only on rivven-core
-      - name: Publish rivven-cluster
-        run: cargo publish -p rivven-cluster --token ${{ secrets.CRATES_IO_TOKEN }}
+      - name: Publish rivven-rdbc
+        run: cargo publish -p rivven-rdbc --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
       
       - name: Publish rivven-cdc
@@ -100,7 +96,12 @@ jobs:
       - name: Wait for crates.io index
         run: sleep 30
       
-      # Layer 3: Depends on core + protocol
+      # Layer 1: Depends on rivven-core
+      - name: Publish rivven-cluster
+        run: cargo publish -p rivven-cluster --token ${{ secrets.CRATES_IO_TOKEN }}
+        continue-on-error: true
+      
+      # Layer 1: Depends on rivven-core + rivven-protocol
       - name: Publish rivven-client
         run: cargo publish -p rivven-client --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
@@ -108,37 +109,32 @@ jobs:
       - name: Wait for crates.io index
         run: sleep 30
       
-      # Layer 4: Depends on protocol, core (optional), client (optional)
+      # Layer 2: Depends on protocol; optional: core, client
       - name: Publish rivven-schema
         run: cargo publish -p rivven-schema --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
       
-      - name: Wait for crates.io index
-        run: sleep 30
-      
-      # Layer 5: rivvend depends on core, protocol, cluster
+      # Layer 2: Depends on core, protocol, cluster
       - name: Publish rivvend
         run: cargo publish -p rivvend --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
       
-      - name: Wait for crates.io index
-        run: sleep 30
-      
-      # Layer 6: rivven-connect depends on cdc, core, client, schema, connect-derive
-      - name: Publish rivven-connect
-        run: cargo publish -p rivven-connect --token ${{ secrets.CRATES_IO_TOKEN }}
+      # Layer 2: Depends on client
+      - name: Publish rivven-operator
+        run: cargo publish -p rivven-operator --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
       
-      - name: Wait for crates.io index
-        run: sleep 30
-      
-      # Layer 7: Final binaries
+      # Layer 2: Depends on client
       - name: Publish rivven (CLI)
         run: cargo publish -p rivven --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
       
-      - name: Publish rivven-operator
-        run: cargo publish -p rivven-operator --token ${{ secrets.CRATES_IO_TOKEN }}
+      - name: Wait for crates.io index
+        run: sleep 30
+      
+      # Layer 3: Depends on cdc, core, client, schema, connect-derive; optional: rdbc
+      - name: Publish rivven-connect
+        run: cargo publish -p rivven-connect --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
 
   pypi:
