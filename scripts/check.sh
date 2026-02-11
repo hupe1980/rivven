@@ -257,7 +257,7 @@ else
 fi
 
 # MSRV check (requires the toolchain to be installed)
-MSRV="1.89"
+MSRV="1.91"
 if rustup run "$MSRV" cargo --version &> /dev/null; then
     run_check "MSRV ($MSRV)" rustup run "$MSRV" cargo check --all-features --workspace
 else

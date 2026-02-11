@@ -183,8 +183,8 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
       
-      - name: Install Rust 1.89 (MSRV)
-        uses: dtolnay/rust-toolchain@1.89.0
+      - name: Install Rust 1.91 (MSRV)
+        uses: dtolnay/rust-toolchain@1.91.0
       
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
