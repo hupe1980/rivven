@@ -389,6 +389,11 @@ impl ConnectorMetadataBuilder {
         self.connector_type(ConnectorType::Processor)
     }
 
+    /// Mark as transform (alias for processor)
+    pub fn transform(self) -> Self {
+        self.connector_type(ConnectorType::Processor)
+    }
+
     /// Set category
     pub fn category(mut self, category: ConnectorCategory) -> Self {
         self.category = Some(category);

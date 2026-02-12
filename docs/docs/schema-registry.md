@@ -301,7 +301,7 @@ spec:
     name: production
   
   replicas: 2
-  version: "0.0.14"
+  version: "0.0.15"
   
   # Server configuration
   server:
@@ -375,7 +375,7 @@ spec:
     spec:
       containers:
         - name: schema-registry
-          image: ghcr.io/hupe1980/rivven-schema:0.0.14
+          image: ghcr.io/hupe1980/rivven-schema:0.0.15
           ports:
             - containerPort: 8081
           env:

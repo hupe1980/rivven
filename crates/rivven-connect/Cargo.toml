@@ -61,6 +61,11 @@ clickhouse = ["dep:clickhouse", "dep:metrics"]
 qdrant = ["dep:qdrant-client", "dep:metrics"]
 pinecone = ["dep:pinecone-sdk", "dep:metrics"]
 
+# LLM connectors (chat + embedding transforms)
+llm-openai = ["dep:rivven-llm", "rivven-llm/openai", "dep:metrics"]
+llm-bedrock = ["dep:rivven-llm", "rivven-llm/bedrock", "dep:metrics"]
+llm-full = ["llm-openai", "llm-bedrock"]
+
 # Lakehouse connectors (open table formats)
 iceberg = ["parquet", "dep:iceberg", "dep:iceberg-catalog-rest"]
 delta-lake = ["parquet", "dep:deltalake"]
@@ -73,8 +78,9 @@ queue-full = ["kafka", "mqtt", "sqs", "pubsub"]
 storage-full = ["s3", "gcs", "azure", "parquet"]
 warehouse-full = ["snowflake", "bigquery", "redshift", "databricks", "clickhouse"]
 vectordb-full = ["qdrant", "pinecone"]
+llm = ["llm-full"]
 lakehouse-full = ["iceberg", "delta-lake"]
-full = ["postgres", "mysql", "sqlserver", "tls", "http", "rdbc-full", "queue-full", "storage-full", "warehouse-full", "vectordb-full", "lakehouse-full"]
+full = ["postgres", "mysql", "sqlserver", "tls", "http", "rdbc-full", "queue-full", "storage-full", "warehouse-full", "vectordb-full", "llm-full", "lakehouse-full"]
 
 [dependencies]
 # Internal crates
@@ -83,6 +89,7 @@ rivven-core = { workspace = true }
 rivven-client = { workspace = true }
 rivven-schema = { workspace = true, features = ["types"] }  # Types only - codecs are in format/
 rivven-rdbc = { workspace = true, optional = true }
+rivven-llm = { workspace = true, optional = true }
 
 # Async
 tokio = { workspace = true }

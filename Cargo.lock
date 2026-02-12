@@ -755,6 +755,7 @@ dependencies = [
  "aws-credential-types",
  "aws-sigv4",
  "aws-smithy-async",
+ "aws-smithy-eventstream",
  "aws-smithy-http",
  "aws-smithy-runtime",
  "aws-smithy-runtime-api",
@@ -768,6 +769,33 @@ dependencies = [
  "pin-project-lite",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "aws-sdk-bedrockruntime"
+version = "1.124.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "135b4983ee5cef449a1442a91779959ba3f8a7b9ab95b4cc8b081f026567eab3"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-sigv4",
+ "aws-smithy-async",
+ "aws-smithy-eventstream",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "http-body-util",
+ "regex-lite",
+ "tracing",
 ]
 
 [[package]]
@@ -898,6 +926,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "efa49f3c607b92daae0c078d48a4571f599f966dce3caee5f1ea55c4d9073f99"
 dependencies = [
  "aws-credential-types",
+ "aws-smithy-eventstream",
  "aws-smithy-http",
  "aws-smithy-runtime-api",
  "aws-smithy-types",
@@ -925,11 +954,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-smithy-eventstream"
+version = "0.60.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c0b3e587fbaa5d7f7e870544508af8ce82ea47cd30376e69e1e37c4ac746f79"
+dependencies = [
+ "aws-smithy-types",
+ "bytes",
+ "crc32fast",
+]
+
+[[package]]
 name = "aws-smithy-http"
 version = "0.63.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "af4a8a5fe3e4ac7ee871237c340bbce13e982d37543b65700f4419e039f5d78e"
 dependencies = [
+ "aws-smithy-eventstream",
  "aws-smithy-runtime-api",
  "aws-smithy-types",
  "bytes",
@@ -7456,7 +7497,7 @@ dependencies = [
 
 [[package]]
 name = "rivven"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "bytes",
@@ -7469,7 +7510,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-cdc"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -7526,7 +7567,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-client"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -7545,7 +7586,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-cluster"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "bytes",
  "chrono",
@@ -7581,7 +7622,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-connect"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "apache-avro 0.17.0",
@@ -7628,6 +7669,7 @@ dependencies = [
  "rivven-client",
  "rivven-connect-derive",
  "rivven-core",
+ "rivven-llm",
  "rivven-rdbc",
  "rivven-schema",
  "rsa",
@@ -7664,7 +7706,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-connect-derive"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "darling 0.20.11",
  "proc-macro2",
@@ -7674,7 +7716,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-core"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "argon2",
  "async-trait",
@@ -7727,7 +7769,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-integration-tests"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7767,8 +7809,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "rivven-llm"
+version = "0.0.15"
+dependencies = [
+ "async-trait",
+ "aws-config",
+ "aws-sdk-bedrockruntime",
+ "reqwest 0.12.28",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-test",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "rivven-operator"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "chrono",
@@ -7793,7 +7853,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-protocol"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "bytes",
  "postcard",
@@ -7806,7 +7866,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-python"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "bytes",
  "pyo3",
@@ -7818,7 +7878,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-rdbc"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "async-trait",
  "chrono",
@@ -7850,7 +7910,7 @@ dependencies = [
 
 [[package]]
 name = "rivven-schema"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "apache-avro 0.17.0",
@@ -7884,7 +7944,7 @@ dependencies = [
 
 [[package]]
 name = "rivvend"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "axum 0.7.9",

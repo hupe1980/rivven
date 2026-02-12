@@ -2125,6 +2125,128 @@ transforms:
       default: other-events
 ```
 
+### LLM Chat Transform
+
+Enrich events by sending data through an LLM (Large Language Model) and writing the response into the event. Supports OpenAI-compatible APIs and AWS Bedrock.
+
+```yaml
+transforms:
+  classify:
+    transform: llm-chat
+    config:
+      provider: openai           # openai | bedrock
+      api_key: "${OPENAI_API_KEY}"
+      model: gpt-4o-mini
+      system_prompt: "Classify sentiment as: positive, negative, neutral. Reply with one word."
+      prompt_template: "{{text}}"
+      output_field: sentiment
+      temperature: 0.0
+      max_tokens: 10
+      timeout_secs: 30
+      skip_on_error: false       # pass events through on LLM failure
+```
+
+**Configuration:**
+
+| Field | Type | Default | Description |
+|:------|:-----|:--------|:------------|
+| `provider` | `openai` \| `bedrock` | `openai` | LLM provider |
+| `api_key` | string | — | API key (required for OpenAI; Bedrock uses AWS credential chain) |
+| `base_url` | string | — | Base URL override (Azure OpenAI, Ollama, vLLM) |
+| `region` | string | `us-east-1` | AWS region (Bedrock only) |
+| `model` | string | **required** | Model identifier |
+| `system_prompt` | string | — | System prompt for LLM persona/behavior |
+| `prompt_template` | string | **required** | Template with `\{\{field\}\}` placeholders |
+| `output_field` | string | `llm_response` | Field name for the LLM response |
+| `temperature` | float | — | Sampling temperature (0.0–2.0) |
+| `max_tokens` | integer | — | Maximum response tokens |
+| `timeout_secs` | integer | `60` | Request timeout in seconds |
+| `skip_on_error` | boolean | `false` | Pass events through on LLM failure |
+
+**Template Placeholders:**
+
+- `\{\{field\}\}` — event data field (supports nested dot-notation: `\{\{address.city\}\}`)
+- `\{\{_data\}\}` — entire event data as JSON
+- `\{\{_stream\}\}` — stream/topic name
+- `\{\{_timestamp\}\}` — event timestamp (RFC 3339)
+
+Template rendering is injection-safe: field values containing placeholder syntax are never re-expanded.
+
+**Metrics (chat):** `llm.chat.requests.success`, `llm.chat.requests.failed`, `llm.chat.requests.timeout`, `llm.chat.duration_ms`, `llm.chat.tokens.prompt`, `llm.chat.tokens.completion`, `llm.chat.tokens.total`, `llm.chat.finish_reason.length` (truncated), `llm.chat.finish_reason.content_filter` (censored), `llm.chat.finish_reason.other`
+
+### LLM Embedding Transform
+
+Generate vector embeddings from event text fields for downstream vector DB sinks (Qdrant, Pinecone, etc.).
+
+```yaml
+transforms:
+  vectorize:
+    transform: llm-embedding
+    config:
+      provider: openai
+      api_key: "${OPENAI_API_KEY}"
+      model: text-embedding-3-small
+      input_field: text
+      output_field: embedding
+      dimensions: 1536           # validate output dimensions (0 = skip)
+      timeout_secs: 30
+      skip_on_missing: true      # pass through if input field missing
+      skip_on_error: false       # pass through on embedding failure
+```
+
+**Configuration:**
+
+| Field | Type | Default | Description |
+|:------|:-----|:--------|:------------|
+| `provider` | `openai` \| `bedrock` | `openai` | LLM provider |
+| `api_key` | string | — | API key (required for OpenAI) |
+| `base_url` | string | — | Base URL override |
+| `region` | string | `us-east-1` | AWS region (Bedrock only) |
+| `model` | string | **required** | Embedding model identifier |
+| `input_field` | string | `text` | Field containing text to embed |
+| `output_field` | string | `embedding` | Field for the embedding vector |
+| `dimensions` | integer | `0` | Embedding dimensions — passed to the API as a hint; also validates output (0 = skip) |
+| `input_type` | string | — | Input type hint (`search_document`, `search_query`) — Cohere Bedrock models |
+| `timeout_secs` | integer | `60` | Request timeout |
+| `skip_on_missing` | boolean | `false` | Pass through if input field is missing |
+| `skip_on_error` | boolean | `false` | Pass through on embedding failure |
+
+**Metrics (embedding):** `llm.embedding.requests.success`, `llm.embedding.requests.failed`, `llm.embedding.requests.timeout`, `llm.embedding.duration_ms`, `llm.embedding.tokens.prompt`, `llm.embedding.tokens.total`
+
+**Example Pipeline — Sentiment + Embeddings:**
+
+```yaml
+sources:
+  reviews:
+    connector: postgres-cdc
+    topic: cdc.reviews
+    transforms:
+      - type: ExtractNewRecordState
+      - transform: llm-chat
+        config:
+          provider: openai
+          api_key: "${OPENAI_API_KEY}"
+          model: gpt-4o-mini
+          system_prompt: "Classify as positive/negative/neutral. One word."
+          prompt_template: "{{text}}"
+          output_field: sentiment
+          temperature: 0.0
+      - transform: llm-embedding
+        config:
+          provider: openai
+          api_key: "${OPENAI_API_KEY}"
+          model: text-embedding-3-small
+          input_field: text
+          output_field: embedding
+
+sinks:
+  vectors:
+    connector: qdrant
+    config:
+      url: http://localhost:6334
+      collection: reviews
+```
+
 ---
 
 ## Custom Connectors

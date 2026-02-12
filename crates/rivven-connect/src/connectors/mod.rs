@@ -58,9 +58,14 @@ pub mod vectordb;
 
 // Lakehouse connectors (Apache Iceberg, Delta Lake)
 pub mod lakehouse;
+
+// LLM transform connectors (Chat, Embedding)
+#[cfg(any(feature = "llm-openai", feature = "llm-bedrock"))]
+pub mod llm;
 // Re-export registry types from SDK (now in traits module)
 pub use super::traits::registry::{
-    AnySink, AnySource, SinkFactory, SinkRegistry, SourceFactory, SourceRegistry,
+    AnySink, AnySource, AnyTransform, SinkFactory, SinkRegistry, SourceFactory, SourceRegistry,
+    TransformFactory, TransformRegistry,
 };
 
 // Re-export inventory types
@@ -180,6 +185,21 @@ pub fn create_sink_registry() -> SinkRegistry {
     // RDBC sink (query-based, feature-gated)
     #[cfg(feature = "rdbc")]
     registry.register("rdbc-sink", Arc::new(rdbc::RdbcSinkFactory));
+
+    registry
+}
+
+/// Create a transform registry with all enabled transforms
+pub fn create_transform_registry() -> TransformRegistry {
+    let mut registry = TransformRegistry::new();
+
+    // LLM Chat transform
+    #[cfg(any(feature = "llm-openai", feature = "llm-bedrock"))]
+    registry.register("llm-chat", Arc::new(llm::LlmChatTransformFactory));
+
+    // LLM Embedding transform
+    #[cfg(any(feature = "llm-openai", feature = "llm-bedrock"))]
+    registry.register("llm-embedding", Arc::new(llm::LlmEmbeddingTransformFactory));
 
     registry
 }
@@ -688,6 +708,48 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .related("postgres-cdc")
             .build(),
         Arc::new(rdbc::RdbcSinkFactory),
+    );
+
+    // ─────────────────────────────────────────────────────────────────
+    // LLM TRANSFORMS (AI/ML)
+    // ─────────────────────────────────────────────────────────────────
+
+    // LLM Chat transform
+    #[cfg(any(feature = "llm-openai", feature = "llm-bedrock"))]
+    inventory.register_transform(
+        ConnectorMetadata::builder("llm-chat")
+            .title("LLM Chat")
+            .description("Enrich events via LLM chat completions (OpenAI, Bedrock)")
+            .transform()
+            .category(ConnectorCategory::AiLlm)
+            .tags(["llm", "chat", "openai", "bedrock", "transform", "ai"])
+            .aliases(["chat-transform", "llm-transform", "ai-chat"])
+            .related("llm-embedding")
+            .build(),
+        Arc::new(llm::LlmChatTransformFactory),
+    );
+
+    // LLM Embedding transform
+    #[cfg(any(feature = "llm-openai", feature = "llm-bedrock"))]
+    inventory.register_transform(
+        ConnectorMetadata::builder("llm-embedding")
+            .title("LLM Embedding")
+            .description("Generate vector embeddings for event fields (OpenAI, Bedrock)")
+            .transform()
+            .category(ConnectorCategory::AiLlm)
+            .tags([
+                "llm",
+                "embedding",
+                "vector",
+                "openai",
+                "bedrock",
+                "transform",
+                "ai",
+            ])
+            .aliases(["embedding-transform", "vectorize", "ai-embedding"])
+            .related("llm-chat")
+            .build(),
+        Arc::new(llm::LlmEmbeddingTransformFactory),
     );
 
     inventory

@@ -1,0 +1,44 @@
+[package]
+name = "rivven-llm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "LLM provider facade for Rivven — unified API for OpenAI, AWS Bedrock, and more"
+readme = "README.md"
+
+[features]
+default = ["openai"]
+openai = ["dep:reqwest", "dep:secrecy"]
+bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime"]
+full = ["openai", "bedrock"]
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true }
+async-trait = { workspace = true }
+
+# HTTP (OpenAI provider)
+reqwest = { workspace = true, optional = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Logging
+tracing = { workspace = true }
+
+# Utilities
+secrecy = { version = "0.10", features = ["serde"], optional = true }
+uuid = { workspace = true }
+
+# AWS SDK (optional — for Bedrock)
+aws-config = { version = "1", optional = true }
+aws-sdk-bedrockruntime = { version = "1", optional = true }
+
+[dev-dependencies]
+tokio-test = "0.4"

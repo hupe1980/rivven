@@ -33,7 +33,7 @@
 use super::metadata::{
     ConnectorCategory, ConnectorMetadata, ConnectorMetadataBuilder, ConnectorType,
 };
-use super::registry::{SinkFactory, SourceFactory};
+use super::registry::{SinkFactory, SourceFactory, TransformFactory};
 use super::spec::ConnectorSpec;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -54,7 +54,15 @@ pub struct SinkEntry {
     pub factory: Arc<dyn SinkFactory>,
 }
 
-/// Unified connector inventory for sources, sinks, and processors
+/// Entry in the connector inventory for transforms
+pub struct TransformEntry {
+    /// Connector metadata for discovery
+    pub metadata: ConnectorMetadata,
+    /// Factory for creating instances
+    pub factory: Arc<dyn TransformFactory>,
+}
+
+/// Unified connector inventory for sources, sinks, and transforms
 ///
 /// Designed to scale to 300+ connectors with efficient lookup and search.
 #[derive(Default)]
@@ -63,6 +71,8 @@ pub struct ConnectorInventory {
     sources: HashMap<String, SourceEntry>,
     /// Sink connectors
     sinks: HashMap<String, SinkEntry>,
+    /// Transform connectors
+    transforms: HashMap<String, TransformEntry>,
     /// Metadata index for fast category lookup
     by_category: HashMap<ConnectorCategory, Vec<String>>,
     /// Metadata index for fast tag lookup
@@ -75,6 +85,7 @@ impl ConnectorInventory {
         Self {
             sources: HashMap::new(),
             sinks: HashMap::new(),
+            transforms: HashMap::new(),
             by_category: HashMap::new(),
             by_tag: HashMap::new(),
         }
@@ -126,6 +137,32 @@ impl ConnectorInventory {
         self.sinks.insert(name, SinkEntry { metadata, factory });
     }
 
+    /// Register a transform connector
+    pub fn register_transform(
+        &mut self,
+        metadata: ConnectorMetadata,
+        factory: Arc<dyn TransformFactory>,
+    ) {
+        let name = metadata.name.clone();
+
+        // Index by category
+        self.by_category
+            .entry(metadata.category)
+            .or_default()
+            .push(name.clone());
+
+        // Index by tags
+        for tag in &metadata.tags {
+            self.by_tag
+                .entry(tag.clone())
+                .or_default()
+                .push(name.clone());
+        }
+
+        self.transforms
+            .insert(name, TransformEntry { metadata, factory });
+    }
+
     /// Get a source factory by name
     pub fn get_source(&self, name: &str) -> Option<&Arc<dyn SourceFactory>> {
         self.sources.get(name).map(|e| &e.factory)
@@ -136,6 +173,11 @@ impl ConnectorInventory {
         self.sinks.get(name).map(|e| &e.factory)
     }
 
+    /// Get a transform factory by name
+    pub fn get_transform(&self, name: &str) -> Option<&Arc<dyn TransformFactory>> {
+        self.transforms.get(name).map(|e| &e.factory)
+    }
+
     /// Get source metadata by name
     pub fn get_source_metadata(&self, name: &str) -> Option<&ConnectorMetadata> {
         self.sources.get(name).map(|e| &e.metadata)
@@ -144,6 +186,11 @@ impl ConnectorInventory {
     /// Get sink metadata by name
     pub fn get_sink_metadata(&self, name: &str) -> Option<&ConnectorMetadata> {
         self.sinks.get(name).map(|e| &e.metadata)
+    }
+
+    /// Get transform metadata by name
+    pub fn get_transform_metadata(&self, name: &str) -> Option<&ConnectorMetadata> {
+        self.transforms.get(name).map(|e| &e.metadata)
     }
 
     /// List all sources with their specs
@@ -162,6 +209,14 @@ impl ConnectorInventory {
             .collect()
     }
 
+    /// List all transforms with their specs
+    pub fn list_transforms(&self) -> Vec<(&str, ConnectorSpec)> {
+        self.transforms
+            .iter()
+            .map(|(name, entry)| (name.as_str(), entry.factory.spec()))
+            .collect()
+    }
+
     /// List all source metadata
     pub fn list_source_metadata(&self) -> Vec<&ConnectorMetadata> {
         self.sources.values().map(|e| &e.metadata).collect()
@@ -170,6 +225,11 @@ impl ConnectorInventory {
     /// List all sink metadata
     pub fn list_sink_metadata(&self) -> Vec<&ConnectorMetadata> {
         self.sinks.values().map(|e| &e.metadata).collect()
+    }
+
+    /// List all transform metadata
+    pub fn list_transform_metadata(&self) -> Vec<&ConnectorMetadata> {
+        self.transforms.values().map(|e| &e.metadata).collect()
     }
 
     /// Search sources by query string
@@ -203,6 +263,12 @@ impl ConnectorInventory {
                     .filter(|e| e.metadata.matches_search(query))
                     .map(|e| &e.metadata),
             )
+            .chain(
+                self.transforms
+                    .values()
+                    .filter(|e| e.metadata.matches_search(query))
+                    .map(|e| &e.metadata),
+            )
             .collect();
 
         // Deduplicate by name (some connectors are both source and sink)
@@ -228,6 +294,12 @@ impl ConnectorInventory {
                     .filter(|e| e.metadata.matches_filters(category, connector_type))
                     .map(|e| &e.metadata),
             )
+            .chain(
+                self.transforms
+                    .values()
+                    .filter(|e| e.metadata.matches_filters(category, connector_type))
+                    .map(|e| &e.metadata),
+            )
             .collect();
 
         // Deduplicate by name
@@ -248,6 +320,7 @@ impl ConnectorInventory {
                             .get(name)
                             .map(|e| &e.metadata)
                             .or_else(|| self.sinks.get(name).map(|e| &e.metadata))
+                            .or_else(|| self.transforms.get(name).map(|e| &e.metadata))
                     })
                     .collect()
             })
@@ -266,6 +339,7 @@ impl ConnectorInventory {
                             .get(name)
                             .map(|e| &e.metadata)
                             .or_else(|| self.sinks.get(name).map(|e| &e.metadata))
+                            .or_else(|| self.transforms.get(name).map(|e| &e.metadata))
                     })
                     .collect()
             })
@@ -298,6 +372,9 @@ impl ConnectorInventory {
         for name in self.sinks.keys() {
             names.insert(name);
         }
+        for name in self.transforms.keys() {
+            names.insert(name);
+        }
         names.len()
     }
 
@@ -311,6 +388,11 @@ impl ConnectorInventory {
         self.sinks.len()
     }
 
+    /// Number of transforms
+    pub fn transform_count(&self) -> usize {
+        self.transforms.len()
+    }
+
     /// Generate markdown documentation for all connectors
     pub fn generate_docs(&self) -> String {
         let mut doc = String::new();
@@ -318,10 +400,11 @@ impl ConnectorInventory {
 
         // Summary
         doc.push_str(&format!(
-            "**Total Connectors**: {} ({} sources, {} sinks)\n\n",
+            "**Total Connectors**: {} ({} sources, {} sinks, {} transforms)\n\n",
             self.total_count(),
             self.source_count(),
-            self.sink_count()
+            self.sink_count(),
+            self.transform_count()
         ));
 
         // Group by parent category
@@ -331,6 +414,10 @@ impl ConnectorInventory {
             by_parent.entry(parent).or_default().push(meta);
         }
         for meta in self.list_sink_metadata() {
+            let parent = meta.category.parent().unwrap_or("other");
+            by_parent.entry(parent).or_default().push(meta);
+        }
+        for meta in self.list_transform_metadata() {
             let parent = meta.category.parent().unwrap_or("other");
             by_parent.entry(parent).or_default().push(meta);
         }

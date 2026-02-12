@@ -26,7 +26,7 @@ Rivven connectors are Rust types that implement the `Source`, `Sink`, or `Transf
 
 ```toml
 [dependencies]
-rivven-connect = "0.0.14"
+rivven-connect = "0.0.15"
 serde = { version = "1.0", features = ["derive"] }
 schemars = "0.8"
 validator = { version = "0.20", features = ["derive"] }
@@ -250,9 +250,9 @@ impl Transform for FilterTransform {
         let matches = check_pattern(&event, &config.field, &config.pattern);
         
         if matches {
-            Ok(TransformOutput::Emit(event))
+            Ok(TransformOutput::single(event))
         } else {
-            Ok(TransformOutput::Drop)
+            Ok(TransformOutput::filtered())
         }
     }
 }

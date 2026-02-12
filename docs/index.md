@@ -2,14 +2,14 @@
 layout: default
 title: Home
 nav_order: 1
-description: "Rivven is a production-grade, high-performance distributed event streaming platform written in Rust."
+description: "Rivven is a high-performance distributed event streaming platform written in Rust."
 permalink: /
 ---
 
 # Rivven
 {: .fs-9 }
 
-A production-grade, high-performance distributed event streaming platform.
+A high-performance distributed event streaming platform.
 {: .fs-6 .fw-300 }
 
 [Get Started](/rivven/docs/getting-started){: .btn .btn-primary .fs-5 .mb-4 .mb-md-0 .mr-2 }
@@ -149,12 +149,12 @@ rivven-connect -c rivven-connect.yaml
 │  │  • Storage       │       │  Sources: postgres-cdc, mysql  │  │
 │  │  • Replication   │       │  Sinks:   s3, snowflake, http  │  │
 │  │  • Auth/RBAC     │       │  Transforms: SMTs, filters     │  │
-│  └──────────────────┘       └────────────────────────────────┘  │
-│           │                            │                        │
-│           ▼                            ▼                        │
+│  └──────────────────┘       └───────────────┬────────────────┘  │
+│                                             │                   │
+│                                             ▼                   │
 │  ┌──────────────────┐       ┌────────────────────────────────┐  │
-│  │  rivven-schema   │       │        rivven-operator         │  │
-│  │ (schema registry)│       │      (kubernetes CRDs)         │  │
+│  │ rivven-operator  │       │        rivven-schema           │  │
+│  │ (kubernetes CRDs)│       │      (schema registry)         │  │
 │  └──────────────────┘       └────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```

@@ -2,8 +2,8 @@ apiVersion: v2
 name: rivven-operator
 description: A Helm chart for deploying the Rivven Kubernetes Operator
 type: application
-version: 0.0.14
-appVersion: "0.0.14"
+version: 0.0.15
+appVersion: "0.0.15"
 kubeVersion: ">=1.25.0-0"
 keywords:
   - rivven

@@ -23,7 +23,7 @@ The Google Cloud Pub/Sub connector provides both source and sink implementations
 The Pub/Sub connector is always available (no feature flag required).
 
 ```toml
-rivven-connect = { version = "0.0.14" }
+rivven-connect = { version = "0.0.15" }
 ```
 
 ### Source Configuration

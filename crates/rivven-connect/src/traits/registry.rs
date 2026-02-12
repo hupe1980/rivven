@@ -391,6 +391,43 @@ macro_rules! impl_any_sink {
     };
 }
 
+/// Helper macro to implement AnyTransform for a typed Transform
+///
+/// This reduces boilerplate when implementing transform adapters.
+#[macro_export]
+macro_rules! impl_any_transform {
+    ($transform_type:ty, $config_type:ty) => {
+        #[async_trait::async_trait]
+        impl $crate::AnyTransform for $transform_type {
+            async fn transform_raw(
+                &self,
+                config: &serde_yaml::Value,
+                event: $crate::SourceEvent,
+            ) -> $crate::error::Result<$crate::TransformOutput> {
+                let typed_config: $config_type = serde_yaml::from_value(config.clone())
+                    .map_err(|e| $crate::error::ConnectorError::Config(e.to_string()))?;
+                typed_config
+                    .validate()
+                    .map_err(|e| $crate::error::ConnectorError::Config(e.to_string()))?;
+                <Self as $crate::Transform>::transform(self, &typed_config, event).await
+            }
+
+            async fn init_raw(&self, config: &serde_yaml::Value) -> $crate::error::Result<()> {
+                let typed_config: $config_type = serde_yaml::from_value(config.clone())
+                    .map_err(|e| $crate::error::ConnectorError::Config(e.to_string()))?;
+                typed_config
+                    .validate()
+                    .map_err(|e| $crate::error::ConnectorError::Config(e.to_string()))?;
+                <Self as $crate::Transform>::init(self, &typed_config).await
+            }
+
+            async fn shutdown(&self) -> $crate::error::Result<()> {
+                <Self as $crate::Transform>::shutdown(self).await
+            }
+        }
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

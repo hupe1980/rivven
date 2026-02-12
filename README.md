@@ -6,7 +6,7 @@
 [![Documentation](https://img.shields.io/badge/docs-rivven.hupe1980.github.io%2Frivven-blue)](https://rivven.hupe1980.github.io/rivven)
 [![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS-blue)](https://github.com/hupe1980/rivven)
 
-> **A production-grade, high-performance distributed event streaming platform written in Rust.**  
+> **A high-performance distributed event streaming platform written in Rust.**  
 > Lightweight binaries. Zero runtime dependencies. Sub-second startup.
 
 **[📖 Documentation](https://rivven.hupe1980.github.io/rivven)** • **[🚀 Getting Started](https://rivven.hupe1980.github.io/rivven/docs/getting-started)** • **[🏗️ Architecture](https://rivven.hupe1980.github.io/rivven/docs/architecture)**
