@@ -410,23 +410,35 @@ impl Segment {
                 // Slow path: create new mmap via spawn_blocking to avoid
                 // blocking the tokio runtime thread
                 let log_path = self.log_path.clone();
-                let new_mmap = tokio::task::spawn_blocking(move || -> Result<Arc<Mmap>> {
+                let new_mmap = tokio::task::spawn_blocking(move || -> Result<Option<Arc<Mmap>>> {
                     let file = File::open(&log_path)?;
                     let file_len = file.metadata()?.len();
                     if file_len == 0 {
-                        return Err(Error::Other("Empty segment file".to_string()));
+                        // Segment exists but has no data yet (e.g. freshly created
+                        // topic with no published messages). Return None so the
+                        // caller can short-circuit to an empty result instead of
+                        // attempting to mmap a zero-length file.
+                        return Ok(None);
                     }
                     // SAFETY: File is opened read-only and remains valid for mmap lifetime.
                     let mmap = unsafe { Mmap::map(&file)? };
-                    Ok(Arc::new(mmap))
+                    Ok(Some(Arc::new(mmap)))
                 })
                 .await
                 .map_err(|e| Error::Other(format!("spawn_blocking failed: {}", e)))??;
 
-                // Cache it for future reads
-                let mut cached = self.cached_mmap.write().await;
-                *cached = Some(Arc::clone(&new_mmap));
-                new_mmap
+                match new_mmap {
+                    Some(m) => {
+                        // Cache it for future reads
+                        let mut cached = self.cached_mmap.write().await;
+                        *cached = Some(Arc::clone(&m));
+                        m
+                    }
+                    None => {
+                        // Empty segment file — no data to read
+                        return Ok(Vec::new());
+                    }
+                }
             }
         };
 
