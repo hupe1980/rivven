@@ -23,7 +23,7 @@ name = "rivven-connect"
 path = "src/main.rs"
 
 [features]
-default = ["postgres", "mysql"]
+default = ["full"]
 postgres = ["rivven-cdc/postgres", "tokio-postgres"]
 mysql = ["rivven-cdc/mysql"]
 sqlserver = ["rivven-cdc/sqlserver"]

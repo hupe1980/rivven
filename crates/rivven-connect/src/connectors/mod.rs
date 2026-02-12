@@ -191,6 +191,7 @@ pub fn create_sink_registry() -> SinkRegistry {
 
 /// Create a transform registry with all enabled transforms
 pub fn create_transform_registry() -> TransformRegistry {
+    #[allow(unused_mut)]
     let mut registry = TransformRegistry::new();
 
     // LLM Chat transform
