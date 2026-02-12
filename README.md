@@ -150,7 +150,7 @@ sinks:
 rivven-connect run --config connect.yaml
 ```
 
-**Built-in connectors**: PostgreSQL CDC • MySQL CDC • MQTT • SQS • Pub/Sub • S3 • GCS • Azure • Snowflake • BigQuery • Redshift • HTTP
+**Built-in connectors**: PostgreSQL CDC • MySQL CDC • MQTT • SQS • Pub/Sub • S3 • GCS • Azure • Snowflake • BigQuery • Redshift • ClickHouse • HTTP
 
 ---
 

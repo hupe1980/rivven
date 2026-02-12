@@ -907,6 +907,160 @@ The connector records the following metrics (via the `metrics` crate):
 - **Non-retryable errors**: Invalid OAuth credentials, table not found, permission denied, schema mismatch. These abort the connector immediately.
 - **Unacknowledged records**: On stream failure, the connector logs the count of unacked records and adjusts metrics accordingly.
 
+### ClickHouse
+
+High-throughput inserts into ClickHouse via the **official `clickhouse-rs` pure Rust client** — uses native `RowBinary` encoding over HTTP for maximum performance with LZ4 wire compression.
+
+**Key features**: RowBinary encoding (zero JSON overhead on the server), LZ4 compression, batch inserts with configurable size and flush interval, exponential backoff retry with jitter, structured error classification into typed `ConnectorError` variants, lock-free circuit breaker, metrics integration (`metrics` crate), parameterized SQL (no injection), session-scoped structured logging, schema validation toggle, ClickHouse Cloud support with access tokens.
+
+#### Authentication
+
+The connector supports two authentication methods:
+
+1. **Username/Password** — Standard ClickHouse authentication (default)
+2. **Access Token** — JWT-based auth for ClickHouse Cloud
+
+#### Configuration
+
+```yaml
+sinks:
+  clickhouse:
+    connector: clickhouse
+    topics: [cdc.orders]
+    consumer_group: clickhouse-sink
+    config:
+      # ClickHouse HTTP endpoint
+      url: "http://localhost:8123"
+      
+      # Target database and table
+      database: "default"
+      table: "events"
+      
+      # Authentication
+      username: "default"
+      password: "${CLICKHOUSE_PASSWORD}"
+      
+      # Batching and performance
+      batch_size: 10000                 # Rows per batch (1–1,000,000)
+      flush_interval_secs: 5            # Max seconds before flushing partial batch
+      
+      # Wire compression
+      compression: lz4                  # lz4 (default) or none
+      
+      # Schema validation (5-10% overhead, clearer error messages)
+      validation: true
+      
+      # Error handling
+      skip_invalid_rows: false          # Abort batch on bad row (default)
+      
+      # Retry configuration
+      max_retries: 3                    # Retries on transient failures
+      initial_backoff_ms: 200           # Initial retry backoff
+      max_backoff_ms: 5000              # Maximum retry backoff
+
+      # Circuit breaker
+      circuit_breaker:
+        enabled: true                   # Enable circuit breaker (default)
+        failure_threshold: 5            # Consecutive failures before opening
+        reset_timeout_secs: 30          # Seconds before half-open probe
+        success_threshold: 2            # Successes to close circuit
+```
+
+#### ClickHouse Cloud Configuration
+
+```yaml
+sinks:
+  clickhouse-cloud:
+    connector: clickhouse
+    topics: [cdc.orders]
+    consumer_group: ch-cloud-sink
+    config:
+      url: "https://abc123.clickhouse.cloud:8443"
+      database: "production"
+      table: "events"
+      username: "default"
+      access_token: "${CLICKHOUSE_CLOUD_TOKEN}"
+      batch_size: 50000
+      compression: lz4
+      validation: false                 # Disable for ~10-300% throughput gain
+```
+
+| Parameter | Required | Default | Description |
+|:----------|:---------|:--------|:------------|
+| `url` | ✓ | - | ClickHouse HTTP(S) endpoint (e.g. `http://localhost:8123`) |
+| `database` | | `default` | Target database name (validated with regex) |
+| `table` | ✓ | - | Target table name (must already exist, validated with regex) |
+| `username` | | `default` | Authentication username |
+| `password` | | - | Authentication password |
+| `access_token` | | - | JWT access token (mutually exclusive with `password`) |
+| `batch_size` | | `10000` | Rows per batch (1–1,000,000) |
+| `flush_interval_secs` | | `5` | Maximum seconds before flushing partial batch |
+| `compression` | | `lz4` | Wire compression: `lz4` or `none` |
+| `validation` | | `true` | Validate rows against ClickHouse schema |
+| `skip_invalid_rows` | | `false` | Skip bad rows instead of aborting batch |
+| `max_retries` | | `3` | Maximum retries on transient failures (0 to disable) |
+| `initial_backoff_ms` | | `200` | Initial retry backoff (ms) |
+| `max_backoff_ms` | | `5000` | Maximum retry backoff (ms) |
+| `circuit_breaker.enabled` | | `true` | Enable circuit breaker |
+| `circuit_breaker.failure_threshold` | | `5` | Consecutive failures before circuit opens |
+| `circuit_breaker.reset_timeout_secs` | | `30` | Seconds before half-open probe |
+| `circuit_breaker.success_threshold` | | `2` | Successes in half-open to close circuit |
+
+#### Table Schema
+
+The connector inserts rows with the following columns. Create your table accordingly:
+
+```sql
+CREATE TABLE events (
+    event_type   String,
+    stream       String,
+    namespace    String,
+    timestamp    String,
+    data         String,      -- JSON-encoded event payload
+    metadata     String,      -- JSON-encoded event metadata
+    _ingested_at String
+) ENGINE = MergeTree()
+ORDER BY (stream, timestamp);
+```
+
+{: .note }
+> **Performance tip**: For maximum throughput, set `validation: false` and `compression: lz4`. This eliminates schema round-trips and uses ClickHouse's native LZ4 wire compression. Measure the impact for your dataset — gains range from 10% to 300%.
+
+#### Circuit Breaker
+
+The ClickHouse connector includes a lock-free circuit breaker (using `AtomicU32`/`AtomicU64` with `Acquire`/`Release` ordering) that prevents cascading failures:
+
+- **Closed**: All batches flow through normally.
+- **Open**: After `failure_threshold` consecutive insert failures, the circuit opens. Batches fail fast without contacting ClickHouse, counted as `records_failed`.
+- **Half-Open**: After `reset_timeout_secs`, one test batch is let through. If it succeeds (`success_threshold` times), the circuit closes. The Open→HalfOpen transition uses `compare_exchange` to prevent TOCTOU races under concurrent access.
+
+The circuit breaker is **always active by default** — both `new()` and `with_config()` constructors initialize it (matching the Databricks connector pattern). Disable with `circuit_breaker.enabled: false` if you prefer pure retry-based recovery.
+
+Circuit breaker configuration is validated at startup (`failure_threshold: 1–100`, `reset_timeout_secs: 1–3600`, `success_threshold: 1–10`).
+
+#### Metrics
+
+The connector emits the following metrics via the `metrics` crate:
+
+| Metric | Type | Description |
+|:-------|:-----|:------------|
+| `clickhouse.batches.success` | Counter | Successfully inserted batches |
+| `clickhouse.batches.failed` | Counter | Failed batch inserts (after all retries) |
+| `clickhouse.batches.retried` | Counter | Batch retry attempts |
+| `clickhouse.records.written` | Counter | Total records written |
+| `clickhouse.records.failed` | Counter | Total records failed |
+| `clickhouse.circuit_breaker.rejected` | Counter | Batches rejected by open circuit breaker |
+| `clickhouse.batch.size` | Gauge | Batch size before flush |
+| `clickhouse.batch.duration_ms` | Histogram | End-to-end batch insert latency |
+
+#### Error Handling
+
+Errors are classified into typed `ConnectorError` variants:
+
+- **Retryable**: `Connection`, `Timeout`, `RateLimited` — retried with exponential backoff and jitter (prevents thundering herd).
+- **Non-retryable**: `Auth`, `NotFound`, `Schema`, `Fatal` — abort the connector immediately.
+- **Batch semantics**: When `skip_invalid_rows: false` (default), a single bad row aborts the entire batch. When `true`, bad rows are skipped and counted in `records_failed`.
+
 ### Apache Iceberg
 
 Write streaming events to Apache Iceberg tables for analytics and lakehouse workloads. Uses the **official Apache Iceberg Rust SDK** for catalog operations and data file writing.

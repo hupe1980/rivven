@@ -50,7 +50,7 @@ pub mod queue;
 // Storage connectors (S3, GCS, Azure Blob, Parquet)
 pub mod storage;
 
-// Warehouse connectors (Snowflake, BigQuery, Redshift)
+// Warehouse connectors (Snowflake, BigQuery, Redshift, Databricks, ClickHouse)
 pub mod warehouse;
 
 // Lakehouse connectors (Apache Iceberg, Delta Lake)
@@ -156,6 +156,9 @@ pub fn create_sink_registry() -> SinkRegistry {
 
     #[cfg(feature = "databricks")]
     registry.register("databricks", Arc::new(warehouse::DatabricksSinkFactory));
+
+    #[cfg(feature = "clickhouse")]
+    registry.register("clickhouse", Arc::new(warehouse::ClickHouseSinkFactory));
 
     // Lakehouse sinks (feature-gated)
     #[cfg(feature = "iceberg")]
@@ -517,6 +520,29 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .related("snowflake")
             .build(),
         Arc::new(warehouse::DatabricksSinkFactory),
+    );
+
+    // ClickHouse sink
+    #[cfg(feature = "clickhouse")]
+    inventory.register_sink(
+        ConnectorMetadata::builder("clickhouse")
+            .title("ClickHouse")
+            .description("High-throughput inserts into ClickHouse via native RowBinary over HTTP")
+            .sink()
+            .category(ConnectorCategory::Warehouse)
+            .feature("clickhouse")
+            .tags([
+                "clickhouse",
+                "olap",
+                "warehouse",
+                "analytics",
+                "columnar",
+                "real-time",
+            ])
+            .aliases(["clickhouse-sink", "ch"])
+            .related("snowflake")
+            .build(),
+        Arc::new(warehouse::ClickHouseSinkFactory),
     );
 
     // ─────────────────────────────────────────────────────────────────

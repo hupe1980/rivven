@@ -27,7 +27,7 @@ rivven-connect is designed to scale to **300+ connectors** with:
 │  ├── Database (postgres_cdc, mysql_cdc, sqlserver_cdc, ...).    │
 │  ├── Messaging (mqtt, sqs, pubsub, nats, ...)                   │
 │  ├── Storage (s3, gcs, azure, minio, ...)                       │
-│  ├── Warehouse (snowflake, bigquery, redshift, databricks, ...)  │
+│  ├── Warehouse (snowflake, bigquery, redshift, databricks, clickhouse, ...)  │
 │  └── Utility (datagen, stdout, http, ...)                       │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -172,6 +172,7 @@ rivven-connect run --config rivven-connect.yaml
 | `bigquery` | `bigquery` | Google BigQuery |
 | `redshift` | `redshift` | Amazon Redshift |
 | `databricks` | `databricks` | Databricks Delta tables via Zerobus |
+| `clickhouse` | `clickhouse` | ClickHouse OLAP via native RowBinary + circuit breaker + metrics |
 
 ### Unified Object Storage
 
@@ -469,7 +470,7 @@ rivven-connect = { version = "0.0.14", features = ["postgres", "s3"] }
 | `queue-full` | mqtt, sqs, pubsub |
 | `storage-full` | s3, gcs, azure, parquet |
 | `lakehouse-full` | iceberg, delta-lake |
-| `warehouse-full` | snowflake, bigquery, redshift, databricks |
+| `warehouse-full` | snowflake, bigquery, redshift, databricks, clickhouse |
 | `full` | All connectors (including rdbc-full) |
 
 ### Single Message Transforms (SMT)

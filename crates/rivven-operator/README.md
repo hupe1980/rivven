@@ -1284,6 +1284,7 @@ externalRegistry:
 - `snowflake` - Snowflake Data Warehouse (Snowpipe Streaming)
 - `bigquery` - Google BigQuery
 - `redshift` - Amazon Redshift
+- `clickhouse` - ClickHouse OLAP (native RowBinary over HTTP)
 
 ## Development
 
