@@ -28,6 +28,7 @@ rivven-connect is designed to scale to **300+ connectors** with:
 │  ├── Messaging (mqtt, sqs, pubsub, nats, ...)                   │
 │  ├── Storage (s3, gcs, azure, minio, ...)                       │
 │  ├── Warehouse (snowflake, bigquery, redshift, databricks, clickhouse, ...)  │
+│  ├── AI/ML Vector (qdrant, pinecone, weaviate, ...)             │
 │  └── Utility (datagen, stdout, http, ...)                       │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -173,6 +174,8 @@ rivven-connect run --config rivven-connect.yaml
 | `redshift` | `redshift` | Amazon Redshift |
 | `databricks` | `databricks` | Databricks Delta tables via Zerobus |
 | `clickhouse` | `clickhouse` | ClickHouse OLAP via native RowBinary + circuit breaker + metrics |
+| `qdrant` | `qdrant` | Qdrant vector DB via gRPC + circuit breaker + metrics |
+| `pinecone` | `pinecone` | Pinecone managed vector DB via gRPC + circuit breaker + metrics |
 
 ### Unified Object Storage
 
@@ -471,6 +474,7 @@ rivven-connect = { version = "0.0.14", features = ["postgres", "s3"] }
 | `storage-full` | s3, gcs, azure, parquet |
 | `lakehouse-full` | iceberg, delta-lake |
 | `warehouse-full` | snowflake, bigquery, redshift, databricks, clickhouse |
+| `vectordb-full` | qdrant, pinecone |
 | `full` | All connectors (including rdbc-full) |
 
 ### Single Message Transforms (SMT)

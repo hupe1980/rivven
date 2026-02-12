@@ -53,6 +53,9 @@ pub mod storage;
 // Warehouse connectors (Snowflake, BigQuery, Redshift, Databricks, ClickHouse)
 pub mod warehouse;
 
+// Vector database connectors (Qdrant, Pinecone)
+pub mod vectordb;
+
 // Lakehouse connectors (Apache Iceberg, Delta Lake)
 pub mod lakehouse;
 // Re-export registry types from SDK (now in traits module)
@@ -159,6 +162,13 @@ pub fn create_sink_registry() -> SinkRegistry {
 
     #[cfg(feature = "clickhouse")]
     registry.register("clickhouse", Arc::new(warehouse::ClickHouseSinkFactory));
+
+    // Vector database sinks (feature-gated)
+    #[cfg(feature = "qdrant")]
+    registry.register("qdrant", Arc::new(vectordb::QdrantSinkFactory));
+
+    #[cfg(feature = "pinecone")]
+    registry.register("pinecone", Arc::new(vectordb::PineconeSinkFactory));
 
     // Lakehouse sinks (feature-gated)
     #[cfg(feature = "iceberg")]
@@ -543,6 +553,54 @@ pub fn create_connector_inventory() -> ConnectorInventory {
             .related("snowflake")
             .build(),
         Arc::new(warehouse::ClickHouseSinkFactory),
+    );
+
+    // ─────────────────────────────────────────────────────────────────
+    // VECTOR DATABASE SINKS
+    // ─────────────────────────────────────────────────────────────────
+
+    // Qdrant sink
+    #[cfg(feature = "qdrant")]
+    inventory.register_sink(
+        ConnectorMetadata::builder("qdrant")
+            .title("Qdrant")
+            .description("High-throughput vector upserts into Qdrant via gRPC")
+            .sink()
+            .category(ConnectorCategory::AiVector)
+            .feature("qdrant")
+            .tags([
+                "qdrant",
+                "vector",
+                "vectordb",
+                "similarity",
+                "embedding",
+                "grpc",
+            ])
+            .aliases(["qdrant-sink", "qdrant-vector"])
+            .build(),
+        Arc::new(vectordb::QdrantSinkFactory),
+    );
+
+    // Pinecone sink
+    #[cfg(feature = "pinecone")]
+    inventory.register_sink(
+        ConnectorMetadata::builder("pinecone")
+            .title("Pinecone")
+            .description("High-throughput vector upserts into Pinecone via gRPC")
+            .sink()
+            .category(ConnectorCategory::AiVector)
+            .feature("pinecone")
+            .tags([
+                "pinecone",
+                "vector",
+                "vectordb",
+                "similarity",
+                "embedding",
+                "managed",
+            ])
+            .aliases(["pinecone-sink", "pinecone-vector"])
+            .build(),
+        Arc::new(vectordb::PineconeSinkFactory),
     );
 
     // ─────────────────────────────────────────────────────────────────

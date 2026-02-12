@@ -1464,6 +1464,287 @@ sinks:
 
 ---
 
+### Qdrant (Vector Database)
+
+High-throughput vector upserts into [Qdrant](https://qdrant.tech/) via the **official `qdrant-client` pure Rust gRPC client** — zero-copy Protobuf encoding over gRPC for maximum performance.
+
+**Key features**: gRPC/Protobuf encoding (zero JSON overhead), batch upserts with configurable size and flush interval, exponential backoff retry with jitter, structured error classification into typed `ConnectorError` variants, lock-free circuit breaker, metrics integration (`metrics` crate), API key auth via `SensitiveString`, named vector support, multiple point ID strategies (field, UUID, deterministic FNV-1a hash), session-scoped structured logging.
+
+#### Point ID Strategies
+
+The connector supports three strategies for generating Qdrant point IDs:
+
+1. **Field** (`field`) — Extract a `u64` ID from a field in the event data (e.g. `id`, `row_id`)
+2. **UUID** (`uuid`) — Extract a UUID string from a field (e.g. `uuid`, `event_id`)
+3. **Hash** (`hash`) — Deterministic FNV-1a hash of the event data (stable across restarts, no field extraction needed)
+
+#### Configuration
+
+```yaml
+sinks:
+  qdrant:
+    connector: qdrant
+    topics: [embeddings.products]
+    consumer_group: qdrant-sink
+    config:
+      # Qdrant gRPC endpoint
+      url: "http://localhost:6334"
+      
+      # Target collection (must already exist)
+      collection: "products"
+      
+      # Vector field in event data
+      vector_field: "embedding"
+      
+      # Optional: named vector (for collections with multiple vector spaces)
+      # vector_name: "dense"
+      
+      # Authentication (optional)
+      api_key: "${QDRANT_API_KEY}"
+      
+      # Point ID strategy
+      id_strategy: "field"            # field | uuid | hash
+      id_field: "id"                  # Field to extract ID from (field/uuid strategies)
+      
+      # Batching and performance
+      batch_size: 1000                # Points per batch (1–100,000)
+      flush_interval_secs: 5          # Max seconds before flushing partial batch
+      
+      # Qdrant options
+      timeout_secs: 30                # gRPC deadline per request
+      wait: true                      # Wait for upsert acknowledgement
+      
+      # Error handling
+      skip_invalid_events: false      # Skip events with missing/invalid vectors
+      
+      # Retry configuration
+      max_retries: 3                  # Retries on transient failures
+      initial_backoff_ms: 200         # Initial retry backoff
+      max_backoff_ms: 5000            # Maximum retry backoff
+
+      # Circuit breaker
+      circuit_breaker:
+        enabled: true                 # Enable circuit breaker (default)
+        failure_threshold: 5          # Consecutive failures before opening
+        reset_timeout_secs: 30        # Seconds before half-open probe
+        success_threshold: 2          # Successes to close circuit
+```
+
+#### Qdrant Cloud Configuration
+
+```yaml
+sinks:
+  qdrant-cloud:
+    connector: qdrant
+    topics: [embeddings.products]
+    consumer_group: qdrant-cloud-sink
+    config:
+      url: "https://xyz-abc.cloud.qdrant.io:6334"
+      collection: "products"
+      vector_field: "embedding"
+      api_key: "${QDRANT_CLOUD_API_KEY}"
+      id_strategy: "hash"
+      batch_size: 5000
+      timeout_secs: 60
+```
+
+| Parameter | Required | Default | Description |
+|:----------|:---------|:--------|:------------|
+| `url` | ✓ | - | Qdrant gRPC endpoint (e.g. `http://localhost:6334`) |
+| `collection` | ✓ | - | Target collection name (validated with regex) |
+| `vector_field` | ✓ | - | Field in event data containing the vector (array of floats) |
+| `vector_name` | | - | Named vector space (for multi-vector collections) |
+| `api_key` | | - | API key for Qdrant Cloud or self-hosted with auth |
+| `id_strategy` | | `hash` | Point ID strategy: `field`, `uuid`, or `hash` |
+| `id_field` | | `id` | Field to extract point ID from (`field`/`uuid` strategies) |
+| `batch_size` | | `1000` | Points per batch (1–100,000) |
+| `flush_interval_secs` | | `5` | Maximum seconds before flushing partial batch |
+| `timeout_secs` | | `30` | gRPC deadline per request (seconds) |
+| `wait` | | `true` | Wait for Qdrant acknowledgement before advancing |
+| `skip_invalid_events` | | `false` | Skip events with missing or invalid vectors |
+| `max_retries` | | `3` | Maximum retries on transient failures (0 to disable) |
+| `initial_backoff_ms` | | `200` | Initial retry backoff (ms) |
+| `max_backoff_ms` | | `5000` | Maximum retry backoff (ms) |
+| `circuit_breaker.enabled` | | `true` | Enable circuit breaker |
+| `circuit_breaker.failure_threshold` | | `5` | Consecutive failures before circuit opens |
+| `circuit_breaker.reset_timeout_secs` | | `30` | Seconds before half-open probe |
+| `circuit_breaker.success_threshold` | | `2` | Successes in half-open to close circuit |
+
+#### Circuit Breaker
+
+The Qdrant connector includes a lock-free circuit breaker (using `AtomicU32`/`AtomicU64` with `Acquire`/`Release` ordering) that prevents cascading failures:
+
+- **Closed**: All batches flow through normally.
+- **Open**: After `failure_threshold` consecutive upsert failures, the circuit opens. Batches fail fast without contacting Qdrant, counted as `records_failed`.
+- **Half-Open**: After `reset_timeout_secs`, one test batch is let through. If it succeeds (`success_threshold` times), the circuit closes. If the probe fails, the circuit immediately re-opens. The Open→HalfOpen transition uses `compare_exchange` to prevent TOCTOU races under concurrent access.
+
+The circuit breaker is **always active by default**. Disable with `circuit_breaker.enabled: false` if you prefer pure retry-based recovery.
+
+Circuit breaker configuration is validated at startup (`failure_threshold: 1–100`, `reset_timeout_secs: 1–3600`, `success_threshold: 1–10`).
+
+#### Metrics
+
+The connector emits the following metrics via the `metrics` crate:
+
+| Metric | Type | Description |
+|:-------|:-----|:------------|
+| `qdrant.batches.success` | Counter | Successfully upserted batches |
+| `qdrant.batches.failed` | Counter | Failed batch upserts (after all retries) |
+| `qdrant.batches.retried` | Counter | Batch retry attempts |
+| `qdrant.records.written` | Counter | Total points written |
+| `qdrant.records.failed` | Counter | Failed/skipped records |
+| `qdrant.circuit_breaker.rejected` | Counter | Batches rejected by open circuit |
+| `qdrant.batch.size` | Gauge | Current batch size |
+| `qdrant.batch.duration_ms` | Histogram | Batch upsert latency |
+
+---
+
+### Pinecone (Vector Database)
+
+High-throughput vector upserts into [Pinecone](https://www.pinecone.io/) via the **official `pinecone-sdk` crate** — REST control plane + gRPC data plane for managed vector search.
+
+**Key features**: gRPC/Protobuf data plane (upserts via tonic), batch upserts with configurable size and flush interval, exponential backoff retry with jitter, structured error classification into typed `ConnectorError` variants (narrowed gRPC pattern matching), lock-free circuit breaker, metrics integration (`metrics` crate), API key auth via `SensitiveString`, namespace support, sparse vector support for hybrid search, multiple vector ID strategies (field, UUID with single-pass validation, deterministic FNV-1a hash), per-request timeout, session-scoped structured logging, early rejection of empty/non-object/f32-overflow vectors.
+
+#### Vector ID Strategies
+
+The connector supports three strategies for generating Pinecone vector IDs:
+
+1. **Field** (`field`) — Extract a string/numeric ID from a field in the event data (e.g. `id`, `doc_id`)
+2. **UUID** (`uuid`) — Extract a UUID string from a field (validated as exactly 32 or 36 hex characters with optional hyphens; single-pass validation)
+3. **Hash** (`hash`) — Deterministic FNV-1a hash of the event data (stable across restarts, no field extraction needed)
+
+#### Configuration
+
+```yaml
+sinks:
+  pinecone:
+    connector: pinecone
+    topics: [embeddings.products]
+    consumer_group: pinecone-sink
+    config:
+      # Pinecone API key (required)
+      api_key: "${PINECONE_API_KEY}"
+      
+      # Index host URL (required, from Pinecone console)
+      index_host: "https://my-index-abc123.svc.us-east1-gcp.pinecone.io"
+      
+      # Optional control plane host override
+      # control_plane_host: "https://api.pinecone.io"
+      
+      # Optional namespace for logical partitioning
+      # namespace: "production"
+      
+      # Vector field in event data
+      vector_field: "embedding"
+      
+      # Optional: sparse vector fields for hybrid search
+      # sparse_vector_indices_field: "sparse_idx"
+      # sparse_vector_values_field: "sparse_vals"
+      
+      # Vector ID strategy
+      id_strategy: "field"            # field | uuid | hash
+      id_field: "id"                  # Field to extract ID from (field/uuid strategies)
+      
+      # Batching and performance
+      batch_size: 1000                # Vectors per batch (1–100,000)
+      flush_interval_secs: 5          # Max seconds before flushing partial batch
+      timeout_secs: 30                # Per-request timeout (seconds)
+      
+      # Error handling
+      skip_invalid_events: false      # Skip events with missing/invalid vectors
+      
+      # Retry configuration
+      max_retries: 3                  # Retries on transient failures
+      initial_backoff_ms: 200         # Initial retry backoff
+      max_backoff_ms: 5000            # Maximum retry backoff
+
+      # Circuit breaker
+      circuit_breaker:
+        enabled: true                 # Enable circuit breaker (default)
+        failure_threshold: 5          # Consecutive failures before opening
+        reset_timeout_secs: 30        # Seconds before half-open probe
+        success_threshold: 2          # Successes to close circuit
+```
+
+#### Pinecone Serverless Configuration
+
+```yaml
+sinks:
+  pinecone-serverless:
+    connector: pinecone
+    topics: [embeddings.products]
+    consumer_group: pinecone-serverless-sink
+    config:
+      api_key: "${PINECONE_API_KEY}"
+      index_host: "https://my-index-xyz.svc.aped-4627-b74a.pinecone.io"
+      vector_field: "embedding"
+      namespace: "prod"
+      id_strategy: "hash"
+      batch_size: 5000
+      timeout_secs: 60
+```
+
+| Parameter | Required | Default | Description |
+|:----------|:---------|:--------|:------------|
+| `api_key` | ✓ | - | Pinecone API key (from console) |
+| `index_host` | ✓ | - | Index host URL (e.g. `https://my-index-abc.svc.pinecone.io`) |
+| `control_plane_host` | | - | Control plane host override |
+| `namespace` | | - | Namespace for logical partitioning |
+| `vector_field` | | `embedding` | Field containing the dense vector (array of f32-range floats; values exceeding ±3.4e38 are rejected) |
+| `sparse_vector_indices_field` | | - | Field for sparse vector indices (array of u32) |
+| `sparse_vector_values_field` | | - | Field for sparse vector values (array of f32) |
+| `id_strategy` | | `field` | Vector ID strategy: `field`, `uuid`, or `hash` |
+| `id_field` | | `id` | Field to extract vector ID from (`field`/`uuid` strategies) |
+| `batch_size` | | `1000` | Vectors per batch (1–100,000) |
+| `flush_interval_secs` | | `5` | Maximum seconds before flushing partial batch |
+| `timeout_secs` | | `30` | Per-request timeout (seconds, 1–300) |
+| `skip_invalid_events` | | `false` | Skip events with missing or invalid vectors |
+| `max_retries` | | `3` | Maximum retries on transient failures (0 to disable) |
+| `initial_backoff_ms` | | `200` | Initial retry backoff (ms) |
+| `max_backoff_ms` | | `5000` | Maximum retry backoff (ms) |
+| `circuit_breaker.enabled` | | `true` | Enable circuit breaker |
+| `circuit_breaker.failure_threshold` | | `5` | Consecutive failures before circuit opens |
+| `circuit_breaker.reset_timeout_secs` | | `30` | Seconds before half-open probe |
+| `circuit_breaker.success_threshold` | | `2` | Successes in half-open to close circuit |
+
+#### Circuit Breaker
+
+The Pinecone connector includes a lock-free circuit breaker (using `AtomicU32`/`AtomicU64` with `Acquire`/`Release` ordering) that prevents cascading failures:
+
+- **Closed**: All batches flow through normally.
+- **Open**: After `failure_threshold` consecutive upsert failures, the circuit opens. Batches fail fast without contacting Pinecone, counted as `records_failed`.
+- **Half-Open**: After `reset_timeout_secs`, one test batch is let through. If it succeeds (`success_threshold` times), the circuit closes. If the probe fails, the circuit immediately re-opens. The Open→HalfOpen transition uses `compare_exchange` to prevent TOCTOU races.
+
+Circuit breaker configuration is validated at startup (`failure_threshold: 1–100`, `reset_timeout_secs: 1–3600`, `success_threshold: 1–10`).
+
+#### Sparse Vector Support
+
+Pinecone supports hybrid search combining dense and sparse vectors. Configure both fields together:
+
+```yaml
+config:
+  vector_field: "embedding"
+  sparse_vector_indices_field: "sparse_idx"
+  sparse_vector_values_field: "sparse_vals"
+```
+
+Both `sparse_vector_indices_field` and `sparse_vector_values_field` must be set together. The indices array must contain u32 values and must match the length of the values array.
+
+#### Metrics
+
+| Metric | Type | Description |
+|:-------|:-----|:------------|
+| `pinecone.batches.success` | Counter | Successfully upserted batches |
+| `pinecone.batches.failed` | Counter | Failed batch upserts (after all retries) |
+| `pinecone.batches.retried` | Counter | Batch retry attempts |
+| `pinecone.records.written` | Counter | Total vectors written |
+| `pinecone.records.failed` | Counter | Failed/skipped records |
+| `pinecone.circuit_breaker.rejected` | Counter | Batches rejected by open circuit |
+| `pinecone.batch.size` | Gauge | Current batch size |
+| `pinecone.batch.duration_ms` | Histogram | Batch upsert latency |
+
+---
+
 ## Rate Limiting
 
 Control throughput to protect downstream systems:

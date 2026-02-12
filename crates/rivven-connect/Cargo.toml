@@ -57,6 +57,10 @@ redshift = ["dep:rustls", "dep:webpki-roots", "dep:tokio-postgres-rustls"]
 databricks = ["dep:databricks-zerobus-ingest-sdk", "dep:metrics"]
 clickhouse = ["dep:clickhouse", "dep:metrics"]
 
+# Vector database connectors
+qdrant = ["dep:qdrant-client", "dep:metrics"]
+pinecone = ["dep:pinecone-sdk", "dep:metrics"]
+
 # Lakehouse connectors (open table formats)
 iceberg = ["parquet", "dep:iceberg", "dep:iceberg-catalog-rest"]
 delta-lake = ["parquet", "dep:deltalake"]
@@ -68,8 +72,9 @@ delta-lake-azure = ["delta-lake", "deltalake/azure"]
 queue-full = ["kafka", "mqtt", "sqs", "pubsub"]
 storage-full = ["s3", "gcs", "azure", "parquet"]
 warehouse-full = ["snowflake", "bigquery", "redshift", "databricks", "clickhouse"]
+vectordb-full = ["qdrant", "pinecone"]
 lakehouse-full = ["iceberg", "delta-lake"]
-full = ["postgres", "mysql", "sqlserver", "tls", "http", "rdbc-full", "queue-full", "storage-full", "warehouse-full", "lakehouse-full"]
+full = ["postgres", "mysql", "sqlserver", "tls", "http", "rdbc-full", "queue-full", "storage-full", "warehouse-full", "vectordb-full", "lakehouse-full"]
 
 [dependencies]
 # Internal crates
@@ -193,6 +198,12 @@ databricks-zerobus-ingest-sdk = { version = "0.5", optional = true }
 
 # ClickHouse (optional — official pure Rust client, HTTP + RowBinary)
 clickhouse = { version = "0.14", features = ["inserter"], optional = true }
+
+# Qdrant (optional — official gRPC-based vector search client)
+qdrant-client = { version = "1.16", optional = true }
+
+# Pinecone (optional — official vector database SDK)
+pinecone-sdk = { version = "0.1", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
