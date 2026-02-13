@@ -60,6 +60,7 @@ clickhouse = ["dep:clickhouse", "dep:metrics"]
 # Vector database connectors
 qdrant = ["dep:qdrant-client", "dep:metrics"]
 pinecone = ["dep:tonic", "dep:metrics"]
+s3-vectors = ["dep:aws-sdk-s3vectors", "dep:aws-config", "dep:aws-smithy-types", "dep:metrics"]
 
 # LLM connectors (chat + embedding transforms)
 llm-openai = ["dep:rivven-llm", "rivven-llm/openai", "dep:metrics"]
@@ -77,7 +78,7 @@ delta-lake-azure = ["delta-lake", "deltalake/azure"]
 queue-full = ["kafka", "mqtt", "sqs", "pubsub"]
 storage-full = ["s3", "gcs", "azure", "parquet"]
 warehouse-full = ["snowflake", "bigquery", "redshift", "databricks", "clickhouse"]
-vectordb-full = ["qdrant", "pinecone"]
+vectordb-full = ["qdrant", "pinecone", "s3-vectors"]
 llm = ["llm-full"]
 lakehouse-full = ["iceberg", "delta-lake"]
 full = ["postgres", "mysql", "sqlserver", "tls", "http", "rdbc-full", "queue-full", "storage-full", "warehouse-full", "vectordb-full", "llm-full", "lakehouse-full"]
@@ -211,6 +212,10 @@ qdrant-client = { version = "1.16", optional = true }
 
 # gRPC (optional — Pinecone vectordb connector; uses rustls, no OpenSSL)
 tonic = { version = "0.13", default-features = false, features = ["channel", "prost", "tls-ring", "tls-webpki-roots"], optional = true }
+
+# Amazon S3 Vectors (optional — purpose-built vector storage with native similarity search)
+aws-sdk-s3vectors = { version = "1", optional = true }
+aws-smithy-types = { version = "1", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

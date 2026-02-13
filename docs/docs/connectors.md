@@ -1745,6 +1745,147 @@ Both `sparse_vector_indices_field` and `sparse_vector_values_field` must be set 
 
 ---
 
+### Amazon S3 Vectors (Vector Database)
+
+High-throughput vector upserts into [Amazon S3 Vectors](https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-vectors.html) via the official **AWS SDK for Rust** (`aws-sdk-s3vectors`).
+
+**Key features**: PutVectors batch API via AWS SDK (SigV4 auth, HTTPS), batch upserts with configurable size and timer-based flush via `tokio::select!`, exponential backoff retry with jitter, structured error classification into typed `ConnectorError` variants (SDK error decomposition: `DispatchFailure`, `ConstructionFailure`, `ResponseError`, `TimeoutError` + message-based fallback for throttle/auth/network), lock-free circuit breaker (`AtomicU32`/`AtomicU64` with `compare_exchange` TOCTOU-safe Open→HalfOpen transition, already-Open guard preventing reset-timer starvation, HalfOpen failure counter), metrics integration (`metrics` crate, 9 metrics incl. retry counter), `#[inline]` on all hot-path functions (10 annotations), IAM-based credential resolution (instance profile, environment, SSO, etc.), auto-provisioning of vector bucket and index on first write (ConflictException-safe for concurrent replicas), multiple vector ID strategies (field, UUID with single-pass validation, deterministic FNV-1a hash), per-request timeout via SDK config, metadata support (arbitrary JSON mapped to `aws_smithy_types::Document` + auto-injected event metadata: `_event_type`, `_stream`, `_namespace`, `_timestamp`, `_key` with reserved-key collision validation), dotted-path field traversal with empty-segment rejection, `#[validate(length)]` on field paths, session-scoped structured logging, early rejection of empty/non-object/f32-overflow vectors.
+
+#### Vector ID Strategies
+
+The connector supports three strategies for generating S3 Vectors keys:
+
+1. **Field** (`field`) — Extract a string/numeric ID from a field in the event data (e.g. `id`, `doc_id`)
+2. **UUID** (`uuid`) — Extract a UUID string from a field (validated as exactly 32 or 36 hex characters with optional hyphens; single-pass validation)
+3. **Hash** (`hash`) — Deterministic FNV-1a hash of the event data (stable across restarts, no field extraction needed)
+
+#### Configuration
+
+```yaml
+sinks:
+  s3vectors:
+    connector: s3-vectors
+    topics: [embeddings.products]
+    consumer_group: s3vectors-sink
+    config:
+      # AWS region (required)
+      region: "us-east-1"
+
+      # Optional: custom endpoint URL (for LocalStack / testing)
+      # endpoint_url: "http://localhost:4566"
+
+      # S3 Vectors bucket name (required, 3–63 chars, lowercase/digits/hyphens)
+      vector_bucket_name: "my-vectors"
+
+      # Index name within the bucket (required, 1–512 chars)
+      index_name: "products"
+
+      # Vector dimension (required, 1–10,000)
+      dimension: 1536
+
+      # Distance metric (optional, default: cosine)
+      distance_metric: "cosine"         # cosine | euclidean
+
+      # Auto-create bucket and index on startup (default: true)
+      auto_create: true
+
+      # Vector field in event data
+      vector_field: "embedding"
+
+      # Vector ID strategy
+      id_strategy: "field"              # field | uuid | hash
+      id_field: "id"                    # Field to extract ID from (field/uuid strategies)
+
+      # Optional: metadata fields to include with each vector
+      # metadata_fields: ["category", "title", "price"]
+
+      # Batching and performance
+      batch_size: 100                   # Vectors per batch (1–10,000)
+      flush_interval_secs: 5            # Max seconds before flushing partial batch
+      timeout_secs: 30                  # Per-request timeout (seconds)
+
+      # Error handling
+      skip_invalid_events: false        # Skip events with missing/invalid vectors
+
+      # Retry configuration
+      max_retries: 3                    # Retries on transient failures
+      initial_backoff_ms: 200           # Initial retry backoff
+      max_backoff_ms: 5000              # Maximum retry backoff
+
+      # Circuit breaker
+      circuit_breaker:
+        enabled: true                   # Enable circuit breaker (default)
+        failure_threshold: 5            # Consecutive failures before opening
+        reset_timeout_secs: 30          # Seconds before half-open probe
+        success_threshold: 2            # Successes to close circuit
+```
+
+#### Auto-Provisioning
+
+When `auto_create: true` (default), the connector automatically creates the vector bucket and index on first write if they don't exist. Existing resources are detected and reused (idempotent). Set `auto_create: false` in production to require pre-provisioned infrastructure.
+
+| Parameter | Required | Default | Description |
+|:----------|:---------|:--------|:------------|
+| `region` | ✓ | - | AWS region (e.g. `us-east-1`) |
+| `endpoint_url` | | - | Custom endpoint URL (for LocalStack, testing) |
+| `vector_bucket_name` | ✓ | - | S3 Vectors bucket name (3–63 chars, `^[a-z0-9][a-z0-9-]*[a-z0-9]$`) |
+| `index_name` | ✓ | - | Index name within the bucket (1–512 chars) |
+| `dimension` | ✓ | - | Vector dimension (1–10,000) |
+| `distance_metric` | | `cosine` | Distance metric: `cosine` or `euclidean` |
+| `auto_create` | | `true` | Auto-create bucket and index on startup |
+| `vector_field` | | `embedding` | Field containing the dense vector (array of f32-range floats; values exceeding ±3.4e38 are rejected) |
+| `id_strategy` | | `field` | Vector ID strategy: `field`, `uuid`, or `hash` |
+| `id_field` | | `id` | Field to extract vector ID from (`field`/`uuid` strategies) |
+| `metadata_fields` | | - | Fields to include as vector metadata (mapped to S3V Document type) |
+| `batch_size` | | `100` | Vectors per batch (1–10,000) |
+| `flush_interval_secs` | | `5` | Maximum seconds before flushing partial batch |
+| `timeout_secs` | | `30` | Per-request timeout (seconds, 1–300) |
+| `skip_invalid_events` | | `false` | Skip events with missing or invalid vectors |
+| `max_retries` | | `3` | Maximum retries on transient failures (0 to disable) |
+| `initial_backoff_ms` | | `200` | Initial retry backoff (ms) |
+| `max_backoff_ms` | | `5000` | Maximum retry backoff (ms) |
+| `circuit_breaker.enabled` | | `true` | Enable circuit breaker |
+| `circuit_breaker.failure_threshold` | | `5` | Consecutive failures before circuit opens |
+| `circuit_breaker.reset_timeout_secs` | | `30` | Seconds before half-open probe |
+| `circuit_breaker.success_threshold` | | `2` | Successes in half-open to close circuit |
+
+#### Circuit Breaker
+
+The S3 Vectors connector includes a lock-free circuit breaker (using `AtomicU32`/`AtomicU64` with `Acquire`/`Release` ordering) that prevents cascading failures:
+
+- **Closed**: All batches flow through normally.
+- **Open**: After `failure_threshold` consecutive upsert failures, the circuit opens. Batches fail fast without contacting S3 Vectors, counted as `records_failed`.
+- **Half-Open**: After `reset_timeout_secs`, one test batch is let through. If it succeeds (`success_threshold` times), the circuit closes. If the probe fails, the circuit immediately re-opens. The Open→HalfOpen transition uses `compare_exchange` to prevent TOCTOU races.
+
+Circuit breaker configuration is validated at startup (`failure_threshold: 1–100`, `reset_timeout_secs: 1–3600`, `success_threshold: 1–10`).
+
+#### Metadata Support
+
+S3 Vectors supports metadata on each vector. Specify which event fields to include:
+
+```yaml
+config:
+  vector_field: "embedding"
+  metadata_fields: ["category", "title", "price"]
+```
+
+Metadata values are automatically mapped from JSON to the S3 Vectors `Document` type (strings, numbers, booleans, arrays, nested objects, and null).
+
+#### Metrics
+
+| Metric | Type | Description |
+|:-------|:-----|:------------|
+| `s3vectors.batches.success` | Counter | Successfully upserted batches |
+| `s3vectors.batches.failed` | Counter | Failed batch upserts (after all retries) |
+| `s3vectors.batches.retried` | Counter | Batch retry attempts |
+| `s3vectors.records.written` | Counter | Total vectors written |
+| `s3vectors.records.failed` | Counter | Failed/skipped records |
+| `s3vectors.circuit_breaker.rejected` | Counter | Batches rejected by open circuit |
+| `s3vectors.batch.size` | Gauge | Current batch size |
+| `s3vectors.batch.duration_ms` | Histogram | Batch upsert latency |
+
+---
+
 ## Rate Limiting
 
 Control throughput to protect downstream systems:

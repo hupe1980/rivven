@@ -142,11 +142,11 @@ This follows a modular architecture where each connector category can be enabled
 ```toml
 # Only include what you need
 [dependencies]
-rivven-connect = { version = "0.0.15", features = ["postgres", "s3"] }
+rivven-connect = { version = "0.0.16", features = ["postgres", "s3"] }
 
 # Or include everything
 [dependencies]
-rivven-connect = { version = "0.0.15", features = ["full"] }
+rivven-connect = { version = "0.0.16", features = ["full"] }
 ```
 
 ### Bundle Features

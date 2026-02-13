@@ -176,6 +176,7 @@ rivven-connect run --config rivven-connect.yaml
 | `clickhouse` | `clickhouse` | ClickHouse OLAP via native RowBinary + circuit breaker + metrics |
 | `qdrant` | `qdrant` | Qdrant vector DB via gRPC + circuit breaker + metrics |
 | `pinecone` | `pinecone` | Pinecone managed vector DB via gRPC (rustls) + circuit breaker + metrics |
+| `s3-vectors` | `s3-vectors` | Amazon S3 Vectors via AWS SDK + circuit breaker + metrics |
 
 ### Unified Object Storage
 
@@ -451,20 +452,20 @@ RDBC connectors expose pool metrics via the Prometheus endpoint (`/metrics`):
 Use the `rdbc-*` features to enable database drivers:
 
 ```toml
-rivven-connect = { version = "0.0.15", features = ["rdbc-postgres"] }       # PostgreSQL
-rivven-connect = { version = "0.0.15", features = ["rdbc-mysql"] }          # MySQL/MariaDB  
-rivven-connect = { version = "0.0.15", features = ["rdbc-sqlserver"] }      # SQL Server
-rivven-connect = { version = "0.0.15", features = ["rdbc-full"] }           # All databases
+rivven-connect = { version = "0.0.16", features = ["rdbc-postgres"] }       # PostgreSQL
+rivven-connect = { version = "0.0.16", features = ["rdbc-mysql"] }          # MySQL/MariaDB  
+rivven-connect = { version = "0.0.16", features = ["rdbc-sqlserver"] }      # SQL Server
+rivven-connect = { version = "0.0.16", features = ["rdbc-full"] }           # All databases
 ```
 
 ### Feature Bundles
 
 ```toml
 # In Cargo.toml
-rivven-connect = { version = "0.0.15", features = ["full"] }
+rivven-connect = { version = "0.0.16", features = ["full"] }
 
 # Or selective features
-rivven-connect = { version = "0.0.15", features = ["postgres", "s3"] }
+rivven-connect = { version = "0.0.16", features = ["postgres", "s3"] }
 ```
 
 | Bundle | Includes |
@@ -474,7 +475,7 @@ rivven-connect = { version = "0.0.15", features = ["postgres", "s3"] }
 | `storage-full` | s3, gcs, azure, parquet |
 | `lakehouse-full` | iceberg, delta-lake |
 | `warehouse-full` | snowflake, bigquery, redshift, databricks, clickhouse |
-| `vectordb-full` | qdrant, pinecone |
+| `vectordb-full` | qdrant, pinecone, s3-vectors |
 | `full` | All connectors (including rdbc-full) |
 
 ### Single Message Transforms (SMT)
