@@ -1601,9 +1601,9 @@ The connector emits the following metrics via the `metrics` crate:
 
 ### Pinecone (Vector Database)
 
-High-throughput vector upserts into [Pinecone](https://www.pinecone.io/) via the **official `pinecone-sdk` crate** — REST control plane + gRPC data plane for managed vector search.
+High-throughput vector upserts into [Pinecone](https://www.pinecone.io/) via a **lightweight gRPC client** built on `tonic` with rustls — no OpenSSL dependency, fully static-linkable for musl targets.
 
-**Key features**: gRPC/Protobuf data plane (upserts via tonic), batch upserts with configurable size and flush interval, exponential backoff retry with jitter, structured error classification into typed `ConnectorError` variants (narrowed gRPC pattern matching), lock-free circuit breaker, metrics integration (`metrics` crate), API key auth via `SensitiveString`, namespace support, sparse vector support for hybrid search, multiple vector ID strategies (field, UUID with single-pass validation, deterministic FNV-1a hash), per-request timeout, session-scoped structured logging, early rejection of empty/non-object/f32-overflow vectors.
+**Key features**: gRPC/protobuf data plane (persistent HTTP/2 channel via `connect_lazy`), batch upserts with configurable size and timer-based flush via `tokio::select!`, exponential backoff retry with jitter, structured error classification into typed `ConnectorError` variants (all 16 gRPC status codes explicitly mapped + message-based fallback), lock-free circuit breaker (`AtomicU32`/`AtomicU64`), metrics integration (`metrics` crate), API key auth via gRPC metadata interceptor (`SensitiveString`, zeroize-on-drop), namespace support, sparse vector support for hybrid search, multiple vector ID strategies (field, UUID with single-pass validation, deterministic FNV-1a hash), per-request timeout with `tokio::time::timeout`, HTTP/2 connection tuning (PING keep-alive every 30 s, adaptive flow control, enlarged window sizes for large batches, TCP_NODELAY), session-scoped structured logging, early rejection of empty/non-object/f32-overflow vectors.
 
 #### Vector ID Strategies
 
@@ -1688,7 +1688,7 @@ sinks:
 |:----------|:---------|:--------|:------------|
 | `api_key` | ✓ | - | Pinecone API key (from console) |
 | `index_host` | ✓ | - | Index host URL (e.g. `https://my-index-abc.svc.pinecone.io`) |
-| `control_plane_host` | | - | Control plane host override |
+| `control_plane_host` | | - | Retained for backward compatibility (unused by REST client) |
 | `namespace` | | - | Namespace for logical partitioning |
 | `vector_field` | | `embedding` | Field containing the dense vector (array of f32-range floats; values exceeding ±3.4e38 are rejected) |
 | `sparse_vector_indices_field` | | - | Field for sparse vector indices (array of u32) |

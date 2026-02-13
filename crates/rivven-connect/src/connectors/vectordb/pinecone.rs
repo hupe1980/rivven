@@ -1,7 +1,7 @@
 //! Pinecone vector database sink connector
 //!
 //! This module provides a sink connector for streaming data into Pinecone
-//! using the official `pinecone-sdk` crate for maximum compatibility.
+//! using gRPC via `tonic` (rustls — no OpenSSL).
 //!
 //! # Features
 //!
@@ -76,15 +76,16 @@
 //! sinks.register("pinecone", Arc::new(PineconeSinkFactory));
 //! ```
 
+use super::pinecone_client::{
+    json_to_prost_value, string_value, Namespace, PineconeClient, PineconeClientConfig,
+    PineconeError, SparseValues, Vector,
+};
 use crate::connectors::{AnySink, SinkFactory};
 use crate::error::ConnectorError;
 use crate::prelude::*;
 use async_trait::async_trait;
 use futures::StreamExt;
 use metrics::{counter, gauge, histogram};
-use pinecone_sdk::models::{Namespace, SparseValues, Vector};
-use pinecone_sdk::pinecone::{PineconeClient, PineconeClientConfig};
-use pinecone_sdk::utils::errors::PineconeError;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -196,8 +197,8 @@ pub struct PineconeSinkConfig {
     #[validate(length(min = 1, max = 2048))]
     pub index_host: String,
 
-    /// Optional control plane host override.
-    /// Defaults to `https://api.pinecone.io` if unset.
+    /// Optional control plane host override (unused by the REST client).
+    /// Retained for configuration backward compatibility.
     #[serde(default)]
     pub control_plane_host: Option<String>,
 
@@ -551,27 +552,6 @@ fn extract_vector_id(
     }
 }
 
-/// Convert a `serde_json::Value` to a Pinecone metadata `Value`.
-///
-/// Pinecone metadata supports strings, numbers, booleans, and null.
-/// Arrays and nested objects are converted to their JSON string representation
-/// since Pinecone filtering only operates on flat metadata fields.
-#[inline]
-fn json_to_pinecone_value(v: &serde_json::Value) -> pinecone_sdk::models::Value {
-    use pinecone_sdk::models::Kind;
-    let kind = match v {
-        serde_json::Value::Null => Some(Kind::NullValue(0)),
-        serde_json::Value::Bool(b) => Some(Kind::BoolValue(*b)),
-        serde_json::Value::Number(n) => Some(Kind::NumberValue(n.as_f64().unwrap_or(0.0))),
-        serde_json::Value::String(s) => Some(Kind::StringValue(s.clone())),
-        // Complex types: serialize to JSON string for storage
-        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            Some(Kind::StringValue(v.to_string()))
-        }
-    };
-    pinecone_sdk::models::Value { kind }
-}
-
 /// Build a Pinecone `Vector` from a source event.
 ///
 /// Returns `(vector, payload_bytes)` where `payload_bytes` is the approximate
@@ -620,48 +600,35 @@ fn build_vector(
                     continue;
                 }
             }
-            metadata_fields.insert(k.clone(), json_to_pinecone_value(v));
+            metadata_fields.insert(k.clone(), json_to_prost_value(v));
         }
     }
     // Add event metadata
     metadata_fields.insert(
         "_event_type".to_string(),
-        json_to_pinecone_value(&serde_json::Value::String(event.event_type.to_string())),
+        string_value(event.event_type.to_string()),
     );
-    metadata_fields.insert(
-        "_stream".to_string(),
-        json_to_pinecone_value(&serde_json::Value::String(event.stream.clone())),
-    );
+    metadata_fields.insert("_stream".to_string(), string_value(event.stream.clone()));
     if let Some(ref ns) = event.namespace {
-        metadata_fields.insert(
-            "_namespace".to_string(),
-            json_to_pinecone_value(&serde_json::Value::String(ns.clone())),
-        );
+        metadata_fields.insert("_namespace".to_string(), string_value(ns.clone()));
     } else {
-        metadata_fields.insert(
-            "_namespace".to_string(),
-            json_to_pinecone_value(&serde_json::Value::String(String::new())),
-        );
+        metadata_fields.insert("_namespace".to_string(), string_value(String::new()));
     }
     metadata_fields.insert(
         "_timestamp".to_string(),
-        json_to_pinecone_value(&serde_json::Value::String(event.timestamp.to_rfc3339())),
+        string_value(event.timestamp.to_rfc3339()),
     );
 
     // Estimate size without serialization — avoids allocation on the hot path.
     let payload_bytes = metadata_fields.len() * 50 + values.len() * 4;
 
-    // Metadata is always non-empty (at least _event_type, _stream,
-    // _namespace, _timestamp are unconditionally inserted above).
-    let metadata = Some(pinecone_sdk::models::Metadata {
-        fields: metadata_fields,
-    });
-
     let vector = Vector {
         id,
         values,
         sparse_values,
-        metadata,
+        metadata: Some(prost_types::Struct {
+            fields: metadata_fields,
+        }),
     };
 
     Ok((vector, payload_bytes))
@@ -817,8 +784,9 @@ impl CircuitBreaker {
 
 /// Classify a `PineconeError` into a typed `ConnectorError`.
 ///
-/// Uses enum variant matching for precision, with string-based fallback
-/// for `DataPlaneError` (gRPC status) and unknown variants.
+/// Uses the error variant and gRPC status code for precise classification.
+/// All 16 gRPC status codes are explicitly mapped; unknown codes fall through
+/// to string-based message heuristics.
 fn classify_pinecone_error(err: &PineconeError) -> ConnectorError {
     let raw = err.to_string();
     // Truncate to prevent leaking sensitive SDK internals in logs/responses
@@ -833,61 +801,45 @@ fn classify_pinecone_error(err: &PineconeError) -> ConnectorError {
     };
 
     match err {
-        // ── Auth errors (non-retryable) ─────────────────────────────
-        PineconeError::UnauthorizedError { .. } | PineconeError::ActionForbiddenError { .. } => {
-            ConnectorError::Auth(msg)
-        }
-
-        PineconeError::APIKeyMissingError { .. } => ConnectorError::Config(msg),
-
         // ── Timeout (retryable) ─────────────────────────────────────
-        PineconeError::TimeoutError { .. } => ConnectorError::Timeout(msg),
+        PineconeError::Timeout(_) => ConnectorError::Timeout(msg),
 
         // ── Connection (retryable) ──────────────────────────────────
-        PineconeError::ConnectionError { .. }
-        | PineconeError::ReqwestError { .. }
-        | PineconeError::IoError { .. } => ConnectorError::Connection(msg),
+        PineconeError::Connection(_) => ConnectorError::Connection(msg),
 
-        // ── Not found (non-retryable) ───────────────────────────────
-        PineconeError::IndexNotFoundError { .. }
-        | PineconeError::CollectionNotFoundError { .. } => ConnectorError::NotFound(msg),
+        // ── Serialization (non-retryable) ───────────────────────────
+        PineconeError::Serialization(_) => ConnectorError::Serialization(msg),
 
-        // ── Schema / request errors (non-retryable) ─────────────────
-        PineconeError::BadRequestError { .. } | PineconeError::UnprocessableEntityError { .. } => {
-            ConnectorError::Schema(msg)
-        }
-
-        // ── Configuration errors (non-retryable) ────────────────────
-        PineconeError::InvalidConfigurationError { .. }
-        | PineconeError::InvalidHeadersError { .. }
-        | PineconeError::InvalidCloudError { .. }
-        | PineconeError::InvalidRegionError { .. } => ConnectorError::Config(msg),
-
-        // ── Rate limiting / quota (retryable) ───────────────────────
-        PineconeError::PodQuotaExceededError { .. }
-        | PineconeError::CollectionsQuotaExceededError { .. } => ConnectorError::RateLimited(msg),
-
-        // ── Internal server error (retryable) ───────────────────────
-        PineconeError::InternalServerError { .. } => ConnectorError::Connection(msg),
-
-        // ── Data plane gRPC errors — classify via string matching ───
-        PineconeError::DataPlaneError { .. } | PineconeError::InferenceError { .. } => {
-            classify_grpc_error(&msg)
-        }
-
-        // ── Serialization ───────────────────────────────────────────
-        PineconeError::SerdeError { .. } => ConnectorError::Serialization(msg),
-
-        // ── Catch-all ───────────────────────────────────────────────
-        _ => {
-            // String-based fallback for any new/unknown variants
-            classify_grpc_error(&msg)
-        }
+        // ── API errors — classify by gRPC status code ──────────────
+        // All 16 gRPC codes are explicitly mapped for defence-in-depth.
+        PineconeError::Api { code, .. } => match code.as_str() {
+            // Auth (non-retryable)
+            "Unauthenticated" | "PermissionDenied" => ConnectorError::Auth(msg),
+            // Not found (non-retryable)
+            "NotFound" => ConnectorError::NotFound(msg),
+            // Schema / client error (non-retryable)
+            "InvalidArgument" | "FailedPrecondition" | "AlreadyExists" | "OutOfRange" => {
+                ConnectorError::Schema(msg)
+            }
+            // Rate limiting (retryable)
+            "ResourceExhausted" => ConnectorError::RateLimited(msg),
+            // Timeout (retryable)
+            "DeadlineExceeded" => ConnectorError::Timeout(msg),
+            // Transient server errors (retryable)
+            "Cancelled" | "Unavailable" | "Internal" | "Unknown" => ConnectorError::Connection(msg),
+            // Fatal server errors (non-retryable)
+            "Unimplemented" | "DataLoss" => ConnectorError::Fatal(msg),
+            _ => classify_error_message(&msg),
+        },
     }
 }
 
-/// Classify a gRPC/DataPlane error message into a `ConnectorError`.
-fn classify_grpc_error(msg: &str) -> ConnectorError {
+/// Classify an error message string into a `ConnectorError`.
+///
+/// Fallback for API error responses whose HTTP status code does not match
+/// a known category.  Scans the lowercased message for well-known patterns
+/// (rate-limit, timeout, connection, auth, schema, etc.).
+fn classify_error_message(msg: &str) -> ConnectorError {
     let lower = msg.to_lowercase();
 
     if lower.contains("resource exhausted")
@@ -1012,18 +964,18 @@ impl PineconeSink {
     /// Build a configured `PineconeClient` from the sink config.
     fn create_client(config: &PineconeSinkConfig) -> crate::error::Result<PineconeClient> {
         let pinecone_config = PineconeClientConfig {
-            api_key: Some(config.api_key.expose_secret().to_string()),
-            control_plane_host: config.control_plane_host.clone(),
-            ..Default::default()
+            api_key: config.api_key.expose_secret().to_string(),
         };
-        Ok(pinecone_config.client().map_err(|e| {
-            ConnectorError::Connection(format!("Failed to build Pinecone client: {}", e))
-        })?)
+        Ok(
+            PineconeClient::new(&pinecone_config, &config.index_host).map_err(|e| {
+                ConnectorError::Connection(format!("Failed to build Pinecone client: {}", e))
+            })?,
+        )
     }
 
     /// Upsert a batch of vectors into Pinecone with retry logic.
     async fn upsert_batch(
-        index: &mut pinecone_sdk::pinecone::data::Index,
+        client: &PineconeClient,
         batch: &[Vector],
         namespace: &Namespace,
         retry: &RetryParams,
@@ -1033,13 +985,14 @@ impl PineconeSink {
 
         loop {
             let upsert_result =
-                match tokio::time::timeout(retry.timeout, index.upsert(batch, namespace)).await {
+                match tokio::time::timeout(retry.timeout, client.upsert(batch, namespace)).await {
                     Ok(result) => result,
                     Err(_elapsed) => {
                         // Synthesize a timeout error for unified handling below
-                        Err(PineconeError::TimeoutError {
-                            message: format!("Upsert timed out after {}s", retry.timeout.as_secs()),
-                        })
+                        Err(PineconeError::Timeout(format!(
+                            "Upsert timed out after {}s",
+                            retry.timeout.as_secs()
+                        )))
                     }
                 };
 
@@ -1088,7 +1041,7 @@ impl Sink for PineconeSink {
 
     fn spec() -> ConnectorSpec {
         ConnectorSpec::new("pinecone", env!("CARGO_PKG_VERSION"))
-            .description("Pinecone sink — high-throughput vector upserts via gRPC")
+            .description("Pinecone sink — high-throughput vector upserts via gRPC (rustls)")
             .documentation_url("https://rivven.dev/docs/connectors/pinecone-sink")
             .config_schema_from::<PineconeSinkConfig>()
             .metadata("protocol", "grpc")
@@ -1179,38 +1132,24 @@ impl Sink for PineconeSink {
 
         let client = Self::create_client(config)?;
 
-        // ── Index connectivity ──────────────────────────────────────
+        // ── Index connectivity + stats ──────────────────────────────
         let t2 = std::time::Instant::now();
-        match client.index(&config.index_host).await {
-            Ok(mut index) => {
+        match client.describe_index_stats().await {
+            Ok(stats) => {
                 builder = builder.check(
                     CheckDetail::passed("connectivity")
                         .with_duration_ms(t2.elapsed().as_millis() as u64),
                 );
 
-                // ── Index stats ─────────────────────────────────────────
-                let t3 = std::time::Instant::now();
-                match index.describe_index_stats(None).await {
-                    Ok(stats) => {
-                        info!(
-                            dimension = stats.dimension,
-                            total_vectors = stats.total_vector_count,
-                            "Pinecone index stats retrieved"
-                        );
-                        builder = builder.check(
-                            CheckDetail::passed("index_stats")
-                                .with_duration_ms(t3.elapsed().as_millis() as u64),
-                        );
-                    }
-                    Err(e) => {
-                        let msg = format!("Failed to retrieve index stats: {}", e);
-                        warn!("{}", msg);
-                        builder = builder.check(
-                            CheckDetail::failed("index_stats", &msg)
-                                .with_duration_ms(t3.elapsed().as_millis() as u64),
-                        );
-                    }
-                }
+                info!(
+                    dimension = stats.dimension,
+                    total_vectors = stats.total_vector_count,
+                    "Pinecone index stats retrieved"
+                );
+                builder = builder.check(
+                    CheckDetail::passed("index_stats")
+                        .with_duration_ms(t2.elapsed().as_millis() as u64),
+                );
             }
             Err(e) => {
                 let msg = format!("Failed to connect to Pinecone index: {}", e);
@@ -1269,9 +1208,6 @@ impl Sink for PineconeSink {
 
         let session_id = generate_session_id();
         let client = Self::create_client(config)?;
-        let mut index = client.index(&config.index_host).await.map_err(|e| {
-            ConnectorError::Connection(format!("Failed to connect to Pinecone index: {}", e))
-        })?;
 
         let retry = RetryParams::from(config);
         let namespace: Namespace = match &config.namespace {
@@ -1390,8 +1326,7 @@ impl Sink for PineconeSink {
 
                 let t0 = std::time::Instant::now();
 
-                match Self::upsert_batch(&mut index, &batch, &namespace, &retry, &session_id).await
-                {
+                match Self::upsert_batch(&client, &batch, &namespace, &retry, &session_id).await {
                     Ok(()) => {
                         let elapsed_ms = t0.elapsed().as_millis() as f64;
                         histogram!("pinecone.batch.duration_ms").record(elapsed_ms);
@@ -1874,32 +1809,35 @@ circuit_breaker:
     }
 
     #[test]
-    fn test_json_to_pinecone_value() {
-        use pinecone_sdk::models::Kind;
+    fn test_json_to_prost_value() {
+        use prost_types::value::Kind;
 
         // String
-        let v = json_to_pinecone_value(&serde_json::json!("hello"));
-        assert!(matches!(v.kind, Some(Kind::StringValue(ref s)) if s == "hello"));
+        let v = json_to_prost_value(&serde_json::json!("hello"));
+        assert_eq!(v.kind, Some(Kind::StringValue("hello".into())));
 
         // Number
-        let v = json_to_pinecone_value(&serde_json::json!(42.5));
-        assert!(matches!(v.kind, Some(Kind::NumberValue(n)) if (n - 42.5).abs() < f64::EPSILON));
+        let v = json_to_prost_value(&serde_json::json!(42.5));
+        assert_eq!(v.kind, Some(Kind::NumberValue(42.5)));
 
         // Boolean
-        let v = json_to_pinecone_value(&serde_json::json!(true));
-        assert!(matches!(v.kind, Some(Kind::BoolValue(true))));
+        let v = json_to_prost_value(&serde_json::json!(true));
+        assert_eq!(v.kind, Some(Kind::BoolValue(true)));
 
         // Null
-        let v = json_to_pinecone_value(&serde_json::json!(null));
-        assert!(matches!(v.kind, Some(Kind::NullValue(0))));
+        let v = json_to_prost_value(&serde_json::json!(null));
+        assert_eq!(v.kind, Some(Kind::NullValue(0)));
 
         // Array → JSON string
-        let v = json_to_pinecone_value(&serde_json::json!([1, 2, 3]));
-        assert!(matches!(v.kind, Some(Kind::StringValue(ref s)) if s == "[1,2,3]"));
+        let v = json_to_prost_value(&serde_json::json!([1, 2, 3]));
+        assert_eq!(v.kind, Some(Kind::StringValue("[1,2,3]".into())));
 
         // Object → JSON string
-        let v = json_to_pinecone_value(&serde_json::json!({"a": 1}));
-        assert!(matches!(v.kind, Some(Kind::StringValue(ref s)) if s.contains("\"a\"")));
+        let v = json_to_prost_value(&serde_json::json!({"a": 1}));
+        match &v.kind {
+            Some(Kind::StringValue(s)) => assert!(s.contains("\"a\"")),
+            other => panic!("expected StringValue, got {:?}", other),
+        }
     }
 
     #[test]
@@ -2346,58 +2284,58 @@ circuit_breaker:
     }
 
     #[test]
-    fn test_classify_grpc_error_patterns() {
+    fn test_classify_error_message_patterns() {
         // Connection patterns
         assert!(matches!(
-            classify_grpc_error("unavailable: connection refused"),
+            classify_error_message("unavailable: connection refused"),
             ConnectorError::Connection(_)
         ));
         assert!(matches!(
-            classify_grpc_error("transport error: hyper error"),
+            classify_error_message("transport error: hyper error"),
             ConnectorError::Connection(_)
         ));
         assert!(matches!(
-            classify_grpc_error("dns error: no record found"),
+            classify_error_message("dns error: no record found"),
             ConnectorError::Connection(_)
         ));
 
         // Auth patterns
         assert!(matches!(
-            classify_grpc_error("unauthenticated: bad api key"),
+            classify_error_message("unauthenticated: bad api key"),
             ConnectorError::Auth(_)
         ));
         assert!(matches!(
-            classify_grpc_error("permission denied"),
+            classify_error_message("permission denied"),
             ConnectorError::Auth(_)
         ));
 
         // Schema patterns
         assert!(matches!(
-            classify_grpc_error("invalid_argument: vector dimension mismatch"),
+            classify_error_message("invalid_argument: vector dimension mismatch"),
             ConnectorError::Schema(_)
         ));
 
         // Rate limiting
         assert!(matches!(
-            classify_grpc_error("resource exhausted: too many requests"),
+            classify_error_message("resource exhausted: too many requests"),
             ConnectorError::RateLimited(_)
         ));
 
         // Timeout
         assert!(matches!(
-            classify_grpc_error("deadline exceeded"),
+            classify_error_message("deadline exceeded"),
             ConnectorError::Timeout(_)
         ));
 
         // Not found
         assert!(matches!(
-            classify_grpc_error("not found: index doesn't exist"),
+            classify_error_message("not found: index doesn't exist"),
             ConnectorError::NotFound(_)
         ));
 
         // Unknown → Fatal
         assert!(matches!(
-            classify_grpc_error("some random error"),
+            classify_error_message("some random error"),
             ConnectorError::Fatal(_)
         ));
     }
@@ -2884,12 +2822,12 @@ index_host: "https://test.pinecone.io"
     }
 
     #[test]
-    fn test_classify_grpc_error_invalid_narrowed() {
+    fn test_classify_error_message_invalid_narrowed() {
         // P4-02: "invalid" substring no longer matches broadly.
         // "invalidated" should NOT be classified as Schema.
         assert!(
             matches!(
-                classify_grpc_error("internal: cached state invalidated"),
+                classify_error_message("internal: cached state invalidated"),
                 ConnectorError::Fatal(_)
             ),
             "\"invalidated\" should fall through to Fatal, not Schema"
@@ -2897,19 +2835,19 @@ index_host: "https://test.pinecone.io"
 
         // "invalid_argument" still matches Schema
         assert!(matches!(
-            classify_grpc_error("invalid_argument: vector dimension mismatch"),
+            classify_error_message("invalid_argument: vector dimension mismatch"),
             ConnectorError::Schema(_)
         ));
 
         // "invalid argument" (space) matches Schema
         assert!(matches!(
-            classify_grpc_error("invalid argument: bad vector"),
+            classify_error_message("invalid argument: bad vector"),
             ConnectorError::Schema(_)
         ));
 
         // "invalid vector" matches Schema
         assert!(matches!(
-            classify_grpc_error("invalid vector: wrong size"),
+            classify_error_message("invalid vector: wrong size"),
             ConnectorError::Schema(_)
         ));
     }
@@ -2921,5 +2859,190 @@ index_host: "https://test.pinecone.io"
         let result = extract_vector(&empty, "v");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("empty array"));
+    }
+
+    // ── Pass-5: gRPC client migration tests ──────────────────────
+
+    #[test]
+    fn test_classify_pinecone_error_by_grpc_code() {
+        // Unauthenticated → Auth
+        assert!(matches!(
+            classify_pinecone_error(&PineconeError::Api {
+                code: "Unauthenticated".into(),
+                message: "Invalid API key".into()
+            }),
+            ConnectorError::Auth(_)
+        ));
+        // PermissionDenied → Auth
+        assert!(matches!(
+            classify_pinecone_error(&PineconeError::Api {
+                code: "PermissionDenied".into(),
+                message: "Forbidden".into()
+            }),
+            ConnectorError::Auth(_)
+        ));
+        // NotFound → NotFound
+        assert!(matches!(
+            classify_pinecone_error(&PineconeError::Api {
+                code: "NotFound".into(),
+                message: "Index not found".into()
+            }),
+            ConnectorError::NotFound(_)
+        ));
+        // InvalidArgument → Schema
+        assert!(matches!(
+            classify_pinecone_error(&PineconeError::Api {
+                code: "InvalidArgument".into(),
+                message: "Bad Request".into()
+            }),
+            ConnectorError::Schema(_)
+        ));
+        // FailedPrecondition → Schema
+        assert!(matches!(
+            classify_pinecone_error(&PineconeError::Api {
+                code: "FailedPrecondition".into(),
+                message: "Unprocessable".into()
+            }),
+            ConnectorError::Schema(_)
+        ));
+        // ResourceExhausted → RateLimited
+        assert!(matches!(
+            classify_pinecone_error(&PineconeError::Api {
+                code: "ResourceExhausted".into(),
+                message: "Too Many Requests".into()
+            }),
+            ConnectorError::RateLimited(_)
+        ));
+        // DeadlineExceeded → Timeout
+        assert!(matches!(
+            classify_pinecone_error(&PineconeError::Api {
+                code: "DeadlineExceeded".into(),
+                message: "Request Timeout".into()
+            }),
+            ConnectorError::Timeout(_)
+        ));
+        // Unavailable → Connection (retryable)
+        assert!(matches!(
+            classify_pinecone_error(&PineconeError::Api {
+                code: "Unavailable".into(),
+                message: "Service Unavailable".into()
+            }),
+            ConnectorError::Connection(_)
+        ));
+        // Internal → Connection (retryable)
+        assert!(matches!(
+            classify_pinecone_error(&PineconeError::Api {
+                code: "Internal".into(),
+                message: "Internal Server Error".into()
+            }),
+            ConnectorError::Connection(_)
+        ));
+        // Unknown → Connection (retryable)
+        assert!(matches!(
+            classify_pinecone_error(&PineconeError::Api {
+                code: "Unknown".into(),
+                message: "Unknown Error".into()
+            }),
+            ConnectorError::Connection(_)
+        ));
+        // Timeout variant → Timeout
+        assert!(matches!(
+            classify_pinecone_error(&PineconeError::Timeout("deadline".into())),
+            ConnectorError::Timeout(_)
+        ));
+        // Connection variant → Connection
+        assert!(matches!(
+            classify_pinecone_error(&PineconeError::Connection("refused".into())),
+            ConnectorError::Connection(_)
+        ));
+        // Serialization variant → Serialization
+        assert!(matches!(
+            classify_pinecone_error(&PineconeError::Serialization("bad proto".into())),
+            ConnectorError::Serialization(_)
+        ));
+    }
+
+    #[test]
+    fn test_classify_pinecone_error_truncates_long_message() {
+        let long_msg = "x".repeat(1024);
+        let err = PineconeError::Api {
+            code: "Internal".into(),
+            message: long_msg,
+        };
+        let classified = classify_pinecone_error(&err);
+        let msg = classified.to_string();
+        // Message should be truncated to ~512 chars + "..."
+        assert!(
+            msg.len() < 600,
+            "Expected truncated message, got len={}",
+            msg.len()
+        );
+        assert!(msg.contains("..."));
+    }
+
+    // ── Pass-6: comprehensive gRPC code coverage tests ─────────
+
+    #[test]
+    fn test_classify_grpc_already_exists() {
+        let err = PineconeError::Api {
+            code: "AlreadyExists".into(),
+            message: "Vector ID already exists".into(),
+        };
+        assert!(
+            matches!(classify_pinecone_error(&err), ConnectorError::Schema(_)),
+            "AlreadyExists should map to Schema"
+        );
+    }
+
+    #[test]
+    fn test_classify_grpc_out_of_range() {
+        let err = PineconeError::Api {
+            code: "OutOfRange".into(),
+            message: "Dimension out of range".into(),
+        };
+        assert!(
+            matches!(classify_pinecone_error(&err), ConnectorError::Schema(_)),
+            "OutOfRange should map to Schema"
+        );
+    }
+
+    #[test]
+    fn test_classify_grpc_cancelled() {
+        let err = PineconeError::Api {
+            code: "Cancelled".into(),
+            message: "Request cancelled".into(),
+        };
+        assert!(
+            matches!(classify_pinecone_error(&err), ConnectorError::Connection(_)),
+            "Cancelled should map to Connection (retryable)"
+        );
+        // Verify retryable
+        assert!(classify_pinecone_error(&err).is_retryable());
+    }
+
+    #[test]
+    fn test_classify_grpc_unimplemented() {
+        let err = PineconeError::Api {
+            code: "Unimplemented".into(),
+            message: "Method not supported".into(),
+        };
+        assert!(
+            matches!(classify_pinecone_error(&err), ConnectorError::Fatal(_)),
+            "Unimplemented should map to Fatal (non-retryable)"
+        );
+        assert!(!classify_pinecone_error(&err).is_retryable());
+    }
+
+    #[test]
+    fn test_classify_grpc_data_loss() {
+        let err = PineconeError::Api {
+            code: "DataLoss".into(),
+            message: "Unrecoverable data loss".into(),
+        };
+        assert!(
+            matches!(classify_pinecone_error(&err), ConnectorError::Fatal(_)),
+            "DataLoss should map to Fatal (non-retryable)"
+        );
+        assert!(!classify_pinecone_error(&err).is_retryable());
     }
 }

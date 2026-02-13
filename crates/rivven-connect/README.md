@@ -175,7 +175,7 @@ rivven-connect run --config rivven-connect.yaml
 | `databricks` | `databricks` | Databricks Delta tables via Zerobus |
 | `clickhouse` | `clickhouse` | ClickHouse OLAP via native RowBinary + circuit breaker + metrics |
 | `qdrant` | `qdrant` | Qdrant vector DB via gRPC + circuit breaker + metrics |
-| `pinecone` | `pinecone` | Pinecone managed vector DB via gRPC + circuit breaker + metrics |
+| `pinecone` | `pinecone` | Pinecone managed vector DB via gRPC (rustls) + circuit breaker + metrics |
 
 ### Unified Object Storage
 
