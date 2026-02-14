@@ -1,3 +1,4 @@
+use crate::storage::segment::SegmentSyncPolicy;
 use crate::storage::TieredStorageConfig;
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +29,21 @@ pub struct Config {
     /// Tiered storage configuration (hot/warm/cold data tiering)
     #[serde(default)]
     pub tiered_storage: TieredStorageConfig,
+
+    /// Segment fsync policy controlling durability guarantees (F-001 fix).
+    ///
+    /// - `None`: no fsync — OS page cache only (fastest, data loss on crash)
+    /// - `EveryWrite`: fsync after every append (maximum durability)
+    /// - `EveryNWrites(n)`: fsync every N writes (balanced)
+    ///
+    /// Default: `EveryNWrites(1)` — every write is fsynced for safety.
+    /// Override to `None` in benchmarks or development.
+    #[serde(default = "default_sync_policy")]
+    pub sync_policy: SegmentSyncPolicy,
+}
+
+fn default_sync_policy() -> SegmentSyncPolicy {
+    SegmentSyncPolicy::EveryNWrites(1)
 }
 
 impl Default for Config {
@@ -41,6 +57,7 @@ impl Default for Config {
             max_segment_size: 1024 * 1024 * 1024, // 1GB
             log_level: "info".to_string(),
             tiered_storage: TieredStorageConfig::default(),
+            sync_policy: default_sync_policy(),
         }
     }
 }

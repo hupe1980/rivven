@@ -120,7 +120,7 @@ impl RedbLogStore {
         postcard::from_bytes(value.value()).ok()
     }
 
-    /// Save state to database
+    /// Save state to database (single key convenience wrapper)
     fn save_state<T: Serialize>(
         &self,
         key: &str,
@@ -129,7 +129,17 @@ impl RedbLogStore {
         let bytes = postcard::to_allocvec(value).map_err(|e| StorageError::IO {
             source: StorageIOError::write_logs(openraft::AnyError::new(&e)),
         })?;
+        self.save_states(&[(key, &bytes)])
+    }
 
+    /// Save multiple state entries in a single write transaction (F-040 fix).
+    ///
+    /// Consolidates multiple key-value writes into one ACID transaction,
+    /// avoiding the overhead and inconsistency risk of separate transactions.
+    fn save_states(
+        &self,
+        entries: &[(&str, &[u8])],
+    ) -> std::result::Result<(), StorageError<NodeId>> {
         let write_txn = self.db.begin_write().map_err(|e| StorageError::IO {
             source: StorageIOError::write_logs(openraft::AnyError::new(&e)),
         })?;
@@ -139,11 +149,11 @@ impl RedbLogStore {
                 .map_err(|e| StorageError::IO {
                     source: StorageIOError::write_logs(openraft::AnyError::new(&e)),
                 })?;
-            table
-                .insert(key, bytes.as_slice())
-                .map_err(|e| StorageError::IO {
+            for (key, bytes) in entries {
+                table.insert(*key, *bytes).map_err(|e| StorageError::IO {
                     source: StorageIOError::write_logs(openraft::AnyError::new(&e)),
                 })?;
+            }
         }
         write_txn.commit().map_err(|e| StorageError::IO {
             source: StorageIOError::write_logs(openraft::AnyError::new(&e)),
@@ -181,6 +191,7 @@ impl RedbLogStore {
     }
 
     /// Get log entry by index
+    #[allow(dead_code)]
     fn get_log(&self, index: u64) -> std::result::Result<Option<RaftEntry>, StorageError<NodeId>> {
         let read_txn = self.db.begin_read().map_err(|e| StorageError::IO {
             source: StorageIOError::read_logs(openraft::AnyError::new(&e)),
@@ -240,6 +251,9 @@ impl RedbLogStore {
     }
 
     /// Delete log entries in range [start, end)
+    ///
+    /// F-036 fix: Propagate errors instead of silently swallowing them
+    /// with `let _ = table.remove(index)`.
     fn delete_logs_range(
         &self,
         start: u64,
@@ -255,9 +269,11 @@ impl RedbLogStore {
                     source: StorageIOError::write_logs(openraft::AnyError::new(&e)),
                 })?;
 
-            // Use retain to efficiently remove entries in range
+            // Use drain_filter/retain pattern with error propagation
             for index in start..end {
-                let _ = table.remove(index);
+                table.remove(index).map_err(|e| StorageError::IO {
+                    source: StorageIOError::write_logs(openraft::AnyError::new(&e)),
+                })?;
             }
         }
         write_txn.commit().map_err(|e| StorageError::IO {
@@ -269,6 +285,8 @@ impl RedbLogStore {
 
 // Implement RaftLogReader for RedbLogStore
 impl RaftLogReader<TypeConfig> for RedbLogStore {
+    /// F-035 fix: Use a single read transaction with range iteration instead
+    /// of opening a separate transaction per entry via `get_log()`.
     async fn try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + Send>(
         &mut self,
         range: RB,
@@ -284,12 +302,30 @@ impl RaftLogReader<TypeConfig> for RedbLogStore {
             std::ops::Bound::Unbounded => u64::MAX,
         };
 
+        // Single read transaction for the entire range scan
+        let read_txn = self.db.begin_read().map_err(|e| StorageError::IO {
+            source: StorageIOError::read_logs(openraft::AnyError::new(&e)),
+        })?;
+        let table = read_txn
+            .open_table(LOGS_TABLE)
+            .map_err(|e| StorageError::IO {
+                source: StorageIOError::read_logs(openraft::AnyError::new(&e)),
+            })?;
+
         let mut entries = Vec::new();
-        for index in start..end {
-            match self.get_log(index)? {
-                Some(entry) => entries.push(entry),
-                None => break, // Stop at first missing entry
-            }
+        let iter = table.range(start..end).map_err(|e| StorageError::IO {
+            source: StorageIOError::read_logs(openraft::AnyError::new(&e)),
+        })?;
+
+        for item in iter {
+            let (_, value) = item.map_err(|e| StorageError::IO {
+                source: StorageIOError::read_logs(openraft::AnyError::new(&e)),
+            })?;
+            let entry: RaftEntry =
+                postcard::from_bytes(value.value()).map_err(|e| StorageError::IO {
+                    source: StorageIOError::read_logs(openraft::AnyError::new(&e)),
+                })?;
+            entries.push(entry);
         }
 
         Ok(entries)

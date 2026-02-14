@@ -87,8 +87,21 @@ impl OffsetManager {
                     let dst = path.clone();
                     let json_clone = json;
                     if let Err(e) = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+                        // Write temp file
                         std::fs::write(&tmp, json_clone.as_bytes())?;
+                        // F-029: fsync temp file before rename to ensure data is durable
+                        {
+                            let f = std::fs::File::open(&tmp)?;
+                            f.sync_all()?;
+                        }
+                        // Atomic rename
                         std::fs::rename(&tmp, &dst)?;
+                        // F-029: fsync parent directory to ensure rename is durable
+                        if let Some(parent) = dst.parent() {
+                            if let Ok(dir) = std::fs::File::open(parent) {
+                                let _ = dir.sync_all();
+                            }
+                        }
                         Ok(())
                     })
                     .await

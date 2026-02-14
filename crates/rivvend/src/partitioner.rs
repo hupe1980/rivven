@@ -19,8 +19,7 @@
 //! - Lower producer latency
 //! - Still achieves good partition balance over time
 
-use parking_lot::RwLock;
-use std::collections::HashMap;
+use dashmap::DashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -48,17 +47,42 @@ struct TopicStickyState {
     current_partition: AtomicU32,
     /// Messages sent to current partition
     messages_in_batch: AtomicU64,
-    /// When the current batch started
-    batch_start: RwLock<Instant>,
+    /// When the current batch started (nanos since process start, via Instant)
+    batch_start_nanos: AtomicU64,
 }
+
+/// Baseline instant for converting `Instant` to/from AtomicU64.
+/// Using a thread-local or global LazyLock to avoid repeated system calls.
+static EPOCH: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
 
 impl TopicStickyState {
     fn new(initial_partition: u32) -> Self {
         Self {
             current_partition: AtomicU32::new(initial_partition),
             messages_in_batch: AtomicU64::new(0),
-            batch_start: RwLock::new(Instant::now()),
+            batch_start_nanos: AtomicU64::new(Self::now_nanos()),
         }
+    }
+
+    /// Get current time as nanos since process EPOCH
+    #[inline]
+    fn now_nanos() -> u64 {
+        EPOCH.elapsed().as_nanos() as u64
+    }
+
+    /// Get elapsed duration since batch start
+    #[inline]
+    fn batch_elapsed(&self) -> Duration {
+        let start = self.batch_start_nanos.load(Ordering::Relaxed);
+        let now = Self::now_nanos();
+        Duration::from_nanos(now.saturating_sub(start))
+    }
+
+    /// Reset batch start to now
+    #[inline]
+    fn reset_batch_start(&self) {
+        self.batch_start_nanos
+            .store(Self::now_nanos(), Ordering::Relaxed);
     }
 }
 
@@ -67,10 +91,13 @@ impl TopicStickyState {
 /// Implements Kafka 2.4+ style sticky partitioning:
 /// - Messages with keys use hash-based partitioning
 /// - Messages without keys stick to one partition until batch/time threshold
+///
+/// F-045 fix: Uses `DashMap` instead of `RwLock<HashMap>` for per-shard locking.
+/// Multi-topic workloads no longer contend on a single global lock.
 pub struct StickyPartitioner {
     config: StickyPartitionerConfig,
-    /// Per-topic sticky state
-    topic_states: RwLock<HashMap<String, TopicStickyState>>,
+    /// Per-topic sticky state (DashMap provides per-shard locking)
+    topic_states: DashMap<String, TopicStickyState>,
     /// Global counter for initial partition selection (ensures even distribution)
     global_counter: AtomicU32,
 }
@@ -85,7 +112,7 @@ impl StickyPartitioner {
     pub fn with_config(config: StickyPartitionerConfig) -> Self {
         Self {
             config,
-            topic_states: RwLock::new(HashMap::new()),
+            topic_states: DashMap::new(),
             global_counter: AtomicU32::new(0),
         }
     }
@@ -114,39 +141,28 @@ impl StickyPartitioner {
 
     /// Sticky partitioning for keyless messages
     fn sticky_partition(&self, topic: &str, num_partitions: u32) -> u32 {
-        // Fast path: check if we need to rotate
-        {
-            let states = self.topic_states.read();
-            if let Some(state) = states.get(topic) {
-                let should_rotate = self.should_rotate(state);
-                if !should_rotate {
-                    state.messages_in_batch.fetch_add(1, Ordering::Relaxed);
-                    return state.current_partition.load(Ordering::Relaxed) % num_partitions;
-                }
+        // Fast path: check existing entry via DashMap shard lock (no global lock)
+        if let Some(state) = self.topic_states.get(topic) {
+            if !self.should_rotate(&state) {
+                state.messages_in_batch.fetch_add(1, Ordering::Relaxed);
+                return state.current_partition.load(Ordering::Relaxed) % num_partitions;
             }
-        }
 
-        // Slow path: need to rotate or initialize
-        let mut states = self.topic_states.write();
-
-        let state = states.entry(topic.to_string()).or_insert_with(|| {
-            // Initial partition: round-robin across topics for even distribution
-            let initial = self.global_counter.fetch_add(1, Ordering::Relaxed) % num_partitions;
-            TopicStickyState::new(initial)
-        });
-
-        // Check again if we need to rotate (might have changed while waiting for lock)
-        if self.should_rotate(state) {
-            // Rotate to next partition
+            // Rotate in-place (we hold a read ref, but interior mutability via atomics)
             let current = state.current_partition.load(Ordering::Relaxed);
             let next = (current + 1) % num_partitions;
             state.current_partition.store(next, Ordering::Relaxed);
-            state.messages_in_batch.store(0, Ordering::Relaxed);
-            *state.batch_start.write() = Instant::now();
+            state.messages_in_batch.store(1, Ordering::Relaxed);
+            state.reset_batch_start();
+            return next;
         }
 
-        state.messages_in_batch.fetch_add(1, Ordering::Relaxed);
-        state.current_partition.load(Ordering::Relaxed) % num_partitions
+        // Slow path: initialize new topic entry
+        let initial = self.global_counter.fetch_add(1, Ordering::Relaxed) % num_partitions;
+        let state = TopicStickyState::new(initial);
+        state.messages_in_batch.store(1, Ordering::Relaxed);
+        self.topic_states.insert(topic.to_string(), state);
+        initial
     }
 
     /// Check if we should rotate to a new partition
@@ -160,14 +176,12 @@ impl StickyPartitioner {
         }
 
         // Check time threshold
-        let batch_start = *state.batch_start.read();
-        batch_start.elapsed() >= self.config.linger_duration
+        state.batch_elapsed() >= self.config.linger_duration
     }
 
     /// Remove state for a topic (called on topic deletion to prevent L-9 memory leak)
     pub fn reset_topic(&self, topic: &str) {
-        let mut states = self.topic_states.write();
-        states.remove(topic);
+        self.topic_states.remove(topic);
     }
 
     /// Remove state for topics no longer in the active set.
@@ -175,8 +189,8 @@ impl StickyPartitioner {
     /// Call periodically or on topic deletion to prevent
     /// the `topic_states` map from growing without bound.
     pub fn retain_topics(&self, active_topics: &std::collections::HashSet<String>) {
-        let mut states = self.topic_states.write();
-        states.retain(|topic, _| active_topics.contains(topic));
+        self.topic_states
+            .retain(|topic, _| active_topics.contains(topic));
     }
 }
 

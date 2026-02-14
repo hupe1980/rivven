@@ -3,7 +3,7 @@ pub mod segment;
 pub mod tiered;
 
 pub use log_manager::LogManager;
-pub use segment::Segment;
+pub use segment::{Segment, SegmentSyncPolicy};
 pub use tiered::{
     ColdStorageBackend, ColdStorageConfig, HotTier, HotTierStats, LocalFsColdStorage,
     SegmentMetadata, StorageTier, TieredStorage, TieredStorageConfig, TieredStorageStats,

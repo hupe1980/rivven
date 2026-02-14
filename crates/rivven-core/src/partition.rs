@@ -51,7 +51,14 @@ impl Partition {
             tiered_storage.is_some()
         );
         let base_dir = std::path::PathBuf::from(&config.data_dir);
-        let log_manager = LogManager::new(base_dir, topic, id, config.max_segment_size).await?;
+        let log_manager = LogManager::with_sync_policy(
+            base_dir,
+            topic,
+            id,
+            config.max_segment_size,
+            config.sync_policy,
+        )
+        .await?;
 
         // Recover offset from storage
         let recovered_offset = log_manager.recover_next_offset().await?;
@@ -113,13 +120,25 @@ impl Partition {
 
         // Write to log manager (primary storage) — consumes message, no clone needed
         if let Err(e) = log.append(offset, message).await {
-            // Reclaim the offset on failure to prevent gaps
-            let _ = self.next_offset.compare_exchange(
-                offset + 1,
-                offset,
-                Ordering::AcqRel,
-                Ordering::Relaxed,
-            );
+            // F-017 fix: Reclaim the offset on failure using a CAS retry loop.
+            // A single CAS can fail spuriously if a concurrent append advances
+            // past our offset. The loop retries until the offset is rolled back
+            // or we observe it has already been rolled back far enough.
+            loop {
+                let current = self.next_offset.load(Ordering::SeqCst);
+                if current <= offset {
+                    break; // Already rolled back or another thread did it
+                }
+                match self.next_offset.compare_exchange(
+                    current,
+                    offset,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => break,
+                    Err(_) => continue, // Retry
+                }
+            }
             return Err(e);
         }
         drop(log);
@@ -274,15 +293,24 @@ impl Partition {
         {
             let mut log = self.log_manager.write().await;
             if let Err(e) = log.append_batch(batch_messages).await {
-                // Roll back atomically reserved offsets on failure.
-                // CAS ensures we only roll back if no concurrent append advanced
-                // past our reservation.
-                let _ = self.next_offset.compare_exchange(
-                    start_offset + batch_size as u64,
-                    start_offset,
-                    Ordering::SeqCst,
-                    Ordering::Relaxed,
-                );
+                // F-017 fix: Roll back atomically reserved offsets using a CAS retry loop.
+                // Retries until we successfully roll back or observe the offset is
+                // already at or below our start_offset.
+                loop {
+                    let current = self.next_offset.load(Ordering::SeqCst);
+                    if current <= start_offset {
+                        break; // Already rolled back
+                    }
+                    match self.next_offset.compare_exchange(
+                        current,
+                        start_offset,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
+                        Ok(_) => break,
+                        Err(_) => continue, // Retry
+                    }
+                }
                 return Err(e);
             }
         }

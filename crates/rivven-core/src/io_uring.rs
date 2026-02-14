@@ -624,7 +624,7 @@ impl BatchExecutor {
 /// # Example
 ///
 /// ```ignore
-/// let wal = WalWriter::new("wal.log", IoUringConfig::default())?;
+/// let wal = PortableWalWriter::new("wal.log", IoUringConfig::default())?;
 ///
 /// // Direct write (immediate)
 /// wal.append(b"entry1")?;
@@ -634,14 +634,14 @@ impl BatchExecutor {
 /// wal.append_batched(b"entry3")?;
 /// wal.flush_batch()?; // Execute all batched writes
 /// ```
-pub struct WalWriter {
+pub struct PortableWalWriter {
     writer: AsyncWriter,
     batch: Mutex<IoBatch>,
     pending_bytes: AtomicU64,
     max_batch_bytes: u64,
 }
 
-impl WalWriter {
+impl PortableWalWriter {
     /// Create a new WAL writer
     pub fn new(path: impl AsRef<Path>, config: IoUringConfig) -> io::Result<Self> {
         let max_batch_bytes = (config.registered_buffers * config.buffer_size) as u64;
@@ -942,7 +942,7 @@ mod tests {
         let path = dir.path().join("wal.log");
 
         let config = IoUringConfig::minimal();
-        let wal = WalWriter::new(&path, config).unwrap();
+        let wal = PortableWalWriter::new(&path, config).unwrap();
 
         let offset = wal.append(b"entry1").unwrap();
         assert_eq!(offset, 0);
@@ -1058,7 +1058,7 @@ mod tests {
         let path = dir.path().join("wal_batch.log");
 
         let config = IoUringConfig::minimal();
-        let wal = WalWriter::new(&path, config).unwrap();
+        let wal = PortableWalWriter::new(&path, config).unwrap();
 
         // Direct write
         wal.append(b"direct").unwrap();
@@ -1087,7 +1087,7 @@ mod tests {
         let path = dir.path().join("wal_batch_crc.log");
 
         let config = IoUringConfig::minimal();
-        let wal = WalWriter::new(&path, config).unwrap();
+        let wal = PortableWalWriter::new(&path, config).unwrap();
 
         // Batched write with checksum
         wal.append_with_checksum_batched(b"data1").unwrap();
@@ -1110,7 +1110,7 @@ mod tests {
         config.registered_buffers = 1;
         config.buffer_size = 10; // 10 bytes max batch
 
-        let wal = WalWriter::new(&path, config).unwrap();
+        let wal = PortableWalWriter::new(&path, config).unwrap();
         assert_eq!(wal.max_batch_bytes(), 10);
 
         // First batch should not auto-flush

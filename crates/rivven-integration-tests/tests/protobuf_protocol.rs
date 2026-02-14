@@ -38,7 +38,7 @@ impl ProtobufClient {
     /// Send a request using protobuf wire format
     async fn send_request(&mut self, request: Request) -> Result<Response> {
         // Serialize with protobuf format byte (0x01)
-        let request_bytes = request.to_wire(WireFormat::Protobuf)?;
+        let request_bytes = request.to_wire(WireFormat::Protobuf, 0)?;
 
         // Send length-prefixed message
         let len = request_bytes.len() as u32;
@@ -63,7 +63,7 @@ impl ProtobufClient {
         );
 
         // Parse response
-        let (response, format) = Response::from_wire(&response_buf)?;
+        let (response, format, _correlation_id) = Response::from_wire(&response_buf)?;
         assert_eq!(format, WireFormat::Protobuf);
 
         Ok(response)
@@ -71,7 +71,7 @@ impl ProtobufClient {
 
     /// Send a request using postcard wire format
     async fn send_request_postcard(&mut self, request: Request) -> Result<(Response, WireFormat)> {
-        let request_bytes = request.to_wire(WireFormat::Postcard)?;
+        let request_bytes = request.to_wire(WireFormat::Postcard, 0)?;
 
         let len = request_bytes.len() as u32;
         self.stream.write_all(&len.to_be_bytes()).await?;
@@ -85,7 +85,7 @@ impl ProtobufClient {
         let mut response_buf = vec![0u8; response_len];
         self.stream.read_exact(&mut response_buf).await?;
 
-        let (response, format) = Response::from_wire(&response_buf)?;
+        let (response, format, _correlation_id) = Response::from_wire(&response_buf)?;
         Ok((response, format))
     }
 }

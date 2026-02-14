@@ -535,6 +535,7 @@ impl AuthenticatedHandler {
             | Request::SaslAuthenticate { .. }
             | Request::ScramClientFirst { .. }
             | Request::ScramClientFinal { .. }
+            | Request::Handshake { .. }
             | Request::Ping => {
                 // Already handled
                 return Response::Error {

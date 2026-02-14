@@ -24,7 +24,7 @@ use rivven_core::consumer_group::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -408,8 +408,11 @@ impl GroupPersistence for RaftPersistence {
 }
 
 /// Consumer group coordinator - manages multiple consumer groups
+///
+/// F-052 fix: Uses `tokio::sync::RwLock` instead of `std::sync::RwLock`
+/// to avoid blocking the async executor during lock contention.
 pub struct ConsumerCoordinator {
-    groups: Arc<RwLock<HashMap<GroupId, ConsumerGroup>>>,
+    groups: Arc<tokio::sync::RwLock<HashMap<GroupId, ConsumerGroup>>>,
     /// Persistence backend
     persistence: Arc<dyn GroupPersistence>,
 }
@@ -418,7 +421,7 @@ impl ConsumerCoordinator {
     /// Create a new coordinator with in-memory persistence (non-durable)
     pub fn new() -> Self {
         Self {
-            groups: Arc::new(RwLock::new(HashMap::new())),
+            groups: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             persistence: Arc::new(InMemoryPersistence::new()),
         }
     }
@@ -426,7 +429,7 @@ impl ConsumerCoordinator {
     /// Create a coordinator with custom persistence backend
     pub fn with_persistence(persistence: Arc<dyn GroupPersistence>) -> Self {
         Self {
-            groups: Arc::new(RwLock::new(HashMap::new())),
+            groups: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             persistence,
         }
     }
@@ -434,13 +437,13 @@ impl ConsumerCoordinator {
     /// Create a coordinator with Raft-based persistence
     pub fn with_raft_persistence() -> Self {
         Self {
-            groups: Arc::new(RwLock::new(HashMap::new())),
+            groups: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             persistence: Arc::new(RaftPersistence::new()),
         }
     }
 
     /// Restore state from persistence on startup
-    pub fn restore(&self) -> CoordinatorResult<usize> {
+    pub async fn restore(&self) -> CoordinatorResult<usize> {
         let group_ids = self.persistence.list_groups()?;
         let mut restored = 0;
 
@@ -448,7 +451,7 @@ impl ConsumerCoordinator {
             if let Some(state) = self.persistence.load_group(&group_id)? {
                 // Restore group with persisted offsets
                 // Note: Members are transient and will rejoin
-                let mut groups = self.write_groups()?;
+                let mut groups = self.groups.write().await;
                 use std::collections::hash_map::Entry;
                 if let Entry::Vacant(entry) = groups.entry(group_id) {
                     let mut group = ConsumerGroup::new(
@@ -471,27 +474,23 @@ impl ConsumerCoordinator {
         Ok(restored)
     }
 
-    /// Acquire a read lock on groups, handling poisoned locks gracefully
-    fn read_groups(
+    /// Acquire a read lock on groups (async, non-blocking)
+    async fn read_groups(
         &self,
-    ) -> CoordinatorResult<RwLockReadGuard<'_, HashMap<GroupId, ConsumerGroup>>> {
-        self.groups
-            .read()
-            .map_err(|_| CoordinatorError::LockPoisoned)
+    ) -> tokio::sync::RwLockReadGuard<'_, HashMap<GroupId, ConsumerGroup>> {
+        self.groups.read().await
     }
 
-    /// Acquire a write lock on groups, handling poisoned locks gracefully
-    fn write_groups(
+    /// Acquire a write lock on groups (async, non-blocking)
+    async fn write_groups(
         &self,
-    ) -> CoordinatorResult<RwLockWriteGuard<'_, HashMap<GroupId, ConsumerGroup>>> {
-        self.groups
-            .write()
-            .map_err(|_| CoordinatorError::LockPoisoned)
+    ) -> tokio::sync::RwLockWriteGuard<'_, HashMap<GroupId, ConsumerGroup>> {
+        self.groups.write().await
     }
 
     /// JoinGroup - Consumer joins a group (triggers rebalance)
     #[allow(clippy::too_many_arguments)] // Protocol-defined function signature
-    pub fn join_group(
+    pub async fn join_group(
         &self,
         group_id: GroupId,
         member_id: Option<MemberId>,
@@ -501,7 +500,7 @@ impl ConsumerCoordinator {
         subscriptions: Vec<String>,
         metadata: Vec<u8>,
     ) -> CoordinatorResult<JoinGroupResponse> {
-        let mut groups = self.write_groups()?;
+        let mut groups = self.write_groups().await;
 
         // Get or create group
         let is_new_group = !groups.contains_key(&group_id);
@@ -546,14 +545,14 @@ impl ConsumerCoordinator {
     }
 
     /// SyncGroup - Leader sends assignments, members receive them
-    pub fn sync_group(
+    pub async fn sync_group(
         &self,
         group_id: GroupId,
         member_id: MemberId,
         generation_id: u32,
         assignments: HashMap<MemberId, Vec<PartitionAssignment>>,
     ) -> CoordinatorResult<SyncGroupResponse> {
-        let mut groups = self.write_groups()?;
+        let mut groups = self.write_groups().await;
 
         let group = groups
             .get_mut(&group_id)
@@ -588,13 +587,13 @@ impl ConsumerCoordinator {
     }
 
     /// Heartbeat - Keep-alive for failure detection
-    pub fn heartbeat(
+    pub async fn heartbeat(
         &self,
         group_id: GroupId,
         member_id: MemberId,
         generation_id: u32,
     ) -> CoordinatorResult<HeartbeatResponse> {
-        let mut groups = self.write_groups()?;
+        let mut groups = self.write_groups().await;
 
         let group = groups
             .get_mut(&group_id)
@@ -631,13 +630,12 @@ impl ConsumerCoordinator {
     }
 
     /// LeaveGroup - Graceful consumer departure
-    pub fn leave_group(
+    pub async fn leave_group(
         &self,
         group_id: GroupId,
         member_id: MemberId,
     ) -> CoordinatorResult<LeaveGroupResponse> {
-        let mut groups = self.write_groups()?;
-
+        let mut groups = self.write_groups().await;
         let group = groups
             .get_mut(&group_id)
             .ok_or_else(|| CoordinatorError::GroupNotFound(group_id.clone()))?;
@@ -648,14 +646,14 @@ impl ConsumerCoordinator {
     }
 
     /// CommitOffset - Persist consumer offsets
-    pub fn commit_offset(
+    pub async fn commit_offset(
         &self,
         group_id: GroupId,
         topic: String,
         partition: u32,
         offset: i64,
     ) -> CoordinatorResult<CommitOffsetResponse> {
-        let mut groups = self.write_groups()?;
+        let mut groups = self.write_groups().await;
 
         let group = groups
             .get_mut(&group_id)
@@ -671,13 +669,13 @@ impl ConsumerCoordinator {
     }
 
     /// FetchOffset - Retrieve committed offsets
-    pub fn fetch_offset(
+    pub async fn fetch_offset(
         &self,
         group_id: GroupId,
         topic: String,
         partition: u32,
     ) -> CoordinatorResult<FetchOffsetResponse> {
-        let groups = self.read_groups()?;
+        let groups = self.read_groups().await;
 
         let group = groups
             .get(&group_id)
@@ -690,11 +688,10 @@ impl ConsumerCoordinator {
 
     /// Background task: Check for timeouts and trigger rebalances
     ///
-    /// Note: This can fail if the lock is poisoned. In production, the caller
-    /// should handle this by logging and continuing, as timeout checks are
-    /// best-effort.
-    pub fn check_timeouts(&self) -> CoordinatorResult<()> {
-        let mut groups = self.write_groups()?;
+    /// Note: In production, the caller should handle errors by logging
+    /// and continuing, as timeout checks are best-effort.
+    pub async fn check_timeouts(&self) -> CoordinatorResult<()> {
+        let mut groups = self.write_groups().await;
 
         for group in groups.values_mut() {
             let timed_out = group.check_timeouts();
@@ -757,8 +754,8 @@ pub struct FetchOffsetResponse {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_join_group_creates_group() {
+    #[tokio::test]
+    async fn test_join_group_creates_group() {
         let coordinator = ConsumerCoordinator::new();
 
         let response = coordinator
@@ -771,6 +768,7 @@ mod tests {
                 vec!["topic-1".to_string()],
                 vec![],
             )
+            .await
             .unwrap();
 
         assert_eq!(response.generation_id, 0);
@@ -778,8 +776,8 @@ mod tests {
         assert_eq!(response.members.len(), 1);
     }
 
-    #[test]
-    fn test_join_group_first_member_is_leader() {
+    #[tokio::test]
+    async fn test_join_group_first_member_is_leader() {
         let coordinator = ConsumerCoordinator::new();
 
         let response = coordinator
@@ -792,13 +790,14 @@ mod tests {
                 vec!["topic-1".to_string()],
                 vec![],
             )
+            .await
             .unwrap();
 
         assert_eq!(response.leader_id, response.member_id);
     }
 
-    #[test]
-    fn test_join_group_triggers_rebalance() {
+    #[tokio::test]
+    async fn test_join_group_triggers_rebalance() {
         let coordinator = ConsumerCoordinator::new();
 
         // First member
@@ -812,6 +811,7 @@ mod tests {
                 vec!["topic-1".to_string()],
                 vec![],
             )
+            .await
             .unwrap();
 
         // Second member - should trigger rebalance
@@ -825,6 +825,7 @@ mod tests {
                 vec!["topic-1".to_string()],
                 vec![],
             )
+            .await
             .unwrap();
 
         // Generation should still be 0 until sync_group completes rebalance
@@ -832,8 +833,8 @@ mod tests {
         assert_eq!(response2.members.len(), 2);
     }
 
-    #[test]
-    fn test_sync_group_completes_rebalance() {
+    #[tokio::test]
+    async fn test_sync_group_completes_rebalance() {
         let coordinator = ConsumerCoordinator::new();
 
         let response1 = coordinator
@@ -846,6 +847,7 @@ mod tests {
                 vec!["topic-1".to_string()],
                 vec![],
             )
+            .await
             .unwrap();
 
         let member_id = response1.member_id.clone();
@@ -868,14 +870,15 @@ mod tests {
                 generation_id,
                 assignments,
             )
+            .await
             .unwrap();
 
         assert_eq!(sync_response.assignment.len(), 1);
         assert_eq!(sync_response.assignment[0].partition, 0);
     }
 
-    #[test]
-    fn test_heartbeat_detects_invalid_generation() {
+    #[tokio::test]
+    async fn test_heartbeat_detects_invalid_generation() {
         let coordinator = ConsumerCoordinator::new();
 
         let response = coordinator
@@ -888,13 +891,16 @@ mod tests {
                 vec!["topic-1".to_string()],
                 vec![],
             )
+            .await
             .unwrap();
 
-        let result = coordinator.heartbeat(
-            "test-group".to_string(),
-            response.member_id,
-            999, // Wrong generation
-        );
+        let result = coordinator
+            .heartbeat(
+                "test-group".to_string(),
+                response.member_id,
+                999, // Wrong generation
+            )
+            .await;
 
         assert!(matches!(
             result,
@@ -902,8 +908,8 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_leave_group_removes_member() {
+    #[tokio::test]
+    async fn test_leave_group_removes_member() {
         let coordinator = ConsumerCoordinator::new();
 
         let response = coordinator
@@ -916,24 +922,28 @@ mod tests {
                 vec!["topic-1".to_string()],
                 vec![],
             )
+            .await
             .unwrap();
 
         coordinator
             .leave_group("test-group".to_string(), response.member_id.clone())
+            .await
             .unwrap();
 
         // Heartbeat should fail after leaving
-        let result = coordinator.heartbeat(
-            "test-group".to_string(),
-            response.member_id,
-            response.generation_id,
-        );
+        let result = coordinator
+            .heartbeat(
+                "test-group".to_string(),
+                response.member_id,
+                response.generation_id,
+            )
+            .await;
 
         assert!(matches!(result, Err(CoordinatorError::UnknownMember(_))));
     }
 
-    #[test]
-    fn test_commit_and_fetch_offset() {
+    #[tokio::test]
+    async fn test_commit_and_fetch_offset() {
         let coordinator = ConsumerCoordinator::new();
 
         coordinator
@@ -946,23 +956,26 @@ mod tests {
                 vec!["topic-1".to_string()],
                 vec![],
             )
+            .await
             .unwrap();
 
         // Commit offset
         coordinator
             .commit_offset("test-group".to_string(), "topic-1".to_string(), 0, 42)
+            .await
             .unwrap();
 
         // Fetch offset
         let response = coordinator
             .fetch_offset("test-group".to_string(), "topic-1".to_string(), 0)
+            .await
             .unwrap();
 
         assert_eq!(response.offset, Some(42));
     }
 
-    #[test]
-    fn test_fetch_offset_returns_none_when_not_committed() {
+    #[tokio::test]
+    async fn test_fetch_offset_returns_none_when_not_committed() {
         let coordinator = ConsumerCoordinator::new();
 
         coordinator
@@ -975,10 +988,12 @@ mod tests {
                 vec!["topic-1".to_string()],
                 vec![],
             )
+            .await
             .unwrap();
 
         let response = coordinator
             .fetch_offset("test-group".to_string(), "topic-1".to_string(), 0)
+            .await
             .unwrap();
 
         assert_eq!(response.offset, None);
@@ -1172,8 +1187,8 @@ mod tests {
         assert_eq!(topic1_offsets.get(&0), Some(&100));
     }
 
-    #[test]
-    fn test_coordinator_with_raft_persistence() {
+    #[tokio::test]
+    async fn test_coordinator_with_raft_persistence() {
         let entries = Arc::new(std::sync::Mutex::new(Vec::<Vec<u8>>::new()));
         let entries_clone = entries.clone();
 
@@ -1196,6 +1211,7 @@ mod tests {
                 vec!["topic-1".to_string()],
                 vec![],
             )
+            .await
             .unwrap();
 
         // Check that at least one entry was logged
@@ -1212,8 +1228,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_coordinator_restore() {
+    #[tokio::test]
+    async fn test_coordinator_restore() {
         // Create persistence with some state
         let raft_persistence = Arc::new(RaftPersistence::new());
 
@@ -1235,12 +1251,13 @@ mod tests {
 
         // Create coordinator and restore
         let coordinator = ConsumerCoordinator::with_persistence(raft_persistence);
-        coordinator.restore().unwrap();
+        coordinator.restore().await.unwrap();
 
         // Verify the group was restored - we can check via fetch_offset
         // since the group exists
         let response = coordinator
             .fetch_offset("restored-group".to_string(), "topic-1".to_string(), 0)
+            .await
             .unwrap();
 
         assert_eq!(response.offset, Some(500));

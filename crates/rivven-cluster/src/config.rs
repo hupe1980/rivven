@@ -211,6 +211,13 @@ pub struct SwimConfig {
     /// Number of indirect probes on ping failure
     pub indirect_probes: usize,
 
+    /// Number of targets probed concurrently per round.
+    ///
+    /// The original SWIM paper probes one random target per interval, giving
+    /// O(N × interval) worst-case detection. Probing K targets concurrently
+    /// reduces this to O(N/K × interval) ≈ O(log N) when K = ⌈log₂(N)⌉.
+    pub probes_per_round: usize,
+
     /// Multiplier for suspicion timeout (suspicion_mult * ping_interval)
     pub suspicion_multiplier: u32,
 
@@ -234,6 +241,7 @@ impl Default for SwimConfig {
             ping_interval: Duration::from_secs(1),
             ping_timeout: Duration::from_millis(500),
             indirect_probes: 3,
+            probes_per_round: 3,
             suspicion_multiplier: 4,
             max_gossip_updates: 10,
             sync_interval: Duration::from_secs(30),

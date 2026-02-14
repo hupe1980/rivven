@@ -170,6 +170,7 @@ async fn test_isr_update() -> Result<(), Box<dyn std::error::Error>> {
     let cmd = MetadataCommand::UpdatePartitionIsr {
         partition,
         isr: vec!["node-1".to_string()], // Only node-1 in ISR now
+        leader_epoch: 1,
     };
 
     let response = node.propose(cmd).await?;

@@ -254,7 +254,11 @@ impl Drop for ZeroCopyBuffer {
 
 /// A slice view into a ZeroCopyBuffer
 /// Holds an `Arc` to the underlying buffer for safe, reference-counted access.
-#[derive(Debug, Clone)]
+///
+/// F-046 fix: `Clone` intentionally NOT derived — cloning would enable aliased
+/// mutable references via `write()` / `as_mut_bytes()`, which is undefined behavior.
+/// Use `BufferSlice::share()` for a read-only shared view if needed.
+#[derive(Debug)]
 pub struct BufferSlice {
     buffer: Arc<ZeroCopyBuffer>,
     offset: usize,
@@ -296,6 +300,18 @@ impl BufferSlice {
     /// Get the length of this slice
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    /// Create a read-only shared view of this buffer region (F-046).
+    ///
+    /// Unlike `Clone`, this returns a `BufferRef` that only supports
+    /// immutable access, preventing aliased mutable references.
+    pub fn share(&self) -> BufferRef {
+        BufferRef::Slice {
+            buffer: Arc::clone(&self.buffer),
+            offset: self.offset,
+            len: self.len,
+        }
     }
 
     /// Check if slice is empty
@@ -581,6 +597,7 @@ pub struct ZeroCopyProducer {
     /// Buffer pool for allocating message buffers
     buffer_pool: Arc<ZeroCopyBufferPool>,
     /// Current write buffer
+    /// F-097: `parking_lot` — O(1) buffer swap, never held across `.await`.
     current_buffer: parking_lot::Mutex<Option<Arc<ZeroCopyBuffer>>>,
     /// Interned topic names
     topic_cache: dashmap::DashMap<String, Arc<str>>,
@@ -733,6 +750,7 @@ pub struct ProducerStatsSnapshot {
 /// Zero-copy consumer for high-throughput message consumption
 pub struct ZeroCopyConsumer {
     /// Read buffer for batch reads
+    /// F-097: `parking_lot` — O(1) buffer access, never held across `.await`.
     read_buffer: parking_lot::Mutex<BytesMut>,
     /// Statistics
     stats: ConsumerStats,

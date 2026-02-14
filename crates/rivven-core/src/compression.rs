@@ -99,6 +99,9 @@ pub enum CompressionError {
     #[error("Data corruption detected")]
     DataCorruption,
 
+    #[error("Decompression bomb detected: original_size {size} exceeds maximum {max}")]
+    DecompressionBomb { size: usize, max: usize },
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -446,10 +449,29 @@ fn compress_zstd(data: &[u8], level: CompressionLevel) -> Result<Vec<u8>> {
     zstd::bulk::compress(data, level).map_err(|e| CompressionError::ZstdError(e.to_string()))
 }
 
-/// Decompress Zstd data
-fn decompress_zstd(data: &[u8]) -> Result<Vec<u8>> {
-    zstd::bulk::decompress(data, 16 * 1024 * 1024) // 16 MB max
-        .map_err(|e| CompressionError::ZstdError(e.to_string()))
+/// Maximum decompression output size (256 MiB) to prevent decompression bombs.
+const MAX_DECOMPRESSION_SIZE: usize = 256 * 1024 * 1024;
+
+/// Decompress Zstd data.
+///
+/// Uses `original_size` from the header when available (capped at `MAX_DECOMPRESSION_SIZE`)
+/// to allocate the correct buffer. Falls back to a conservative 16 MB limit when the
+/// original size is unknown.
+fn decompress_zstd(data: &[u8], original_size: Option<usize>) -> Result<Vec<u8>> {
+    let capacity = match original_size {
+        Some(size) => {
+            // F-048: Validate original_size against maximum to prevent decompression bombs
+            if size > MAX_DECOMPRESSION_SIZE {
+                return Err(CompressionError::DecompressionBomb {
+                    size,
+                    max: MAX_DECOMPRESSION_SIZE,
+                });
+            }
+            size
+        }
+        None => 16 * 1024 * 1024, // 16 MB fallback when size unknown
+    };
+    zstd::bulk::decompress(data, capacity).map_err(|e| CompressionError::ZstdError(e.to_string()))
 }
 
 /// Compress data using Snappy
@@ -618,7 +640,7 @@ impl Compressor {
         let decompressed = match algorithm {
             CompressionAlgorithm::None => payload.to_vec(),
             CompressionAlgorithm::Lz4 => decompress_lz4(payload, original_size)?,
-            CompressionAlgorithm::Zstd => decompress_zstd(payload)?,
+            CompressionAlgorithm::Zstd => decompress_zstd(payload, original_size)?,
             CompressionAlgorithm::Snappy => decompress_snappy(payload)?,
         };
 

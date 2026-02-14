@@ -113,24 +113,22 @@ impl SinkRunner {
         // Initialize offsets for each topic
         self.initialize_offsets().await?;
 
-        // Run connector-specific logic
-        let result = match self.config.connector.as_str() {
-            "stdout" => self.run_stdout_sink(&mut shutdown_rx).await,
-            "s3" => self.run_s3_sink(&mut shutdown_rx).await,
-            "http" => self.run_http_sink(&mut shutdown_rx).await,
-            other => {
-                // Dynamic dispatch: try the registry for external/plugin connectors
-                if let Some(factory) = self.sink_registry.get(other) {
-                    self.run_registry_sink(factory, &mut shutdown_rx).await
-                } else {
-                    let available: Vec<&str> =
-                        self.sink_registry.list().iter().map(|(n, _)| *n).collect();
-                    Err(ConnectError::config(format!(
-                        "Unknown sink connector type: '{}'. Available: {:?}",
-                        other, available
-                    )))
-                }
-            }
+        // Run connector-specific logic — registry-first dispatch.
+        // All registered connectors (stdout, s3, http-webhook, etc.) are resolved
+        // through the SinkRegistry. Only the built-in HTTP batch sink falls back to
+        // an inline implementation when not in the registry.
+        let connector = self.config.connector.as_str();
+        let result = if let Some(factory) = self.sink_registry.get(connector) {
+            self.run_registry_sink(factory, &mut shutdown_rx).await
+        } else if connector == "http" {
+            // Built-in HTTP batch sink (no factory yet — reqwest always available)
+            self.run_http_sink(&mut shutdown_rx).await
+        } else {
+            let available: Vec<&str> = self.sink_registry.list().iter().map(|(n, _)| *n).collect();
+            Err(ConnectError::config(format!(
+                "Unknown sink connector type: '{}'. Available: {:?}",
+                connector, available
+            )))
         };
 
         // Log rate limiter stats on shutdown
@@ -314,6 +312,7 @@ impl SinkRunner {
     }
 
     /// Stdout sink - prints events to console (useful for debugging)
+    #[allow(dead_code)]
     async fn run_stdout_sink(&self, shutdown_rx: &mut broadcast::Receiver<()>) -> Result<()> {
         use super::prelude::*;
         use crate::connectors::stdout::{format_event, OutputFormat, StdoutSinkConfig};
@@ -363,7 +362,10 @@ impl SinkRunner {
         };
 
         *self.status.write().await = ConnectorStatus::Running;
-        let poll_interval = tokio::time::Duration::from_millis(100);
+        // F-042: Adaptive backoff — start at 1ms, double up to 100ms when idle, reset on data
+        const BACKOFF_MIN_MS: u64 = 1;
+        const BACKOFF_MAX_MS: u64 = 100;
+        let mut backoff_ms: u64 = BACKOFF_MIN_MS;
 
         info!("Sink '{}' ready, consuming events", self.name);
 
@@ -475,7 +477,10 @@ impl SinkRunner {
             }
 
             if !received_any {
-                tokio::time::sleep(poll_interval).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
+            } else {
+                backoff_ms = BACKOFF_MIN_MS;
             }
         }
     }
@@ -483,6 +488,7 @@ impl SinkRunner {
     /// S3 sink - writes events to S3 in batches
     ///
     /// Requires the `s3` feature with `object_store` dependency.
+    #[allow(dead_code)]
     async fn run_s3_sink(&self, _shutdown_rx: &mut broadcast::Receiver<()>) -> Result<()> {
         Err(ConnectError::sink(
             &self.name,
@@ -669,7 +675,10 @@ impl SinkRunner {
             self.name, self.config.connector
         );
 
-        let poll_interval = tokio::time::Duration::from_millis(100);
+        // F-042: Adaptive backoff — start at 1ms, double up to 100ms when idle, reset on data
+        const BACKOFF_MIN_MS: u64 = 1;
+        const BACKOFF_MAX_MS: u64 = 100;
+        let mut backoff_ms: u64 = BACKOFF_MIN_MS;
         let batch_size: usize = self
             .config
             .config
@@ -785,7 +794,10 @@ impl SinkRunner {
             }
 
             if !received_any {
-                tokio::time::sleep(poll_interval).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(backoff_ms)).await;
+                backoff_ms = (backoff_ms * 2).min(BACKOFF_MAX_MS);
+            } else {
+                backoff_ms = BACKOFF_MIN_MS;
             }
         }
     }

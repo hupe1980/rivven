@@ -115,29 +115,33 @@ codegen-units = 1
 strip = true
 
 # ============================================================================
-# Dependency Deduplication Analysis
+# Dependency Deduplication Analysis (F-096)
 # ============================================================================
 # Run `cargo tree --duplicates` to see current duplicate count.
-# As of v0.0.8: ~79 duplicate versions (down from 82)
+# As of v0.0.16: 172 duplicate versions
 #
 # These duplicates are UNAVOIDABLE due to upstream crate dependencies:
 #
-# | Crate         | Old   | New   | Blocked By                              |
-# |---------------|-------|-------|----------------------------------------|
-# | thiserror     | 1.x   | 2.x   | apache-avro, x509-parser, asn1-rs      |
-# | base64        | 0.21  | 0.22  | mysql_common, docker_credential        |
-# | rand          | 0.8   | 0.9   | most ecosystem uses 0.8                |
-# | getrandom     | 0.2   | 0.3   | tied to rand version                   |
-# | hashbrown     | 0.14  | 0.15+ | dashmap 6.x pins 0.14                  |
-# | itertools     | 0.10  | 0.14  | criterion pins 0.10                    |
-# | socket2       | 0.5   | 0.6   | mysql_async pins 0.5                   |
-# | nom           | 7.x   | 8.x   | asn1-rs, der-parser pin 7.x            |
-# | darling       | 0.20  | 0.21  | serde_with pins 0.20                   |
+# | Crate         | Old     | New     | Blocked By                            |
+# |---------------|---------|---------|---------------------------------------|
+# | thiserror     | 1.x     | 2.x    | apache-avro, x509-parser, asn1-rs     |
+# | base64        | 0.21    | 0.22   | mysql_common, docker_credential       |
+# | rand          | 0.8     | 0.9    | most ecosystem uses 0.8               |
+# | getrandom     | 0.2     | 0.3    | tied to rand version                  |
+# | hashbrown     | 0.14    | 0.15+  | dashmap 6.x pins 0.14                 |
+# | itertools     | 0.10    | 0.14   | criterion pins 0.10                   |
+# | socket2       | 0.5     | 0.6    | mysql_async pins 0.5                  |
+# | nom           | 7.x     | 8.x    | asn1-rs, der-parser pin 7.x           |
+# | darling       | 0.20    | 0.21+  | serde_with pins 0.20, pyo3 0.21       |
+# | axum          | 0.7     | 0.8    | tonic pins axum 0.7                   |
+# | apache-avro   | 0.17    | 0.21   | iceberg pins 0.17                     |
+# | arrayvec      | 0.5     | 0.7    | mysql_common pins 0.5                 |
 #
 # Deduplication strategies applied:
 # 1. Unified workspace deps: apache-avro, reqwest, tower, metrics
 # 2. Feature-gated optional deps to reduce build graph
 # 3. rustls-only TLS stack (no openssl)
+# 4. Single prost version for all protobuf codegen
 #
 # Monitor upstream: https://github.com/dtolnay/thiserror/issues (thiserror 2.x adoption)
 # ============================================================================

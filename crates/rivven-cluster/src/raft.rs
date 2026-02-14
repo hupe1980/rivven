@@ -1099,7 +1099,10 @@ impl RaftNode {
                 *next += 1;
                 idx
             };
-            let log_id = LogId::new(openraft::CommittedLeaderId::new(0, self.node_id), index);
+            // F-019 fix: Use term 1 (not 0) so standalone entries never conflict
+            // with real Raft elections (which start at term 1+), enabling a future
+            // standalone-to-cluster migration path.
+            let log_id = LogId::new(openraft::CommittedLeaderId::new(1, self.node_id), index);
             let response = self.state_machine.apply_command(&log_id, command).await;
 
             RaftMetrics::increment_proposals();
@@ -1160,7 +1163,8 @@ impl RaftNode {
                     *next += 1;
                     idx
                 };
-                let log_id = LogId::new(openraft::CommittedLeaderId::new(0, self.node_id), index);
+                // F-019 fix: Use term 1 (not 0) — see propose() for rationale.
+                let log_id = LogId::new(openraft::CommittedLeaderId::new(1, self.node_id), index);
                 let response = self.state_machine.apply_command(&log_id, command).await;
                 responses.push(response.response);
             }
@@ -1183,9 +1187,13 @@ impl RaftNode {
             RaftMetrics::increment_proposals();
             RaftMetrics::increment_commits();
 
-            // The batch returns a single response — replicate it for each command
-            let response = result.data.response;
-            return Ok(vec![response; batch_size]);
+            // Extract per-command responses from the batch result (F-012 fix)
+            match result.data.response {
+                MetadataResponse::BatchResponses(responses) => return Ok(responses),
+                // Fallback: if the state machine returned a non-batch response
+                // (e.g., during rolling upgrade), replicate it for each command
+                other => return Ok(vec![other; batch_size]),
+            }
         }
 
         Err(ClusterError::RaftStorage(
@@ -1384,11 +1392,18 @@ impl RaftNode {
 // ============================================================================
 
 /// Hash a string node ID to u64 for Raft compatibility
+///
+/// F-014 fix: Uses deterministic FNV-1a hash instead of `DefaultHasher`.
+/// `DefaultHasher` (SipHash) is not guaranteed to be stable across Rust
+/// versions or platforms, which could cause node ID mismatches in a cluster.
 pub fn hash_node_id(node_id: &str) -> NodeId {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    node_id.hash(&mut hasher);
-    hasher.finish()
+    // FNV-1a: deterministic, platform-independent, and fast for short strings
+    let mut hash: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
+    for byte in node_id.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3); // FNV-1a prime
+    }
+    hash
 }
 
 // ============================================================================

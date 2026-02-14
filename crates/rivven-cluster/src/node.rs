@@ -189,7 +189,10 @@ impl Node {
 
     /// Mark as suspect
     pub fn mark_suspect(&mut self) {
-        if self.state == NodeState::Alive {
+        // F-022 fix: Allow Unknown → Suspect transition in addition to Alive → Suspect.
+        // A node just discovered (Unknown) can be suspected if it misses pings
+        // before ever being confirmed Alive.
+        if self.state == NodeState::Alive || self.state == NodeState::Unknown {
             self.state = NodeState::Suspect;
         }
     }

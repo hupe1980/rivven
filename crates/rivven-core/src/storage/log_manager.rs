@@ -1,7 +1,10 @@
-use super::segment::Segment;
+use super::segment::{Segment, SegmentSyncPolicy};
 use crate::{Message, Result};
 use std::fs;
 use std::path::PathBuf;
+
+/// Maximum number of messages to return per read operation (F-030)
+const MAX_MESSAGES_PER_READ: usize = 10_000;
 
 #[derive(Debug)]
 pub struct LogManager {
@@ -9,6 +12,8 @@ pub struct LogManager {
     segments: Vec<Segment>,
     active_segment_index: usize,
     max_segment_size: u64,
+    /// Fsync policy for all segments (F-001 fix)
+    sync_policy: SegmentSyncPolicy,
 }
 
 impl LogManager {
@@ -17,6 +22,24 @@ impl LogManager {
         topic: &str,
         partition: u32,
         max_segment_size: u64,
+    ) -> Result<Self> {
+        Self::with_sync_policy(
+            base_dir,
+            topic,
+            partition,
+            max_segment_size,
+            SegmentSyncPolicy::EveryNWrites(1),
+        )
+        .await
+    }
+
+    /// Create a new LogManager with an explicit segment sync policy (F-001 fix).
+    pub async fn with_sync_policy(
+        base_dir: PathBuf,
+        topic: &str,
+        partition: u32,
+        max_segment_size: u64,
+        sync_policy: SegmentSyncPolicy,
     ) -> Result<Self> {
         let dir = base_dir
             .join(topic)
@@ -35,8 +58,8 @@ impl LogManager {
         paths.sort();
 
         if paths.is_empty() {
-            // Create initial segment
-            segments.push(Segment::new(&dir, 0)?);
+            // Create initial segment with configured sync policy
+            segments.push(Segment::with_sync_policy(&dir, 0, sync_policy)?);
         } else {
             for path in paths {
                 // Handle malformed filenames gracefully (non-UTF8, missing stem, etc.)
@@ -50,7 +73,7 @@ impl LogManager {
                 };
                 // Assumes filename is just the offset (e.g. "00000000000000000000")
                 if let Ok(base_offset) = filename.parse::<u64>() {
-                    segments.push(Segment::new(&dir, base_offset)?);
+                    segments.push(Segment::with_sync_policy(&dir, base_offset, sync_policy)?);
                 } else {
                     tracing::warn!(filename = %filename, "Skipping segment file with unparseable offset");
                 }
@@ -58,7 +81,7 @@ impl LogManager {
         }
 
         if segments.is_empty() {
-            segments.push(Segment::new(&dir, 0)?);
+            segments.push(Segment::with_sync_policy(&dir, 0, sync_policy)?);
         }
 
         let active_segment_index = segments.len() - 1;
@@ -68,6 +91,7 @@ impl LogManager {
             segments,
             active_segment_index,
             max_segment_size,
+            sync_policy,
         })
     }
 
@@ -78,7 +102,7 @@ impl LogManager {
         if segment.size() >= self.max_segment_size {
             // Flush current segment before rolling
             segment.flush().await?;
-            let new_segment = Segment::new(&self.dir, offset)?;
+            let new_segment = Segment::with_sync_policy(&self.dir, offset, self.sync_policy)?;
             self.segments.push(new_segment);
             self.active_segment_index += 1;
         }
@@ -103,7 +127,8 @@ impl LogManager {
             // Roll if current segment is already at capacity
             if segment.size() >= self.max_segment_size {
                 segment.flush().await?;
-                let new_segment = Segment::new(&self.dir, remaining[0].0)?;
+                let new_segment =
+                    Segment::with_sync_policy(&self.dir, remaining[0].0, self.sync_policy)?;
                 self.segments.push(new_segment);
                 self.active_segment_index += 1;
             }
@@ -115,7 +140,15 @@ impl LogManager {
             let mut accumulated = 0u64;
             let mut split_at = 0;
             for (_, m) in remaining.iter() {
-                let msg_size = (m.value.len() + 100) as u64;
+                // Accurate size estimation: value + key + headers + fixed overhead
+                // Fixed overhead (64 bytes): CRC(4) + length prefix(4) + offset(8) + timestamp(12) + postcard framing(~36)
+                let key_len = m.key.as_ref().map(|k| k.len()).unwrap_or(0);
+                let headers_len = m
+                    .headers
+                    .iter()
+                    .map(|(k, v)| k.len() + v.len() + 8)
+                    .sum::<usize>();
+                let msg_size = (m.value.len() + key_len + headers_len + 64) as u64;
                 if accumulated + msg_size > available && split_at > 0 {
                     break;
                 }
@@ -161,7 +194,7 @@ impl LogManager {
                     continue;
                 }
 
-                if messages.len() < 1000 && bytes_collected < max_bytes {
+                if messages.len() < MAX_MESSAGES_PER_READ && bytes_collected < max_bytes {
                     // Estimate size (header + key + val)
                     let size = 8 + msg.key.as_ref().map(|k| k.len()).unwrap_or(0) + msg.value.len();
                     bytes_collected += size;

@@ -408,6 +408,7 @@ pub struct AppendOnlyLog {
     /// Configuration
     config: AppendLogConfig,
     /// Active segments
+    /// F-097: `parking_lot` — O(1) segment list access, never held across `.await`.
     segments: RwLock<Vec<Arc<LogSegment>>>,
     /// Total bytes written
     total_bytes: AtomicU64,
@@ -558,6 +559,7 @@ const SHARD_COUNT: usize = 64;
 /// Uses multiple shards to reduce contention. Each shard has its own lock,
 /// so operations on different keys in different shards can proceed in parallel.
 pub struct ConcurrentHashMap<K, V> {
+    /// F-097: `parking_lot` — O(1) sharded HashMap lookup/insert, never held across `.await`.
     shards: [CacheAligned<RwLock<HashMap<K, V>>>; SHARD_COUNT],
     len: AtomicUsize,
 }

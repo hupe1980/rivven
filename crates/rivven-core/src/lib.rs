@@ -1,3 +1,23 @@
+//! Core storage, concurrency, and data-plane primitives for Rivven.
+//!
+//! # Synchronization: `parking_lot` vs `tokio::sync` (F-097)
+//!
+//! This crate deliberately uses `parking_lot::{Mutex, RwLock}` for in-memory
+//! data structures that are guarded by **O(1) critical sections**: HashMap
+//! lookups/inserts, atomic swaps, counter increments, and similar operations
+//! that complete in bounded constant time.
+//!
+//! *Why not `tokio::sync`?* A `tokio::sync::Mutex` is optimised for holding
+//! a lock **across** `.await` points.  When the lock body is purely synchronous
+//! and O(1), `parking_lot` avoids the future-boxing overhead and provides
+//! deterministic low-latency locking (spin → OS wait).
+//!
+//! **Ground rules enforced throughout the crate:**
+//! 1. A `parking_lot` lock is **never** held across an `.await` boundary.
+//! 2. Every critical section executes in bounded constant time.
+//! 3. Where a lock *must* span an `.await` (e.g., file I/O), `tokio::sync` is
+//!    used instead (see `Segment::log_file`).
+
 pub mod auth;
 pub mod backpressure;
 pub mod bloom;
@@ -29,6 +49,9 @@ pub mod zero_copy;
 pub mod compression;
 
 pub mod async_io;
+
+// Shared crypto primitives (always available, no feature gate)
+pub mod crypto;
 
 // Encryption at rest (optional but default)
 #[cfg(feature = "encryption")]
@@ -82,8 +105,8 @@ pub use quota::{
 };
 pub use storage::{
     ColdStorageBackend, ColdStorageConfig, HotTier, HotTierStats, LocalFsColdStorage,
-    SegmentMetadata, StorageTier, TieredStorage, TieredStorageConfig, TieredStorageStats,
-    TieredStorageStatsSnapshot, WarmTier, WarmTierStats,
+    SegmentMetadata, SegmentSyncPolicy, StorageTier, TieredStorage, TieredStorageConfig,
+    TieredStorageStats, TieredStorageStatsSnapshot, WarmTier, WarmTierStats,
 };
 pub use topic::{Topic, TopicManager};
 pub use topic_config::{
@@ -112,12 +135,12 @@ pub use async_io::{AsyncFile, AsyncIo, AsyncIoConfig, AsyncSegment, BatchBuilder
 pub use auth::{
     AclEntry, AuthConfig, AuthError, AuthManager, AuthResult, AuthSession, PasswordHash,
     Permission, Principal, PrincipalType, ResourceType, Role, SaslPlainAuth, SaslScramAuth,
-    ScramState,
+    ScramState, Session,
 };
 pub use io_uring::{
     is_io_uring_available, AsyncReader, AsyncWriter, BatchExecutor, BatchReadResult, BatchStats,
-    IoBatch, IoOperation, IoUringConfig, IoUringStats, IoUringStatsSnapshot, SegmentReader,
-    WalWriter,
+    IoBatch, IoOperation, IoUringConfig, IoUringStats, IoUringStatsSnapshot, PortableWalWriter,
+    SegmentReader,
 };
 pub use service_auth::{
     ApiKey, AuthMethod, ServiceAccount, ServiceAuthConfig, ServiceAuthError, ServiceAuthManager,

@@ -66,7 +66,8 @@ pub struct Segment {
 /// - `None`: No fsync — data lives in OS page cache until kernel writeback (fastest, least durable)
 /// - `EveryWrite`: fsync after every append — maximum durability, equivalent to `acks=all` + sync
 /// - `EveryNWrites(n)`: fsync every N writes — balances throughput and durability
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum SegmentSyncPolicy {
     /// No fsync — relies on OS page cache writeback (fastest)
     None,
@@ -171,21 +172,23 @@ impl Segment {
             )));
         }
 
-        // 1. Serialize message
+        // F-038 fix: Single allocation, zero copies.
+        // Serialize directly into the frame buffer after an 8-byte header placeholder
+        // (CRC + len), then patch the header in place. This avoids the prior approach
+        // of allocating a Vec<u8> via to_bytes(), then copying into a BytesMut frame.
         message.offset = offset;
-        let bytes = message.to_bytes()?;
-        let len = bytes.len() as u32;
+        let mut frame = Vec::with_capacity(8 + 256);
+        frame.extend_from_slice(&[0u8; 8]); // placeholder for [CRC: 4][Len: 4]
+        frame = postcard::to_extend(&message, frame)?;
 
-        // 2. Calculate CRC
+        // Patch CRC + length into the reserved header
+        let payload = &frame[8..];
+        let len = payload.len() as u32;
         let mut hasher = Hasher::new();
-        hasher.update(&bytes);
+        hasher.update(payload);
         let crc = hasher.finalize();
-
-        // 3. Prepare frame: [CRC: 4][Len: 4][Payload: N]
-        let mut frame = BytesMut::with_capacity(8 + bytes.len());
-        frame.put_u32(crc);
-        frame.put_u32(len);
-        frame.put_slice(&bytes);
+        frame[0..4].copy_from_slice(&crc.to_be_bytes());
+        frame[4..8].copy_from_slice(&len.to_be_bytes());
 
         let position = self.current_size;
         let frame_len = frame.len() as u64;
@@ -227,6 +230,11 @@ impl Segment {
         let mut positions = Vec::with_capacity(messages.len());
         let mut total_frame = BytesMut::with_capacity(messages.len() * 256); // Estimate
 
+        // F-038 fix: Reuse a single serialization buffer across all messages.
+        // `postcard::to_extend` serializes into the Vec, then `clear()` resets
+        // length to 0 without deallocating. This reduces N allocations to 1.
+        let mut msg_buf = Vec::with_capacity(1024);
+
         for (offset, mut message) in messages {
             if offset < self.base_offset {
                 return Err(Error::Other(format!(
@@ -235,14 +243,15 @@ impl Segment {
                 )));
             }
 
-            // Serialize
+            // Serialize into reusable buffer (grows as needed, never deallocates)
             message.offset = offset;
-            let bytes = message.to_bytes()?;
-            let len = bytes.len() as u32;
+            msg_buf.clear();
+            msg_buf = postcard::to_extend(&message, msg_buf)?;
+            let len = msg_buf.len() as u32;
 
             // CRC
             let mut hasher = Hasher::new();
-            hasher.update(&bytes);
+            hasher.update(&msg_buf);
             let crc = hasher.finalize();
 
             let position = self.current_size + total_frame.len() as u64;
@@ -251,7 +260,7 @@ impl Segment {
             // Frame: [CRC: 4][Len: 4][Payload: N]
             total_frame.put_u32(crc);
             total_frame.put_u32(len);
-            total_frame.put_slice(&bytes);
+            total_frame.put_slice(&msg_buf);
 
             // Sparse indexing
             if position == 0 || position - self.last_index_position >= INDEX_INTERVAL_BYTES {
@@ -329,16 +338,67 @@ impl Segment {
             SegmentSyncPolicy::EveryWrite => {
                 writer.flush()?;
                 writer.get_ref().sync_data()?;
+                // F-028 fix: also flush and fsync pending index entries so
+                // the index stays consistent with the log after a crash.
+                self.sync_pending_index_entries()?;
             }
             SegmentSyncPolicy::EveryNWrites(n) => {
+                // F-054: Use compare_exchange loop to atomically reset the counter.
+                // The previous fetch_add + store(0) was racy: two threads could both
+                // see count >= n, both sync, and both reset — or worse, a concurrent
+                // fetch_add between the check and store could be lost.
                 let count = self.writes_since_sync.fetch_add(1, Relaxed) + 1;
                 if count >= n {
                     writer.flush()?;
                     writer.get_ref().sync_data()?;
-                    self.writes_since_sync.store(0, Relaxed);
+                    // F-028 fix: also flush and fsync pending index entries
+                    self.sync_pending_index_entries()?;
+                    // Atomically reset: CAS from current value to 0.
+                    // If another thread incremented in the meantime, retry.
+                    let mut current = count;
+                    while self
+                        .writes_since_sync
+                        .compare_exchange_weak(current, 0, Relaxed, Relaxed)
+                        .is_err()
+                    {
+                        current = self.writes_since_sync.load(Relaxed);
+                    }
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Synchronously flush and fsync pending index entries (F-028 fix).
+    ///
+    /// Called from `maybe_sync` (which is non-async) to ensure the index
+    /// file is durable whenever the log file is fsynced. Without this,
+    /// a crash after a log fsync but before the next `flush()` would leave
+    /// the index stale — reads after recovery would miss recently written
+    /// offsets until the index is rebuilt.
+    fn sync_pending_index_entries(&self) -> Result<()> {
+        let entries: Vec<(u32, u64)> = {
+            let mut guard = self.pending_index_entries.lock().unwrap();
+            guard.drain(..).collect()
+        };
+
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let mut file = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&self.index_path)?;
+
+        let mut buf = BytesMut::with_capacity(entries.len() * INDEX_ENTRY_SIZE);
+        for (rel_offset, pos) in &entries {
+            buf.put_u32(*rel_offset);
+            buf.put_u64(*pos);
+        }
+        file.write_all(&buf)?;
+        file.sync_all()?;
+
         Ok(())
     }
 
@@ -629,6 +689,10 @@ impl Segment {
             }
 
             let slice = &mmap[current_pos..];
+
+            // F-033: Read and validate CRC before processing the record
+            let crc_bytes: [u8; 4] = slice[0..4].try_into().unwrap();
+            let stored_crc = u32::from_be_bytes(crc_bytes);
             let len_bytes: [u8; 4] = slice[4..8].try_into().unwrap();
             let msg_len = u32::from_be_bytes(len_bytes) as usize;
 
@@ -637,6 +701,21 @@ impl Segment {
             }
 
             let payload = &slice[8..8 + msg_len];
+
+            // Verify CRC — skip corrupted records
+            let mut hasher = Hasher::new();
+            hasher.update(payload);
+            let computed_crc = hasher.finalize();
+            if computed_crc != stored_crc {
+                tracing::warn!(
+                    base_offset = self.base_offset,
+                    position = current_pos,
+                    "CRC mismatch in find_offset_for_timestamp — skipping corrupted record"
+                );
+                current_pos += 8 + msg_len;
+                continue;
+            }
+
             if let Ok(msg) = Message::from_bytes(payload) {
                 let msg_timestamp = msg.timestamp.timestamp_millis();
                 if msg_timestamp >= target_timestamp {

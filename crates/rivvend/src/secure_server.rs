@@ -25,13 +25,12 @@
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 
-use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::BytesMut;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
@@ -48,7 +47,6 @@ use rivven_core::{
 
 use crate::auth_handler::{AuthenticatedHandler, ConnectionAuth};
 use crate::handler::RequestHandler;
-use crate::protocol::{Request, Response, WireFormat};
 
 // ============================================================================
 // Configuration
@@ -578,71 +576,32 @@ impl SecureServer {
         );
 
         loop {
-            // Read with idle timeout
-            let mut len_buf = [0u8; 4];
-            match tokio::time::timeout(self.config.idle_timeout, stream.read_exact(&mut len_buf))
-                .await
+            // Use shared framing to read next request
+            let frame = match crate::framing::read_framed_request(
+                &mut stream,
+                &mut buffer,
+                self.config.max_message_size,
+                self.config.idle_timeout,
+                &client_addr.to_string(),
+            )
+            .await?
             {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                Some(crate::framing::ReadFrame::Request {
+                    request,
+                    wire_format,
+                    correlation_id,
+                }) => (request, wire_format, correlation_id),
+                Some(crate::framing::ReadFrame::Disconnected) => {
                     debug!("Client {} disconnected gracefully", client_addr);
                     return Ok(());
                 }
-                Ok(Err(e)) => return Err(e.into()),
-                Err(_) => {
-                    debug!("Idle timeout for {}", client_addr);
+                Some(crate::framing::ReadFrame::Timeout) => {
                     return Ok(());
                 }
-            }
-
-            let msg_len = u32::from_be_bytes(len_buf) as usize;
-
-            // Validate message size
-            if msg_len > self.config.max_message_size {
-                warn!(
-                    "Message too large from {}: {} bytes (max: {})",
-                    client_addr, msg_len, self.config.max_message_size
-                );
-                let response = Response::Error {
-                    message: format!("MESSAGE_TOO_LARGE: {} bytes exceeds limit", msg_len),
-                };
-                // Default to Postcard for error responses before we parse format
-                self.send_response_with_format(&mut stream, &response, WireFormat::Postcard)
-                    .await?;
-                continue;
-            }
-
-            // Read message body with timeout to prevent slow-read DoS
-            buffer.clear();
-            buffer.resize(msg_len, 0);
-            match tokio::time::timeout(self.config.idle_timeout, stream.read_exact(&mut buffer))
-                .await
-            {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => return Err(e.into()),
-                Err(_) => {
-                    debug!(
-                        "Read timeout during message body from {} - closing connection",
-                        client_addr
-                    );
-                    return Ok(());
-                }
-            }
-
-            // Parse request with wire format detection
-            let (request, wire_format) = match Request::from_wire(&buffer) {
-                Ok((req, fmt)) => (req, fmt),
-                Err(e) => {
-                    warn!("Invalid request from {}: {}", client_addr, e);
-                    let response = Response::Error {
-                        message: format!("INVALID_REQUEST: {}", e),
-                    };
-                    // Default to Postcard for error responses if we couldn't parse the format
-                    self.send_response_with_format(&mut stream, &response, WireFormat::Postcard)
-                        .await?;
-                    continue;
-                }
+                None => continue, // size-exceeded or parse error — already sent error response
             };
+
+            let (request, wire_format, correlation_id) = frame;
 
             // Handle request with auth
             let response = auth_handler
@@ -650,27 +609,9 @@ impl SecureServer {
                 .await;
 
             // Send response in the same format the client used
-            self.send_response_with_format(&mut stream, &response, wire_format)
+            crate::framing::send_response(&mut stream, &response, wire_format, correlation_id)
                 .await?;
         }
-    }
-
-    /// Send a response with the specified wire format
-    async fn send_response_with_format<S>(
-        &self,
-        stream: &mut S,
-        response: &Response,
-        format: WireFormat,
-    ) -> anyhow::Result<()>
-    where
-        S: AsyncWrite + Unpin,
-    {
-        let response_bytes = response.to_wire(format)?;
-        let len = response_bytes.len() as u32;
-        stream.write_all(&len.to_be_bytes()).await?;
-        stream.write_all(&response_bytes).await?;
-        stream.flush().await?;
-        Ok(())
     }
 }
 

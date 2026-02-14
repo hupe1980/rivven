@@ -290,14 +290,120 @@ impl Request {
                 )),
             })),
 
-            // SCRAM and transaction variants that don't have dedicated proto types
-            // map to error — these use the native postcard wire format
-            _ => {
-                return Err(crate::ProtocolError::Serialization(format!(
-                    "Request type {:?} not supported in protobuf wire format (use postcard)",
-                    std::mem::discriminant(self)
-                )));
+            Request::ScramClientFirst { message } => Some(RequestType::ScramClientFirst(
+                proto::ScramClientFirstRequest {
+                    message: message.to_vec(),
+                },
+            )),
+
+            Request::ScramClientFinal { message } => Some(RequestType::ScramClientFinal(
+                proto::ScramClientFinalRequest {
+                    message: message.to_vec(),
+                },
+            )),
+
+            Request::TransactionalPublish {
+                txn_id,
+                topic,
+                partition,
+                key,
+                value,
+                producer_id,
+                producer_epoch,
+                sequence,
+            } => Some(RequestType::TransactionalPublish(
+                proto::TransactionalPublishRequest {
+                    txn_id: txn_id.clone(),
+                    topic: topic.clone(),
+                    partition: *partition,
+                    record: Some(proto::Record {
+                        key: key.clone().map(|b| b.to_vec()).unwrap_or_default(),
+                        value: value.to_vec(),
+                        headers: vec![],
+                        timestamp: 0,
+                    }),
+                    producer_id: *producer_id,
+                    producer_epoch: *producer_epoch as u32,
+                    sequence: *sequence,
+                },
+            )),
+
+            Request::AddPartitionsToTxn {
+                txn_id,
+                producer_id,
+                producer_epoch,
+                partitions,
+            } => Some(RequestType::AddPartitionsToTxn(
+                proto::AddPartitionsToTxnRequest {
+                    txn_id: txn_id.clone(),
+                    producer_id: *producer_id,
+                    producer_epoch: *producer_epoch as u32,
+                    partitions: partitions
+                        .iter()
+                        .map(|(t, p)| proto::TopicPartition {
+                            topic: t.clone(),
+                            partition: *p,
+                        })
+                        .collect(),
+                },
+            )),
+
+            Request::AddOffsetsToTxn {
+                txn_id,
+                producer_id,
+                producer_epoch,
+                group_id,
+                offsets,
+            } => Some(RequestType::AddOffsetsToTxn(
+                proto::AddOffsetsToTxnRequest {
+                    txn_id: txn_id.clone(),
+                    producer_id: *producer_id,
+                    producer_epoch: *producer_epoch as u32,
+                    group_id: group_id.clone(),
+                    offsets: offsets
+                        .iter()
+                        .map(|(t, p, o)| proto::TopicPartitionOffset {
+                            topic: t.clone(),
+                            partition: *p,
+                            offset: *o,
+                        })
+                        .collect(),
+                },
+            )),
+
+            Request::DescribeQuotas { entities } => {
+                Some(RequestType::DescribeQuotas(proto::DescribeQuotasRequest {
+                    entities: entities
+                        .iter()
+                        .map(|(et, en)| proto::QuotaEntity {
+                            entity_type: et.clone(),
+                            entity_name: en.clone(),
+                        })
+                        .collect(),
+                }))
             }
+
+            Request::AlterQuotas { alterations } => {
+                Some(RequestType::AlterQuotas(proto::AlterQuotasRequest {
+                    alterations: alterations
+                        .iter()
+                        .map(|a| proto::QuotaAlterationProto {
+                            entity_type: a.entity_type.clone(),
+                            entity_name: a.entity_name.clone(),
+                            quota_key: a.quota_key.clone(),
+                            quota_value: a.quota_value,
+                        })
+                        .collect(),
+                }))
+            }
+
+            Request::Handshake {
+                protocol_version,
+                client_id,
+            } => Some(RequestType::Handshake(proto::HandshakeRequest {
+                protocol_version: *protocol_version,
+                client_id: client_id.clone(),
+            })),
         };
 
         Ok(proto::Request {
@@ -499,6 +605,84 @@ impl Request {
                     .map(|po| (po.partition, po.offset))
                     .collect(),
             }),
+
+            RequestType::ScramClientFirst(req) => Ok(Request::ScramClientFirst {
+                message: Bytes::from(req.message.clone()),
+            }),
+
+            RequestType::ScramClientFinal(req) => Ok(Request::ScramClientFinal {
+                message: Bytes::from(req.message.clone()),
+            }),
+
+            RequestType::TransactionalPublish(req) => {
+                let record = req
+                    .record
+                    .as_ref()
+                    .ok_or_else(|| crate::ProtocolError::Serialization("Missing record".into()))?;
+                Ok(Request::TransactionalPublish {
+                    txn_id: req.txn_id.clone(),
+                    topic: req.topic.clone(),
+                    partition: req.partition,
+                    key: if record.key.is_empty() {
+                        None
+                    } else {
+                        Some(Bytes::from(record.key.clone()))
+                    },
+                    value: Bytes::from(record.value.clone()),
+                    producer_id: req.producer_id,
+                    producer_epoch: req.producer_epoch as u16,
+                    sequence: req.sequence,
+                })
+            }
+
+            RequestType::AddPartitionsToTxn(req) => Ok(Request::AddPartitionsToTxn {
+                txn_id: req.txn_id.clone(),
+                producer_id: req.producer_id,
+                producer_epoch: req.producer_epoch as u16,
+                partitions: req
+                    .partitions
+                    .iter()
+                    .map(|tp| (tp.topic.clone(), tp.partition))
+                    .collect(),
+            }),
+
+            RequestType::AddOffsetsToTxn(req) => Ok(Request::AddOffsetsToTxn {
+                txn_id: req.txn_id.clone(),
+                producer_id: req.producer_id,
+                producer_epoch: req.producer_epoch as u16,
+                group_id: req.group_id.clone(),
+                offsets: req
+                    .offsets
+                    .iter()
+                    .map(|tpo| (tpo.topic.clone(), tpo.partition, tpo.offset))
+                    .collect(),
+            }),
+
+            RequestType::DescribeQuotas(req) => Ok(Request::DescribeQuotas {
+                entities: req
+                    .entities
+                    .iter()
+                    .map(|e| (e.entity_type.clone(), e.entity_name.clone()))
+                    .collect(),
+            }),
+
+            RequestType::AlterQuotas(req) => Ok(Request::AlterQuotas {
+                alterations: req
+                    .alterations
+                    .iter()
+                    .map(|a| crate::QuotaAlteration {
+                        entity_type: a.entity_type.clone(),
+                        entity_name: a.entity_name.clone(),
+                        quota_key: a.quota_key.clone(),
+                        quota_value: a.quota_value,
+                    })
+                    .collect(),
+            }),
+
+            RequestType::Handshake(req) => Ok(Request::Handshake {
+                protocol_version: req.protocol_version,
+                client_id: req.client_id.clone(),
+            }),
         }
     }
 }
@@ -635,7 +819,13 @@ impl Response {
                     brokers: brokers
                         .iter()
                         .map(|b| proto::BrokerInfo {
-                            id: b.node_id.parse().unwrap_or(0),
+                            id: b.node_id.parse().unwrap_or_else(|_| {
+                                eprintln!(
+                                    "[WARN] BrokerInfo.id: failed to parse node_id '{}' as u32, defaulting to 0",
+                                    b.node_id
+                                );
+                                0
+                            }),
                             host: b.host.clone(),
                             port: b.port as u32,
                             rack: b.rack.clone().unwrap_or_default(),
@@ -806,13 +996,92 @@ impl Response {
                 }))
             }
 
-            // Remaining SCRAM/quota/throttle variants use postcard wire format
-            _ => {
-                return Err(crate::ProtocolError::Serialization(format!(
-                    "Response type {:?} not supported in protobuf wire format (use postcard)",
-                    std::mem::discriminant(self)
-                )));
-            }
+            Response::ScramServerFirst { message } => Some(ResponseType::ScramServerFirst(
+                proto::ScramServerFirstResponse {
+                    message: message.to_vec(),
+                },
+            )),
+
+            Response::ScramServerFinal {
+                message,
+                session_id,
+                expires_in,
+            } => Some(ResponseType::ScramServerFinal(
+                proto::ScramServerFinalResponse {
+                    message: message.to_vec(),
+                    session_id: session_id.clone(),
+                    expires_in: *expires_in,
+                },
+            )),
+
+            Response::PartitionsAddedToTxn {
+                txn_id,
+                partition_count,
+            } => Some(ResponseType::PartitionsAddedToTxn(
+                proto::PartitionsAddedToTxnResponse {
+                    txn_id: txn_id.clone(),
+                    partition_count: *partition_count as u32,
+                },
+            )),
+
+            Response::TransactionalPublished {
+                offset,
+                partition,
+                sequence,
+            } => Some(ResponseType::TransactionalPublish(
+                proto::TransactionalPublishResponse {
+                    offset: *offset,
+                    partition: *partition,
+                    sequence: *sequence,
+                },
+            )),
+
+            Response::OffsetsAddedToTxn { txn_id } => Some(ResponseType::OffsetsAddedToTxn(
+                proto::OffsetsAddedToTxnResponse {
+                    txn_id: txn_id.clone(),
+                },
+            )),
+
+            Response::QuotasDescribed { entries } => Some(ResponseType::QuotasDescribed(
+                proto::QuotasDescribedResponse {
+                    entries: entries
+                        .iter()
+                        .map(|e| proto::QuotaEntryProto {
+                            entity_type: e.entity_type.clone(),
+                            entity_name: e.entity_name.clone(),
+                            quotas: e.quotas.clone(),
+                        })
+                        .collect(),
+                },
+            )),
+
+            Response::QuotasAltered { altered_count } => Some(ResponseType::QuotasAltered(
+                proto::QuotasAlteredResponse {
+                    altered_count: *altered_count as u32,
+                },
+            )),
+
+            Response::Throttled {
+                throttle_time_ms,
+                quota_type,
+                entity,
+            } => Some(ResponseType::Throttled(proto::ThrottledResponse {
+                throttle_time_ms: *throttle_time_ms,
+                quota_type: quota_type.clone(),
+                entity: entity.clone(),
+            })),
+
+            Response::HandshakeResult {
+                server_version,
+                compatible,
+                message,
+            } => Some(ResponseType::HandshakeResult(
+                proto::HandshakeResultResponse {
+                    server_version: *server_version,
+                    compatible: *compatible,
+                    message: message.clone(),
+                },
+            )),
         };
 
         Ok(proto::Response {
@@ -1050,6 +1319,59 @@ impl Response {
                         },
                     })
                     .collect(),
+            }),
+
+            ResponseType::ScramServerFirst(resp) => Ok(Response::ScramServerFirst {
+                message: Bytes::from(resp.message.clone()),
+            }),
+
+            ResponseType::ScramServerFinal(resp) => Ok(Response::ScramServerFinal {
+                message: Bytes::from(resp.message.clone()),
+                session_id: resp.session_id.clone(),
+                expires_in: resp.expires_in,
+            }),
+
+            ResponseType::PartitionsAddedToTxn(resp) => Ok(Response::PartitionsAddedToTxn {
+                txn_id: resp.txn_id.clone(),
+                partition_count: resp.partition_count as usize,
+            }),
+
+            ResponseType::TransactionalPublish(resp) => Ok(Response::TransactionalPublished {
+                offset: resp.offset,
+                partition: resp.partition,
+                sequence: resp.sequence,
+            }),
+
+            ResponseType::OffsetsAddedToTxn(resp) => Ok(Response::OffsetsAddedToTxn {
+                txn_id: resp.txn_id.clone(),
+            }),
+
+            ResponseType::QuotasDescribed(resp) => Ok(Response::QuotasDescribed {
+                entries: resp
+                    .entries
+                    .iter()
+                    .map(|e| crate::QuotaEntry {
+                        entity_type: e.entity_type.clone(),
+                        entity_name: e.entity_name.clone(),
+                        quotas: e.quotas.clone(),
+                    })
+                    .collect(),
+            }),
+
+            ResponseType::QuotasAltered(resp) => Ok(Response::QuotasAltered {
+                altered_count: resp.altered_count as usize,
+            }),
+
+            ResponseType::Throttled(resp) => Ok(Response::Throttled {
+                throttle_time_ms: resp.throttle_time_ms,
+                quota_type: resp.quota_type.clone(),
+                entity: resp.entity.clone(),
+            }),
+
+            ResponseType::HandshakeResult(resp) => Ok(Response::HandshakeResult {
+                server_version: resp.server_version,
+                compatible: resp.compatible,
+                message: resp.message.clone(),
             }),
         }
     }

@@ -45,14 +45,14 @@ assert_eq!(format, WireFormat::Postcard);
 
 ## Wire Format
 
-Messages use a **format-prefixed** wire protocol:
+Messages use a **format-prefixed** wire protocol with correlation IDs:
 
 ```
-┌─────────────────┬──────────────────┬─────────────────────────┐
-│ Length (4 bytes)│ Format (1 byte)  │ Payload (N bytes)       │
-│ Big-endian u32  │ 0x00 = postcard  │ Serialized Request/Resp │
-│                 │ 0x01 = protobuf  │                         │
-└─────────────────┴──────────────────┴─────────────────────────┘
+┌─────────────────┬──────────────────┬──────────────────┬─────────────────────────┐
+│ Length (4 bytes)│ Format (1 byte)  │ Correlation (4B) │ Payload (N bytes)       │
+│ Big-endian u32  │ 0x00 = postcard  │ Big-endian u32   │ Serialized Request/Resp │
+│                 │ 0x01 = protobuf  │                  │                         │
+└─────────────────┴──────────────────┴──────────────────┴─────────────────────────┘
 ```
 
 ### Format Byte Values
@@ -66,10 +66,26 @@ Messages use a **format-prefixed** wire protocol:
 
 | Method | Description |
 |:-------|:------------|
-| `to_wire(format)` | Serialize with format byte prefix |
-| `from_wire(data)` | Deserialize with auto-format detection |
-| `to_bytes()` | Postcard only, no format prefix (legacy) |
-| `from_bytes(data)` | Postcard only, no format prefix (legacy) |
+| `to_wire(format, correlation_id)` | Serialize with format byte + correlation ID |
+| `from_wire(data)` | Deserialize with auto-format detection, returns (msg, format, correlation_id) |
+| `to_bytes()` | Postcard only, no format prefix (internal use) |
+| `from_bytes(data)` | Postcard only, no format prefix (internal use) |
+
+### Connection Handshake
+
+Clients should send a `Handshake` request as the first message:
+
+```rust
+// Send version handshake
+let handshake = Request::Handshake {
+    protocol_version: PROTOCOL_VERSION,
+    client_id: "my-app".into(),
+};
+let wire = handshake.to_wire(WireFormat::Postcard, 0)?;
+
+// Server responds with compatibility info
+// Response::HandshakeResult { server_version, compatible, message }
+```
 
 ### Server Behavior
 

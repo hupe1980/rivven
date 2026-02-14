@@ -250,6 +250,7 @@ impl Cli {
             max_segment_size: self.max_segment_size,
             log_level: self.log_level.clone(),
             tiered_storage: rivven_core::storage::TieredStorageConfig::default(),
+            sync_policy: rivven_core::SegmentSyncPolicy::EveryNWrites(1),
         }
     }
 

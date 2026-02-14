@@ -625,6 +625,23 @@ mod cedar_impl {
             Ok(())
         }
 
+        /// F-041 fix: Upsert a single entity incrementally without cloning all existing entities.
+        /// Uses Cedar's `upsert_entities` API which re-computes TC but avoids O(n) clone.
+        fn upsert_entity(&self, entity: Entity) -> CedarResult<()> {
+            let mut guard = self.entities.write();
+            let current = std::mem::replace(&mut *guard, Entities::empty());
+            match current.upsert_entities([entity], None) {
+                Ok(updated) => {
+                    *guard = updated;
+                    Ok(())
+                }
+                Err(e) => Err(CedarError::Entity(format!(
+                    "Failed to upsert entity: {:?}",
+                    e
+                ))),
+            }
+        }
+
         /// Add a user entity
         pub fn add_user(
             &self,
@@ -676,12 +693,7 @@ mod cedar_impl {
             let entity = Entity::new(uid, attrs, parents)
                 .map_err(|e| CedarError::Entity(format!("Invalid entity: {:?}", e)))?;
 
-            let mut entities = self.entities.write();
-            // Convert to new Entities
-            let mut all_entities: Vec<Entity> = entities.iter().cloned().collect();
-            all_entities.push(entity);
-            *entities = Entities::from_entities(all_entities, None)
-                .map_err(|e| CedarError::Entity(format!("Invalid entities: {:?}", e)))?;
+            self.upsert_entity(entity)?;
 
             debug!("Added user entity: {}", username);
             Ok(())
@@ -706,11 +718,7 @@ mod cedar_impl {
 
             let entity = Entity::new_no_attrs(uid, parents);
 
-            let mut entities = self.entities.write();
-            let mut all_entities: Vec<Entity> = entities.iter().cloned().collect();
-            all_entities.push(entity);
-            *entities = Entities::from_entities(all_entities, None)
-                .map_err(|e| CedarError::Entity(format!("Invalid entities: {:?}", e)))?;
+            self.upsert_entity(entity)?;
 
             debug!("Added group entity: {}", name);
             Ok(())
@@ -763,11 +771,7 @@ mod cedar_impl {
             let entity = Entity::new(uid, attrs, HashSet::new())
                 .map_err(|e| CedarError::Entity(format!("Invalid entity: {:?}", e)))?;
 
-            let mut entities = self.entities.write();
-            let mut all_entities: Vec<Entity> = entities.iter().cloned().collect();
-            all_entities.push(entity);
-            *entities = Entities::from_entities(all_entities, None)
-                .map_err(|e| CedarError::Entity(format!("Invalid entities: {:?}", e)))?;
+            self.upsert_entity(entity)?;
 
             debug!("Added topic entity: {}", name);
             Ok(())
@@ -789,11 +793,7 @@ mod cedar_impl {
             let entity = Entity::new(uid, attrs, HashSet::new())
                 .map_err(|e| CedarError::Entity(format!("Invalid entity: {:?}", e)))?;
 
-            let mut entities = self.entities.write();
-            let mut all_entities: Vec<Entity> = entities.iter().cloned().collect();
-            all_entities.push(entity);
-            *entities = Entities::from_entities(all_entities, None)
-                .map_err(|e| CedarError::Entity(format!("Invalid entities: {:?}", e)))?;
+            self.upsert_entity(entity)?;
 
             debug!("Added consumer group entity: {}", name);
             Ok(())
@@ -819,11 +819,7 @@ mod cedar_impl {
             let entity = Entity::new(uid, attrs, HashSet::new())
                 .map_err(|e| CedarError::Entity(format!("Invalid entity: {:?}", e)))?;
 
-            let mut entities = self.entities.write();
-            let mut all_entities: Vec<Entity> = entities.iter().cloned().collect();
-            all_entities.push(entity);
-            *entities = Entities::from_entities(all_entities, None)
-                .map_err(|e| CedarError::Entity(format!("Invalid entities: {:?}", e)))?;
+            self.upsert_entity(entity)?;
 
             debug!("Added schema entity: {} (version {})", name, version);
             Ok(())

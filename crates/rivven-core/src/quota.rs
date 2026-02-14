@@ -248,6 +248,7 @@ struct SlidingWindow {
     /// Accumulated value in current window
     current_value: AtomicU64,
     /// Window start time
+    /// F-097: `parking_lot` — O(1) instant swap, never held across `.await`.
     window_start: RwLock<Instant>,
     /// Total violations
     violations: AtomicU64,

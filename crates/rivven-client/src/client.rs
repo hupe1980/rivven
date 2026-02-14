@@ -86,6 +86,7 @@ impl AsyncWrite for ClientStream {
 /// Rivven client for connecting to a Rivven server
 pub struct Client {
     stream: ClientStream,
+    next_correlation_id: u32,
 }
 
 impl Client {
@@ -98,6 +99,7 @@ impl Client {
 
         Ok(Self {
             stream: ClientStream::Plaintext(stream),
+            next_correlation_id: 0,
         })
     }
 
@@ -129,6 +131,7 @@ impl Client {
 
         Ok(Self {
             stream: ClientStream::Tls(tls_stream),
+            next_correlation_id: 0,
         })
     }
 
@@ -311,8 +314,13 @@ impl Client {
 
     /// Send a request and receive a response
     async fn send_request(&mut self, request: Request) -> Result<Response> {
-        // Serialize request with wire format prefix
-        let request_bytes = request.to_wire(rivven_protocol::WireFormat::Postcard)?;
+        // Generate sequential correlation ID
+        let correlation_id = self.next_correlation_id;
+        self.next_correlation_id = self.next_correlation_id.wrapping_add(1);
+
+        // Serialize request with wire format prefix and correlation ID
+        let request_bytes =
+            request.to_wire(rivven_protocol::WireFormat::Postcard, correlation_id)?;
 
         // Write length prefix + request
         let len = request_bytes.len() as u32;
@@ -335,7 +343,7 @@ impl Client {
         self.stream.read_exact(&mut response_buf).await?;
 
         // Deserialize response (auto-detects wire format)
-        let (response, _format) = Response::from_wire(&response_buf)?;
+        let (response, _format, _correlation_id) = Response::from_wire(&response_buf)?;
 
         Ok(response)
     }
@@ -618,11 +626,15 @@ impl Client {
     /// Register a schema with the schema registry (via HTTP REST API)
     ///
     /// The schema registry runs as a separate service (`rivven-schema`) with a
-    /// Confluent-compatible REST API. This method performs a minimal HTTP/1.1 POST
-    /// to `{registry_url}/subjects/{subject}/versions` without external HTTP deps.
+    /// Confluent-compatible REST API. This method performs a POST to
+    /// `{registry_url}/subjects/{subject}/versions`.
+    ///
+    /// Supports both `http://` and `https://` registry URLs. HTTPS requires the
+    /// `schema-registry` feature which brings in `reqwest` with `rustls-tls`.
+    /// Without the feature flag, a minimal inline HTTP/1.1 client is used (HTTP only).
     ///
     /// # Arguments
-    /// * `registry_url` - Schema registry base URL (e.g., `http://localhost:8081`)
+    /// * `registry_url` - Schema registry base URL (e.g., `http://localhost:8081` or `https://registry.example.com`)
     /// * `subject` - Subject name (typically `{topic}-key` or `{topic}-value`)
     /// * `schema_type` - Schema format: `"AVRO"`, `"PROTOBUF"`, or `"JSON"`
     /// * `schema` - The schema definition string
@@ -636,24 +648,85 @@ impl Client {
         schema_type: &str,
         schema: &str,
     ) -> Result<u32> {
-        use tokio::net::TcpStream as TokioTcpStream;
-
-        // Parse URL into host:port and path
         let url = registry_url.trim_end_matches('/');
-        let stripped = url.strip_prefix("http://").ok_or_else(|| {
-            Error::ConnectionError("schema registry URL must start with http://".into())
-        })?;
-        let (host_port, _) = stripped.split_once('/').unwrap_or((stripped, ""));
-        let path = format!("/subjects/{}/versions", subject);
+        let endpoint = format!("{}/subjects/{}/versions", url, subject);
 
         let body = serde_json::json!({
             "schema": schema,
             "schemaType": schema_type,
         });
-        let body_bytes = serde_json::to_vec(&body)
+
+        #[cfg(feature = "schema-registry")]
+        {
+            self.register_schema_reqwest(&endpoint, &body).await
+        }
+
+        #[cfg(not(feature = "schema-registry"))]
+        {
+            self.register_schema_inline(url, &endpoint, &body).await
+        }
+    }
+
+    /// HTTPS-capable schema registration using reqwest (requires `schema-registry` feature)
+    #[cfg(feature = "schema-registry")]
+    async fn register_schema_reqwest(
+        &self,
+        endpoint: &str,
+        body: &serde_json::Value,
+    ) -> Result<u32> {
+        let client = reqwest::Client::new();
+        let response = client
+            .post(endpoint)
+            .header("Content-Type", "application/vnd.schemaregistry.v1+json")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| Error::ConnectionError(format!("schema registry request failed: {e}")))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(Error::ServerError(format!(
+                "schema registry returned HTTP {status}: {body_text}"
+            )));
+        }
+
+        #[derive(serde::Deserialize)]
+        struct RegisterResponse {
+            id: u32,
+        }
+
+        let result: RegisterResponse = response
+            .json()
+            .await
+            .map_err(|e| Error::ConnectionError(format!("failed to parse response: {e}")))?;
+
+        Ok(result.id)
+    }
+
+    /// Minimal inline HTTP/1.1 client for schema registration (HTTP only, no external deps)
+    #[cfg(not(feature = "schema-registry"))]
+    async fn register_schema_inline(
+        &self,
+        base_url: &str,
+        _endpoint: &str,
+        body: &serde_json::Value,
+    ) -> Result<u32> {
+        use tokio::net::TcpStream as TokioTcpStream;
+
+        let stripped = base_url.strip_prefix("http://").ok_or_else(|| {
+            Error::ConnectionError(
+                "HTTPS requires the `schema-registry` feature; URL must start with http:// without it".into(),
+            )
+        })?;
+        let (host_port, _) = stripped.split_once('/').unwrap_or((stripped, ""));
+
+        // Extract path from endpoint (skip the base URL part)
+        let path = _endpoint.strip_prefix(base_url).unwrap_or(_endpoint);
+
+        let body_bytes = serde_json::to_vec(body)
             .map_err(|e| Error::ConnectionError(format!("failed to serialize schema: {e}")))?;
 
-        // Minimal HTTP/1.1 POST
         let request = format!(
             "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/vnd.schemaregistry.v1+json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             path, host_port, body_bytes.len()
@@ -672,7 +745,6 @@ impl Client {
             .await
             .map_err(|e| Error::ConnectionError(format!("failed to send body: {e}")))?;
 
-        // Read response
         let mut response_buf = Vec::with_capacity(4096);
         stream
             .read_to_end(&mut response_buf)
@@ -681,7 +753,6 @@ impl Client {
 
         let response_str = String::from_utf8_lossy(&response_buf);
 
-        // Parse HTTP status line
         let status_line = response_str.lines().next().unwrap_or("");
         let status_code: u16 = status_line
             .split_whitespace()
@@ -695,7 +766,6 @@ impl Client {
             )));
         }
 
-        // Find JSON body after \r\n\r\n
         let json_body = response_str
             .find("\r\n\r\n")
             .map(|i| &response_str[i + 4..])

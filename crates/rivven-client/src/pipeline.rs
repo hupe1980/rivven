@@ -399,7 +399,7 @@ impl PipelinedClient {
         let (response_tx, response_rx) = oneshot::channel();
 
         // Serialize request with wire format and ID prefix
-        let request_bytes = request.to_wire(rivven_protocol::WireFormat::Postcard)?;
+        let request_bytes = request.to_wire(rivven_protocol::WireFormat::Postcard, 0u32)?;
         let mut data = BytesMut::with_capacity(8 + request_bytes.len());
         data.extend_from_slice(&request_id.to_be_bytes());
         data.extend_from_slice(&request_bytes);
@@ -668,7 +668,7 @@ async fn reader_task<R: tokio::io::AsyncRead + Unpin>(
 
         // Parse response (auto-detects wire format)
         let result = Response::from_wire(&response_buf)
-            .map(|(resp, _format)| resp)
+            .map(|(resp, _format, _correlation_id)| resp)
             .map_err(Error::ProtocolError);
 
         // Dispatch to waiting request

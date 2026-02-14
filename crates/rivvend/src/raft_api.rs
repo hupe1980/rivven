@@ -367,6 +367,7 @@ fn create_raft_router_base<S: Clone + Send + Sync + 'static>(state: RaftApiState
             "/api/v1/transfer-leadership",
             post(transfer_leadership_handler),
         )
+        .route("/api/v1/trigger-election", post(trigger_election_handler))
         // Client APIs
         .route("/api/v1/propose", post(propose_handler))
         .route("/api/v1/propose/batch", post(batch_propose_handler))
@@ -376,14 +377,36 @@ fn create_raft_router_base<S: Clone + Send + Sync + 'static>(state: RaftApiState
             get(linearizable_metadata_handler),
         );
 
-    // Apply auth middleware if a cluster token is configured
-    let protected = if let Some(ref token) = state.cluster_auth_token {
-        let token = token.clone();
+    // F-059 fix: ALWAYS apply auth middleware to protected routes.
+    // In standalone mode without a configured token, we generate a random
+    // token and log it at startup. This prevents unauthenticated access to
+    // cluster mutation endpoints (/api/v1/bootstrap, /api/v1/propose, etc.).
+    let auth_token: Arc<String> = if let Some(ref token) = state.cluster_auth_token {
+        token.clone()
+    } else {
+        // Generate a deterministic-enough ephemeral token from entropy sources
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        std::time::SystemTime::now().hash(&mut hasher);
+        std::process::id().hash(&mut hasher);
+        let token = format!("rvn-ephemeral-{:016x}{:016x}", hasher.finish(), {
+            let mut h2 = DefaultHasher::new();
+            hasher.finish().hash(&mut h2);
+            h2.finish()
+        });
+        tracing::warn!(
+            "No cluster_auth_token configured — generated ephemeral token for Raft API: {}",
+            token
+        );
+        Arc::new(token)
+    };
+
+    let protected = {
+        let token = auth_token;
         protected.layer(axum::middleware::from_fn(move |req, next| {
             cluster_auth_middleware(token.clone(), req, next)
         }))
-    } else {
-        protected
     };
 
     public.merge(protected).with_state(state)
@@ -1164,13 +1187,14 @@ pub struct TransferLeadershipRequest {
 /// Trigger a new election, stepping down as leader
 ///
 /// This enables zero-downtime rolling updates:
-/// 1. Step down as leader (triggers new election)
+/// 1. Step down as leader (triggers new election on target/random follower)
 /// 2. Wait for new leader to be elected
 /// 3. Stop/update the old leader node
 ///
-/// Note: openraft 0.9 does not support targeted transfer. If `target_node_id`
-/// is supplied it is logged but the election outcome depends on Raft protocol
-/// (highest log wins). Use this for graceful shutdown.
+/// F-095 fix: Instead of calling `trigger().elect()` on the current (leader)
+/// node, which would just re-elect the leader itself, we forward the election
+/// trigger to a follower node via HTTP. If `target_node_id` is specified, we
+/// send the request to that node; otherwise we pick a random follower.
 async fn transfer_leadership_handler(
     State(state): State<RaftApiState>,
     Json(req): Json<TransferLeadershipRequest>,
@@ -1189,24 +1213,161 @@ async fn transfer_leadership_handler(
             .into_response();
     }
 
-    if let Some(raft_instance) = raft.get_raft() {
-        if let Some(ref target) = req.target_node_id {
-            info!(
-                target = %target,
-                "Leadership transfer requested with preferred target (best-effort)"
-            );
-        }
-        info!("Initiating leadership step-down for graceful transfer");
+    let current_node_id = raft.node_id();
+    drop(raft);
 
-        // Trigger an election by forcing a heartbeat timeout
-        // The other nodes will notice missing heartbeats and elect a new leader
+    // Determine target: use request target or pick a random follower
+    let target_node_id = if let Some(ref target_str) = req.target_node_id {
+        let target = hash_node_id(target_str);
+        if target == current_node_id {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Cannot transfer leadership to self".to_string(),
+                    code: 400,
+                }),
+            )
+                .into_response();
+        }
+        target
+    } else {
+        // Pick a random follower from known node addresses
+        let addresses = state.node_addresses.read().await;
+        let followers: Vec<u64> = addresses
+            .keys()
+            .copied()
+            .filter(|id| *id != current_node_id)
+            .collect();
+
+        if followers.is_empty() {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ErrorResponse {
+                    error: "No other nodes available for leadership transfer".to_string(),
+                    code: 503,
+                }),
+            )
+                .into_response();
+        }
+
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        // Deterministic but varying selection: hash current time to pick a follower
+        let mut hasher = DefaultHasher::new();
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .hash(&mut hasher);
+        let idx = (hasher.finish() as usize) % followers.len();
+        followers[idx]
+    };
+
+    // Look up the target node's address
+    let target_addr = {
+        let addresses = state.node_addresses.read().await;
+        addresses.get(&target_node_id).cloned()
+    };
+
+    let Some(target_addr) = target_addr else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("Target node {} address unknown", target_node_id),
+                code: 404,
+            }),
+        )
+            .into_response();
+    };
+
+    info!(
+        target_node_id,
+        target_addr = %target_addr,
+        "Forwarding election trigger to target node for leadership transfer"
+    );
+
+    // Forward the election trigger to the target node
+    let url = format!(
+        "{}/api/v1/trigger-election",
+        target_addr.trim_end_matches('/')
+    );
+
+    let mut request_builder = state.http_client.post(&url);
+
+    // Forward cluster auth token if configured
+    if let Some(ref token) = state.cluster_auth_token {
+        request_builder = request_builder.header("Authorization", format!("Bearer {}", token));
+    }
+
+    match request_builder.send().await {
+        Ok(resp) if resp.status().is_success() => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "success": true,
+                "message": format!("Election triggered on node {}", target_node_id),
+                "target_node_id": target_node_id,
+                "note": "Check /health endpoint to see new leader"
+            })),
+        )
+            .into_response(),
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            error!(
+                target_node_id,
+                status = %status,
+                body = %body,
+                "Election trigger forwarding failed"
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!(
+                        "Election trigger on node {} failed ({}): {}",
+                        target_node_id, status, body
+                    ),
+                    code: 500,
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            error!(
+                target_node_id,
+                error = %e,
+                "Failed to reach target node for election trigger"
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(ErrorResponse {
+                    error: format!(
+                        "Cannot reach node {} for election trigger: {}",
+                        target_node_id, e
+                    ),
+                    code: 502,
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Trigger a local Raft election on this node
+///
+/// This is called by the leader (via transfer-leadership forwarding) to make
+/// a follower node start a new election. This node will become a candidate.
+async fn trigger_election_handler(State(state): State<RaftApiState>) -> impl IntoResponse {
+    let raft = state.raft_node.read().await;
+
+    if let Some(raft_instance) = raft.get_raft() {
+        info!("Triggering local Raft election (received leadership transfer request)");
+
         match raft_instance.trigger().elect().await {
             Ok(_) => (
                 StatusCode::OK,
                 Json(serde_json::json!({
                     "success": true,
-                    "message": "Election triggered - leadership may transfer",
-                    "note": "Check /health endpoint to see new leader"
+                    "message": "Election triggered on this node"
                 })),
             )
                 .into_response(),
@@ -1305,7 +1466,7 @@ pub async fn start_raft_api_server_with_dashboard(
     tls_config: &TlsConfig,
     dashboard_config: DashboardConfig,
 ) -> anyhow::Result<()> {
-    use tower_http::cors::{Any, CorsLayer};
+    use tower_http::cors::CorsLayer;
 
     // Create the dashboard state
     let dashboard_state = crate::dashboard::DashboardState {
@@ -1320,10 +1481,19 @@ pub async fn start_raft_api_server_with_dashboard(
         info!("Dashboard enabled at http://{}/", bind_addr);
 
         // CORS layer for dashboard API requests
+        // F-065/F-067 fix: Only allow same-origin requests by default.
+        // The dashboard is served from the same host, so no cross-origin
+        // access is needed. If external tools need access, operators should
+        // deploy a reverse proxy with appropriate CORS headers.
         let cors = CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any);
+            .allow_origin(tower_http::cors::AllowOrigin::exact(
+                format!("http://{}", bind_addr).parse().unwrap(),
+            ))
+            .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+            .allow_headers([
+                axum::http::header::CONTENT_TYPE,
+                axum::http::header::AUTHORIZATION,
+            ]);
 
         // Merge Raft API routes with Dashboard routes
         create_raft_router(state)

@@ -398,6 +398,41 @@ impl RequestHandler {
             Request::DescribeTopicConfigs { topics } => {
                 self.handle_describe_topic_configs(topics).await
             }
+
+            // F-094: Protocol version handshake
+            Request::Handshake {
+                protocol_version,
+                client_id,
+            } => {
+                let server_version = rivven_protocol::PROTOCOL_VERSION;
+                let compatible = protocol_version == server_version;
+                if compatible {
+                    tracing::debug!(
+                        client_id = %client_id,
+                        version = protocol_version,
+                        "Protocol handshake succeeded"
+                    );
+                } else {
+                    tracing::warn!(
+                        client_id = %client_id,
+                        client_version = protocol_version,
+                        server_version,
+                        "Protocol version mismatch"
+                    );
+                }
+                Response::HandshakeResult {
+                    server_version,
+                    compatible,
+                    message: if compatible {
+                        "OK".to_string()
+                    } else {
+                        format!(
+                            "Version mismatch: client={}, server={}",
+                            protocol_version, server_version
+                        )
+                    },
+                }
+            }
         }
     }
 
@@ -411,9 +446,11 @@ impl RequestHandler {
         // Backpressure — reject if pending bytes exceed limit.
         // This prevents OOM when Raft or followers are slow.
         let msg_size = value.len() + key.as_ref().map_or(0, |k| k.len());
-        let current = self.pending_bytes.fetch_add(msg_size, Ordering::Relaxed);
+        // F-055: Use AcqRel ordering so the counter is visible across threads
+        // in a timely manner, preventing stale reads that bypass backpressure.
+        let current = self.pending_bytes.fetch_add(msg_size, Ordering::AcqRel);
         if current + msg_size > self.max_pending_bytes {
-            self.pending_bytes.fetch_sub(msg_size, Ordering::Relaxed);
+            self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
             warn!(
                 "Publish rejected: pending bytes {} + {} exceeds limit {}",
                 current, msg_size, self.max_pending_bytes
@@ -425,6 +462,8 @@ impl RequestHandler {
 
         // Validate topic name
         if let Err(e) = Validator::validate_topic_name(&topic_name) {
+            // F-062 fix: Release backpressure bytes on early return
+            self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
             warn!(
                 "Invalid topic name '{}': {}",
                 Validator::sanitize_for_log(&topic_name, 50),
@@ -439,6 +478,8 @@ impl RequestHandler {
         let topic = match self.resolve_topic(topic_name).await {
             Ok(t) => t,
             Err(e) => {
+                // F-062 fix: Release backpressure bytes on early return
+                self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
                 error!("Failed to resolve topic: {}", e);
                 return Response::Error { message: e };
             }
@@ -484,7 +525,7 @@ impl RequestHandler {
         };
 
         // Release backpressure count after write completes
-        self.pending_bytes.fetch_sub(msg_size, Ordering::Relaxed);
+        self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
 
         result
     }
@@ -509,8 +550,15 @@ impl RequestHandler {
             };
         }
 
-        // Enforce reasonable limits on max_messages
-        let max_messages = max_messages.min(10_000); // Cap at 10k messages per request
+        // Enforce reasonable limits on max_messages (F-082)
+        const MAX_MESSAGES_LIMIT: usize = 10_000;
+        if max_messages > MAX_MESSAGES_LIMIT {
+            warn!(
+                "max_messages {} exceeds server limit of {}, capping",
+                max_messages, MAX_MESSAGES_LIMIT
+            );
+        }
+        let max_messages = max_messages.min(MAX_MESSAGES_LIMIT);
 
         // Parse isolation level (0 = read_uncommitted, 1 = read_committed)
         let read_committed = isolation_level.map(|l| l == 1).unwrap_or(false);
@@ -1383,6 +1431,9 @@ impl RequestHandler {
         );
 
         // Write COMMIT markers to all affected partitions
+        // F-066 fix: If any marker write fails, abort the transaction
+        // instead of proceeding with a partial commit.
+        let mut marker_failed = false;
         for tp in &txn.partitions {
             if let Ok(topic_obj) = self.topic_manager.get_topic(&tp.topic).await {
                 if let Ok(partition) = topic_obj.partition(tp.partition) {
@@ -1393,13 +1444,42 @@ impl RequestHandler {
                         ..Message::new(Bytes::new())
                     };
                     if let Err(e) = partition.append(marker).await {
-                        warn!(
-                            "Failed to write COMMIT marker for txn {} to {}/{}: {}",
+                        error!(
+                            "Failed to write COMMIT marker for txn {} to {}/{}: {} — aborting transaction",
                             txn_id, tp.topic, tp.partition, e
                         );
+                        marker_failed = true;
+                        break;
                     }
+                } else {
+                    error!(
+                        "Partition {}/{} not found during commit of txn {} — aborting transaction",
+                        tp.topic, tp.partition, txn_id
+                    );
+                    marker_failed = true;
+                    break;
                 }
+            } else {
+                error!(
+                    "Topic {} not found during commit of txn {} — aborting transaction",
+                    tp.topic, txn_id
+                );
+                marker_failed = true;
+                break;
             }
+        }
+
+        if marker_failed {
+            // Abort instead of proceeding with partial commit
+            let _ = self
+                .transaction_coordinator
+                .complete_abort(&txn_id, producer_id);
+            return Response::Error {
+                message: format!(
+                    "COMMIT_FAILED: marker write failed for txn '{}', transaction aborted",
+                    txn_id
+                ),
+            };
         }
 
         // Phase 2: Complete commit

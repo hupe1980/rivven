@@ -73,6 +73,18 @@ message Request {
     DescribeTopicConfigsRequest describe_topic_configs = 61;
     CreatePartitionsRequest create_partitions = 62;
     DeleteRecordsRequest delete_records = 63;
+    // SCRAM challenge messages
+    ScramClientFirstRequest scram_client_first = 70;
+    ScramClientFinalRequest scram_client_final = 71;
+    // Transaction extension
+    TransactionalPublishRequest transactional_publish = 53;
+    AddPartitionsToTxnRequest add_partitions_to_txn = 54;
+    AddOffsetsToTxnRequest add_offsets_to_txn = 55;
+    // Quotas
+    DescribeQuotasRequest describe_quotas = 80;
+    AlterQuotasRequest alter_quotas = 81;
+    // Handshake
+    HandshakeRequest handshake = 90;
   }
 }
 
@@ -226,6 +238,19 @@ message Response {
     CreatePartitionsResponse create_partitions = 62;
     DeleteRecordsResponse delete_records = 63;
     OkResponse ok = 98;
+    // SCRAM challenge responses
+    ScramServerFirstResponse scram_server_first = 70;
+    ScramServerFinalResponse scram_server_final = 71;
+    // Transaction extension
+    PartitionsAddedToTxnResponse partitions_added_to_txn = 53;
+    TransactionalPublishResponse transactional_publish = 54;
+    OffsetsAddedToTxnResponse offsets_added_to_txn = 55;
+    // Quotas
+    QuotasDescribedResponse quotas_described = 80;
+    QuotasAlteredResponse quotas_altered = 81;
+    ThrottledResponse throttled = 82;
+    // Handshake
+    HandshakeResultResponse handshake_result = 90;
   }
 }
 
@@ -567,6 +592,159 @@ message DeleteRecordsResultProto {
   uint32 partition = 1;
   uint64 low_watermark = 2;
   string error = 3;
+}
+
+// ============================================================================
+// SCRAM Messages
+// ============================================================================
+
+// SCRAM-SHA-256: Client-first message
+message ScramClientFirstRequest {
+  bytes message = 1;
+}
+
+// SCRAM-SHA-256: Client-final message
+message ScramClientFinalRequest {
+  bytes message = 1;
+}
+
+// SCRAM-SHA-256: Server-first (challenge)
+message ScramServerFirstResponse {
+  bytes message = 1;
+}
+
+// SCRAM-SHA-256: Server-final (verification)
+message ScramServerFinalResponse {
+  bytes message = 1;
+  optional string session_id = 2;
+  optional uint64 expires_in = 3;
+}
+
+// ============================================================================
+// Transaction Extension Messages
+// ============================================================================
+
+// Transactional publish
+message TransactionalPublishRequest {
+  string txn_id = 1;
+  string topic = 2;
+  optional uint32 partition = 3;
+  Record record = 4;
+  uint64 producer_id = 5;
+  uint32 producer_epoch = 6;
+  int32 sequence = 7;
+}
+
+// Add partitions to transaction
+message AddPartitionsToTxnRequest {
+  string txn_id = 1;
+  uint64 producer_id = 2;
+  uint32 producer_epoch = 3;
+  repeated TopicPartition partitions = 4;
+}
+
+message TopicPartition {
+  string topic = 1;
+  uint32 partition = 2;
+}
+
+// Add consumer offsets to transaction
+message AddOffsetsToTxnRequest {
+  string txn_id = 1;
+  uint64 producer_id = 2;
+  uint32 producer_epoch = 3;
+  string group_id = 4;
+  repeated TopicPartitionOffset offsets = 5;
+}
+
+message TopicPartitionOffset {
+  string topic = 1;
+  uint32 partition = 2;
+  int64 offset = 3;
+}
+
+// Partitions added to transaction response
+message PartitionsAddedToTxnResponse {
+  string txn_id = 1;
+  uint32 partition_count = 2;
+}
+
+// Transactional publish response
+message TransactionalPublishResponse {
+  uint64 offset = 1;
+  uint32 partition = 2;
+  int32 sequence = 3;
+}
+
+// Offsets added to transaction response
+message OffsetsAddedToTxnResponse {
+  string txn_id = 1;
+}
+
+// ============================================================================
+// Quota Messages
+// ============================================================================
+
+// Describe quotas request
+message DescribeQuotasRequest {
+  repeated QuotaEntity entities = 1;
+}
+
+message QuotaEntity {
+  string entity_type = 1;
+  optional string entity_name = 2;
+}
+
+// Alter quotas request
+message AlterQuotasRequest {
+  repeated QuotaAlterationProto alterations = 1;
+}
+
+message QuotaAlterationProto {
+  string entity_type = 1;
+  optional string entity_name = 2;
+  string quota_key = 3;
+  optional uint64 quota_value = 4;
+}
+
+// Quotas described response
+message QuotasDescribedResponse {
+  repeated QuotaEntryProto entries = 1;
+}
+
+message QuotaEntryProto {
+  string entity_type = 1;
+  optional string entity_name = 2;
+  map<string, uint64> quotas = 3;
+}
+
+// Quotas altered response
+message QuotasAlteredResponse {
+  uint32 altered_count = 1;
+}
+
+// Throttle response
+message ThrottledResponse {
+  uint64 throttle_time_ms = 1;
+  string quota_type = 2;
+  string entity = 3;
+}
+
+// ============================================================================
+// Handshake Messages
+// ============================================================================
+
+// Protocol handshake request
+message HandshakeRequest {
+  uint32 protocol_version = 1;
+  string client_id = 2;
+}
+
+// Protocol handshake response
+message HandshakeResultResponse {
+  uint32 server_version = 1;
+  bool compatible = 2;
+  string message = 3;
 }
 
 // ============================================================================

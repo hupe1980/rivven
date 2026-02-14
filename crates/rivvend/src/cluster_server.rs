@@ -38,7 +38,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
@@ -529,6 +529,17 @@ impl ClusterServer {
                         Ok((tcp_stream, addr)) => {
                             let client_ip = addr.ip();
 
+                            // F-091 fix: enable TCP keepalive so dead connections
+                            // (network partition, client crash) are detected instead of
+                            // waiting for the full idle timeout.
+                            let sock_ref = socket2::SockRef::from(&tcp_stream);
+                            let keepalive = socket2::TcpKeepalive::new()
+                                .with_time(std::time::Duration::from_secs(60))
+                                .with_interval(std::time::Duration::from_secs(10));
+                            if let Err(e) = sock_ref.set_tcp_keepalive(&keepalive) {
+                                debug!("TCP keepalive setup failed for {}: {}", addr, e);
+                            }
+
                             // Check rate limiter before accepting connection
                             match rate_limiter.try_connection(client_ip).await {
                                 Ok(conn_guard) => {
@@ -1001,7 +1012,8 @@ impl RequestRouter {
             Request::Authenticate { .. }
             | Request::SaslAuthenticate { .. }
             | Request::ScramClientFirst { .. }
-            | Request::ScramClientFinal { .. } => RoutingDecision::Local,
+            | Request::ScramClientFinal { .. }
+            | Request::Handshake { .. } => RoutingDecision::Local,
             // Metadata and control operations - handle locally (any node can serve)
             Request::CreateTopic { .. }
             | Request::ListTopics
@@ -1090,98 +1102,55 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut buffer = BytesMut::with_capacity(8192);
+    let peer_label = client_ip.to_string();
 
     loop {
-        // Read length prefix (4 bytes) with timeout to prevent slowloris attacks
-        let mut len_buf = [0u8; 4];
-        match tokio::time::timeout(read_timeout, stream.read_exact(&mut len_buf)).await {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                return Ok(()); // Clean disconnect
+        // Use shared framing for read + parse
+        let frame = match crate::framing::read_framed_request(
+            &mut stream,
+            &mut buffer,
+            max_request_size,
+            read_timeout,
+            &peer_label,
+        )
+        .await?
+        {
+            Some(crate::framing::ReadFrame::Request {
+                request,
+                wire_format,
+                correlation_id,
+            }) => (request, wire_format, correlation_id),
+            Some(crate::framing::ReadFrame::Disconnected | crate::framing::ReadFrame::Timeout) => {
+                return Ok(());
             }
-            Ok(Err(e)) => return Err(e.into()),
-            Err(_) => {
-                debug!("Read timeout from {} - closing connection", client_ip);
-                return Ok(()); // Timeout is not an error, just close connection
-            }
-        }
+            None => continue, // size-exceeded or parse error — already sent error response
+        };
 
-        let msg_len = u32::from_be_bytes(len_buf) as usize;
-
-        // Check request size against configured limit
-        if msg_len > max_request_size {
-            warn!(
-                "Request from {} too large: {} > {} bytes",
-                client_ip, msg_len, max_request_size
-            );
-            // Send error response before closing
-            let error_response = Response::Error {
-                message: format!(
-                    "REQUEST_TOO_LARGE: {} > {} bytes",
-                    msg_len, max_request_size
-                ),
-            };
-            // Use postcard format since we haven't parsed the request yet
-            if let Ok(bytes) = error_response.to_wire(WireFormat::Postcard) {
-                let len = bytes.len() as u32;
-                let _ = stream.write_all(&len.to_be_bytes()).await;
-                let _ = stream.write_all(&bytes).await;
-                let _ = stream.flush().await;
-            }
-            return Ok(());
-        }
+        let (request, wire_format, correlation_id) = frame;
 
         // Check rate limit before processing
-        match rate_limiter.check_request(&client_ip, msg_len).await {
-            crate::rate_limiter::RequestResult::Allowed => {
-                // Continue processing
-            }
+        // Use a small size estimate (1) since we already validated the message size above
+        match rate_limiter.check_request(&client_ip, 1).await {
+            crate::rate_limiter::RequestResult::Allowed => {}
             crate::rate_limiter::RequestResult::RateLimited => {
                 debug!("Rate limited request from {}", client_ip);
-                // Send rate limit error and close connection
                 let error_response = Response::Error {
                     message: "RATE_LIMIT_EXCEEDED: Too many requests".to_string(),
                 };
-                // Use postcard format since we haven't parsed the request yet
-                if let Ok(bytes) = error_response.to_wire(WireFormat::Postcard) {
-                    let len = bytes.len() as u32;
-                    let _ = stream.write_all(&len.to_be_bytes()).await;
-                    let _ = stream.write_all(&bytes).await;
-                    let _ = stream.flush().await;
-                }
-                // Brief delay before closing to prevent retry storms
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                crate::framing::send_response(
+                    &mut stream,
+                    &error_response,
+                    wire_format,
+                    correlation_id,
+                )
+                .await?;
+                tokio::time::sleep(Duration::from_millis(1000)).await;
                 return Ok(());
             }
             crate::rate_limiter::RequestResult::RequestTooLarge => {
-                // Already handled above, but include for completeness
                 return Ok(());
             }
         }
-
-        // Read message data with timeout to prevent slow-read DoS
-        buffer.clear();
-        buffer.resize(msg_len, 0);
-        match tokio::time::timeout(read_timeout, stream.read_exact(&mut buffer)).await {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => return Err(e.into()),
-            Err(_) => {
-                debug!(
-                    "Read timeout during message body from {} - closing connection",
-                    client_ip
-                );
-                return Ok(());
-            }
-        }
-
-        // Deserialize request using wire format
-        let (request, wire_format) = match Request::from_wire(&buffer) {
-            Ok((req, fmt)) => (req, fmt),
-            Err(e) => {
-                error!("Failed to deserialize request from {}: {}", client_ip, e);
-                continue;
-            }
-        };
 
         // Track request
         stats.request_handled();
@@ -1189,16 +1158,26 @@ where
         // Route and handle request
         let response = router.route(request).await;
 
-        // Serialize response using same wire format as request
-        let response_bytes = match response.to_wire(wire_format) {
+        // Serialize and send response using same wire format as request
+        let response_bytes = match response.to_wire(wire_format, correlation_id) {
             Ok(bytes) => bytes,
             Err(e) => {
                 error!("Failed to serialize response: {}", e);
-                continue;
+                let error_response = Response::Error {
+                    message: format!("INTERNAL_ERROR: response serialization failed: {}", e),
+                };
+                match error_response
+                    .to_wire(wire_format, correlation_id)
+                    .or_else(|_| error_response.to_wire(WireFormat::Postcard, correlation_id))
+                {
+                    Ok(err_bytes) => err_bytes,
+                    Err(_) => {
+                        return Ok(());
+                    }
+                }
             }
         };
 
-        // Write response with length prefix
         let len = response_bytes.len() as u32;
         stream.write_all(&len.to_be_bytes()).await?;
         stream.write_all(&response_bytes).await?;

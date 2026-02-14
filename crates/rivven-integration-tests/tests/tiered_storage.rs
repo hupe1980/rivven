@@ -511,6 +511,7 @@ async fn test_config_serialization_with_tiered_storage() -> Result<()> {
         data_dir: "/var/lib/rivven/data".to_string(),
         max_segment_size: 1024 * 1024 * 1024,
         log_level: "info".to_string(),
+        sync_policy: rivven_core::SegmentSyncPolicy::EveryNWrites(1),
         tiered_storage: TieredStorageConfig {
             enabled: true,
             hot_tier_max_bytes: 8 * 1024 * 1024 * 1024,

@@ -23,6 +23,10 @@ pub struct Topic {
     name: String,
 
     /// Partitions in this topic (growable via add_partitions)
+    ///
+    /// F-097: `parking_lot::RwLock` is intentional here — critical sections are
+    /// O(1) Vec index lookups and never held across `.await` points.
+    /// `tokio::sync::RwLock` would add unnecessary overhead for pure-sync access.
     partitions: parking_lot::RwLock<Vec<Arc<Partition>>>,
 }
 

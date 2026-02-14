@@ -500,6 +500,9 @@ pub struct CircuitBreaker {
     /// Statistics
     stats: CircuitBreakerStats,
     /// Start of current failure window
+    ///
+    /// F-097: `parking_lot::Mutex` is intentional — only guards an `Instant`
+    /// swap (O(1), sub-microsecond), never held across `.await` points.
     window_start: parking_lot::Mutex<Instant>,
 }
 

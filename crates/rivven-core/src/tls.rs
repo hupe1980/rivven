@@ -441,7 +441,21 @@ impl TlsConfigBuilder {
     }
 
     /// Skip certificate verification (DANGEROUS - testing only)
+    ///
+    /// # Security Warning
+    ///
+    /// This disables all certificate verification, making the connection
+    /// vulnerable to man-in-the-middle attacks. Only use in tests or
+    /// development environments.
     pub fn insecure_skip_verify(mut self) -> Self {
+        #[cfg(not(any(test, debug_assertions)))]
+        tracing::error!(
+            "SECURITY WARNING: insecure_skip_verify is enabled in a release build! \
+             This disables TLS certificate verification and makes connections \
+             vulnerable to MITM attacks. Do NOT use in production."
+        );
+        #[cfg(any(test, debug_assertions))]
+        tracing::warn!("insecure_skip_verify enabled (test/debug build)");
         self.config.insecure_skip_verify = true;
         self
     }
@@ -880,6 +894,11 @@ fn build_client_config(config: &TlsConfig) -> TlsResult<ClientConfig> {
     // Build root certificate store
     let root_store = if config.insecure_skip_verify {
         // DANGEROUS: Trust all certificates (development only)
+        #[cfg(not(any(test, debug_assertions)))]
+        tracing::error!(
+            "SECURITY WARNING: Building TLS client config with insecure_skip_verify=true \
+             in a release build. Certificate verification is DISABLED."
+        );
         rustls::RootCertStore::empty()
     } else if let Some(ref ca_source) = config.root_ca {
         let ca_certs = load_certificates(ca_source)?;

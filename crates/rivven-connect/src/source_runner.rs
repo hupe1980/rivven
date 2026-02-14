@@ -183,39 +183,27 @@ impl SourceRunner {
         // Ensure topic exists
         self.ensure_topic_exists().await?;
 
-        // Run connector-specific logic
-        let result = match self.config.connector.as_str() {
-            "datagen" => self.run_datagen(&mut shutdown_rx).await,
-            "postgres-cdc" => {
-                #[cfg(feature = "postgres")]
-                {
-                    self.run_postgres_cdc(&mut shutdown_rx).await
-                }
-                #[cfg(not(feature = "postgres"))]
-                {
-                    Err(ConnectError::config(
-                        "PostgreSQL CDC support not compiled in. Enable 'postgres' feature.",
-                    ))
-                }
-            }
-            "http" => self.run_http_source(&mut shutdown_rx).await,
-            other => {
-                // Dynamic dispatch: try the registry for external/plugin connectors
-                if let Some(factory) = self.source_registry.get(other) {
-                    self.run_registry_source(factory, &mut shutdown_rx).await
-                } else {
-                    let available: Vec<&str> = self
-                        .source_registry
-                        .list()
-                        .iter()
-                        .map(|(n, _)| *n)
-                        .collect();
-                    Err(ConnectError::config(format!(
-                        "Unknown source connector type: '{}'. Available: {:?}",
-                        other, available
-                    )))
-                }
-            }
+        // Run connector-specific logic — registry-first dispatch.
+        // All registered connectors (datagen, postgres-cdc, mysql-cdc, etc.) are
+        // resolved through the SourceRegistry. Only the built-in HTTP poller
+        // falls back to an inline implementation when not in the registry.
+        let connector = self.config.connector.as_str();
+        let result = if let Some(factory) = self.source_registry.get(connector) {
+            self.run_registry_source(factory, &mut shutdown_rx).await
+        } else if connector == "http" {
+            // Built-in HTTP poller (no factory yet — reqwest always available)
+            self.run_http_source(&mut shutdown_rx).await
+        } else {
+            let available: Vec<&str> = self
+                .source_registry
+                .list()
+                .iter()
+                .map(|(n, _)| *n)
+                .collect();
+            Err(ConnectError::config(format!(
+                "Unknown source connector type: '{}'. Available: {:?}",
+                connector, available
+            )))
         };
 
         *self.status.write().await = match &result {
@@ -430,6 +418,7 @@ impl SourceRunner {
         Ok(Bytes::from(out))
     }
 
+    #[allow(dead_code)]
     #[cfg(feature = "postgres")]
     async fn run_postgres_cdc(&self, shutdown_rx: &mut broadcast::Receiver<()>) -> Result<()> {
         use crate::connectors::cdc::PostgresCdcConfig as SdkPgConfig;
@@ -664,6 +653,7 @@ impl SourceRunner {
         }
     }
 
+    #[allow(dead_code)]
     async fn run_datagen(&self, shutdown_rx: &mut broadcast::Receiver<()>) -> Result<()> {
         use super::prelude::*;
         use crate::connectors::datagen::{DatagenConfig, DatagenSource};

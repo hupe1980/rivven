@@ -239,6 +239,7 @@ async fn test_isr_updates_across_cluster() {
     let cmd = MetadataCommand::UpdatePartitionIsr {
         partition,
         isr: vec!["node-1".to_string(), "node-2".to_string()],
+        leader_epoch: 1,
     };
 
     let response = {

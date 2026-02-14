@@ -196,6 +196,35 @@ data/
 
 Rivven ensures **full durability** across broker restarts through multiple mechanisms:
 
+#### Segment Sync Policy
+
+Every segment write is governed by the configurable `sync_policy`:
+
+| Policy | Behavior | Trade-off |
+|:-------|:---------|:----------|
+| `EveryWrite` | `fdatasync` after every append | Maximum durability, lowest throughput |
+| `EveryNWrites(n)` | `fdatasync` every N appends | Balanced (default: n=1) |
+| `None` | OS page cache only | Fastest, data loss on crash |
+
+Configure via broker config:
+
+```yaml
+# rivven.yaml
+server:
+  sync_policy: EveryNWrites(1)  # default — every write fsynced
+```
+
+The sync policy propagates through the full write path:
+`Config` → `LogManager` → `Segment` → index files. When `EveryWrite` or
+`EveryNWrites` triggers, both the log file and pending index entries are
+fsynced atomically.
+
+#### WAL Recovery with CRC Validation
+
+The Write-Ahead Log validates CRC32 checksums during recovery. If a record
+fails CRC verification (e.g., partial write from crash), the recovery scan
+stops at the last valid record — no corrupted data is silently loaded.
+
 #### Topic Metadata Persistence
 
 Topic configuration and metadata are persisted to `topic_metadata.json`:
@@ -310,6 +339,7 @@ Optimized for streaming workloads:
 
 The partition append path avoids unnecessary copies:
 
+- **Zero-alloc serialization**: `Segment::append()` uses `postcard::to_extend` with an 8-byte header placeholder, then patches CRC + length in-place — **1 allocation, 0 copies** per message. Batch append reuses a single serialization buffer across all messages.
 - **No message clone**: When tiered storage is enabled, the message is serialized once before being consumed by the log manager. The pre-serialized bytes are reused for the tiered storage write path.
 - **Lock-free offset allocation**: Next offset is allocated via `AtomicU64::fetch_add` (AcqRel ordering).
 - **Single-pass consume**: The consume handler combines isolation-level filtering and protocol conversion into a single iterator pass, avoiding intermediate `Vec` allocations.
@@ -341,6 +371,10 @@ Write batching for 10-100x throughput improvement:
 ### Async I/O (Portable, io_uring-style API)
 
 Rivven provides a portable async I/O layer with an io_uring-style API. The current implementation uses `std::fs::File` behind `parking_lot::Mutex` as a portable fallback; the API is designed for a future true io_uring backend on Linux 5.6+:
+
+#### Synchronization Contract
+
+`parking_lot::{Mutex, RwLock}` is used for **O(1) critical sections** (HashMap lookups, counter increments, buffer swaps) where the future-boxing overhead of `tokio::sync` is unnecessary. These locks are **never** held across `.await` boundaries. Where a lock must span async I/O (e.g., `Segment::log_file`), `tokio::sync::Mutex` is used instead.
 
 - **Submission Queue** - Batch I/O operations
 - **Completion Queue** - Poll results
@@ -579,21 +613,34 @@ This ensures:
 
 ### Wire Format
 
-Rivven uses a **format-prefixed** binary protocol for cross-language support:
+Rivven uses a **format-prefixed** binary protocol with correlation IDs for request-response matching:
 
 ```
-┌────────────┬─────────────┬──────────────────────────┐
-│ Length (4B)│ Format (1B) │ Serialized payload       │
-│ Big-endian │ 0x00=post   │ Request or Response      │
-│ u32        │ 0x01=proto  │                          │
-└────────────┴─────────────┴──────────────────────────┘
+┌────────────┬─────────────┬──────────────────┬──────────────────────────┐
+│ Length (4B)│ Format (1B) │ Correlation (4B) │ Serialized payload       │
+│ Big-endian │ 0x00=post   │ Big-endian u32   │ Request or Response      │
+│ u32        │ 0x01=proto  │                  │                         │
+└────────────┴─────────────┴──────────────────┴──────────────────────────┘
 ```
 
-- **Length**: 4-byte big-endian unsigned integer (includes format byte)
+- **Length**: 4-byte big-endian unsigned integer (includes format + correlation ID + payload)
 - **Format**: 1-byte wire format identifier
   - `0x00`: postcard (Rust-native, ~50ns serialize)
   - `0x01`: protobuf (cross-language compatible)
+- **Correlation ID**: 4-byte big-endian u32 matching responses to requests (enables pipelining)
 - **Payload**: Serialized Request or Response
+
+### Connection Handshake
+
+Clients should send a `Handshake` request as the first message after connecting:
+
+```
+Client → Server: Handshake { protocol_version: 2, client_id: "my-app" }
+Server → Client: HandshakeResult { server_version: 2, compatible: true, message: "..." }
+```
+
+The server validates the client's protocol version and returns compatibility information.
+Incompatible versions receive `compatible: false` with a descriptive error message.
 
 ### Format Auto-Detection
 
@@ -601,8 +648,8 @@ The server **auto-detects** the wire format from the first byte and responds in 
 
 ```rust
 // Rust client (postcard - fastest)
-let wire_bytes = request.to_wire(WireFormat::Postcard)?;
-let (response, format) = Response::from_wire(&response_bytes)?;
+let wire_bytes = request.to_wire(WireFormat::Postcard, correlation_id)?;
+let (response, format, corr_id) = Response::from_wire(&response_bytes)?;
 
 // Non-Rust clients use format byte 0x01 for protobuf
 ```

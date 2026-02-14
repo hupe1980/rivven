@@ -53,13 +53,16 @@ use std::sync::Arc;
 use thiserror::Error;
 
 /// AES-256-GCM nonce size in bytes
-const NONCE_SIZE: usize = 12;
+pub use crate::crypto::NONCE_SIZE;
 
 /// AES-256-GCM authentication tag size in bytes
-const TAG_SIZE: usize = 16;
+pub use crate::crypto::TAG_SIZE;
 
 /// AES-256 key size in bytes
-const KEY_SIZE: usize = 32;
+pub use crate::crypto::KEY_SIZE;
+
+/// Shared key material type
+pub use crate::crypto::{KeyInfo, KeyMaterial};
 
 /// Encryption header magic bytes
 const ENCRYPTION_MAGIC: [u8; 4] = [0x52, 0x56, 0x45, 0x4E]; // "RVEN"
@@ -438,9 +441,10 @@ impl ring::hkdf::KeyType for DataKeyLen {
 pub struct EncryptionManager {
     config: EncryptionConfig,
     master_key: MasterKey,
-    /// Current key for encryption (latest version)
-    data_key: LessSafeKey,
-    /// All known keys indexed by version (for decrypting old data)
+    /// All known keys indexed by version (for encrypting + decrypting)
+    ///
+    /// F-097: `parking_lot::RwLock` is intentional — critical sections are O(1)
+    /// HashMap lookups/inserts and never held across `.await` points.
     key_store: parking_lot::RwLock<HashMap<u32, LessSafeKey>>,
     rng: SystemRandom,
     current_key_version: AtomicU32,
@@ -461,9 +465,6 @@ impl EncryptionManager {
         let data_key_bytes = master_key.derive_data_key(config.aad_scope.as_bytes())?;
 
         let algo = ring_algorithm(config.algorithm);
-        let unbound_key = UnboundKey::new(algo, &data_key_bytes)
-            .map_err(|_| EncryptionError::InvalidKey("failed to create encryption key".into()))?;
-        let data_key = LessSafeKey::new(unbound_key);
 
         // Populate the key store with the initial key version
         let version = master_key.version();
@@ -476,7 +477,6 @@ impl EncryptionManager {
             config,
             current_key_version: AtomicU32::new(version),
             master_key,
-            data_key,
             key_store: parking_lot::RwLock::new(key_store),
             rng: SystemRandom::new(),
         }))
@@ -484,9 +484,14 @@ impl EncryptionManager {
 
     /// Rotate the data encryption key, deriving a new key from a new master key.
     /// Old keys are retained in the key store so existing data can still be decrypted.
+    ///
+    /// F-053 fix: The key is inserted into the store BEFORE the version is bumped,
+    /// ensuring that any concurrent decrypt using the new version can always find
+    /// the key. We use Acquire for the read and Release for the write to establish
+    /// a happens-before relationship.
     pub fn rotate_key(&self, new_master: MasterKey) -> Result<()> {
         let new_version = new_master.version();
-        if new_version <= self.current_key_version.load(Ordering::Relaxed) {
+        if new_version <= self.current_key_version.load(Ordering::Acquire) {
             return Err(EncryptionError::KeyRotation(
                 "new key version must be greater than current".into(),
             ));
@@ -537,34 +542,47 @@ impl EncryptionManager {
     }
 
     /// Generate a nonce from LSN (deterministic but unique per record)
-    fn generate_nonce(&self, lsn: u64) -> [u8; NONCE_SIZE] {
+    ///
+    /// F-063 fix: propagate RNG failure instead of silently using zero bytes.
+    fn generate_nonce(&self, lsn: u64) -> Result<[u8; NONCE_SIZE]> {
         let mut nonce = [0u8; NONCE_SIZE];
         // Use LSN as 8 bytes + 4 random bytes for uniqueness
         nonce[0..8].copy_from_slice(&lsn.to_be_bytes());
-        self.rng.fill(&mut nonce[8..12]).ok();
-        nonce
+        self.rng.fill(&mut nonce[8..12]).map_err(|_| {
+            EncryptionError::Encryption(
+                "RNG failure during nonce generation — refusing to encrypt with zero nonce bytes"
+                    .into(),
+            )
+        })?;
+        Ok(nonce)
     }
 
     /// Encrypt data with associated LSN for nonce derivation
+    ///
+    /// F-058 fix: uses key_store lookup by current_key_version instead of
+    /// the stale `self.data_key` field, so post-rotation encryptions use the
+    /// correct key.
     pub fn encrypt(&self, plaintext: &[u8], lsn: u64) -> Result<Vec<u8>> {
-        let nonce_bytes = self.generate_nonce(lsn);
+        let nonce_bytes = self.generate_nonce(lsn)?;
         let nonce = Nonce::assume_unique_for_key(nonce_bytes);
 
-        let header = EncryptedHeader::new(
-            self.config.algorithm,
-            self.current_key_version.load(Ordering::Relaxed),
-            nonce_bytes,
-        );
+        let version = self.current_key_version.load(Ordering::Acquire);
+        let header = EncryptedHeader::new(self.config.algorithm, version, nonce_bytes);
 
         // Allocate buffer: header + plaintext + tag
         let mut output = Vec::with_capacity(EncryptedHeader::SIZE + plaintext.len() + TAG_SIZE);
         output.extend_from_slice(&header.to_bytes());
         output.extend_from_slice(plaintext);
 
+        // F-058 fix: look up the current key from key_store (not self.data_key)
+        let store = self.key_store.read();
+        let key = store
+            .get(&version)
+            .ok_or(EncryptionError::KeyNotFound(version))?;
+
         // Encrypt in-place using separate tag method
         let ciphertext_start = EncryptedHeader::SIZE;
-        let tag = self
-            .data_key
+        let tag = key
             .seal_in_place_separate_tag(
                 nonce,
                 Aad::from(self.config.aad_scope.as_bytes()),
@@ -735,6 +753,20 @@ pub fn generate_key_file(path: &std::path::Path) -> Result<()> {
         let mut perms = fs::metadata(path)?.permissions();
         perms.set_mode(0o600);
         fs::set_permissions(path, perms)?;
+    }
+
+    // F-075: On Windows, restrict the key file as much as possible.
+    // Windows does not have Unix-style file modes; set read-only to limit
+    // exposure and warn the operator to verify ACLs manually.
+    #[cfg(windows)]
+    {
+        let mut perms = fs::metadata(path)?.permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(path, perms)?;
+        tracing::warn!(
+            path = %path.display(),
+            "Key file created on Windows \u{2014} manually verify file ACLs restrict access to current user only"
+        );
     }
 
     Ok(())

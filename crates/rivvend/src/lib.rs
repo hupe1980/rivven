@@ -22,6 +22,7 @@
 pub mod auth_handler;
 pub mod cli;
 pub mod cluster_server;
+pub mod framing;
 pub mod handler;
 pub mod partitioner;
 pub mod protocol;

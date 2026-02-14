@@ -360,30 +360,41 @@ impl GroupCommitWal {
     }
 
     /// Recover state from existing WAL files
+    ///
+    /// F-025 fix: Scans ALL WAL files to find the true max LSN, not just
+    /// the latest file. Each file is named with its starting LSN, so the
+    /// true max LSN is the file's starting LSN + its valid record count.
     async fn recover_state(config: &WalConfig) -> io::Result<(PathBuf, u64)> {
         let mut max_lsn = 0u64;
         let mut latest_file = None;
 
         if let Ok(entries) = std::fs::read_dir(&config.dir) {
+            // Collect all WAL files with their starting LSNs
+            let mut wal_files: Vec<(u64, PathBuf)> = Vec::new();
+
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().is_some_and(|e| e == "wal") {
                     if let Some(name) = path.file_stem() {
-                        if let Ok(lsn) = name.to_string_lossy().parse::<u64>() {
-                            if lsn >= max_lsn {
-                                max_lsn = lsn;
-                                latest_file = Some(path);
-                            }
+                        if let Ok(start_lsn) = name.to_string_lossy().parse::<u64>() {
+                            wal_files.push((start_lsn, path));
                         }
                     }
                 }
             }
-        }
 
-        // If we found a file, scan it to find the true max LSN
-        if let Some(ref file) = latest_file {
-            if let Ok(recovered_lsn) = Self::scan_wal_file(file).await {
-                max_lsn = recovered_lsn;
+            // Sort by starting LSN to process in order
+            wal_files.sort_by_key(|(lsn, _)| *lsn);
+
+            // Scan ALL WAL files to find the true max LSN
+            for (start_lsn, path) in &wal_files {
+                if let Ok(record_count) = Self::scan_wal_file(path).await {
+                    let file_max_lsn = start_lsn + record_count;
+                    if file_max_lsn >= max_lsn {
+                        max_lsn = file_max_lsn;
+                        latest_file = Some(path.clone());
+                    }
+                }
             }
         }
 
@@ -393,7 +404,7 @@ impl GroupCommitWal {
         Ok((file, max_lsn))
     }
 
-    /// Scan a WAL file to find the highest LSN
+    /// Scan a WAL file to find the highest LSN (F-023 fix: validates CRC)
     async fn scan_wal_file(path: &Path) -> io::Result<u64> {
         let data = tokio::fs::read(path).await?;
         let mut offset = 0;
@@ -412,6 +423,13 @@ impl GroupCommitWal {
                 break;
             }
 
+            let stored_crc = u32::from_be_bytes([
+                data[offset + 4],
+                data[offset + 5],
+                data[offset + 6],
+                data[offset + 7],
+            ]);
+
             let data_len = u32::from_be_bytes([
                 data[offset + 8],
                 data[offset + 9],
@@ -421,6 +439,23 @@ impl GroupCommitWal {
 
             let record_size = RECORD_HEADER_SIZE + data_len;
             if offset + record_size > data.len() {
+                break;
+            }
+
+            // F-023 fix: validate CRC during recovery to detect corruption
+            let record_data = &data[offset + RECORD_HEADER_SIZE..offset + record_size];
+            let mut hasher = Hasher::new();
+            hasher.update(record_data);
+            let computed_crc = hasher.finalize();
+
+            if computed_crc != stored_crc {
+                tracing::warn!(
+                    path = ?path,
+                    offset = offset,
+                    expected_crc = stored_crc,
+                    computed_crc = computed_crc,
+                    "WAL record CRC mismatch during recovery — stopping scan"
+                );
                 break;
             }
 
@@ -804,6 +839,7 @@ impl WalWriter {
     }
 
     fn write_batch(&mut self, data: &[u8]) -> io::Result<()> {
+        let bytes_written = data.len() as u64;
         self.file.write_all(data)?;
         self.file.flush()?;
 
@@ -818,7 +854,11 @@ impl WalWriter {
             }
         }
 
-        self.position += data.len() as u64;
+        // F-026 fix: Advance position only AFTER sync succeeds.
+        // If write_all, flush, or sync fail, the `?` operator returns
+        // early and position remains unchanged, preventing the file
+        // position from reflecting unsynced data.
+        self.position += bytes_written;
         Ok(())
     }
 

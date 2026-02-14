@@ -322,6 +322,25 @@ impl PasswordHash {
         Self::constant_time_compare(&stored_key, &self.stored_key)
     }
 
+    /// Async version of `new` — runs PBKDF2 (600k iterations) in a blocking
+    /// thread pool so the tokio runtime is not blocked (F-043 fix).
+    pub async fn new_async(password: &str) -> Self {
+        let password = password.to_string();
+        tokio::task::spawn_blocking(move || Self::new(&password))
+            .await
+            .expect("PasswordHash::new_async: spawn_blocking panicked")
+    }
+
+    /// Async version of `verify` — runs PBKDF2 (600k iterations) in a blocking
+    /// thread pool so the tokio runtime is not blocked (F-043 fix).
+    pub async fn verify_async(&self, password: &str) -> bool {
+        let hash = self.clone();
+        let password = password.to_string();
+        tokio::task::spawn_blocking(move || hash.verify(&password))
+            .await
+            .expect("PasswordHash::verify_async: spawn_blocking panicked")
+    }
+
     /// Constant-time comparison to prevent timing attacks
     pub fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
         if a.len() != b.len() {
@@ -560,6 +579,36 @@ impl AclIndex {
 // Session and Token
 // ============================================================================
 
+// ============================================================================
+// Unified Session Trait (F-006)
+// ============================================================================
+
+/// Unified session trait for all authentication mechanisms.
+///
+/// Provides a common interface for session handling across:
+/// - `AuthSession` (RBAC/ACL with SASL authentication)
+/// - `ServiceSession` (API keys, mTLS, OIDC client credentials)
+///
+/// This enables handler code to work with any authenticated session
+/// without knowing the specific authentication mechanism.
+pub trait Session: Send + Sync + std::fmt::Debug {
+    /// Unique session identifier
+    fn session_id(&self) -> &str;
+
+    /// The authenticated principal/identity name
+    fn principal(&self) -> &str;
+
+    /// Whether this session has expired
+    fn is_expired(&self) -> bool;
+
+    /// Client IP address that created this session
+    fn client_ip(&self) -> &str;
+}
+
+// ============================================================================
+// Auth Session
+// ============================================================================
+
 /// An authenticated session
 #[derive(Debug, Clone)]
 pub struct AuthSession {
@@ -585,10 +634,28 @@ pub struct AuthSession {
     pub client_ip: String,
 }
 
+impl Session for AuthSession {
+    fn session_id(&self) -> &str {
+        &self.id
+    }
+
+    fn principal(&self) -> &str {
+        &self.principal_name
+    }
+
+    fn is_expired(&self) -> bool {
+        Instant::now() >= self.expires_at
+    }
+
+    fn client_ip(&self) -> &str {
+        &self.client_ip
+    }
+}
+
 impl AuthSession {
     /// Check if the session has expired
     pub fn is_expired(&self) -> bool {
-        Instant::now() >= self.expires_at
+        <Self as Session>::is_expired(self)
     }
 
     /// Check if this session has a specific permission on a resource
@@ -649,12 +716,17 @@ pub struct AuthConfig {
 
 impl Default for AuthConfig {
     fn default() -> Self {
+        // F-069: Authentication is enabled by default for security.
+        // Disable explicitly in development/testing via AuthConfig { require_authentication: false, .. }.
+        #[cfg(not(test))]
+        tracing::info!("AuthConfig::default() — authentication and ACLs ENABLED by default.");
+
         AuthConfig {
             session_timeout: Duration::from_secs(3600), // 1 hour
             max_failed_attempts: 5,
             lockout_duration: Duration::from_secs(300), // 5 minutes
-            require_authentication: false,              // Default to open for dev
-            enable_acls: false,
+            require_authentication: true,               // F-069: Secure by default
+            enable_acls: true,                          // F-069: ACLs on by default
             default_deny: true,
         }
     }
@@ -665,6 +737,10 @@ struct FailedAttemptTracker {
     attempts: HashMap<String, Vec<Instant>>,
     lockouts: HashMap<String, Instant>,
 }
+
+/// F-076 fix: Maximum number of tracked IP/principal entries to prevent
+/// unbounded memory growth from distributed brute-force attacks.
+const MAX_TRACKED_IDENTIFIERS: usize = 10_000;
 
 impl FailedAttemptTracker {
     fn new() -> Self {
@@ -695,6 +771,32 @@ impl FailedAttemptTracker {
 
         // Clean up old lockouts
         self.lockouts.retain(|_, t| t.elapsed() < lockout_duration);
+
+        // F-076 fix: enforce hard cap on tracked identifiers.
+        // When the limit is reached, evict the oldest entries (by last
+        // attempt time) to make room. This bounds memory usage under
+        // distributed brute-force attacks targeting many IPs.
+        if self.attempts.len() >= MAX_TRACKED_IDENTIFIERS && !self.attempts.contains_key(identifier)
+        {
+            // Evict entries with no recent attempts first
+            self.attempts.retain(|_, v| !v.is_empty());
+
+            // If still over limit, evict the oldest entries
+            if self.attempts.len() >= MAX_TRACKED_IDENTIFIERS {
+                let mut entries: Vec<(String, Instant)> = self
+                    .attempts
+                    .iter()
+                    .filter_map(|(k, v)| v.last().map(|t| (k.clone(), *t)))
+                    .collect();
+                entries.sort_by_key(|(_, t)| *t);
+                // Remove oldest 10% to amortize eviction cost
+                let to_remove = entries.len() / 10;
+                for (key, _) in entries.into_iter().take(to_remove.max(1)) {
+                    self.attempts.remove(&key);
+                    self.lockouts.remove(&key);
+                }
+            }
+        }
 
         // Get or create attempt list
         let attempts = self.attempts.entry(identifier.to_string()).or_default();
@@ -772,6 +874,7 @@ pub struct AuthManager {
     config: AuthConfig,
 
     /// Principals (users/service accounts)
+    /// F-097: `parking_lot` — O(1) principal lookup, never held across `.await`.
     principals: RwLock<HashMap<String, Principal>>,
 
     /// Roles
@@ -1552,7 +1655,9 @@ impl SaslScramAuth {
                 let rng = SystemRandom::new();
                 let mut fake_salt = vec![0u8; 32];
                 rng.fill(&mut fake_salt).expect("Failed to generate salt");
-                (fake_salt, 4096)
+                // F-060 fix: Use the same iteration count as real users (600000)
+                // to prevent leaking user existence via timing differences.
+                (fake_salt, 600_000)
             }
         };
 

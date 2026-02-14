@@ -180,6 +180,16 @@ impl PartitionReplication {
 
     /// Record appended locally (called by storage layer)
     pub async fn record_appended(&self, offset: u64) -> Result<()> {
+        // F-015 fix: Enforce min-ISR before accepting writes.
+        // If the ISR has fallen below the configured minimum, reject the write
+        // to prevent data loss from under-replicated partitions.
+        if self.is_leader && !self.has_min_isr().await {
+            return Err(ClusterError::NotEnoughIsr {
+                required: self.config.min_isr,
+                current: self.isr.read().await.len() as u16,
+            });
+        }
+
         // Update our log end offset
         self.log_end_offset.store(offset + 1, Ordering::SeqCst);
 
@@ -306,10 +316,10 @@ impl PartitionReplication {
         drop(isr);
         drop(replicas);
 
-        let current_hwm = self.high_watermark.load(Ordering::SeqCst);
-        if min_leo > current_hwm {
-            self.high_watermark.store(min_leo, Ordering::SeqCst);
-
+        // F-010 fix: Use fetch_max to atomically advance HWM without regression.
+        // load+store was racy — two concurrent callers could regress HWM.
+        let prev_hwm = self.high_watermark.fetch_max(min_leo, Ordering::SeqCst);
+        if min_leo > prev_hwm {
             // Complete any pending acks
             self.complete_pending_acks(min_leo).await;
         }
@@ -585,6 +595,8 @@ impl ReplicationManager {
             let cmd = crate::metadata::MetadataCommand::UpdatePartitionIsr {
                 partition: partition_id.clone(),
                 isr: isr_vec.clone(),
+                // F-011 fix: attach current leader epoch for fencing
+                leader_epoch: partition.leader_epoch(),
             };
 
             match node.propose(cmd).await {
@@ -872,7 +884,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_hwm_advancement() {
-        let config = ReplicationConfig::default();
+        let config = ReplicationConfig {
+            // Use min_isr=1 so writes succeed with only the leader in ISR.
+            // The test verifies HWM advancement after replica catch-up, not
+            // min-ISR enforcement (covered by test_min_isr_enforcement).
+            min_isr: 1,
+            ..ReplicationConfig::default()
+        };
         let partition_id = PartitionId::new("test", 0);
         let mut replication = PartitionReplication::new(
             partition_id.clone(),

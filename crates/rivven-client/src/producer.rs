@@ -852,7 +852,7 @@ async fn fetch_topic_metadata(inner: &ProducerInner, topic: &str) -> Result<u32>
         topic: topic.to_string(),
     };
 
-    let request_bytes = request.to_wire(rivven_protocol::WireFormat::Postcard)?;
+    let request_bytes = request.to_wire(rivven_protocol::WireFormat::Postcard, 0u32)?;
     let len = request_bytes.len() as u32;
     writer
         .write_all(&len.to_be_bytes())
@@ -880,7 +880,8 @@ async fn fetch_topic_metadata(inner: &ProducerInner, topic: &str) -> Result<u32>
         .await
         .map_err(|e| Error::IoError(e.to_string()))?;
 
-    let (response, _format) = Response::from_wire(&response_buf).map_err(Error::ProtocolError)?;
+    let (response, _format, _correlation_id) =
+        Response::from_wire(&response_buf).map_err(Error::ProtocolError)?;
 
     match response {
         Response::Metadata { name, partitions } => {
@@ -1053,7 +1054,7 @@ async fn send_batch(
         };
 
         // Serialize and write with wire format (no flush yet - BufWriter coalesces)
-        let request_bytes = request.to_wire(rivven_protocol::WireFormat::Postcard)?;
+        let request_bytes = request.to_wire(rivven_protocol::WireFormat::Postcard, 0u32)?;
         let len = request_bytes.len() as u32;
         writer
             .write_all(&len.to_be_bytes())
@@ -1088,7 +1089,7 @@ async fn send_batch(
             .await
             .map_err(|e| Error::IoError(e.to_string()))?;
 
-        let (response, _format) =
+        let (response, _format, _correlation_id) =
             Response::from_wire(&response_buf).map_err(Error::ProtocolError)?;
 
         match response {

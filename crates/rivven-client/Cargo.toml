@@ -10,6 +10,7 @@ description = "High-performance async client for Rivven event streaming platform
 [features]
 default = []
 tls = ["rivven-core/tls"]
+schema-registry = ["dep:reqwest"]
 
 [dependencies]
 rivven-core = { workspace = true }
@@ -24,6 +25,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
 base64 = "0.22"
+reqwest = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

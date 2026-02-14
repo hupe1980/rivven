@@ -123,6 +123,8 @@ tokio-util = { version = "0.7", features = ["compat"], optional = true }
 
 # Encryption (AES-256-GCM for column-level encryption)
 aes-gcm = "0.10"
+# Shared crypto primitives from rivven-core
+rivven-core = { path = "../rivven-core", default-features = false }
 # Apache Avro serialization (binary encoding with schema evolution)
 apache-avro = { workspace = true }
 # Ed25519 for MariaDB client_ed25519 authentication  

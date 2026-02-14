@@ -79,7 +79,7 @@ pub struct DeleteRecordsResult {
 ///
 /// **WARNING**: Variant order must remain stable for postcard serialization compatibility.
 /// Adding new variants should only be done at the end of the enum.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub enum Request {
     /// Authenticate with username/password (SASL/PLAIN compatible)
     Authenticate { username: String, password: String },
@@ -354,6 +354,271 @@ pub enum Request {
         /// Topics to describe (empty = all)
         topics: Vec<String>,
     },
+
+    /// Protocol version handshake (F-094)
+    ///
+    /// Sent by the client as the first message after connecting.
+    /// The server validates the protocol version and returns compatibility info.
+    Handshake {
+        /// Client's protocol version (must match `PROTOCOL_VERSION`)
+        protocol_version: u32,
+        /// Optional client identifier for diagnostics
+        client_id: String,
+    },
+}
+
+// F-074 fix: Manual Debug impl to redact credentials from log output.
+// `Request::Authenticate { password }` and SASL/SCRAM variants contain
+// secrets that must never appear in debug logs.
+impl std::fmt::Debug for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Authenticate { username, .. } => f
+                .debug_struct("Authenticate")
+                .field("username", username)
+                .field("password", &"[REDACTED]")
+                .finish(),
+            Self::SaslAuthenticate { mechanism, .. } => f
+                .debug_struct("SaslAuthenticate")
+                .field("mechanism", mechanism)
+                .field("auth_bytes", &"[REDACTED]")
+                .finish(),
+            Self::ScramClientFirst { .. } => f
+                .debug_struct("ScramClientFirst")
+                .field("message", &"[REDACTED]")
+                .finish(),
+            Self::ScramClientFinal { .. } => f
+                .debug_struct("ScramClientFinal")
+                .field("message", &"[REDACTED]")
+                .finish(),
+            Self::Publish {
+                topic,
+                partition,
+                key,
+                value,
+            } => f
+                .debug_struct("Publish")
+                .field("topic", topic)
+                .field("partition", partition)
+                .field("key", key)
+                .field("value_len", &value.len())
+                .finish(),
+            Self::Consume {
+                topic,
+                partition,
+                offset,
+                max_messages,
+                isolation_level,
+            } => f
+                .debug_struct("Consume")
+                .field("topic", topic)
+                .field("partition", partition)
+                .field("offset", offset)
+                .field("max_messages", max_messages)
+                .field("isolation_level", isolation_level)
+                .finish(),
+            Self::CreateTopic { name, partitions } => f
+                .debug_struct("CreateTopic")
+                .field("name", name)
+                .field("partitions", partitions)
+                .finish(),
+            Self::ListTopics => write!(f, "ListTopics"),
+            Self::DeleteTopic { name } => {
+                f.debug_struct("DeleteTopic").field("name", name).finish()
+            }
+            Self::CommitOffset {
+                consumer_group,
+                topic,
+                partition,
+                offset,
+            } => f
+                .debug_struct("CommitOffset")
+                .field("consumer_group", consumer_group)
+                .field("topic", topic)
+                .field("partition", partition)
+                .field("offset", offset)
+                .finish(),
+            Self::GetOffset {
+                consumer_group,
+                topic,
+                partition,
+            } => f
+                .debug_struct("GetOffset")
+                .field("consumer_group", consumer_group)
+                .field("topic", topic)
+                .field("partition", partition)
+                .finish(),
+            Self::GetMetadata { topic } => {
+                f.debug_struct("GetMetadata").field("topic", topic).finish()
+            }
+            Self::GetClusterMetadata { topics } => f
+                .debug_struct("GetClusterMetadata")
+                .field("topics", topics)
+                .finish(),
+            Self::Ping => write!(f, "Ping"),
+            Self::GetOffsetBounds { topic, partition } => f
+                .debug_struct("GetOffsetBounds")
+                .field("topic", topic)
+                .field("partition", partition)
+                .finish(),
+            Self::ListGroups => write!(f, "ListGroups"),
+            Self::DescribeGroup { consumer_group } => f
+                .debug_struct("DescribeGroup")
+                .field("consumer_group", consumer_group)
+                .finish(),
+            Self::DeleteGroup { consumer_group } => f
+                .debug_struct("DeleteGroup")
+                .field("consumer_group", consumer_group)
+                .finish(),
+            Self::GetOffsetForTimestamp {
+                topic,
+                partition,
+                timestamp_ms,
+            } => f
+                .debug_struct("GetOffsetForTimestamp")
+                .field("topic", topic)
+                .field("partition", partition)
+                .field("timestamp_ms", timestamp_ms)
+                .finish(),
+            Self::InitProducerId { producer_id } => f
+                .debug_struct("InitProducerId")
+                .field("producer_id", producer_id)
+                .finish(),
+            Self::IdempotentPublish {
+                topic,
+                partition,
+                producer_id,
+                producer_epoch,
+                sequence,
+                ..
+            } => f
+                .debug_struct("IdempotentPublish")
+                .field("topic", topic)
+                .field("partition", partition)
+                .field("producer_id", producer_id)
+                .field("producer_epoch", producer_epoch)
+                .field("sequence", sequence)
+                .finish(),
+            Self::BeginTransaction {
+                txn_id,
+                producer_id,
+                producer_epoch,
+                timeout_ms,
+            } => f
+                .debug_struct("BeginTransaction")
+                .field("txn_id", txn_id)
+                .field("producer_id", producer_id)
+                .field("producer_epoch", producer_epoch)
+                .field("timeout_ms", timeout_ms)
+                .finish(),
+            Self::AddPartitionsToTxn {
+                txn_id,
+                producer_id,
+                producer_epoch,
+                partitions,
+            } => f
+                .debug_struct("AddPartitionsToTxn")
+                .field("txn_id", txn_id)
+                .field("producer_id", producer_id)
+                .field("producer_epoch", producer_epoch)
+                .field("partitions", partitions)
+                .finish(),
+            Self::TransactionalPublish {
+                txn_id,
+                topic,
+                partition,
+                producer_id,
+                producer_epoch,
+                sequence,
+                ..
+            } => f
+                .debug_struct("TransactionalPublish")
+                .field("txn_id", txn_id)
+                .field("topic", topic)
+                .field("partition", partition)
+                .field("producer_id", producer_id)
+                .field("producer_epoch", producer_epoch)
+                .field("sequence", sequence)
+                .finish(),
+            Self::AddOffsetsToTxn {
+                txn_id,
+                producer_id,
+                producer_epoch,
+                group_id,
+                offsets,
+            } => f
+                .debug_struct("AddOffsetsToTxn")
+                .field("txn_id", txn_id)
+                .field("producer_id", producer_id)
+                .field("producer_epoch", producer_epoch)
+                .field("group_id", group_id)
+                .field("offsets", offsets)
+                .finish(),
+            Self::CommitTransaction {
+                txn_id,
+                producer_id,
+                producer_epoch,
+            } => f
+                .debug_struct("CommitTransaction")
+                .field("txn_id", txn_id)
+                .field("producer_id", producer_id)
+                .field("producer_epoch", producer_epoch)
+                .finish(),
+            Self::AbortTransaction {
+                txn_id,
+                producer_id,
+                producer_epoch,
+            } => f
+                .debug_struct("AbortTransaction")
+                .field("txn_id", txn_id)
+                .field("producer_id", producer_id)
+                .field("producer_epoch", producer_epoch)
+                .finish(),
+            Self::DescribeQuotas { entities } => f
+                .debug_struct("DescribeQuotas")
+                .field("entities", entities)
+                .finish(),
+            Self::AlterQuotas { alterations } => f
+                .debug_struct("AlterQuotas")
+                .field("alterations", alterations)
+                .finish(),
+            Self::AlterTopicConfig { topic, configs } => f
+                .debug_struct("AlterTopicConfig")
+                .field("topic", topic)
+                .field("configs", configs)
+                .finish(),
+            Self::CreatePartitions {
+                topic,
+                new_partition_count,
+                assignments,
+            } => f
+                .debug_struct("CreatePartitions")
+                .field("topic", topic)
+                .field("new_partition_count", new_partition_count)
+                .field("assignments", assignments)
+                .finish(),
+            Self::DeleteRecords {
+                topic,
+                partition_offsets,
+            } => f
+                .debug_struct("DeleteRecords")
+                .field("topic", topic)
+                .field("partition_offsets", partition_offsets)
+                .finish(),
+            Self::DescribeTopicConfigs { topics } => f
+                .debug_struct("DescribeTopicConfigs")
+                .field("topics", topics)
+                .finish(),
+            Self::Handshake {
+                protocol_version,
+                client_id,
+            } => f
+                .debug_struct("Handshake")
+                .field("protocol_version", protocol_version)
+                .field("client_id", client_id)
+                .finish(),
+        }
+    }
 }
 
 /// Protocol response messages
@@ -579,6 +844,16 @@ pub enum Response {
         /// Configuration descriptions per topic
         configs: Vec<TopicConfigDescription>,
     },
+
+    /// Protocol version handshake response (F-094)
+    HandshakeResult {
+        /// Server's protocol version
+        server_version: u32,
+        /// Whether the client version is compatible
+        compatible: bool,
+        /// Human-readable message (e.g. reason for incompatibility)
+        message: String,
+    },
 }
 
 impl Request {
@@ -602,19 +877,23 @@ impl Request {
 
     /// Serialize request with wire format prefix
     ///
-    /// Wire format: `[format_byte][payload]`
+    /// Wire format: `[format_byte][correlation_id (4 bytes BE)][payload]`
     /// - format_byte: 0x00 = postcard, 0x01 = protobuf
+    /// - correlation_id: 4-byte big-endian u32 for request-response matching
     /// - payload: serialized message
     ///
     /// Note: Length prefix is NOT included (handled by transport layer)
     #[inline]
-    pub fn to_wire(&self, format: crate::WireFormat) -> Result<Vec<u8>> {
+    pub fn to_wire(&self, format: crate::WireFormat, correlation_id: u32) -> Result<Vec<u8>> {
         match format {
             crate::WireFormat::Postcard => {
-                let payload = postcard::to_allocvec(self)?;
-                let mut result = Vec::with_capacity(1 + payload.len());
+                // F-037 fix: Single allocation — serialize directly into the output
+                // Vec via `postcard::to_extend` instead of double-allocating
+                // (to_allocvec → intermediate Vec → copy into result Vec).
+                let mut result = Vec::with_capacity(crate::WIRE_HEADER_SIZE + 128);
                 result.push(format.as_byte());
-                result.extend_from_slice(&payload);
+                result.extend_from_slice(&correlation_id.to_be_bytes());
+                let result = postcard::to_extend(self, result)?;
                 Ok(result)
             }
             crate::WireFormat::Protobuf => {
@@ -622,8 +901,9 @@ impl Request {
                 #[cfg(feature = "protobuf")]
                 {
                     let payload = self.to_proto_bytes()?;
-                    let mut result = Vec::with_capacity(1 + payload.len());
+                    let mut result = Vec::with_capacity(crate::WIRE_HEADER_SIZE + payload.len());
                     result.push(format.as_byte());
+                    result.extend_from_slice(&correlation_id.to_be_bytes());
                     result.extend_from_slice(&payload);
                     Ok(result)
                 }
@@ -639,13 +919,13 @@ impl Request {
 
     /// Deserialize request with format auto-detection
     ///
-    /// Detects format from first byte and deserializes accordingly.
-    /// Returns the deserialized request and the detected format.
+    /// Detects format from first byte, reads correlation_id, and deserializes accordingly.
+    /// Returns the deserialized request, the detected format, and the correlation_id.
     #[inline]
-    pub fn from_wire(data: &[u8]) -> Result<(Self, crate::WireFormat)> {
-        if data.is_empty() {
+    pub fn from_wire(data: &[u8]) -> Result<(Self, crate::WireFormat, u32)> {
+        if data.len() < crate::WIRE_HEADER_SIZE {
             return Err(crate::ProtocolError::Serialization(
-                "Empty wire data".into(),
+                "Wire data too short (need format byte + correlation_id)".into(),
             ));
         }
 
@@ -657,18 +937,19 @@ impl Request {
             ))
         })?;
 
-        let payload = &data[1..];
+        let correlation_id = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
+        let payload = &data[crate::WIRE_HEADER_SIZE..];
 
         match format {
             crate::WireFormat::Postcard => {
                 let request = postcard::from_bytes(payload)?;
-                Ok((request, format))
+                Ok((request, format, correlation_id))
             }
             crate::WireFormat::Protobuf => {
                 #[cfg(feature = "protobuf")]
                 {
                     let request = Self::from_proto_bytes(payload)?;
-                    Ok((request, format))
+                    Ok((request, format, correlation_id))
                 }
                 #[cfg(not(feature = "protobuf"))]
                 {
@@ -696,21 +977,24 @@ impl Response {
 
     /// Serialize response with wire format prefix
     #[inline]
-    pub fn to_wire(&self, format: crate::WireFormat) -> Result<Vec<u8>> {
+    pub fn to_wire(&self, format: crate::WireFormat, correlation_id: u32) -> Result<Vec<u8>> {
         match format {
             crate::WireFormat::Postcard => {
-                let payload = postcard::to_allocvec(self)?;
-                let mut result = Vec::with_capacity(1 + payload.len());
+                // F-037 fix: Single allocation — serialize directly into the output
+                // Vec via `postcard::to_extend` instead of double-allocating.
+                let mut result = Vec::with_capacity(crate::WIRE_HEADER_SIZE + 128);
                 result.push(format.as_byte());
-                result.extend_from_slice(&payload);
+                result.extend_from_slice(&correlation_id.to_be_bytes());
+                let result = postcard::to_extend(self, result)?;
                 Ok(result)
             }
             crate::WireFormat::Protobuf => {
                 #[cfg(feature = "protobuf")]
                 {
                     let payload = self.to_proto_bytes()?;
-                    let mut result = Vec::with_capacity(1 + payload.len());
+                    let mut result = Vec::with_capacity(crate::WIRE_HEADER_SIZE + payload.len());
                     result.push(format.as_byte());
+                    result.extend_from_slice(&correlation_id.to_be_bytes());
                     result.extend_from_slice(&payload);
                     Ok(result)
                 }
@@ -726,10 +1010,10 @@ impl Response {
 
     /// Deserialize response with format auto-detection
     #[inline]
-    pub fn from_wire(data: &[u8]) -> Result<(Self, crate::WireFormat)> {
-        if data.is_empty() {
+    pub fn from_wire(data: &[u8]) -> Result<(Self, crate::WireFormat, u32)> {
+        if data.len() < crate::WIRE_HEADER_SIZE {
             return Err(crate::ProtocolError::Serialization(
-                "Empty wire data".into(),
+                "Wire data too short (need format byte + correlation_id)".into(),
             ));
         }
 
@@ -741,18 +1025,19 @@ impl Response {
             ))
         })?;
 
-        let payload = &data[1..];
+        let correlation_id = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
+        let payload = &data[crate::WIRE_HEADER_SIZE..];
 
         match format {
             crate::WireFormat::Postcard => {
                 let response = postcard::from_bytes(payload)?;
-                Ok((response, format))
+                Ok((response, format, correlation_id))
             }
             crate::WireFormat::Protobuf => {
                 #[cfg(feature = "protobuf")]
                 {
                     let response = Self::from_proto_bytes(payload)?;
-                    Ok((response, format))
+                    Ok((response, format, correlation_id))
                 }
                 #[cfg(not(feature = "protobuf"))]
                 {
@@ -818,15 +1103,16 @@ mod tests {
     fn test_request_wire_roundtrip() {
         let request = Request::Ping;
 
-        // Serialize with format prefix
-        let wire_bytes = request.to_wire(crate::WireFormat::Postcard).unwrap();
+        // Serialize with format prefix and correlation_id
+        let wire_bytes = request.to_wire(crate::WireFormat::Postcard, 42).unwrap();
 
         // First byte should be format identifier
         assert_eq!(wire_bytes[0], 0x00); // Postcard format
 
         // Deserialize with auto-detection
-        let (decoded, format) = Request::from_wire(&wire_bytes).unwrap();
+        let (decoded, format, correlation_id) = Request::from_wire(&wire_bytes).unwrap();
         assert_eq!(format, crate::WireFormat::Postcard);
+        assert_eq!(correlation_id, 42);
         assert!(matches!(decoded, Request::Ping));
     }
 
@@ -834,15 +1120,16 @@ mod tests {
     fn test_response_wire_roundtrip() {
         let response = Response::Pong;
 
-        // Serialize with format prefix
-        let wire_bytes = response.to_wire(crate::WireFormat::Postcard).unwrap();
+        // Serialize with format prefix and correlation_id
+        let wire_bytes = response.to_wire(crate::WireFormat::Postcard, 99).unwrap();
 
         // First byte should be format identifier
         assert_eq!(wire_bytes[0], 0x00); // Postcard format
 
         // Deserialize with auto-detection
-        let (decoded, format) = Response::from_wire(&wire_bytes).unwrap();
+        let (decoded, format, correlation_id) = Response::from_wire(&wire_bytes).unwrap();
         assert_eq!(format, crate::WireFormat::Postcard);
+        assert_eq!(correlation_id, 99);
         assert!(matches!(decoded, Response::Pong));
     }
 
@@ -863,11 +1150,12 @@ mod tests {
             value: Bytes::from("hello world"),
         };
 
-        let wire_bytes = request.to_wire(crate::WireFormat::Postcard).unwrap();
+        let wire_bytes = request.to_wire(crate::WireFormat::Postcard, 1).unwrap();
         assert_eq!(wire_bytes[0], 0x00);
 
-        let (decoded, format) = Request::from_wire(&wire_bytes).unwrap();
+        let (decoded, format, correlation_id) = Request::from_wire(&wire_bytes).unwrap();
         assert_eq!(format, crate::WireFormat::Postcard);
+        assert_eq!(correlation_id, 1);
 
         // Verify the decoded request matches
         if let Request::Publish {
@@ -888,11 +1176,12 @@ mod tests {
             partition: 7,
         };
 
-        let wire_bytes = response.to_wire(crate::WireFormat::Postcard).unwrap();
+        let wire_bytes = response.to_wire(crate::WireFormat::Postcard, 2).unwrap();
         assert_eq!(wire_bytes[0], 0x00);
 
-        let (decoded, format) = Response::from_wire(&wire_bytes).unwrap();
+        let (decoded, format, correlation_id) = Response::from_wire(&wire_bytes).unwrap();
         assert_eq!(format, crate::WireFormat::Postcard);
+        assert_eq!(correlation_id, 2);
 
         if let Response::Published { offset, partition } = decoded {
             assert_eq!(offset, 12345);

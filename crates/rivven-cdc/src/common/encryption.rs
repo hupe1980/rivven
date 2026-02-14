@@ -32,6 +32,7 @@ use aes_gcm::{
     Aes256Gcm, Nonce,
 };
 use rand::{rngs::OsRng, RngCore};
+use rivven_core::crypto::{KeyInfo, KeyMaterial, KEY_SIZE};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -215,75 +216,68 @@ impl EncryptionConfigBuilder {
 
 /// Encryption key with metadata.
 ///
-/// Key material is zeroized on `Drop` (M-19 fix) to prevent recovery from
-/// core dumps or swap. The `Clone` implementation deliberately copies the
-/// key material (needed for key rotation); callers should minimize clones.
+/// Wraps [`KeyMaterial`] from `rivven-core::crypto` for the raw key bytes
+/// and [`KeyInfo`] for metadata. Key material is zeroized on drop via
+/// the `KeyMaterial` implementation.
 pub struct EncryptionKey {
-    /// Key ID
-    pub id: String,
-    /// Key version
-    pub version: u32,
+    /// Key metadata (id, version, created_at, active)
+    pub info: KeyInfo,
     /// Raw key material (32 bytes for AES-256)
-    key_material: Vec<u8>,
-    /// Creation timestamp
-    pub created_at: u64,
-    /// Whether this key is active for encryption
-    pub active: bool,
+    material: KeyMaterial,
+}
+
+impl EncryptionKey {
+    /// Key ID (convenience accessor)
+    pub fn id(&self) -> &str {
+        &self.info.id
+    }
+
+    /// Key version (convenience accessor)
+    pub fn version(&self) -> u32 {
+        self.info.version
+    }
+
+    /// Creation timestamp (convenience accessor)
+    pub fn created_at(&self) -> u64 {
+        self.info.created_at
+    }
+
+    /// Whether this key is active (convenience accessor)
+    pub fn active(&self) -> bool {
+        self.info.active
+    }
 }
 
 impl Clone for EncryptionKey {
     fn clone(&self) -> Self {
         Self {
-            id: self.id.clone(),
-            version: self.version,
-            key_material: self.key_material.clone(),
-            created_at: self.created_at,
-            active: self.active,
+            info: self.info.clone(),
+            material: self.material.clone(),
         }
-    }
-}
-
-impl Drop for EncryptionKey {
-    fn drop(&mut self) {
-        // Securely zeroize key material to prevent recovery from freed memory.
-        // Uses `write_volatile` + compiler fence to prevent the optimizer from
-        // eliding the zeroing (the "dead store elimination" problem).
-        for byte in self.key_material.iter_mut() {
-            // SAFETY: byte is a valid, aligned &mut u8
-            unsafe { std::ptr::write_volatile(byte, 0) };
-        }
-        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
     }
 }
 
 impl EncryptionKey {
     /// Create a new encryption key.
     pub fn new(id: impl Into<String>, key_material: Vec<u8>) -> Result<Self> {
-        if key_material.len() != 32 {
-            return Err(CdcError::replication("Key must be 32 bytes for AES-256"));
-        }
+        let material = KeyMaterial::from_bytes(&key_material)
+            .ok_or_else(|| CdcError::replication("Key must be 32 bytes for AES-256"))?;
         Ok(Self {
-            id: id.into(),
-            version: 1,
-            key_material,
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            active: true,
+            info: KeyInfo::new(id, 1),
+            material,
         })
     }
 
     /// Generate a random key using secure random.
     pub fn generate(id: impl Into<String>) -> Result<Self> {
-        let mut key_material = vec![0u8; 32];
-        OsRng.fill_bytes(&mut key_material);
-        Self::new(id, key_material)
+        let mut key_bytes = vec![0u8; KEY_SIZE];
+        OsRng.fill_bytes(&mut key_bytes);
+        Self::new(id, key_bytes)
     }
 
     /// Create an AEAD cipher.
     fn to_cipher(&self) -> Result<Aes256Gcm> {
-        Aes256Gcm::new_from_slice(&self.key_material)
+        Aes256Gcm::new_from_slice(self.material.as_bytes())
             .map_err(|_| CdcError::replication("Invalid key material"))
     }
 }
@@ -324,7 +318,7 @@ impl MemoryKeyProvider {
 
     /// Create with a specific key.
     pub fn with_key(key: EncryptionKey) -> Self {
-        let key_id = key.id.clone();
+        let key_id = key.id().to_string();
         let mut keys = HashMap::new();
         keys.insert(key_id.clone(), key);
         Self {
@@ -356,7 +350,7 @@ impl KeyProvider for MemoryKeyProvider {
 
     async fn store_key(&self, key: EncryptionKey) -> Result<()> {
         let mut keys = self.keys.write().await;
-        keys.insert(key.id.clone(), key);
+        keys.insert(key.id().to_string(), key);
         Ok(())
     }
 
@@ -366,13 +360,13 @@ impl KeyProvider for MemoryKeyProvider {
         // Deactivate old key
         let mut keys = self.keys.write().await;
         if let Some(old) = keys.get_mut(key_id) {
-            old.active = false;
+            old.info.active = false;
         }
 
         // Store new key with incremented version
         let mut versioned_key = new_key;
         if let Some(old) = keys.get(key_id) {
-            versioned_key.version = old.version + 1;
+            versioned_key.info.version = old.version() + 1;
         }
 
         let key_clone = versioned_key.clone();
@@ -482,14 +476,14 @@ impl<P: KeyProvider> FieldEncryptor<P> {
                 for field in &fields_to_encrypt {
                     if let Some(value) = obj.get(field) {
                         let plaintext = value.to_string();
-                        match self.encrypt_value(&cipher, &plaintext, &key.id) {
+                        match self.encrypt_value(&cipher, &plaintext, key.id()) {
                             Ok(ciphertext) => {
                                 obj.insert(
                                     field.clone(),
                                     serde_json::json!({
                                         "__encrypted": true,
-                                        "__key_id": key.id,
-                                        "__key_version": key.version,
+                                        "__key_id": key.id(),
+                                        "__key_version": key.version(),
                                         "__value": ciphertext,
                                     }),
                                 );
@@ -513,14 +507,14 @@ impl<P: KeyProvider> FieldEncryptor<P> {
                 for field in &fields_to_encrypt {
                     if let Some(value) = obj.get(field) {
                         let plaintext = value.to_string();
-                        match self.encrypt_value(&cipher, &plaintext, &key.id) {
+                        match self.encrypt_value(&cipher, &plaintext, key.id()) {
                             Ok(ciphertext) => {
                                 obj.insert(
                                     field.clone(),
                                     serde_json::json!({
                                         "__encrypted": true,
-                                        "__key_id": key.id,
-                                        "__key_version": key.version,
+                                        "__key_id": key.id(),
+                                        "__key_version": key.version(),
                                         "__value": ciphertext,
                                     }),
                                 );
@@ -868,9 +862,9 @@ mod tests {
     #[test]
     fn test_encryption_key_generation() {
         let key = EncryptionKey::generate("test-key").unwrap();
-        assert_eq!(key.id, "test-key");
-        assert_eq!(key.version, 1);
-        assert!(key.active);
+        assert_eq!(key.id(), "test-key");
+        assert_eq!(key.version(), 1);
+        assert!(key.active());
     }
 
     #[test]
@@ -889,8 +883,8 @@ mod tests {
         let provider = MemoryKeyProvider::new().unwrap();
 
         let key = provider.get_active_key().await.unwrap();
-        assert_eq!(key.id, "default");
-        assert!(key.active);
+        assert_eq!(key.id(), "default");
+        assert!(key.active());
     }
 
     #[tokio::test]
@@ -900,8 +894,8 @@ mod tests {
         let old_key = provider.get_active_key().await.unwrap();
         let new_key = provider.rotate_key("default").await.unwrap();
 
-        assert_eq!(new_key.id, "default");
-        assert_eq!(new_key.version, old_key.version + 1);
+        assert_eq!(new_key.id(), "default");
+        assert_eq!(new_key.version(), old_key.version() + 1);
     }
 
     #[tokio::test]

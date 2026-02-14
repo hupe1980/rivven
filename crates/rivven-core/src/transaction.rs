@@ -550,6 +550,7 @@ impl From<&TransactionStats> for TransactionStatsSnapshot {
 /// assigned to this broker as their transaction coordinator.
 pub struct TransactionCoordinator {
     /// Active transactions by (producer_id, txn_id)
+    /// F-097: `parking_lot` — O(1) transaction lookup, never held across `.await`.
     transactions: RwLock<HashMap<(ProducerId, TransactionId), Transaction>>,
 
     /// Producer to transaction mapping (for single-txn-per-producer enforcement)

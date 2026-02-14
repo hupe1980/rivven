@@ -67,10 +67,11 @@ use error::IntoPyErr;
 #[pyfunction]
 fn connect<'py>(py: Python<'py>, address: String) -> PyResult<Bound<'py, PyAny>> {
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let addr = address.clone();
         let inner = rivven_client::Client::connect(&address)
             .await
             .into_py_err()?;
-        Ok(RivvenClient::new(inner))
+        Ok(RivvenClient::with_addr(inner, addr))
     })
 }
 
@@ -134,6 +135,24 @@ fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+/// F-086 fix: Stub for connect_tls when TLS feature is not compiled in.
+/// Gives users a clear error message instead of AttributeError.
+#[cfg(not(feature = "tls"))]
+#[pyfunction]
+#[pyo3(name = "connect_tls", signature = (_address, _ca_cert_path, _server_name, _client_cert_path=None, _client_key_path=None))]
+fn connect_tls_stub(
+    _address: String,
+    _ca_cert_path: String,
+    _server_name: String,
+    _client_cert_path: Option<String>,
+    _client_key_path: Option<String>,
+) -> PyResult<()> {
+    Err(pyo3::exceptions::PyRuntimeError::new_err(
+        "TLS support is not available: the 'tls' feature was not enabled at compile time. \
+         Rebuild rivven-python with `--features tls` to enable TLS connections.",
+    ))
+}
+
 /// Python module definition
 #[pymodule]
 fn _rivven(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -153,6 +172,11 @@ fn _rivven(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     #[cfg(feature = "tls")]
     m.add_function(wrap_pyfunction!(connect_tls, m)?)?;
+
+    // F-086 fix: When TLS feature is not compiled in, register a stub that
+    // gives users a clear error message instead of a confusing AttributeError.
+    #[cfg(not(feature = "tls"))]
+    m.add_function(wrap_pyfunction!(connect_tls_stub, m)?)?;
 
     // Classes
     m.add_class::<RivvenClient>()?;

@@ -116,6 +116,21 @@ let config = Config::new().with_tiered_storage(tiered_config);
 
 ## Hot Path Optimizations
 
+### Segment Append (Zero-Allocation Serialization)
+
+The produce hot path (`Segment::append` / `append_batch`) uses `postcard::to_extend`
+to serialize messages directly into the output frame, avoiding intermediate
+allocations:
+
+```
+Single append — 1 allocation, 0 copies:
+  Vec [CRC:4 placeholder | Len:4 placeholder] ──to_extend──▶ [CRC | Len | payload]
+
+Batch append — 2 allocations for N messages:
+  Reusable msg_buf Vec ──to_extend + clear()──▶ per-message payload
+  Single BytesMut ◀── accumulates all framed records
+```
+
 ### Zero-Copy Buffers
 
 Cache-line aligned (64-byte) buffers eliminate unnecessary memory copies:
@@ -204,11 +219,11 @@ println!("Hit rate: {:.1}%", stats.hit_rate() * 100.0);
 rivven-core provides a portable async I/O layer with an io_uring-style API. The current implementation uses `std::fs::File` behind `parking_lot::Mutex` as a portable fallback. The API is designed so a true io_uring backend can be swapped in on Linux 5.6+ without changing callers:
 
 ```rust
-use rivven_core::io_uring::{IoUringConfig, WalWriter, SegmentReader, IoBatch, BatchExecutor};
+use rivven_core::io_uring::{IoUringConfig, PortableWalWriter, SegmentReader, IoBatch, BatchExecutor};
 
 // High-throughput WAL writer
 let config = IoUringConfig::high_throughput();
-let wal = WalWriter::new("/data/wal.log", config)?;
+let wal = PortableWalWriter::new("/data/wal.log", config)?;
 
 // Direct write (immediate)
 let offset = wal.append(b"record data")?;

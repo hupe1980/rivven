@@ -159,7 +159,10 @@ impl Message {
         self
     }
 
-    /// Serialize to bytes
+    /// Serialize to bytes (allocates a new Vec).
+    ///
+    /// For the hot path (segment append), prefer `postcard::to_extend` directly
+    /// to avoid intermediate allocations — see `Segment::append()`.
     pub fn to_bytes(&self) -> crate::Result<Vec<u8>> {
         Ok(postcard::to_allocvec(self)?)
     }

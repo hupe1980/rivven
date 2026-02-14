@@ -295,7 +295,16 @@ impl CountingBloomFilter {
             self.decrement_counter(counter_index);
         }
 
-        self.count.fetch_sub(1, Ordering::Relaxed);
+        // F-050: Prevent underflow — only decrement if count > 0
+        let _ = self
+            .count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {
+                if c > 0 {
+                    Some(c - 1)
+                } else {
+                    None
+                }
+            });
     }
 
     /// Check if an item might be present

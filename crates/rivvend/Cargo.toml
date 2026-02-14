@@ -29,6 +29,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 postcard = { workspace = true }
 parking_lot = { workspace = true }
+dashmap = "6.1"
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
@@ -40,6 +41,7 @@ openraft = { version = "0.9", features = ["serde"] }
 reqwest = { workspace = true }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 subtle = { workspace = true }
+socket2 = "0.5"
 
 # Dashboard (optional)
 rust-embed = { version = "8.3", optional = true }

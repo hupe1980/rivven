@@ -5,18 +5,19 @@
 //!
 //! # Wire Format
 //!
-//! All messages use a unified wire format with format auto-detection:
+//! All messages use a unified wire format with format auto-detection and correlation ID:
 //!
 //! ```text
-//! ┌─────────────────┬─────────────────┬──────────────────────────────┐
-//! │ Length (4 bytes)│ Format (1 byte) │ Payload (N bytes)            │
-//! │ Big-endian u32  │ 0x00 = postcard │ Serialized message           │
-//! │                 │ 0x01 = protobuf │                              │
-//! └─────────────────┴─────────────────┴──────────────────────────────┘
+//! ┌─────────────────┬─────────────────┬──────────────────────────┬──────────────────────┐
+//! │ Length (4 bytes)│ Format (1 byte) │ Correlation ID (4 bytes) │ Payload (N bytes)    │
+//! │ Big-endian u32  │ 0x00 = postcard │ Big-endian u32           │ Serialized message   │
+//! │                 │ 0x01 = protobuf │                          │                      │
+//! └─────────────────┴─────────────────┴──────────────────────────┴──────────────────────┘
 //! ```
 //!
 //! - **postcard** (0x00): High-performance Rust-native binary format
 //! - **protobuf** (0x01): Cross-language format for Go, Java, Python clients
+//! - **correlation_id**: Matches responses to their originating requests
 //!
 //! # Protocol Stability
 //!
@@ -30,10 +31,10 @@
 //!
 //! // Serialize with format prefix
 //! let request = Request::Ping;
-//! let bytes = request.to_wire(WireFormat::Postcard)?;
+//! let bytes = request.to_wire(WireFormat::Postcard, 1)?;
 //!
 //! // Deserialize with auto-detection
-//! let (response, format) = Response::from_wire(&bytes)?;
+//! let (response, format, correlation_id) = Response::from_wire(&bytes)?;
 //! ```
 
 mod error;
@@ -64,10 +65,17 @@ pub use metadata::{BrokerInfo, PartitionMetadata, TopicMetadata};
 pub use types::{MessageData, SchemaType};
 
 /// Protocol version for compatibility checking
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
-/// Maximum message size (64 MiB)
-pub const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+/// Wire header size: format byte (1) + correlation_id (4)
+pub const WIRE_HEADER_SIZE: usize = 5;
+
+/// Maximum message size (10 MiB)
+///
+/// Aligned with the server default (`max_request_size` = 10 MB) and
+/// `SecureServerConfig::max_message_size` to avoid silent truncation or
+/// misleading protocol-level limits (F-068 fix).
+pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
 /// Wire format identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

@@ -172,9 +172,10 @@ pub fn derive_source_config(input: TokenStream) -> TokenStream {
     let struct_name = &attrs.ident;
     let spec_struct_name = quote::format_ident!("{}Spec", struct_name);
 
-    let name = attrs
-        .name
-        .unwrap_or_else(|| struct_name.to_string().to_lowercase().replace("config", ""));
+    let name = attrs.name.unwrap_or_else(|| {
+        let name = struct_name.to_string();
+        name.strip_suffix("Config").unwrap_or(&name).to_lowercase()
+    });
     let version = attrs.version.unwrap_or_else(|| "0.0.1".to_string());
 
     let description_code = match &attrs.description {
@@ -282,9 +283,10 @@ pub fn derive_sink_config(input: TokenStream) -> TokenStream {
     let struct_name = &attrs.ident;
     let spec_struct_name = quote::format_ident!("{}Spec", struct_name);
 
-    let name = attrs
-        .name
-        .unwrap_or_else(|| struct_name.to_string().to_lowercase().replace("config", ""));
+    let name = attrs.name.unwrap_or_else(|| {
+        let name = struct_name.to_string();
+        name.strip_suffix("Config").unwrap_or(&name).to_lowercase()
+    });
     let version = attrs.version.unwrap_or_else(|| "0.0.1".to_string());
 
     let description_code = match &attrs.description {
@@ -385,13 +387,15 @@ pub fn derive_transform_config(input: TokenStream) -> TokenStream {
     let struct_name = &attrs.ident;
     let spec_struct_name = quote::format_ident!("{}Spec", struct_name);
 
-    let name = attrs
-        .name
-        .unwrap_or_else(|| struct_name.to_string().to_lowercase().replace("config", ""));
+    let name = attrs.name.unwrap_or_else(|| {
+        let name = struct_name.to_string();
+        name.strip_suffix("Config").unwrap_or(&name).to_lowercase()
+    });
     let version = attrs.version.unwrap_or_else(|| "0.0.1".to_string());
 
+    // F-079 fix: Use `.description()` consistent with SourceConfig/SinkConfig
     let description_code = match attrs.description {
-        Some(desc) => quote! { .with_description(#desc) },
+        Some(desc) => quote! { .description(#desc) },
         None => quote! {},
     };
 
@@ -402,7 +406,7 @@ pub fn derive_transform_config(input: TokenStream) -> TokenStream {
         impl #spec_struct_name {
             /// Returns the connector specification
             pub fn spec() -> rivven_connect::ConnectorSpec {
-                rivven_connect::ConnectorSpec::new(#name, #version)
+                rivven_connect::ConnectorSpec::builder(#name, #version)
                     #description_code
                     .build()
             }
@@ -473,13 +477,14 @@ pub fn connector_spec(attr: TokenStream, item: TokenStream) -> TokenStream {
     let name = attrs.name.unwrap_or_else(|| "unknown".to_string());
     let version = attrs.version.unwrap_or_else(|| "0.0.1".to_string());
 
+    // F-079 fix: Use `.description()` and `.documentation_url()` consistent with builder API
     let description_code = match attrs.description {
-        Some(desc) => quote! { .with_description(#desc) },
+        Some(desc) => quote! { .description(#desc) },
         None => quote! {},
     };
 
     let doc_url_code = match attrs.documentation_url {
-        Some(url) => quote! { .with_documentation_url(#url) },
+        Some(url) => quote! { .documentation_url(#url) },
         None => quote! {},
     };
 
@@ -490,7 +495,7 @@ pub fn connector_spec(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         /// Auto-generated connector specification
         pub fn connector_spec() -> rivven_connect::ConnectorSpec {
-            rivven_connect::ConnectorSpec::new(#name, #version)
+            rivven_connect::ConnectorSpec::builder(#name, #version)
                 #description_code
                 #doc_url_code
                 .build()

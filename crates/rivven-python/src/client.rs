@@ -1,4 +1,9 @@
 //! Rivven client for Python
+//!
+//! F-051 fix: Uses separate connections for producers/consumers to avoid
+//! serializing all operations through a single Mutex. Admin operations
+//! (topic management, group management) still go through the main client,
+//! but producers and consumers each get their own dedicated connection.
 
 use crate::consumer::Consumer;
 use crate::error::IntoPyErr;
@@ -36,6 +41,8 @@ use tokio::sync::Mutex;
 #[pyclass]
 pub struct RivvenClient {
     client: Arc<Mutex<Client>>,
+    /// Broker address for creating dedicated producer/consumer connections
+    addr: Option<String>,
 }
 
 impl RivvenClient {
@@ -43,6 +50,15 @@ impl RivvenClient {
     pub fn new(client: Client) -> Self {
         Self {
             client: Arc::new(Mutex::new(client)),
+            addr: None,
+        }
+    }
+
+    /// Create with address stored for spawning dedicated connections
+    pub fn with_addr(client: Client, addr: String) -> Self {
+        Self {
+            client: Arc::new(Mutex::new(client)),
+            addr: Some(addr),
         }
     }
 }
@@ -145,6 +161,10 @@ impl RivvenClient {
 
     /// Create a producer for a topic
     ///
+    /// F-051 fix: If the client was created with `connect()`, the producer gets
+    /// its own dedicated connection so it doesn't contend with admin operations
+    /// or other producers on the main client Mutex.
+    ///
     /// Args:
     ///     topic (str): Topic to produce to
     ///
@@ -154,11 +174,27 @@ impl RivvenClient {
     /// Example:
     ///     >>> producer = client.producer("events")
     ///     >>> await producer.send(b"Hello!")
-    pub fn producer(&self, topic: String) -> Producer {
-        Producer::new(Arc::clone(&self.client), topic)
+    pub fn producer<'py>(&self, py: Python<'py>, topic: String) -> PyResult<Bound<'py, PyAny>> {
+        let addr = self.addr.clone();
+        let fallback_client = Arc::clone(&self.client);
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let client = match addr {
+                Some(a) => {
+                    let dedicated = Client::connect(&a).await.into_py_err()?;
+                    Arc::new(Mutex::new(dedicated))
+                }
+                None => fallback_client,
+            };
+            Ok(Producer::new(client, topic))
+        })
     }
 
     /// Create a consumer for a topic partition
+    ///
+    /// F-051 fix: If the client was created with `connect()`, the consumer gets
+    /// its own dedicated connection so it doesn't contend with admin operations
+    /// or other consumers on the main client Mutex.
     ///
     /// Args:
     ///     topic (str): Topic to consume from
@@ -187,15 +223,24 @@ impl RivvenClient {
         batch_size: usize,
         auto_commit: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let client = Arc::clone(&self.client);
+        let main_client = Arc::clone(&self.client);
+        let addr = self.addr.clone();
         let group_clone = group.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            // F-051 fix: Create a dedicated connection for the consumer
+            let client = match addr {
+                Some(a) => {
+                    let dedicated = Client::connect(&a).await.into_py_err()?;
+                    Arc::new(Mutex::new(dedicated))
+                }
+                None => Arc::clone(&main_client),
+            };
+
             // Determine starting offset
             let offset = match (start_offset, &group_clone) {
                 (Some(off), _) => off,
                 (None, Some(g)) => {
-                    // Try to get committed offset
                     let mut guard = client.lock().await;
                     match guard.get_offset(g, &topic, partition).await {
                         Ok(Some(off)) => off,

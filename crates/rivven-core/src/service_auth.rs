@@ -261,6 +261,10 @@ impl ApiKey {
     ///
     /// Supports both Argon2id hashes (PHC string format `$argon2id$...`)
     /// and legacy SHA-256 hex hashes for backward compatibility.
+    ///
+    /// When a legacy SHA-256 hash is verified successfully, the caller
+    /// should call [`upgrade_to_argon2`] to re-hash with Argon2id.
+    /// Use [`needs_rehash`] to check whether an upgrade is needed.
     pub fn verify_secret(&self, secret: &str) -> bool {
         if self.secret_hash.starts_with("$argon2") {
             // Argon2id verification (constant-time internally)
@@ -272,6 +276,10 @@ impl ApiKey {
             }
         } else {
             // Legacy SHA-256 path — constant-time comparison
+            warn!(
+                key_id = %self.key_id,
+                "API key is using legacy SHA-256 hash — schedule upgrade to Argon2id"
+            );
             let provided_hash = Self::hash_secret_sha256(secret);
             if provided_hash.len() != self.secret_hash.len() {
                 return false;
@@ -286,6 +294,26 @@ impl ApiKey {
             }
             result == 0
         }
+    }
+
+    /// Returns `true` if this key still uses the legacy SHA-256 hash
+    /// and should be upgraded to Argon2id.
+    pub fn needs_rehash(&self) -> bool {
+        !self.secret_hash.starts_with("$argon2")
+    }
+
+    /// Upgrade the stored hash from legacy SHA-256 to Argon2id.
+    ///
+    /// Call this after a successful [`verify_secret`] when [`needs_rehash`]
+    /// returns `true`. The plaintext `secret` is required to compute the
+    /// new Argon2id hash.
+    pub fn upgrade_to_argon2(&mut self, secret: &str) {
+        let new_hash = Self::hash_secret(secret);
+        info!(
+            key_id = %self.key_id,
+            "Upgraded API key hash from legacy SHA-256 to Argon2id"
+        );
+        self.secret_hash = new_hash;
     }
 
     /// Check if key is valid (not expired, not revoked)
@@ -472,9 +500,27 @@ pub struct ServiceSession {
     pub api_key_id: Option<String>,
 }
 
+impl crate::auth::Session for ServiceSession {
+    fn session_id(&self) -> &str {
+        &self.id
+    }
+
+    fn principal(&self) -> &str {
+        &self.service_account
+    }
+
+    fn is_expired(&self) -> bool {
+        Instant::now() > self.expires_at
+    }
+
+    fn client_ip(&self) -> &str {
+        &self.client_ip
+    }
+}
+
 impl ServiceSession {
     pub fn is_expired(&self) -> bool {
-        Instant::now() > self.expires_at
+        <Self as crate::auth::Session>::is_expired(self)
     }
 
     /// Time until expiration
@@ -718,6 +764,29 @@ impl ServiceAuthManager {
             warn!("Invalid API key secret for key_id={}", key_id);
             return Err(ServiceAuthError::InvalidCredentials);
         }
+
+        // Upgrade legacy SHA-256 hash to Argon2id on successful verification
+        let needs_rehash = api_key.needs_rehash();
+        drop(keys); // Release read lock before potential write
+
+        if needs_rehash {
+            if let Some(mut keys) = self.api_keys.try_write() {
+                if let Some(api_key) = keys.get_mut(&key_id) {
+                    api_key.upgrade_to_argon2(&secret);
+                }
+            } else {
+                warn!(
+                    "Could not acquire write lock to upgrade hash for key_id={}",
+                    key_id
+                );
+            }
+        }
+
+        // Re-acquire read lock for remaining checks
+        let keys = self.api_keys.read();
+        let api_key = keys
+            .get(&key_id)
+            .ok_or_else(|| ServiceAuthError::KeyNotFound(key_id.clone()))?;
 
         // Check validity
         if !api_key.is_valid() {

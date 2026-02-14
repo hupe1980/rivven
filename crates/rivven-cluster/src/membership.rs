@@ -358,6 +358,12 @@ impl Membership {
     async fn run_receiver(&self) -> Result<()> {
         let mut buf = vec![0u8; 65536];
 
+        // F-072 fix: Maximum expected SWIM message size.
+        // SWIM messages (Ping, Ack, PingReq, Sync, etc.) are small—typically
+        // under 1 KB even with piggybacked gossip. Reject oversized payloads
+        // before deserialization to prevent memory exhaustion attacks.
+        const MAX_SWIM_PAYLOAD_SIZE: usize = 8192;
+
         // Rate-limit inbound UDP processing to prevent a flood from
         // exhausting CPU. 10,000 messages/sec is well above normal SWIM traffic
         // but caps attack surface during a UDP flood.
@@ -387,6 +393,15 @@ impl Membership {
             };
 
             msg_count += 1;
+
+            // F-072 fix: reject oversized payloads before any processing
+            if len > MAX_SWIM_PAYLOAD_SIZE {
+                warn!(
+                    "Dropping oversized UDP payload ({} bytes, max {}) from {}",
+                    len, MAX_SWIM_PAYLOAD_SIZE, from
+                );
+                continue;
+            }
 
             // Verify HMAC if authentication is enabled
             let payload = match self.verify_message(&buf[..len]) {
@@ -738,43 +753,117 @@ impl Membership {
     }
 
     /// Run the SWIM failure detector loop
+    ///
+    /// **Detection latency**: O(N × ping_interval) in the worst case, since
+    /// a single random target is probed per interval. This matches the basic
+    /// SWIM paper design (Section 3.1). Indirect probes (§4) are used when
+    /// the direct ping times out, delegating to K random healthy members,
+    /// which improves accuracy but does not reduce worst-case detection time.
+    ///
+    /// For faster detection in large clusters, consider increasing the
+    /// number of concurrent probes per interval or using SWIM+Inf’s
+    /// suspicion sub-protocol with adaptive timeouts.
     async fn run_failure_detector(&self) -> Result<()> {
         let mut interval = tokio::time::interval(self.config.ping_interval);
 
         loop {
             interval.tick().await;
 
-            // Get a random member to probe (round-robin would be more fair)
-            let target = self.select_probe_target();
+            // Select up to K targets to probe concurrently
+            let targets = self.select_probe_targets(self.config.probes_per_round);
 
-            if let Some(target_node) = target {
-                let target_id = target_node.id().to_string();
-                let target_addr = target_node.cluster_addr();
+            if !targets.is_empty() {
+                let incarnation = *self.incarnation.read().await;
+                let mut join_set = tokio::task::JoinSet::new();
 
-                // Send direct ping with piggybacked gossip
-                let ping = SwimMessage::Ping {
-                    source: self.local_node.id.clone(),
-                    incarnation: *self.incarnation.read().await,
-                };
-                self.send_with_gossip(&ping, target_addr).await?;
+                for target_node in targets {
+                    let target_id = target_node.id().to_string();
+                    let target_addr = target_node.cluster_addr();
+                    let source_id = self.local_node.id.clone();
+                    let pending_pings = Arc::clone(&self.pending_pings);
+                    let members = Arc::clone(&self.members);
+                    let socket = Arc::clone(&self.socket);
+                    let gossip_queue = Arc::clone(&self.gossip_queue);
+                    let hmac_key = self.hmac_key.clone();
+                    let event_tx = self.event_tx.clone();
+                    let ping_timeout = self.config.ping_timeout;
+                    let indirect_probes_k = self.config.indirect_probes;
+                    let incarnation_lock = Arc::clone(&self.incarnation);
 
-                // Track pending ping
-                self.pending_pings.insert(target_id.clone(), Instant::now());
+                    join_set.spawn(async move {
+                        // Send direct ping with piggybacked gossip
+                        let ping = SwimMessage::Ping {
+                            source: source_id.clone(),
+                            incarnation,
+                        };
+                        if let Err(e) = Self::send_with_gossip_static(
+                            &ping,
+                            target_addr,
+                            &socket,
+                            &gossip_queue,
+                            &members,
+                            &hmac_key,
+                        )
+                        .await
+                        {
+                            warn!(target = %target_id, error = %e, "failed to send ping");
+                            return;
+                        }
 
-                // Wait for ack or timeout
-                tokio::time::sleep(self.config.ping_timeout).await;
+                        // Track pending ping
+                        pending_pings.insert(target_id.clone(), Instant::now());
 
-                // Check if we got an ack
-                if self.pending_pings.contains_key(&target_id) {
-                    // No ack, try indirect probes
-                    self.send_indirect_probes(&target_id).await?;
+                        // Wait for ack or timeout
+                        tokio::time::sleep(ping_timeout).await;
 
-                    // Wait again
-                    tokio::time::sleep(self.config.ping_timeout * 2).await;
+                        // Check if we got an ack
+                        if pending_pings.contains_key(&target_id) {
+                            // No ack, try indirect probes
+                            let _ = Self::send_indirect_probes_static(
+                                &target_id,
+                                &source_id,
+                                &members,
+                                &socket,
+                                &hmac_key,
+                                &incarnation_lock,
+                                indirect_probes_k,
+                            )
+                            .await;
 
-                    // Still no ack? Mark as suspect
-                    if self.pending_pings.remove(&target_id).is_some() {
-                        self.mark_suspect(&target_id).await?;
+                            // Wait again
+                            tokio::time::sleep(ping_timeout * 2).await;
+
+                            // Still no ack? Mark as suspect
+                            if pending_pings.remove(&target_id).is_some() {
+                                // Inline mark_suspect logic for the spawned task
+                                if let Some(mut member) = members.get_mut(&target_id) {
+                                    if member.state == NodeState::Alive
+                                        || member.state == NodeState::Unknown
+                                    {
+                                        member.mark_suspect();
+                                        let suspect = SwimMessage::Suspect {
+                                            node_id: target_id.clone(),
+                                            incarnation: member.incarnation,
+                                            from: source_id.clone(),
+                                        };
+                                        drop(member);
+                                        gossip_queue.lock().await.push(GossipItem {
+                                            message: suspect,
+                                            transmissions: 0,
+                                        });
+                                        let _ = event_tx
+                                            .send(MembershipEvent::NodeSuspected(target_id));
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+
+                // Await all probe tasks
+                while let Some(res) = join_set.join_next().await {
+                    if let Err(e) = res {
+                        warn!(error = %e, "probe task panicked");
                     }
                 }
             }
@@ -784,66 +873,130 @@ impl Membership {
         }
     }
 
-    /// Select a random member to probe
-    fn select_probe_target(&self) -> Option<Node> {
+    /// Select up to `k` random members to probe concurrently.
+    fn select_probe_targets(&self, k: usize) -> Vec<Node> {
         use rand::seq::IteratorRandom;
 
         self.members
             .iter()
             .filter(|r| r.key() != &self.local_node.id)
             .filter(|r| r.value().state.is_reachable())
-            .choose(&mut rand::thread_rng())
+            .choose_multiple(&mut rand::thread_rng(), k)
+            .into_iter()
             .map(|r| r.value().clone())
+            .collect()
     }
 
-    /// Send indirect ping requests
-    async fn send_indirect_probes(&self, target: &NodeId) -> Result<()> {
+    /// Static version of `send_with_gossip` for use inside spawned tasks.
+    async fn send_with_gossip_static(
+        msg: &SwimMessage,
+        addr: SocketAddr,
+        socket: &Arc<UdpSocket>,
+        gossip_queue: &Arc<tokio::sync::Mutex<Vec<GossipItem>>>,
+        members: &Arc<DashMap<NodeId, Node>>,
+        hmac_key: &Option<String>,
+    ) -> Result<()> {
+        // Send the primary message
+        Self::send_message_static(msg, addr, socket, hmac_key).await?;
+
+        // Piggyback pending gossip items
+        let gossip = Self::drain_gossip_static(gossip_queue, members).await;
+        for item in gossip {
+            Self::send_message_static(&item, addr, socket, hmac_key).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Static version of `send_message` for use inside spawned tasks.
+    async fn send_message_static(
+        msg: &SwimMessage,
+        addr: SocketAddr,
+        socket: &Arc<UdpSocket>,
+        hmac_key: &Option<String>,
+    ) -> Result<()> {
+        let data = postcard::to_allocvec(msg)?;
+        let packet = Self::sign_message_static(&data, hmac_key);
+        socket.send_to(&packet, addr).await?;
+        Ok(())
+    }
+
+    /// Static version of `sign_message` for use inside spawned tasks.
+    fn sign_message_static(data: &[u8], hmac_key: &Option<String>) -> Vec<u8> {
+        #[cfg(feature = "swim")]
+        if let Some(ref key) = hmac_key {
+            let mut mac =
+                Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("HMAC key always valid");
+            mac.update(data);
+            let tag = mac.finalize().into_bytes();
+            let mut signed = Vec::with_capacity(data.len() + HMAC_TAG_LEN);
+            signed.extend_from_slice(data);
+            signed.extend_from_slice(&tag);
+            return signed;
+        }
+        data.to_vec()
+    }
+
+    /// Static version of `drain_gossip` for use inside spawned tasks.
+    async fn drain_gossip_static(
+        gossip_queue: &Arc<tokio::sync::Mutex<Vec<GossipItem>>>,
+        members: &Arc<DashMap<NodeId, Node>>,
+    ) -> Vec<SwimMessage> {
+        let member_count = members.len().max(2) as f64;
+        let max_transmissions = (member_count.log2().ceil() as u32) + 1;
+
+        let mut queue = gossip_queue.lock().await;
+        let take = queue.len().min(MAX_GOSSIP_PER_MSG);
+        let mut items = Vec::with_capacity(take);
+
+        for item in queue.iter_mut().take(take) {
+            item.transmissions += 1;
+            items.push(item.message.clone());
+        }
+
+        queue.retain(|item| item.transmissions < max_transmissions);
+
+        items
+    }
+
+    /// Static version of `send_indirect_probes` for use inside spawned tasks.
+    async fn send_indirect_probes_static(
+        target: &NodeId,
+        source_id: &NodeId,
+        members: &Arc<DashMap<NodeId, Node>>,
+        socket: &Arc<UdpSocket>,
+        hmac_key: &Option<String>,
+        incarnation: &Arc<RwLock<u64>>,
+        indirect_probes_k: usize,
+    ) -> Result<()> {
         use rand::seq::IteratorRandom;
 
-        let intermediaries: Vec<_> = self
-            .members
+        let intermediaries: Vec<_> = members
             .iter()
-            .filter(|r| r.key() != &self.local_node.id && r.key() != target)
+            .filter(|r| r.key() != source_id && r.key() != target)
             .filter(|r| r.value().is_healthy())
-            .choose_multiple(&mut rand::thread_rng(), self.config.indirect_probes);
+            .choose_multiple(&mut rand::thread_rng(), indirect_probes_k);
 
-        let incarnation = *self.incarnation.read().await;
+        let inc = *incarnation.read().await;
         let ping_req = SwimMessage::PingReq {
-            source: self.local_node.id.clone(),
+            source: source_id.clone(),
             target: target.clone(),
-            incarnation,
+            incarnation: inc,
         };
 
         for intermediate in intermediaries {
-            let _ = self
-                .send_message(&ping_req, intermediate.value().cluster_addr())
-                .await;
+            let _ = Self::send_message_static(
+                &ping_req,
+                intermediate.value().cluster_addr(),
+                socket,
+                hmac_key,
+            )
+            .await;
         }
 
         Ok(())
     }
 
-    /// Mark a node as suspect
-    async fn mark_suspect(&self, node_id: &NodeId) -> Result<()> {
-        if let Some(mut member) = self.members.get_mut(node_id) {
-            if member.state == NodeState::Alive {
-                member.mark_suspect();
-
-                // Enqueue suspicion for piggyback dissemination
-                let suspect = SwimMessage::Suspect {
-                    node_id: node_id.clone(),
-                    incarnation: member.incarnation,
-                    from: self.local_node.id.clone(),
-                };
-                self.enqueue_gossip(suspect).await;
-
-                let _ = self
-                    .event_tx
-                    .send(MembershipEvent::NodeSuspected(node_id.clone()));
-            }
-        }
-        Ok(())
-    }
     /// Check for suspects that have timed out
     async fn check_suspect_timeouts(&self) -> Result<()> {
         let timeout = self.config.ping_interval * self.config.suspicion_multiplier;
@@ -884,7 +1037,8 @@ impl Membership {
             interval.tick().await;
 
             // Select random member to sync with
-            if let Some(target) = self.select_probe_target() {
+            let targets = self.select_probe_targets(1);
+            if let Some(target) = targets.first() {
                 let states: Vec<NodeGossipState> = self
                     .members
                     .iter()

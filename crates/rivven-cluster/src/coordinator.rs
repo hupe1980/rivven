@@ -48,7 +48,10 @@ pub struct ClusterCoordinator {
     /// Current coordinator state
     state: RwLock<CoordinatorState>,
 
-    /// Local metadata store (used in standalone/test mode when no Raft node is wired)
+    /// Local metadata store — only mutated directly in standalone/test mode
+    /// (i.e. when no Raft node is wired).  When Raft is active the Raft state
+    /// machine is the single source of truth; followers never apply membership
+    /// commands locally to avoid a dual source-of-truth window (see F-002).
     metadata: Arc<MetadataStore>,
 
     /// Raft consensus node — when available, ALL state mutations go through Raft
@@ -282,8 +285,15 @@ impl ClusterCoordinator {
         }
     }
 
-    /// Apply a membership command: through Raft if available (leader only proposes),
-    /// otherwise apply locally as a hint.
+    /// Apply a membership command through the appropriate channel.
+    ///
+    /// - **Leader**: proposes the command through Raft so it is replicated to all nodes.
+    /// - **Follower**: does *nothing* locally.  The leader's Raft proposal will
+    ///   replicate through Raft and be applied by the state machine on every node
+    ///   (including this follower), keeping the Raft log as the single source of
+    ///   truth (F-002).
+    /// - **No Raft node** (standalone / test / bootstrap): applies directly to the
+    ///   local `MetadataStore`.
     async fn apply_membership_command(
         metadata: &MetadataStore,
         cmd: MetadataCommand,
@@ -299,13 +309,13 @@ impl ClusterCoordinator {
                 }
                 return;
             }
-            // Followers: apply locally as hint for routing.
-            // The leader's Raft proposal will eventually replicate to all nodes.
-            drop(raft_lock);
-            drop(raft_guard);
-            metadata.apply(0, cmd).await;
+            // F-002 fix: Followers do NOT apply hints locally.
+            // The Raft state machine is the single source of truth.
+            // The leader's proposal will replicate through Raft and be applied
+            // by the state machine on all nodes (including this follower).
+            debug!("Follower received membership event; will be applied via Raft replication");
         } else {
-            // No Raft node yet (bootstrap phase): apply locally
+            // No Raft node yet (standalone / bootstrap / test): apply locally
             drop(raft_guard);
             metadata.apply(0, cmd).await;
         }

@@ -163,13 +163,16 @@ impl ProducerMetadata {
         self.epoch
     }
 
-    /// Validate and update sequence for a partition
+    /// Validate sequence for a partition WITHOUT mutating state (F-073 fix).
+    ///
+    /// This only checks whether the sequence is valid, duplicate, or out-of-order.
+    /// Call [`commit_sequence`] after a successful append to persist the state change.
     pub fn validate_sequence(
         &mut self,
         partition: u32,
         epoch: ProducerEpoch,
         sequence: SequenceNumber,
-        offset: u64,
+        _offset: u64,
     ) -> SequenceResult {
         // Check epoch first (fencing)
         if epoch < self.epoch {
@@ -188,12 +191,11 @@ impl ProducerMetadata {
         self.last_activity = SystemTime::now();
 
         // Get or create partition state
-        if let Some(state) = self.partitions.get_mut(&partition) {
+        if let Some(state) = self.partitions.get(&partition) {
             let expected = state.last_sequence.wrapping_add(1);
 
             if sequence == expected {
-                // Valid sequence
-                state.update(sequence, offset);
+                // Valid sequence — state will be committed later via commit_sequence
                 SequenceResult::Valid
             } else if sequence <= state.last_sequence {
                 // Duplicate
@@ -210,8 +212,7 @@ impl ProducerMetadata {
         } else {
             // First message for this partition
             if sequence == 0 {
-                self.partitions
-                    .insert(partition, PartitionProducerState::new(sequence, offset));
+                // Valid — state will be committed later via commit_sequence
                 SequenceResult::Valid
             } else {
                 // First message should have sequence 0
@@ -221,6 +222,21 @@ impl ProducerMetadata {
                 }
             }
         }
+    }
+
+    /// Commit sequence state after a successful append (F-073 fix).
+    ///
+    /// This should be called only after the message has been durably appended.
+    /// Separating validation from mutation prevents state corruption when
+    /// the append fails after validation succeeds.
+    pub fn commit_sequence(&mut self, partition: u32, sequence: SequenceNumber, offset: u64) {
+        if let Some(state) = self.partitions.get_mut(&partition) {
+            state.update(sequence, offset);
+        } else {
+            self.partitions
+                .insert(partition, PartitionProducerState::new(sequence, offset));
+        }
+        self.last_activity = SystemTime::now();
     }
 
     /// Check if producer is idle (no activity for duration)
@@ -454,14 +470,17 @@ mod tests {
         // First message (seq=0)
         let result = manager.validate_produce(pid, epoch, 0, 0, 100);
         assert_eq!(result, SequenceResult::Valid);
+        manager.record_produce(pid, epoch, 0, 0, 100);
 
         // Second message (seq=1)
         let result = manager.validate_produce(pid, epoch, 0, 1, 101);
         assert_eq!(result, SequenceResult::Valid);
+        manager.record_produce(pid, epoch, 0, 1, 101);
 
         // Third message (seq=2)
         let result = manager.validate_produce(pid, epoch, 0, 2, 102);
         assert_eq!(result, SequenceResult::Valid);
+        manager.record_produce(pid, epoch, 0, 2, 102);
     }
 
     #[test]
@@ -472,6 +491,7 @@ mod tests {
         // First message
         let result = manager.validate_produce(pid, epoch, 0, 0, 100);
         assert_eq!(result, SequenceResult::Valid);
+        manager.record_produce(pid, epoch, 0, 0, 100);
 
         // Retry same sequence (duplicate) - returns last known offset for this sequence
         // Note: In Kafka, duplicates of the last sequence return the last offset
@@ -481,6 +501,7 @@ mod tests {
         // Next message
         let result = manager.validate_produce(pid, epoch, 0, 1, 101);
         assert_eq!(result, SequenceResult::Valid);
+        manager.record_produce(pid, epoch, 0, 1, 101);
 
         // Retry of seq=1 returns the offset for seq=1
         let result = manager.validate_produce(pid, epoch, 0, 1, 999);
@@ -500,6 +521,7 @@ mod tests {
         // First message
         let result = manager.validate_produce(pid, epoch, 0, 0, 100);
         assert_eq!(result, SequenceResult::Valid);
+        manager.record_produce(pid, epoch, 0, 0, 100);
 
         // Skip seq=1, send seq=2 (out of order)
         let result = manager.validate_produce(pid, epoch, 0, 2, 101);
@@ -536,6 +558,7 @@ mod tests {
         // Send with epoch 0
         let result = manager.validate_produce(pid, epoch0, 0, 0, 100);
         assert_eq!(result, SequenceResult::Valid);
+        manager.record_produce(pid, epoch0, 0, 0, 100);
 
         // Reconnect - bumps epoch to 1
         let (_, epoch1) = manager.init_producer(Some(pid));
@@ -554,6 +577,7 @@ mod tests {
         // New instance with epoch 1 works (starts fresh at seq=0)
         let result = manager.validate_produce(pid, epoch1, 0, 0, 101);
         assert_eq!(result, SequenceResult::Valid);
+        manager.record_produce(pid, epoch1, 0, 0, 101);
     }
 
     #[test]
@@ -564,18 +588,22 @@ mod tests {
         // Partition 0
         let result = manager.validate_produce(pid, epoch, 0, 0, 100);
         assert_eq!(result, SequenceResult::Valid);
+        manager.record_produce(pid, epoch, 0, 0, 100);
 
         // Partition 1 (independent sequence)
         let result = manager.validate_produce(pid, epoch, 1, 0, 200);
         assert_eq!(result, SequenceResult::Valid);
+        manager.record_produce(pid, epoch, 1, 0, 200);
 
         // Partition 0 seq=1
         let result = manager.validate_produce(pid, epoch, 0, 1, 101);
         assert_eq!(result, SequenceResult::Valid);
+        manager.record_produce(pid, epoch, 0, 1, 101);
 
         // Partition 1 seq=1
         let result = manager.validate_produce(pid, epoch, 1, 1, 201);
         assert_eq!(result, SequenceResult::Valid);
+        manager.record_produce(pid, epoch, 1, 1, 201);
     }
 
     #[test]
@@ -611,7 +639,9 @@ mod tests {
 
         let (pid, epoch) = manager.init_producer(None);
         manager.validate_produce(pid, epoch, 0, 0, 100);
+        manager.record_produce(pid, epoch, 0, 0, 100);
         manager.validate_produce(pid, epoch, 1, 0, 200);
+        manager.record_produce(pid, epoch, 1, 0, 200);
 
         let stats = manager.stats();
         assert_eq!(stats.active_producers, 1);
@@ -625,7 +655,9 @@ mod tests {
 
         // Send message with epoch 0
         manager.validate_produce(pid, epoch0, 0, 0, 100);
+        manager.record_produce(pid, epoch0, 0, 0, 100);
         manager.validate_produce(pid, epoch0, 0, 1, 101);
+        manager.record_produce(pid, epoch0, 0, 1, 101);
 
         // Higher epoch comes in (new instance)
         let new_epoch: ProducerEpoch = 5;

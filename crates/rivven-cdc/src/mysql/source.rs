@@ -380,15 +380,19 @@ async fn run_mysql_cdc_loop(
     let encoded_password =
         url::form_urlencoded::byte_serialize(config.password.as_deref().unwrap_or("").as_bytes())
             .collect::<String>();
-    let metadata_url = format!(
-        "mysql://{}:{}@{}:{}/{}",
-        encoded_user,
-        encoded_password,
-        config.host,
-        config.port,
-        config.database.as_deref().unwrap_or("mysql")
-    );
-    let metadata_pool = mysql_async::Pool::new(metadata_url.as_str());
+    // F-070 fix: build the metadata URL in a limited scope and drop it immediately
+    // after pool creation, preventing accidental logging of embedded credentials.
+    let metadata_pool = {
+        let metadata_url = format!(
+            "mysql://{}:{}@{}:{}/{}",
+            encoded_user,
+            encoded_password,
+            config.host,
+            config.port,
+            config.database.as_deref().unwrap_or("mysql")
+        );
+        mysql_async::Pool::new(metadata_url.as_str())
+    };
 
     // Connect to MySQL with TLS if configured
     #[cfg(feature = "mysql-tls")]

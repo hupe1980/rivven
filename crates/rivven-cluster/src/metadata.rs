@@ -52,10 +52,12 @@ pub enum MetadataCommand {
         epoch: u64,
     },
 
-    /// Update partition ISR
+    /// Update partition ISR (F-011 fix: includes leader epoch for fencing)
     UpdatePartitionIsr {
         partition: PartitionId,
         isr: Vec<NodeId>,
+        /// Leader epoch of the proposer — stale-epoch proposals are rejected
+        leader_epoch: u64,
     },
 
     /// Reassign partition replicas
@@ -88,8 +90,14 @@ pub enum MetadataCommand {
     /// No-op (for heartbeats/leader election)
     Noop,
 
-    /// Atomic batch of commands — applied all-or-nothing in the state machine.
-    /// Used by `propose_batch` to get a single Raft consensus round.
+    /// Batch of commands applied in a single Raft consensus round.
+    ///
+    /// Semantics: **best-effort** — each command is applied independently.
+    /// Some commands may succeed while others fail. The batch is atomic at
+    /// the Raft log level (single entry, single fsync), but individual
+    /// commands can return errors without rolling back prior successes.
+    ///
+    /// Used by `propose_batch` for higher throughput.
     Batch(Vec<MetadataCommand>),
 }
 
@@ -124,6 +132,8 @@ pub enum MetadataResponse {
     ConsumerGroupDeleted {
         group_id: GroupId,
     },
+    /// Per-command responses from a Batch command (F-012 fix)
+    BatchResponses(Vec<MetadataResponse>),
     Error {
         message: String,
     },
@@ -179,9 +189,11 @@ impl ClusterMetadata {
                 leader,
                 epoch,
             } => self.update_partition_leader(&partition, leader, epoch),
-            MetadataCommand::UpdatePartitionIsr { partition, isr } => {
-                self.update_partition_isr(&partition, isr)
-            }
+            MetadataCommand::UpdatePartitionIsr {
+                partition,
+                isr,
+                leader_epoch,
+            } => self.update_partition_isr(&partition, isr, leader_epoch),
             MetadataCommand::ReassignPartition {
                 partition,
                 replicas,
@@ -196,29 +208,18 @@ impl ClusterMetadata {
             }
             MetadataCommand::Noop => MetadataResponse::Success,
             MetadataCommand::Batch(commands) => {
-                // Apply all commands atomically in a single state machine transition.
-                // If any command fails, we still apply the rest (best-effort) and
-                // return errors per-command. The key invariant is that the entire
-                // batch is part of a single Raft log entry, so it's all-or-nothing
-                // at the consensus level.
+                // Apply commands individually within a single state machine transition.
+                // Best-effort: each command is applied independently — some may
+                // succeed while others fail. The entire batch is a single Raft
+                // log entry (atomic at the consensus level), but individual
+                // command failures do NOT roll back prior successes. (F-013 fix)
                 let mut responses = Vec::with_capacity(commands.len());
-                let mut had_error = false;
                 for cmd in commands {
                     let resp = self.apply(index, cmd);
-                    if matches!(resp, MetadataResponse::Error { .. }) {
-                        had_error = true;
-                    }
                     responses.push(resp);
                 }
-                if had_error {
-                    // Return the first error for the batch
-                    responses
-                        .into_iter()
-                        .find(|r| matches!(r, MetadataResponse::Error { .. }))
-                        .unwrap_or(MetadataResponse::Success)
-                } else {
-                    MetadataResponse::Success
-                }
+                // Return per-command responses so callers can inspect each result (F-012 fix)
+                MetadataResponse::BatchResponses(responses)
             }
         }
     }
@@ -329,14 +330,25 @@ impl ClusterMetadata {
         }
     }
 
-    /// Update partition ISR
+    /// Update partition ISR (F-011 fix: epoch-fenced)
     fn update_partition_isr(
         &mut self,
         partition: &PartitionId,
         isr: Vec<NodeId>,
+        leader_epoch: u64,
     ) -> MetadataResponse {
         if let Some(topic) = self.topics.get_mut(&partition.topic) {
             if let Some(p) = topic.partition_mut(partition.partition) {
+                // F-011 fix: reject stale-epoch ISR updates to prevent split-brain
+                if leader_epoch < p.leader_epoch {
+                    return MetadataResponse::Error {
+                        message: format!(
+                            "Stale leader epoch {} < current {} for partition {}",
+                            leader_epoch, p.leader_epoch, partition
+                        ),
+                    };
+                }
+
                 p.isr = isr.iter().cloned().collect();
                 p.under_replicated = p.isr.len() < p.replicas.len();
 
