@@ -38,7 +38,8 @@ rdbc-sqlserver = ["rdbc", "rivven-rdbc/sqlserver"]
 rdbc-full = ["rdbc-postgres", "rdbc-mysql", "rdbc-sqlserver"]
 
 # Queue connectors (message queues)
-kafka = ["dep:rskafka"]      # Kafka source/sink (pure Rust client)
+kafka = ["dep:krafka"]       # Kafka source/sink (pure Rust, consumer groups, transactions)
+kafka-msk = ["kafka", "krafka/aws-msk"]  # AWS MSK IAM authentication for Kafka
 mqtt = ["dep:rumqttc"]       # MQTT source (pure Rust client)
 sqs = ["dep:aws-sdk-sqs", "dep:aws-config"]  # AWS SQS source (real AWS SDK)
 pubsub = ["dep:gcloud-pubsub", "dep:gcloud-googleapis", "dep:tokio-util"]  # Google Pub/Sub (real GCP SDK)
@@ -181,8 +182,9 @@ iceberg-catalog-rest = { version = "0.8", optional = true }
 # Delta Lake (optional)
 deltalake = { version = "0.30", optional = true }
 
-# Apache Kafka (pure Rust client - optional)
-rskafka = { version = "0.5", optional = true }
+# Apache Kafka (pure Rust, async-native client - optional)
+# Features: consumer groups, transactions, SASL, OAUTHBEARER, MSK IAM, batching, compression
+krafka = { version = "0.2", optional = true }
 
 # MQTT client (pure Rust - optional)
 rumqttc = { version = "0.24", optional = true }

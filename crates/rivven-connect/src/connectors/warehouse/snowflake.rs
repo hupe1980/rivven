@@ -66,10 +66,12 @@
 use crate::connectors::{AnySink, SinkFactory};
 use crate::error::ConnectorError;
 use crate::prelude::*;
+use crate::traits::circuit_breaker::CircuitBreakerConfig;
+#[cfg(feature = "snowflake")]
+use crate::traits::circuit_breaker::CircuitBreaker;
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
@@ -293,169 +295,6 @@ impl Default for RetryConfig {
     }
 }
 
-/// Circuit breaker configuration for Snowflake API calls
-#[derive(Debug, Clone, Deserialize, Serialize, Validate, JsonSchema)]
-pub struct CircuitBreakerConfig {
-    /// Whether circuit breaker is enabled
-    #[serde(default = "default_circuit_breaker_enabled")]
-    pub enabled: bool,
-
-    /// Number of consecutive failures before circuit opens
-    #[serde(default = "default_failure_threshold")]
-    #[validate(range(min = 1, max = 100))]
-    pub failure_threshold: u32,
-
-    /// Time in seconds to wait before transitioning from open to half-open
-    #[serde(default = "default_reset_timeout_secs")]
-    #[validate(range(min = 1, max = 3600))]
-    pub reset_timeout_secs: u64,
-
-    /// Number of successful requests in half-open state to close circuit
-    #[serde(default = "default_success_threshold")]
-    #[validate(range(min = 1, max = 10))]
-    pub success_threshold: u32,
-}
-
-fn default_circuit_breaker_enabled() -> bool {
-    true
-}
-
-fn default_failure_threshold() -> u32 {
-    5
-}
-
-fn default_reset_timeout_secs() -> u64 {
-    30
-}
-
-fn default_success_threshold() -> u32 {
-    2
-}
-
-impl Default for CircuitBreakerConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_circuit_breaker_enabled(),
-            failure_threshold: default_failure_threshold(),
-            reset_timeout_secs: default_reset_timeout_secs(),
-            success_threshold: default_success_threshold(),
-        }
-    }
-}
-
-/// Circuit breaker state
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg(feature = "snowflake")]
-enum CircuitState {
-    Closed,
-    Open,
-    HalfOpen,
-}
-
-/// Circuit breaker for protecting against cascading failures
-#[cfg(feature = "snowflake")]
-struct CircuitBreaker {
-    config: CircuitBreakerConfig,
-    /// Current failure count
-    failure_count: AtomicU32,
-    /// Current success count (for half-open state)
-    success_count: AtomicU32,
-    /// Timestamp when circuit opened (microseconds since epoch)
-    opened_at: AtomicU64,
-}
-
-#[cfg(feature = "snowflake")]
-impl CircuitBreaker {
-    fn new(config: CircuitBreakerConfig) -> Self {
-        Self {
-            config,
-            failure_count: AtomicU32::new(0),
-            success_count: AtomicU32::new(0),
-            opened_at: AtomicU64::new(0),
-        }
-    }
-
-    fn state(&self) -> CircuitState {
-        if !self.config.enabled {
-            return CircuitState::Closed;
-        }
-
-        let failures = self.failure_count.load(Ordering::Relaxed);
-        if failures < self.config.failure_threshold {
-            return CircuitState::Closed;
-        }
-
-        let opened_at = self.opened_at.load(Ordering::Relaxed);
-        if opened_at == 0 {
-            return CircuitState::Closed;
-        }
-
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_micros() as u64)
-            .unwrap_or(0);
-
-        let reset_timeout_micros = self.config.reset_timeout_secs * 1_000_000;
-        if now > opened_at + reset_timeout_micros {
-            CircuitState::HalfOpen
-        } else {
-            CircuitState::Open
-        }
-    }
-
-    fn allow_request(&self) -> bool {
-        match self.state() {
-            CircuitState::Closed => true,
-            CircuitState::Open => false,
-            CircuitState::HalfOpen => true,
-        }
-    }
-
-    fn record_success(&self) {
-        match self.state() {
-            CircuitState::Closed => {
-                // Reset failure count on success
-                self.failure_count.store(0, Ordering::Relaxed);
-            }
-            CircuitState::HalfOpen => {
-                let successes = self.success_count.fetch_add(1, Ordering::Relaxed) + 1;
-                if successes >= self.config.success_threshold {
-                    // Close the circuit
-                    self.failure_count.store(0, Ordering::Relaxed);
-                    self.success_count.store(0, Ordering::Relaxed);
-                    self.opened_at.store(0, Ordering::Relaxed);
-                    debug!(
-                        "Circuit breaker closed after {} successful requests",
-                        successes
-                    );
-                }
-            }
-            CircuitState::Open => {}
-        }
-    }
-
-    fn record_failure(&self) {
-        let failures = self.failure_count.fetch_add(1, Ordering::Relaxed) + 1;
-
-        if failures == self.config.failure_threshold {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_micros() as u64)
-                .unwrap_or(0);
-            self.opened_at.store(now, Ordering::Relaxed);
-            warn!(
-                "Circuit breaker opened after {} consecutive failures",
-                failures
-            );
-        }
-
-        // Reset success count on any failure in half-open state
-        if self.state() == CircuitState::HalfOpen {
-            self.success_count.store(0, Ordering::Relaxed);
-        }
-    }
-}
-
 /// Configuration for the Snowflake sink
 #[derive(Debug, Clone, Deserialize, Serialize, Validate, JsonSchema)]
 pub struct SnowflakeSinkConfig {
@@ -531,7 +370,6 @@ pub struct SnowflakeSinkConfig {
 
     /// Circuit breaker configuration for protecting against cascading failures
     #[serde(default)]
-    #[validate(nested)]
     pub circuit_breaker: CircuitBreakerConfig,
 
     /// Request timeout in seconds
@@ -648,7 +486,7 @@ impl SnowflakeSink {
             .expect("Failed to create HTTP client");
         Self {
             client,
-            circuit_breaker: Some(CircuitBreaker::new(CircuitBreakerConfig::default())),
+            circuit_breaker: Some(CircuitBreaker::from_config(&CircuitBreakerConfig::default())),
         }
     }
 
@@ -662,7 +500,7 @@ impl SnowflakeSink {
             .expect("Failed to create HTTP client");
 
         let circuit_breaker = if config.circuit_breaker.enabled {
-            Some(CircuitBreaker::new(config.circuit_breaker.clone()))
+            Some(CircuitBreaker::from_config(&config.circuit_breaker))
         } else {
             None
         };
@@ -1350,6 +1188,7 @@ pub fn register(registry: &mut crate::SinkRegistry) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::circuit_breaker::CircuitState;
 
     #[test]
     fn test_spec() {
@@ -1521,7 +1360,7 @@ mod tests {
                 reset_timeout_secs: 1,
                 success_threshold: 2,
             };
-            let cb = CircuitBreaker::new(config);
+            let cb = CircuitBreaker::from_config(&config);
 
             // Initially closed
             assert_eq!(cb.state(), CircuitState::Closed);
@@ -1540,19 +1379,18 @@ mod tests {
 
         #[test]
         fn test_circuit_breaker_disabled() {
-            let config = CircuitBreakerConfig {
-                enabled: false,
-                failure_threshold: 1,
-                reset_timeout_secs: 1,
-                success_threshold: 1,
+            // When `enabled` is false, no CircuitBreaker is created (checked at config level)
+            let config = SnowflakeSinkConfig {
+                circuit_breaker: CircuitBreakerConfig {
+                    enabled: false,
+                    failure_threshold: 1,
+                    reset_timeout_secs: 1,
+                    success_threshold: 1,
+                },
+                ..Default::default()
             };
-            let cb = CircuitBreaker::new(config);
-
-            // Always closed when disabled
-            assert_eq!(cb.state(), CircuitState::Closed);
-            cb.record_failure();
-            assert_eq!(cb.state(), CircuitState::Closed);
-            assert!(cb.allow_request());
+            let sink = SnowflakeSink::with_config(&config);
+            assert!(sink.circuit_breaker.is_none());
         }
 
         #[test]
@@ -1563,7 +1401,7 @@ mod tests {
                 reset_timeout_secs: 60,
                 success_threshold: 2,
             };
-            let cb = CircuitBreaker::new(config);
+            let cb = CircuitBreaker::from_config(&config);
 
             // Record some failures
             cb.record_failure();

@@ -37,6 +37,7 @@ use validator::Validate;
 use crate::connectors::{AnySource, SourceFactory};
 use crate::error::{ConnectorError, Result};
 use crate::prelude::*;
+use crate::types::SensitiveString;
 
 /// Query mode for RDBC source
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -57,8 +58,7 @@ pub enum RdbcQueryMode {
 #[derive(Debug, Clone, Serialize, Deserialize, Validate, JsonSchema)]
 pub struct RdbcSourceConfig {
     /// Database connection URL
-    #[validate(length(min = 1))]
-    pub connection_url: String,
+    pub connection_url: SensitiveString,
 
     /// Schema name (e.g., "public")
     #[serde(default)]
@@ -157,7 +157,7 @@ fn default_acquire_timeout_ms() -> u64 {
 impl Default for RdbcSourceConfig {
     fn default() -> Self {
         Self {
-            connection_url: String::new(),
+            connection_url: SensitiveString::new(""),
             schema: None,
             table: String::new(),
             mode: RdbcQueryMode::Bulk,
@@ -244,7 +244,7 @@ async fn create_pool(
     use rivven_rdbc::postgres::PgConnectionFactory;
     use std::time::Duration;
     let factory = std::sync::Arc::new(PgConnectionFactory);
-    let pool_config = PoolConfig::new(&config.connection_url)
+    let pool_config = PoolConfig::new(config.connection_url.expose_secret())
         .with_min_size(config.min_pool_size as usize)
         .with_max_size(config.pool_size as usize)
         .with_acquire_timeout(Duration::from_millis(config.acquire_timeout_ms))
@@ -285,7 +285,7 @@ impl Source for RdbcSource {
             return Ok(CheckResult::failure(e));
         }
 
-        match create_connection(&config.connection_url).await {
+        match create_connection(config.connection_url.expose_secret()).await {
             Ok(conn) => match conn.execute("SELECT 1", &[]).await {
                 Ok(_) => {
                     info!(table = %config.table, "RDBC source connection check passed");
@@ -633,7 +633,7 @@ mod tests {
     #[test]
     fn test_mode_validation() {
         let config = RdbcSourceConfig {
-            connection_url: "postgres://localhost/test".to_string(),
+            connection_url: "postgres://localhost/test".into(),
             table: "users".to_string(),
             mode: RdbcQueryMode::Incrementing,
             incrementing_column: None,
@@ -646,7 +646,7 @@ mod tests {
     #[test]
     fn test_build_query_bulk() {
         let config = RdbcSourceConfig {
-            connection_url: "postgres://localhost/test".to_string(),
+            connection_url: "postgres://localhost/test".into(),
             schema: Some("public".to_string()),
             table: "users".to_string(),
             batch_size: 100,
@@ -663,7 +663,7 @@ mod tests {
     #[test]
     fn test_build_query_incrementing() {
         let config = RdbcSourceConfig {
-            connection_url: "postgres://localhost/test".to_string(),
+            connection_url: "postgres://localhost/test".into(),
             table: "users".to_string(),
             mode: RdbcQueryMode::Incrementing,
             incrementing_column: Some("id".to_string()),

@@ -178,9 +178,6 @@ pub fn create_sink_registry() -> SinkRegistry {
     #[cfg(feature = "s3-vectors")]
     registry.register("s3-vectors", Arc::new(vectordb::S3VectorSinkFactory));
 
-    #[cfg(feature = "s3-vectors")]
-    registry.register("s3-vectors", Arc::new(vectordb::S3VectorSinkFactory));
-
     // Lakehouse sinks (feature-gated)
     #[cfg(feature = "iceberg")]
     registry.register("iceberg", Arc::new(lakehouse::IcebergSinkFactory));
@@ -650,28 +647,6 @@ pub fn create_connector_inventory() -> ConnectorInventory {
                 "managed",
             ])
             .aliases(["s3-vectors-sink", "s3vectors", "s3-vector"])
-            .build(),
-        Arc::new(vectordb::S3VectorSinkFactory),
-    );
-    // Amazon S3 Vectors sink
-    #[cfg(feature = "s3-vectors")]
-    inventory.register_sink(
-        ConnectorMetadata::builder("s3-vectors")
-            .title("Amazon S3 Vectors")
-            .description("High-throughput vector upserts into Amazon S3 Vectors via AWS SDK")
-            .sink()
-            .category(ConnectorCategory::AiVector)
-            .feature("s3-vectors")
-            .tags([
-                "s3-vectors",
-                "s3",
-                "aws",
-                "vector",
-                "vectordb",
-                "similarity",
-                "embedding",
-            ])
-            .aliases(["s3-vectors-sink", "s3vectors", "amazon-s3-vectors"])
             .build(),
         Arc::new(vectordb::S3VectorSinkFactory),
     );

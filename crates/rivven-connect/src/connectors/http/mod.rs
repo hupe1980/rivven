@@ -431,13 +431,12 @@ impl HttpWebhookSink {
         // Set up circuit breaker if enabled
         if config.circuit_breaker_threshold > 0 {
             let cb_config = CircuitBreakerConfig {
-                failure_threshold: config.circuit_breaker_threshold as u64,
-                reset_timeout: Duration::from_secs(config.circuit_breaker_reset_secs as u64),
-                success_threshold: 3,
-                half_open_requests: 3,
-                failure_window: Duration::from_secs(60),
+                enabled: true,
+                failure_threshold: config.circuit_breaker_threshold,
+                reset_timeout_secs: config.circuit_breaker_reset_secs as u64,
+                success_threshold: 2,
             };
-            self.circuit_breaker = Some(CircuitBreaker::with_config(cb_config));
+            self.circuit_breaker = Some(CircuitBreaker::from_config(&cb_config));
         }
 
         // Set up concurrency semaphore
@@ -446,11 +445,12 @@ impl HttpWebhookSink {
 
     /// Interpolate template variables in URL
     fn interpolate_url(&self, url: &str, event: &SourceEvent) -> String {
-        url.replace("{stream}", &event.stream)
-            .replace("{event_type}", event.event_type.as_str())
+        let encode = |s: &str| urlencoding::encode(s).into_owned();
+        url.replace("{stream}", &encode(&event.stream))
+            .replace("{event_type}", &encode(event.event_type.as_str()))
             .replace(
                 "{namespace}",
-                event.namespace.as_deref().unwrap_or("default"),
+                &encode(event.namespace.as_deref().unwrap_or("default")),
             )
     }
 

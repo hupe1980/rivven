@@ -264,6 +264,8 @@ impl ReplicationClient {
         slot_name: &str,
         output_plugin: &str,
     ) -> Result<()> {
+        Validator::validate_identifier(slot_name)?;
+        Validator::validate_identifier(output_plugin)?;
         let query = format!(
             "CREATE_REPLICATION_SLOT {} LOGICAL {}",
             slot_name, output_plugin
@@ -279,6 +281,8 @@ impl ReplicationClient {
         start_lsn: u64,
         pub_name: &str,
     ) -> Result<ReplicationStream> {
+        Validator::validate_identifier(slot_name)?;
+        Validator::validate_identifier(pub_name)?;
         let query = format!(
             "START_REPLICATION SLOT {} LOGICAL {}/{} (proto_version '1', publication_names '{}')",
             slot_name,

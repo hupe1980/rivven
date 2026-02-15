@@ -38,6 +38,7 @@ use validator::Validate;
 use crate::connectors::{AnySink, SinkFactory};
 use crate::error::{ConnectorError, Result};
 use crate::prelude::*;
+use crate::types::SensitiveString;
 
 /// Executor abstraction for batch operations.
 /// Enables unified interface for both Connection and Transaction.
@@ -76,8 +77,7 @@ pub enum RdbcWriteMode {
 #[derive(Debug, Clone, Serialize, Deserialize, Validate, JsonSchema)]
 pub struct RdbcSinkConfig {
     /// Database connection URL
-    #[validate(length(min = 1))]
-    pub connection_url: String,
+    pub connection_url: SensitiveString,
 
     /// Target schema name
     #[serde(default)]
@@ -185,7 +185,7 @@ fn default_acquire_timeout_ms() -> u64 {
 impl Default for RdbcSinkConfig {
     fn default() -> Self {
         Self {
-            connection_url: String::new(),
+            connection_url: SensitiveString::new(""),
             schema: None,
             table: String::new(),
             write_mode: RdbcWriteMode::Insert,
@@ -268,7 +268,7 @@ async fn create_pool(
 ) -> std::result::Result<std::sync::Arc<SimpleConnectionPool>, rivven_rdbc::Error> {
     use rivven_rdbc::postgres::PgConnectionFactory;
     let factory = std::sync::Arc::new(PgConnectionFactory);
-    let pool_config = PoolConfig::new(&config.connection_url)
+    let pool_config = PoolConfig::new(config.connection_url.expose_secret())
         .with_min_size(config.min_pool_size as usize)
         .with_max_size(config.pool_size as usize)
         .with_acquire_timeout(Duration::from_millis(config.acquire_timeout_ms))
@@ -308,7 +308,7 @@ impl Sink for RdbcSink {
             return Ok(CheckResult::failure(e));
         }
 
-        match create_connection(&config.connection_url).await {
+        match create_connection(config.connection_url.expose_secret()).await {
             Ok(conn) => match conn.execute("SELECT 1", &[]).await {
                 Ok(_) => {
                     info!(table = %config.table, "RDBC sink connection check passed");
@@ -844,7 +844,7 @@ mod tests {
     #[test]
     fn test_mode_validation() {
         let config = RdbcSinkConfig {
-            connection_url: "postgres://localhost/test".to_string(),
+            connection_url: "postgres://localhost/test".into(),
             table: "users".to_string(),
             write_mode: RdbcWriteMode::Upsert,
             pk_columns: None,

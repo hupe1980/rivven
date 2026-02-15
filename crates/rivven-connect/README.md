@@ -272,13 +272,16 @@ See [docs/delta-lake-sink.md](../../docs/docs/delta-lake-sink.md) for complete c
 
 ### Apache Kafka (Pure Rust)
 
-The Kafka connector provides bidirectional Kafka integration using [rskafka](https://crates.io/crates/rskafka), a pure Rust Kafka client with **zero C dependencies**:
+The Kafka connector provides bidirectional Kafka integration using [krafka](https://crates.io/crates/krafka), an async-native pure Rust Kafka client with **zero C dependencies**:
 
 - **Pure Rust**: No librdkafka, no C compiler needed
+- **Native Consumer Groups**: Full consumer group protocol via krafka
+- **Producer Batching**: Built-in linger/batch-size batching
 - **Lock-free Metrics**: Atomic counters with Prometheus export
-- **Exponential Backoff**: Configurable retry with backoff
 - **Compression**: None, Gzip, Snappy, LZ4, Zstd
-- **Security**: SASL PLAIN with SSL/TLS
+- **Isolation Level**: `read_uncommitted` / `read_committed` for transactional reads
+- **Full SASL Auth**: PLAIN, SCRAM-SHA-256/512, OAUTHBEARER on all clients
+- **AWS MSK IAM**: Native IAM authentication via `kafka-msk` feature
 
 ```yaml
 # Source: Consume from Kafka
@@ -287,18 +290,12 @@ sources:
     connector: kafka-source
     topic: kafka-orders           # Rivven topic (destination)
     config:
-      brokers: ["kafka1:9092", "kafka2:9092"]
+      brokers: "kafka1:9092,kafka2:9092"
       topic: orders               # Kafka topic (external source)
       consumer_group: rivven-migration
       start_offset: earliest
-      fetch_max_messages: 500
-      retry_initial_ms: 100
-      retry_max_ms: 10000
-      security:
-        protocol: sasl_ssl
-        mechanism: PLAIN
-        username: ${KAFKA_USER}
-        password: ${KAFKA_PASSWORD}
+      max_poll_records: 500
+      isolation_level: read_uncommitted
 
 # Sink: Produce to Kafka
 sinks:
@@ -307,12 +304,13 @@ sinks:
     topics: [orders]              # Rivven topics to consume from
     consumer_group: kafka-producer
     config:
-      brokers: ["kafka1:9092"]
+      brokers: "kafka1:9092"
       topic: orders-replica       # Kafka topic (external destination)
       compression: lz4
       acks: all
       batch_size_bytes: 16384
       linger_ms: 5
+      retry_backoff_ms: 100
 ```
 
 See [docs/kafka-connector.md](../../docs/docs/kafka-connector.md) for complete configuration reference.

@@ -85,11 +85,11 @@ use futures::StreamExt;
 use metrics::{counter, gauge, histogram};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, error, info, warn};
 use validator::Validate;
 
+use crate::traits::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use crate::types::SensitiveString;
 
 // ─────────────────────────────────────────────────────────────────
@@ -105,53 +105,6 @@ pub enum ClickHouseCompression {
     /// LZ4 compression (ClickHouse native, best throughput — default)
     #[default]
     Lz4,
-}
-
-/// Circuit breaker configuration for the ClickHouse sink.
-#[derive(Debug, Clone, Deserialize, Serialize, Validate, JsonSchema)]
-pub struct ClickHouseCBConfig {
-    /// Enable the circuit breaker.
-    #[serde(default = "default_cb_enabled")]
-    pub enabled: bool,
-
-    /// Number of consecutive failures before the circuit opens.
-    #[serde(default = "default_cb_failure_threshold")]
-    #[validate(range(min = 1, max = 100))]
-    pub failure_threshold: u32,
-
-    /// Seconds to wait before transitioning from open to half-open.
-    #[serde(default = "default_cb_reset_timeout_secs")]
-    #[validate(range(min = 1, max = 3600))]
-    pub reset_timeout_secs: u64,
-
-    /// Successful batches required in half-open state to close the circuit.
-    #[serde(default = "default_cb_success_threshold")]
-    #[validate(range(min = 1, max = 10))]
-    pub success_threshold: u32,
-}
-
-impl Default for ClickHouseCBConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_cb_enabled(),
-            failure_threshold: default_cb_failure_threshold(),
-            reset_timeout_secs: default_cb_reset_timeout_secs(),
-            success_threshold: default_cb_success_threshold(),
-        }
-    }
-}
-
-fn default_cb_enabled() -> bool {
-    true
-}
-fn default_cb_failure_threshold() -> u32 {
-    5
-}
-fn default_cb_reset_timeout_secs() -> u64 {
-    30
-}
-fn default_cb_success_threshold() -> u32 {
-    2
 }
 
 /// Configuration for the ClickHouse sink
@@ -225,8 +178,7 @@ pub struct ClickHouseSinkConfig {
 
     /// Circuit breaker configuration
     #[serde(default)]
-    #[validate(nested)]
-    pub circuit_breaker: ClickHouseCBConfig,
+    pub circuit_breaker: CircuitBreakerConfig,
 }
 
 fn default_database() -> String {
@@ -328,7 +280,7 @@ impl Default for ClickHouseSinkConfig {
             max_retries: default_max_retries(),
             initial_backoff_ms: default_initial_backoff_ms(),
             max_backoff_ms: default_max_backoff_ms(),
-            circuit_breaker: ClickHouseCBConfig::default(),
+            circuit_breaker: CircuitBreakerConfig::default(),
         }
     }
 }
@@ -371,133 +323,6 @@ impl ClickHouseRow {
             _ingested_at: Utc::now().to_rfc3339(),
         };
         (row, payload_bytes)
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────
-// Circuit Breaker (lock-free, per-sink)
-// ─────────────────────────────────────────────────────────────────
-
-/// Circuit breaker state machine (lock-free).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-enum CBState {
-    Closed = 0,
-    Open = 1,
-    HalfOpen = 2,
-}
-
-impl CBState {
-    fn from_u32(v: u32) -> Self {
-        match v {
-            1 => Self::Open,
-            2 => Self::HalfOpen,
-            _ => Self::Closed,
-        }
-    }
-}
-
-/// Lock-free circuit breaker using atomics — no `Mutex` on the hot path.
-struct CircuitBreaker {
-    state: AtomicU32,
-    consecutive_failures: AtomicU32,
-    opened_at: AtomicU64,
-    half_open_successes: AtomicU32,
-    failure_threshold: u32,
-    reset_timeout: Duration,
-    success_threshold: u32,
-}
-
-impl CircuitBreaker {
-    fn new(config: &ClickHouseCBConfig) -> Self {
-        Self {
-            state: AtomicU32::new(CBState::Closed as u32),
-            consecutive_failures: AtomicU32::new(0),
-            opened_at: AtomicU64::new(0),
-            half_open_successes: AtomicU32::new(0),
-            failure_threshold: config.failure_threshold,
-            reset_timeout: Duration::from_secs(config.reset_timeout_secs),
-            success_threshold: config.success_threshold,
-        }
-    }
-
-    #[inline]
-    fn state(&self) -> CBState {
-        CBState::from_u32(self.state.load(Ordering::Acquire))
-    }
-
-    fn now_epoch_secs() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs()
-    }
-
-    /// Returns `true` if the request should proceed.
-    fn allow_request(&self) -> bool {
-        match self.state() {
-            CBState::Closed => true,
-            CBState::Open => {
-                let opened = self.opened_at.load(Ordering::Acquire);
-                if Self::now_epoch_secs().saturating_sub(opened) >= self.reset_timeout.as_secs() {
-                    // Atomic CAS: only one thread transitions Open → HalfOpen
-                    if self
-                        .state
-                        .compare_exchange(
-                            CBState::Open as u32,
-                            CBState::HalfOpen as u32,
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                        )
-                        .is_ok()
-                    {
-                        self.half_open_successes.store(0, Ordering::Release);
-                    }
-                    true
-                } else {
-                    false
-                }
-            }
-            CBState::HalfOpen => true,
-        }
-    }
-
-    fn record_success(&self) {
-        match self.state() {
-            CBState::Closed => {
-                self.consecutive_failures.store(0, Ordering::Release);
-            }
-            CBState::HalfOpen => {
-                let prev = self.half_open_successes.fetch_add(1, Ordering::AcqRel);
-                if prev + 1 >= self.success_threshold {
-                    self.state.store(CBState::Closed as u32, Ordering::Release);
-                    self.consecutive_failures.store(0, Ordering::Release);
-                    info!("Circuit breaker closed (ClickHouse recovered)");
-                }
-            }
-            CBState::Open => {}
-        }
-    }
-
-    fn record_failure(&self) {
-        let prev = self.consecutive_failures.fetch_add(1, Ordering::AcqRel);
-        if prev + 1 == self.failure_threshold && self.state() != CBState::Open {
-            self.state.store(CBState::Open as u32, Ordering::Release);
-            self.opened_at
-                .store(Self::now_epoch_secs(), Ordering::Release);
-            warn!(
-                threshold = self.failure_threshold,
-                "Circuit breaker OPEN (ClickHouse)"
-            );
-        }
-    }
-
-    /// Diagnostic snapshot for shutdown logging.
-    fn diagnostics(&self) -> (CBState, u32, u32) {
-        let state = self.state();
-        let failures = self.consecutive_failures.load(Ordering::Acquire);
-        let half_open_ok = self.half_open_successes.load(Ordering::Acquire);
-        (state, failures, half_open_ok)
     }
 }
 
@@ -600,7 +425,7 @@ impl ClickHouseSink {
     /// Create a sink pre-configured with the given config's circuit breaker.
     pub fn with_config(config: &ClickHouseSinkConfig) -> Self {
         let cb = if config.circuit_breaker.enabled {
-            Some(CircuitBreaker::new(&config.circuit_breaker))
+            Some(CircuitBreaker::from_config(&config.circuit_breaker))
         } else {
             None
         };
@@ -1009,15 +834,15 @@ impl Sink for ClickHouseSink {
 
         // Log circuit breaker diagnostics on shutdown
         if let Some(ref cb) = self.circuit_breaker {
-            let (cb_state, cb_failures, cb_half_open_ok) = cb.diagnostics();
+            let diag = cb.diagnostics();
             info!(
                 session_id,
                 total_written,
                 total_failed,
                 total_bytes,
-                cb_state = ?cb_state,
-                cb_consecutive_failures = cb_failures,
-                cb_half_open_successes = cb_half_open_ok,
+                cb_state = %diag.state,
+                cb_failure_count = diag.failure_count,
+                cb_success_count = diag.success_count,
                 "ClickHouse sink completed"
             );
         } else {
@@ -1069,6 +894,7 @@ pub fn register(registry: &mut crate::SinkRegistry) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::circuit_breaker::CircuitState;
 
     #[test]
     fn test_spec() {
@@ -1357,61 +1183,61 @@ validation: false
 
     #[test]
     fn test_circuit_breaker_allows_when_closed() {
-        let config = ClickHouseCBConfig {
+        let config = CircuitBreakerConfig {
             enabled: true,
             failure_threshold: 3,
             reset_timeout_secs: 1,
             success_threshold: 1,
         };
-        let cb = CircuitBreaker::new(&config);
+        let cb = CircuitBreaker::from_config(&config);
         assert!(cb.allow_request());
-        assert_eq!(cb.state(), CBState::Closed);
+        assert_eq!(cb.state(), CircuitState::Closed);
     }
 
     #[test]
     fn test_circuit_breaker_opens_after_threshold() {
-        let config = ClickHouseCBConfig {
+        let config = CircuitBreakerConfig {
             enabled: true,
             failure_threshold: 3,
             reset_timeout_secs: 60,
             success_threshold: 1,
         };
-        let cb = CircuitBreaker::new(&config);
+        let cb = CircuitBreaker::from_config(&config);
 
         cb.record_failure();
         cb.record_failure();
-        assert_eq!(cb.state(), CBState::Closed);
+        assert_eq!(cb.state(), CircuitState::Closed);
 
         cb.record_failure();
-        assert_eq!(cb.state(), CBState::Open);
+        assert_eq!(cb.state(), CircuitState::Open);
         assert!(!cb.allow_request()); // reset_timeout_secs = 60 so still open
     }
 
     #[test]
     fn test_circuit_breaker_success_resets() {
-        let config = ClickHouseCBConfig {
+        let config = CircuitBreakerConfig {
             enabled: true,
             failure_threshold: 2,
             reset_timeout_secs: 0, // immediate half-open
             success_threshold: 1,
         };
-        let cb = CircuitBreaker::new(&config);
+        let cb = CircuitBreaker::from_config(&config);
 
         cb.record_failure();
         cb.record_failure();
-        assert_eq!(cb.state(), CBState::Open);
+        assert_eq!(cb.state(), CircuitState::Open);
 
         // With reset_timeout_secs = 0, allow_request should transition to HalfOpen
         assert!(cb.allow_request());
-        assert_eq!(cb.state(), CBState::HalfOpen);
+        assert_eq!(cb.state(), CircuitState::HalfOpen);
 
         cb.record_success();
-        assert_eq!(cb.state(), CBState::Closed);
+        assert_eq!(cb.state(), CircuitState::Closed);
     }
 
     #[test]
     fn test_circuit_breaker_cb_config_defaults() {
-        let cfg = ClickHouseCBConfig::default();
+        let cfg = CircuitBreakerConfig::default();
         assert!(cfg.enabled);
         assert_eq!(cfg.failure_threshold, 5);
         assert_eq!(cfg.reset_timeout_secs, 30);
@@ -1472,7 +1298,7 @@ validation: false
             max_retries: 5,
             initial_backoff_ms: 100,
             max_backoff_ms: 10_000,
-            circuit_breaker: ClickHouseCBConfig {
+            circuit_breaker: CircuitBreakerConfig {
                 enabled: false,
                 failure_threshold: 10,
                 reset_timeout_secs: 60,
@@ -1520,62 +1346,7 @@ validation: false
         assert!(row.data.contains("amount"));
     }
 
-    #[test]
-    fn test_cb_config_validation() {
-        // Valid defaults
-        let valid = ClickHouseCBConfig::default();
-        assert!(valid.validate().is_ok());
 
-        // Invalid: failure_threshold = 0
-        let bad = ClickHouseCBConfig {
-            failure_threshold: 0,
-            ..Default::default()
-        };
-        assert!(bad.validate().is_err());
-
-        // Invalid: failure_threshold > 100
-        let too_high = ClickHouseCBConfig {
-            failure_threshold: 101,
-            ..Default::default()
-        };
-        assert!(too_high.validate().is_err());
-
-        // Invalid: reset_timeout_secs > 3600
-        let bad_timeout = ClickHouseCBConfig {
-            reset_timeout_secs: 7200,
-            ..Default::default()
-        };
-        assert!(bad_timeout.validate().is_err());
-
-        // Invalid: success_threshold > 10
-        let bad_success = ClickHouseCBConfig {
-            success_threshold: 11,
-            ..Default::default()
-        };
-        assert!(bad_success.validate().is_err());
-
-        // Invalid: success_threshold = 0
-        let zero_success = ClickHouseCBConfig {
-            success_threshold: 0,
-            ..Default::default()
-        };
-        assert!(zero_success.validate().is_err());
-    }
-
-    #[test]
-    fn test_nested_cb_config_validation() {
-        // Parent config with invalid CB config should fail validate()
-        let config = ClickHouseSinkConfig {
-            url: "http://localhost:8123".to_string(),
-            table: "events".to_string(),
-            circuit_breaker: ClickHouseCBConfig {
-                failure_threshold: 0,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        assert!(config.validate().is_err());
-    }
 
     #[test]
     fn test_backoff_overflow_safety() {
@@ -1631,46 +1402,47 @@ validation: false
     #[test]
     fn test_circuit_breaker_record_failure_exact_threshold() {
         // Ensure exactly one Open transition (== not >=)
-        let config = ClickHouseCBConfig {
+        let config = CircuitBreakerConfig {
             enabled: true,
             failure_threshold: 2,
             reset_timeout_secs: 60,
             success_threshold: 1,
         };
-        let cb = CircuitBreaker::new(&config);
+        let cb = CircuitBreaker::from_config(&config);
 
         cb.record_failure(); // 1
-        assert_eq!(cb.state(), CBState::Closed);
+        assert_eq!(cb.state(), CircuitState::Closed);
 
         cb.record_failure(); // 2 == threshold → opens
-        assert_eq!(cb.state(), CBState::Open);
+        assert_eq!(cb.state(), CircuitState::Open);
 
         // Additional failures beyond threshold should NOT re-trigger state change
-        cb.record_failure(); // 3 > threshold, == is false, no duplicate transition
-        assert_eq!(cb.state(), CBState::Open);
+        cb.record_failure(); // 3 > threshold, state is Open so record_failure is no-op
+        assert_eq!(cb.state(), CircuitState::Open);
     }
 
     #[test]
     fn test_circuit_breaker_diagnostics() {
-        let config = ClickHouseCBConfig {
+        let config = CircuitBreakerConfig {
             enabled: true,
             failure_threshold: 3,
             reset_timeout_secs: 60,
             success_threshold: 1,
         };
-        let cb = CircuitBreaker::new(&config);
+        let cb = CircuitBreaker::from_config(&config);
 
-        let (state, failures, half_open_ok) = cb.diagnostics();
-        assert_eq!(state, CBState::Closed);
-        assert_eq!(failures, 0);
-        assert_eq!(half_open_ok, 0);
+        let diag = cb.diagnostics();
+        assert_eq!(diag.state, CircuitState::Closed);
+        assert_eq!(diag.failure_count, 0);
+        assert_eq!(diag.success_count, 0);
 
         cb.record_failure();
         cb.record_failure();
         cb.record_failure();
 
-        let (state, failures, _) = cb.diagnostics();
-        assert_eq!(state, CBState::Open);
-        assert_eq!(failures, 3);
+        let diag = cb.diagnostics();
+        assert_eq!(diag.state, CircuitState::Open);
+        // failure_count is reset on state transition in the SDK circuit breaker
+        assert_eq!(diag.failure_count, 0);
     }
 }

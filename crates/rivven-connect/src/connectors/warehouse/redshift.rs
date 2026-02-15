@@ -210,7 +210,8 @@ impl RedshiftSink {
                 root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 
                 let tls_config = match config.ssl_mode {
-                    SslMode::Prefer | SslMode::Require => {
+                    SslMode::Prefer => {
+                        warn!("SslMode::Prefer does not verify TLS certificates; consider using VerifyFull");
                         // Accept any certificate (dangerous but matches native-tls behavior)
                         ClientConfig::builder()
                             .dangerous()
@@ -219,6 +220,12 @@ impl RedshiftSink {
                                     rustls::crypto::ring::default_provider(),
                                 ),
                             ))
+                            .with_no_client_auth()
+                    }
+                    SslMode::Require => {
+                        // Verify certificates with webpki roots
+                        ClientConfig::builder()
+                            .with_root_certificates(root_store.clone())
                             .with_no_client_auth()
                     }
                     SslMode::VerifyCa | SslMode::VerifyFull => {

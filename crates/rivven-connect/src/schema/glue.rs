@@ -43,6 +43,7 @@
 //! ```
 
 use crate::schema::types::*;
+use crate::types::SensitiveString;
 use parking_lot::RwLock;
 use rivven_schema::CompatibilityResult;
 use serde::{Deserialize, Serialize};
@@ -160,8 +161,8 @@ impl GlueRegistry {
 
         Ok(AwsCredentials {
             access_key,
-            secret_key,
-            session_token,
+            secret_key: SensitiveString::new(secret_key),
+            session_token: session_token.map(SensitiveString::new),
         })
     }
 
@@ -811,8 +812,8 @@ impl GlueRegistry {
 #[allow(dead_code)]
 struct AwsCredentials {
     access_key: String,
-    secret_key: String,
-    session_token: Option<String>,
+    secret_key: SensitiveString,
+    session_token: Option<SensitiveString>,
 }
 
 #[cfg(test)]
