@@ -76,11 +76,8 @@ where
         let mut discard_buf = [0u8; 8192];
         while remaining > 0 {
             let to_read = remaining.min(discard_buf.len());
-            match tokio::time::timeout(
-                read_timeout,
-                stream.read_exact(&mut discard_buf[..to_read]),
-            )
-            .await
+            match tokio::time::timeout(read_timeout, stream.read_exact(&mut discard_buf[..to_read]))
+                .await
             {
                 Ok(Ok(_)) => remaining -= to_read,
                 Ok(Err(_)) | Err(_) => {

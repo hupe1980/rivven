@@ -95,9 +95,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::traits::circuit_breaker::CircuitBreakerConfig;
 #[cfg(feature = "databricks")]
 use crate::traits::circuit_breaker::CircuitBreaker;
+use crate::traits::circuit_breaker::CircuitBreakerConfig;
 use tokio::time::MissedTickBehavior;
 use tracing::{debug, error, info, warn};
 use validator::Validate;

@@ -1346,8 +1346,6 @@ validation: false
         assert!(row.data.contains("amount"));
     }
 
-
-
     #[test]
     fn test_backoff_overflow_safety() {
         // At attempt >= 64, wrapping_shl would reset to initial_ms.

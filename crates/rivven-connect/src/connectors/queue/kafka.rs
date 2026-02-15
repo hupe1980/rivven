@@ -24,13 +24,12 @@ use crate::error::{ConnectorError, Result};
 use crate::traits::catalog::{Catalog, ConfiguredCatalog, Stream, SyncMode};
 use crate::traits::event::SourceEvent;
 use crate::traits::registry::{
-    AnySource, AnySink, SinkFactory, SinkRegistry, SourceFactory, SourceRegistry,
+    AnySink, AnySource, SinkFactory, SinkRegistry, SourceFactory, SourceRegistry,
 };
 use crate::traits::sink::{Sink, WriteResult};
 use crate::traits::source::{CheckDetail, CheckResult, Source};
 use crate::traits::spec::{ConnectorSpec, SyncModeSpec};
 use crate::traits::state::State;
-
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -180,8 +179,10 @@ impl KafkaSecurityConfig {
                 if self.protocol == SecurityProtocol::SaslPlaintext {
                     return Err(ConnectorError::Config(
                         "AWS_MSK_IAM requires SASL_SSL protocol; \
-                         SASL_PLAINTEXT transmits IAM credentials without TLS".to_string(),
-                    ).into());
+                         SASL_PLAINTEXT transmits IAM credentials without TLS"
+                            .to_string(),
+                    )
+                    .into());
                 }
                 let access_key = self.aws_access_key_id.as_deref().ok_or_else(|| {
                     ConnectorError::Config(
@@ -208,9 +209,8 @@ impl KafkaSecurityConfig {
     #[inline]
     fn require_username(&self) -> Result<&str> {
         self.sasl_username.as_deref().ok_or_else(|| {
-            ConnectorError::Config(
-                "sasl_username is required for SASL protocols".to_string(),
-            ).into()
+            ConnectorError::Config("sasl_username is required for SASL protocols".to_string())
+                .into()
         })
     }
 
@@ -218,9 +218,8 @@ impl KafkaSecurityConfig {
     #[inline]
     fn require_password(&self) -> Result<&str> {
         self.sasl_password.as_deref().ok_or_else(|| {
-            ConnectorError::Config(
-                "sasl_password is required for SASL protocols".to_string(),
-            ).into()
+            ConnectorError::Config("sasl_password is required for SASL protocols".to_string())
+                .into()
         })
     }
 }
@@ -382,67 +381,78 @@ impl KafkaSourceMetricsSnapshot {
         let mut out = String::with_capacity(1024);
         let p = prefix;
 
-        let _ = write!(out,
+        let _ = write!(
+            out,
             "# HELP {p}_messages_consumed_total Total messages consumed\n\
              # TYPE {p}_messages_consumed_total counter\n\
              {p}_messages_consumed_total {}\n",
             self.messages_consumed
         );
-        let _ = write!(out,
+        let _ = write!(
+            out,
             "# HELP {p}_bytes_consumed_total Total bytes consumed\n\
              # TYPE {p}_bytes_consumed_total counter\n\
              {p}_bytes_consumed_total {}\n",
             self.bytes_consumed
         );
-        let _ = write!(out,
+        let _ = write!(
+            out,
             "# HELP {p}_polls_total Total poll operations\n\
              # TYPE {p}_polls_total counter\n\
              {p}_polls_total {}\n",
             self.polls
         );
-        let _ = write!(out,
+        let _ = write!(
+            out,
             "# HELP {p}_empty_polls_total Empty poll operations\n\
              # TYPE {p}_empty_polls_total counter\n\
              {p}_empty_polls_total {}\n",
             self.empty_polls
         );
-        let _ = write!(out,
+        let _ = write!(
+            out,
             "# HELP {p}_errors_total Total errors\n\
              # TYPE {p}_errors_total counter\n\
              {p}_errors_total {}\n",
             self.errors
         );
-        let _ = write!(out,
+        let _ = write!(
+            out,
             "# HELP {p}_commits_total Total commit operations\n\
              # TYPE {p}_commits_total counter\n\
              {p}_commits_total {}\n",
             self.commits
         );
-        let _ = write!(out,
+        let _ = write!(
+            out,
             "# HELP {p}_commit_failures_total Failed commit operations\n\
              # TYPE {p}_commit_failures_total counter\n\
              {p}_commit_failures_total {}\n",
             self.commit_failures
         );
-        let _ = write!(out,
+        let _ = write!(
+            out,
             "# HELP {p}_rebalances_total Total rebalance events\n\
              # TYPE {p}_rebalances_total counter\n\
              {p}_rebalances_total {}\n",
             self.rebalances
         );
-        let _ = write!(out,
+        let _ = write!(
+            out,
             "# HELP {p}_batch_size_min Minimum batch size\n\
              # TYPE {p}_batch_size_min gauge\n\
              {p}_batch_size_min {}\n",
             self.min_batch_size
         );
-        let _ = write!(out,
+        let _ = write!(
+            out,
             "# HELP {p}_batch_size_max Maximum batch size\n\
              # TYPE {p}_batch_size_max gauge\n\
              {p}_batch_size_max {}\n",
             self.max_batch_size
         );
-        let _ = write!(out,
+        let _ = write!(
+            out,
             "# HELP {p}_batch_size_avg Average batch size\n\
              # TYPE {p}_batch_size_avg gauge\n\
              {p}_batch_size_avg {:.2}\n",
@@ -670,55 +680,64 @@ impl KafkaSinkMetricsSnapshot {
         let mut out = String::with_capacity(1024);
         let p = prefix;
 
-        let _ = write!(out,
+        let _ = write!(
+            out,
             "# HELP {p}_messages_produced_total Total messages produced\n\
              # TYPE {p}_messages_produced_total counter\n\
              {p}_messages_produced_total {}\n",
             self.messages_produced
         );
-        let _ = write!(out,
+        let _ = write!(
+            out,
             "# HELP {p}_bytes_produced_total Total bytes produced\n\
              # TYPE {p}_bytes_produced_total counter\n\
              {p}_bytes_produced_total {}\n",
             self.bytes_produced
         );
-        let _ = write!(out,
+        let _ = write!(
+            out,
             "# HELP {p}_sends_total Total send operations\n\
              # TYPE {p}_sends_total counter\n\
              {p}_sends_total {}\n",
             self.sends
         );
-        let _ = write!(out,
+        let _ = write!(
+            out,
             "# HELP {p}_errors_total Total errors\n\
              # TYPE {p}_errors_total counter\n\
              {p}_errors_total {}\n",
             self.errors
         );
-        let _ = write!(out,
+        let _ = write!(
+            out,
             "# HELP {p}_flushes_total Total flush operations\n\
              # TYPE {p}_flushes_total counter\n\
              {p}_flushes_total {}\n",
             self.flushes
         );
-        let _ = write!(out,
+        let _ = write!(
+            out,
             "# HELP {p}_retries_total Total retries\n\
              # TYPE {p}_retries_total counter\n\
              {p}_retries_total {}\n",
             self.retries
         );
-        let _ = write!(out,
+        let _ = write!(
+            out,
             "# HELP {p}_batch_size_min Minimum batch size\n\
              # TYPE {p}_batch_size_min gauge\n\
              {p}_batch_size_min {}\n",
             self.min_batch_size
         );
-        let _ = write!(out,
+        let _ = write!(
+            out,
             "# HELP {p}_batch_size_max Maximum batch size\n\
              # TYPE {p}_batch_size_max gauge\n\
              {p}_batch_size_max {}\n",
             self.max_batch_size
         );
-        let _ = write!(out,
+        let _ = write!(
+            out,
             "# HELP {p}_batch_size_avg Average batch size\n\
              # TYPE {p}_batch_size_avg gauge\n\
              {p}_batch_size_avg {:.2}\n",
@@ -1021,9 +1040,7 @@ pub struct KafkaSource;
 
 impl KafkaSource {
     /// Build a krafka admin client for health checks and discovery
-    async fn build_admin_client(
-        config: &KafkaSourceConfig,
-    ) -> Result<krafka::admin::AdminClient> {
+    async fn build_admin_client(config: &KafkaSourceConfig) -> Result<krafka::admin::AdminClient> {
         let mut builder = krafka::admin::AdminClient::builder()
             .bootstrap_servers(&config.brokers)
             .request_timeout(Duration::from_millis(config.request_timeout_ms));
@@ -1043,9 +1060,7 @@ impl KafkaSource {
     }
 
     /// Build a krafka consumer
-    async fn build_consumer(
-        config: &KafkaSourceConfig,
-    ) -> Result<krafka::consumer::Consumer> {
+    async fn build_consumer(config: &KafkaSourceConfig) -> Result<krafka::consumer::Consumer> {
         let mut builder = krafka::consumer::Consumer::builder()
             .bootstrap_servers(&config.brokers)
             .group_id(&config.consumer_group)
@@ -1118,8 +1133,11 @@ impl Source for KafkaSource {
                     config.topic, count
                 ))
                 .with_duration_ms(topic_start.elapsed().as_millis() as u64),
-            Ok(_) => CheckDetail::failed("topic", format!("Topic '{}' has 0 partitions", config.topic))
-                .with_duration_ms(topic_start.elapsed().as_millis() as u64),
+            Ok(_) => CheckDetail::failed(
+                "topic",
+                format!("Topic '{}' has 0 partitions", config.topic),
+            )
+            .with_duration_ms(topic_start.elapsed().as_millis() as u64),
             Err(e) => CheckDetail::failed(
                 "topic",
                 format!("Topic '{}' not found or inaccessible: {e}", config.topic),
@@ -1140,9 +1158,10 @@ impl Source for KafkaSource {
     async fn discover(&self, config: &Self::Config) -> Result<Catalog> {
         let admin = Self::build_admin_client(config).await?;
 
-        let topics = admin.list_topics().await.map_err(|e| {
-            ConnectorError::Connection(format!("Failed to list topics: {e}"))
-        })?;
+        let topics = admin
+            .list_topics()
+            .await
+            .map_err(|e| ConnectorError::Connection(format!("Failed to list topics: {e}")))?;
 
         let mut catalog = Catalog::new();
         for topic_name in topics {
@@ -1423,9 +1442,7 @@ pub struct KafkaSink;
 
 impl KafkaSink {
     /// Build a krafka admin client for health checks
-    async fn build_admin_client(
-        config: &KafkaSinkConfig,
-    ) -> Result<krafka::admin::AdminClient> {
+    async fn build_admin_client(config: &KafkaSinkConfig) -> Result<krafka::admin::AdminClient> {
         let mut builder = krafka::admin::AdminClient::builder()
             .bootstrap_servers(&config.brokers)
             .request_timeout(Duration::from_millis(config.request_timeout_ms));
@@ -1445,9 +1462,7 @@ impl KafkaSink {
     }
 
     /// Build a krafka producer
-    async fn build_producer(
-        config: &KafkaSinkConfig,
-    ) -> Result<krafka::producer::Producer> {
+    async fn build_producer(config: &KafkaSinkConfig) -> Result<krafka::producer::Producer> {
         let mut builder = krafka::producer::Producer::builder()
             .bootstrap_servers(&config.brokers)
             .acks(config.acks.into())
@@ -1476,13 +1491,10 @@ impl KafkaSink {
     /// Extract message key from event data using the configured key field
     fn extract_key(event: &SourceEvent, key_field: Option<&str>) -> Option<Bytes> {
         key_field.and_then(|field| {
-            event
-                .data
-                .get(field)
-                .and_then(|v| match v {
-                    serde_json::Value::String(s) => Some(Bytes::from(s.clone())),
-                    other => serde_json::to_vec(other).ok().map(Bytes::from),
-                })
+            event.data.get(field).and_then(|v| match v {
+                serde_json::Value::String(s) => Some(Bytes::from(s.clone())),
+                other => serde_json::to_vec(other).ok().map(Bytes::from),
+            })
         })
     }
 
@@ -1517,10 +1529,7 @@ impl KafkaSink {
                 headers.push(("rivven_position".to_string(), pos.as_bytes().to_vec()));
             }
             if let Some(ref tx) = event.metadata.transaction_id {
-                headers.push((
-                    "rivven_transaction_id".to_string(),
-                    tx.as_bytes().to_vec(),
-                ));
+                headers.push(("rivven_transaction_id".to_string(), tx.as_bytes().to_vec()));
             }
         }
 
@@ -1628,9 +1637,7 @@ impl Sink for KafkaSink {
             let value_len = value_bytes.len() as u64;
 
             let send_result = if headers.is_empty() {
-                producer
-                    .send(topic, key.as_deref(), &value_bytes)
-                    .await
+                producer.send(topic, key.as_deref(), &value_bytes).await
             } else {
                 producer
                     .send_with_headers(topic, key.as_deref(), &value_bytes, headers)
@@ -1866,7 +1873,10 @@ mod tests {
         assert_eq!(config.key_field, Some("id".to_string()));
         assert!(config.include_headers);
         assert_eq!(config.custom_headers.len(), 2);
-        assert_eq!(config.custom_headers.get("source"), Some(&"rivven".to_string()));
+        assert_eq!(
+            config.custom_headers.get("source"),
+            Some(&"rivven".to_string())
+        );
     }
 
     // -- Security config ------------------------------------------------------
@@ -2215,7 +2225,10 @@ mod tests {
             .with_position("offset:42");
         let headers = KafkaSink::build_headers(&event, true, &HashMap::new());
         // Convert to HashMap for easier assertion
-        let map: HashMap<&str, &[u8]> = headers.iter().map(|(k, v)| (k.as_str(), v.as_slice())).collect();
+        let map: HashMap<&str, &[u8]> = headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_slice()))
+            .collect();
         assert_eq!(map.get("rivven_stream"), Some(&b"users".as_slice()));
         assert_eq!(map.get("rivven_event_type"), Some(&b"record".as_slice()));
         assert_eq!(map.get("rivven_namespace"), Some(&b"public".as_slice()));
@@ -2613,8 +2626,14 @@ mod tests {
         "#;
         let config: KafkaSourceConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.security.protocol, SecurityProtocol::SaslPlaintext);
-        assert_eq!(config.security.sasl_mechanism, Some(SaslMechanism::OAuthBearer));
-        assert_eq!(config.security.oauth_token, Some("my-jwt-token".to_string()));
+        assert_eq!(
+            config.security.sasl_mechanism,
+            Some(SaslMechanism::OAuthBearer)
+        );
+        assert_eq!(
+            config.security.oauth_token,
+            Some("my-jwt-token".to_string())
+        );
     }
 
     // -- AWS MSK IAM config deserialization -----------------------------------
@@ -2633,7 +2652,10 @@ mod tests {
         "#;
         let config: KafkaSourceConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.security.protocol, SecurityProtocol::SaslSsl);
-        assert_eq!(config.security.sasl_mechanism, Some(SaslMechanism::AwsMskIam));
+        assert_eq!(
+            config.security.sasl_mechanism,
+            Some(SaslMechanism::AwsMskIam)
+        );
         assert_eq!(config.security.aws_region, Some("us-east-1".to_string()));
     }
 
@@ -2650,7 +2672,10 @@ mod tests {
               aws_region: "eu-west-1"
         "#;
         let config: KafkaSinkConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.security.sasl_mechanism, Some(SaslMechanism::AwsMskIam));
+        assert_eq!(
+            config.security.sasl_mechanism,
+            Some(SaslMechanism::AwsMskIam)
+        );
         assert_eq!(config.security.aws_region, Some("eu-west-1".to_string()));
     }
 
@@ -2691,7 +2716,10 @@ mod tests {
             ..Default::default()
         };
         let auth = config.to_auth_config().unwrap();
-        assert!(auth.is_some(), "Default PLAIN mechanism must produce auth config");
+        assert!(
+            auth.is_some(),
+            "Default PLAIN mechanism must produce auth config"
+        );
     }
 
     #[test]
@@ -2729,7 +2757,10 @@ mod tests {
             .with_namespace("ns")
             .with_position("pos");
         let headers = KafkaSink::build_headers(&event, true, &HashMap::new());
-        assert!(headers.len() >= 3, "Must include stream + event_type + namespace + position");
+        assert!(
+            headers.len() >= 3,
+            "Must include stream + event_type + namespace + position"
+        );
         assert!(headers.len() <= 5, "Max 5 headers without custom");
     }
 }

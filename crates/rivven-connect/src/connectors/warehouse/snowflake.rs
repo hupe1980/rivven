@@ -66,9 +66,9 @@
 use crate::connectors::{AnySink, SinkFactory};
 use crate::error::ConnectorError;
 use crate::prelude::*;
-use crate::traits::circuit_breaker::CircuitBreakerConfig;
 #[cfg(feature = "snowflake")]
 use crate::traits::circuit_breaker::CircuitBreaker;
+use crate::traits::circuit_breaker::CircuitBreakerConfig;
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
