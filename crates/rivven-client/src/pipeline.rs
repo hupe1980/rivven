@@ -400,6 +400,18 @@ impl PipelinedClient {
 
         // Serialize request with wire format and ID prefix
         let request_bytes = request.to_wire(rivven_protocol::WireFormat::Postcard, 0u32)?;
+
+        // Reject oversized requests client-side before queueing for the writer
+        // task. This prevents a TCP-level deadlock where write_all() blocks
+        // waiting for the server to read, while the server rejects and tries
+        // to respond.
+        if request_bytes.len() > rivven_protocol::MAX_MESSAGE_SIZE {
+            return Err(Error::RequestTooLarge(
+                request_bytes.len(),
+                rivven_protocol::MAX_MESSAGE_SIZE,
+            ));
+        }
+
         let mut data = BytesMut::with_capacity(8 + request_bytes.len());
         data.extend_from_slice(&request_id.to_be_bytes());
         data.extend_from_slice(&request_bytes);

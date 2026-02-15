@@ -15,6 +15,12 @@ use rivven_core::tls::{TlsClientStream, TlsConfig, TlsConnector};
 // Default maximum response size (100 MB) - prevents malicious server from exhausting client memory
 const DEFAULT_MAX_RESPONSE_SIZE: usize = 100 * 1024 * 1024;
 
+// Maximum request size — aligned with server `max_request_size` and
+// `rivven_protocol::MAX_MESSAGE_SIZE` (10 MiB). Requests exceeding this
+// are rejected client-side before touching the wire, preventing TCP-level
+// deadlocks when the server must drain an oversized body.
+const DEFAULT_MAX_REQUEST_SIZE: usize = rivven_protocol::MAX_MESSAGE_SIZE;
+
 // ============================================================================
 // Stream Wrapper
 // ============================================================================
@@ -321,6 +327,16 @@ impl Client {
         // Serialize request with wire format prefix and correlation ID
         let request_bytes =
             request.to_wire(rivven_protocol::WireFormat::Postcard, correlation_id)?;
+
+        // Reject oversized requests client-side before touching the wire.
+        // This prevents a TCP-level deadlock where write_all() blocks waiting
+        // for the server to read, while the server rejects and tries to respond.
+        if request_bytes.len() > DEFAULT_MAX_REQUEST_SIZE {
+            return Err(Error::RequestTooLarge(
+                request_bytes.len(),
+                DEFAULT_MAX_REQUEST_SIZE,
+            ));
+        }
 
         // Write length prefix + request
         let len = request_bytes.len() as u32;

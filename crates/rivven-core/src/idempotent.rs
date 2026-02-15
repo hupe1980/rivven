@@ -166,7 +166,7 @@ impl ProducerMetadata {
     /// Validate sequence for a partition WITHOUT mutating state (F-073 fix).
     ///
     /// This only checks whether the sequence is valid, duplicate, or out-of-order.
-    /// Call [`commit_sequence`] after a successful append to persist the state change.
+    /// Call [`Self::commit_sequence`] after a successful append to persist the state change.
     pub fn validate_sequence(
         &mut self,
         partition: u32,

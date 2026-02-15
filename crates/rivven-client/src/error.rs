@@ -29,6 +29,9 @@ pub enum Error {
     #[error("Response too large: {0} bytes (max: {1})")]
     ResponseTooLarge(usize, usize),
 
+    #[error("Request too large: {0} bytes (max: {1})")]
+    RequestTooLarge(usize, usize),
+
     #[error("Circuit breaker open for server: {0}")]
     CircuitBreakerOpen(String),
 
@@ -78,6 +81,10 @@ mod tests {
         assert_eq!(
             Error::ResponseTooLarge(1000, 500).to_string(),
             "Response too large: 1000 bytes (max: 500)"
+        );
+        assert_eq!(
+            Error::RequestTooLarge(2000, 1000).to_string(),
+            "Request too large: 2000 bytes (max: 1000)"
         );
         assert_eq!(
             Error::CircuitBreakerOpen("server1".to_string()).to_string(),

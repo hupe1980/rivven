@@ -263,8 +263,8 @@ impl ApiKey {
     /// and legacy SHA-256 hex hashes for backward compatibility.
     ///
     /// When a legacy SHA-256 hash is verified successfully, the caller
-    /// should call [`upgrade_to_argon2`] to re-hash with Argon2id.
-    /// Use [`needs_rehash`] to check whether an upgrade is needed.
+    /// should call [`Self::upgrade_to_argon2`] to re-hash with Argon2id.
+    /// Use [`Self::needs_rehash`] to check whether an upgrade is needed.
     pub fn verify_secret(&self, secret: &str) -> bool {
         if self.secret_hash.starts_with("$argon2") {
             // Argon2id verification (constant-time internally)
@@ -304,7 +304,7 @@ impl ApiKey {
 
     /// Upgrade the stored hash from legacy SHA-256 to Argon2id.
     ///
-    /// Call this after a successful [`verify_secret`] when [`needs_rehash`]
+    /// Call this after a successful [`Self::verify_secret`] when [`Self::needs_rehash`]
     /// returns `true`. The plaintext `secret` is required to compute the
     /// new Argon2id hash.
     pub fn upgrade_to_argon2(&mut self, secret: &str) {

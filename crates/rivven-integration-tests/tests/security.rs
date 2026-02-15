@@ -143,6 +143,13 @@ async fn test_no_sensitive_data_in_errors() -> Result<()> {
 }
 
 /// Test message size limits
+///
+/// Verifies that:
+///  - Normal (1 KB) and medium (1 MB) messages succeed.
+///  - An oversized (10 MB) message is rejected client-side before hitting
+///    the wire, preventing the TCP-level deadlock that occurs when the
+///    client's `write_all()` blocks while the server tries to drain and
+///    respond.
 #[tokio::test]
 async fn test_message_size_limits() -> Result<()> {
     init_tracing();
@@ -161,15 +168,20 @@ async fn test_message_size_limits() -> Result<()> {
     let medium_msg = vec![b'X'; 1024 * 1024]; // 1MB
     client.publish(&topic, medium_msg).await?;
 
-    // Very large message might be rejected (depending on config)
+    // Very large message is rejected client-side (serialised size > MAX_MESSAGE_SIZE)
     let large_msg = vec![b'X'; 10 * 1024 * 1024]; // 10MB
     let result = client.publish(&topic, large_msg).await;
-    // Note: result may succeed or fail depending on server config
-
-    info!(
-        "Message size limit test completed (large message result: {:?})",
-        result.is_ok()
+    assert!(
+        result.is_err(),
+        "10 MB message should be rejected as too large"
     );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("too large"),
+        "Error should mention size limit: {err_msg}"
+    );
+
+    info!("Message size limit test passed — oversized message rejected client-side");
     broker.shutdown().await?;
     Ok(())
 }

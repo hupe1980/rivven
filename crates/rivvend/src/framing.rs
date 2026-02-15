@@ -62,6 +62,34 @@ where
             "Message too large from {}: {} bytes (max: {})",
             peer_label, msg_len, max_message_size
         );
+
+        // We must drain the oversized body from the stream before sending
+        // the error response. Otherwise the client may still be blocked in
+        // write_all() while the server tries to write back the error, and
+        // neither side reads — causing a TCP-level deadlock (F-078 fix).
+        //
+        // Cap the drain to `max_message_size * 2` (or the declared length,
+        // whichever is smaller) to avoid letting a malicious client force us
+        // to read an unbounded amount of data.
+        let drain_limit = msg_len.min(max_message_size * 2);
+        let mut remaining = drain_limit;
+        let mut discard_buf = [0u8; 8192];
+        while remaining > 0 {
+            let to_read = remaining.min(discard_buf.len());
+            match tokio::time::timeout(
+                read_timeout,
+                stream.read_exact(&mut discard_buf[..to_read]),
+            )
+            .await
+            {
+                Ok(Ok(_)) => remaining -= to_read,
+                Ok(Err(_)) | Err(_) => {
+                    // Connection broken or timed out while draining — just close
+                    return Ok(Some(ReadFrame::Disconnected));
+                }
+            }
+        }
+
         let response = Response::Error {
             message: format!("MESSAGE_TOO_LARGE: {} bytes exceeds limit", msg_len),
         };
