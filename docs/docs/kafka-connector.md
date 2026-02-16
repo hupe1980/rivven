@@ -29,13 +29,13 @@ pure Rust Kafka client with zero librdkafka or C dependencies:
 Enable with the `kafka` feature:
 
 ```toml
-rivven-connect = { version = "0.0.16", features = ["kafka"] }
+rivven-connect = { version = "0.0.17", features = ["kafka"] }
 ```
 
 For AWS MSK IAM authentication, enable the `kafka-msk` feature:
 
 ```toml
-rivven-connect = { version = "0.0.16", features = ["kafka-msk"] }
+rivven-connect = { version = "0.0.17", features = ["kafka-msk"] }
 ```
 
 ## Use Cases
