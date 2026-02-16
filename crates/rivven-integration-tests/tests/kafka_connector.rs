@@ -147,7 +147,7 @@ async fn test_kafka_produce_consume() -> Result<()> {
     assert_eq!(records.len(), 5);
 
     for (i, record) in records.iter().enumerate() {
-        let value = record.record.value.as_ref().unwrap();
+        let value = record.value.as_ref().unwrap();
         let expected = format!(r#"{{"id":{i},"value":"message-{i}"}}"#);
         assert_eq!(std::str::from_utf8(value)?, expected);
     }

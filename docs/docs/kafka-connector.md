@@ -406,8 +406,6 @@ cargo test -p rivven-integration-tests --test kafka_connector
 | `test_kafka_source_check` | Source `check()` connectivity |
 | `test_kafka_source_discover` | Source `discover()` catalog discovery |
 | `test_kafka_source_read` | Source `read()` message streaming |
-| `test_kafka_source_metrics` | Lock-free metrics gathering |
-| `test_kafka_source_shutdown` | Graceful shutdown signaling |
 | `test_kafka_source_offset_modes` | Earliest/Latest start modes |
 | `test_kafka_source_high_throughput` | 1000+ message performance |
 | `test_kafka_source_multiple_partitions` | Multi-partition topic support |
@@ -420,17 +418,15 @@ cargo test -p rivven-integration-tests --test kafka_connector
 | Test | Description |
 |------|-------------|
 | `test_kafka_sink_check` | Sink `check()` validation |
-| `test_kafka_sink_metrics` | Sink metrics tracking |
 | `test_kafka_sink_compression` | Gzip/LZ4/Snappy/Zstd codecs |
 | `test_kafka_sink_custom_headers` | Custom header injection |
 | `test_kafka_sink_idempotent` | Idempotent producer config |
 
-**Batch & Error Tests:**
+**Batch & Edge Case Tests:**
 
 | Test | Description |
 |------|-------------|
-| `test_kafka_batch_metrics` | Batch size min/max/avg tracking |
-| `test_kafka_source_nonexistent_topic` | Missing topic handling |
+| `test_kafka_batch_consumption` | Batch consumption across varying sizes |
 
 ### Hot-Path Optimizations
 

@@ -51,7 +51,7 @@ tokio-postgres = "0.7"
 mysql_async = { version = "0.34", default-features = false }
 
 # Kafka & MQTT client libraries for integration tests
-rskafka = "0.5"
+krafka = "0.2"
 rumqttc = "0.24"
 
 # CLI parsing (for creating test CLI instances)

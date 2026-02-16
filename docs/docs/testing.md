@@ -321,11 +321,8 @@ cargo test -p rivven-integration-tests --test kafka_connector
 | `test_kafka_source_check` | Source connector `check()` validation |
 | `test_kafka_source_discover` | Source connector `discover()` catalog |
 | `test_kafka_source_read` | Source connector `read()` streaming |
-| `test_kafka_source_metrics` | Lock-free metrics gathering |
-| `test_kafka_source_shutdown` | Graceful shutdown signaling |
-| `test_kafka_source_offset_modes` | Earliest/Latest/Offset start modes |
+| `test_kafka_source_offset_modes` | Earliest/Latest start modes |
 | `test_kafka_source_high_throughput` | 1000+ messages performance |
-| `test_kafka_source_nonexistent_topic` | Error handling for missing topics |
 | `test_kafka_source_multiple_partitions` | Multi-partition topic handling |
 | `test_kafka_source_empty_topic` | Empty topic handling |
 | `test_kafka_source_invalid_broker` | Invalid broker error handling |
@@ -336,7 +333,6 @@ cargo test -p rivven-integration-tests --test kafka_connector
 | Test | Description |
 |------|-------------|
 | `test_kafka_sink_check` | Sink connector `check()` validation |
-| `test_kafka_sink_metrics` | Sink metrics tracking |
 | `test_kafka_sink_compression` | Gzip/LZ4/Snappy/Zstd compression |
 | `test_kafka_sink_custom_headers` | Custom header injection |
 | `test_kafka_sink_idempotent` | Idempotent producer configuration |
@@ -345,7 +341,7 @@ cargo test -p rivven-integration-tests --test kafka_connector
 
 | Test | Description |
 |------|-------------|
-| `test_kafka_batch_metrics` | Batch size min/max/avg tracking |
+| `test_kafka_batch_consumption` | Batch consumption across varying sizes |
 
 ### MQTT Connector Tests (`mqtt_connector.rs`)
 

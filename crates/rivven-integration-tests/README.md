@@ -23,8 +23,10 @@ This crate contains comprehensive integration tests using [testcontainers](https
 | `connect_e2e.rs` | 9 | 9 | 0 | Connector pipeline integration tests |
 | `durability.rs` | 4 | 4 | 0 | Data persistence and broker restart tests |
 | `rbac.rs` | 19 | 19 | 0 | Cedar RBAC policy enforcement tests |
+| `kafka_connector.rs` | 17 | 17 | 0 | Kafka source/sink connector tests (testcontainers) |
+| `mqtt_connector.rs` | 24 | 24 | 0 | MQTT source connector tests (testcontainers) |
 
-**Total: 160 tests (147 passed + 13 ignored)**
+**Total: 201 tests (188 passed + 13 ignored)**
 
 ## Prerequisites
 
@@ -52,6 +54,8 @@ cargo test -p rivven-integration-tests --test consumer_groups
 cargo test -p rivven-integration-tests --test connect_e2e
 cargo test -p rivven-integration-tests --test durability
 cargo test -p rivven-integration-tests --test rbac
+cargo test -p rivven-integration-tests --test kafka_connector
+cargo test -p rivven-integration-tests --test mqtt_connector
 
 # Run with logging
 RUST_LOG=info cargo test -p rivven-integration-tests -- --nocapture
@@ -90,6 +94,18 @@ let pool = mariadb.pool();
 
 // Multi-node cluster
 let cluster = TestCluster::start(3).await?;
+
+// Apache Kafka container (KRaft mode, testcontainers)
+let kafka = TestKafka::start().await?;
+kafka.create_topic("test-topic", 3, 1).await?;
+let offsets = kafka.produce_messages("test-topic", 0, vec![
+    (Some(b"key".to_vec()), b"value".to_vec()),
+]).await?;
+let records = kafka.consume_messages("test-topic", 0, 0, 10).await?;
+
+// Mosquitto MQTT container (testcontainers)
+let mqtt = TestMqtt::start().await?;
+mqtt.publish("topic", b"payload", 0, false).await?;
 ```
 
 ### Helpers
@@ -138,6 +154,8 @@ rivven-integration-tests/
     ├── connect_e2e.rs        # Connector pipeline tests
     ├── durability.rs         # Persistence and recovery tests
     └── rbac.rs               # Cedar RBAC authorization tests
+    ├── kafka_connector.rs    # Kafka source/sink connector tests
+    └── mqtt_connector.rs     # MQTT source connector tests
 ```
 
 ## Writing Tests

@@ -1708,8 +1708,12 @@ impl Drop for TestSchemaRegistry {
 
 /// A Kafka container for integration tests using testcontainers.
 ///
-/// This fixture starts a Kafka container (using Redpanda, a Kafka-compatible
-/// streaming platform that starts faster and requires no Zookeeper).
+/// This fixture starts an Apache Kafka container in KRaft mode
+/// (`apache/kafka-native:3.8.0` — GraalVM native image, no Zookeeper).
+///
+/// **Important:** Uses `testcontainers_modules::kafka::apache::Kafka`
+/// explicitly. The default re-export `kafka::Kafka` resolves to
+/// `confluent::Kafka` (Confluent + Zookeeper), which is not what we want.
 ///
 /// # Example
 ///
@@ -1717,9 +1721,15 @@ impl Drop for TestSchemaRegistry {
 /// let kafka = TestKafka::start().await?;
 /// println!("Kafka bootstrap: {}", kafka.bootstrap_servers());
 /// kafka.create_topic("test-topic", 3, 1).await?;
+///
+/// // Produce and consume messages
+/// let offsets = kafka.produce_messages("test-topic", 0, vec![
+///     (Some(b"key".to_vec()), b"value".to_vec()),
+/// ]).await?;
+/// let records = kafka.consume_messages("test-topic", 0, 0, 10).await?;
 /// ```
 pub struct TestKafka {
-    pub container: testcontainers::ContainerAsync<testcontainers_modules::kafka::Kafka>,
+    pub container: testcontainers::ContainerAsync<testcontainers_modules::kafka::apache::Kafka>,
     pub host: String,
     pub port: u16,
 }
@@ -1731,13 +1741,15 @@ impl TestKafka {
     /// Kafka broker with KRaft (no Zookeeper required).
     pub async fn start() -> Result<Self> {
         use testcontainers::runners::AsyncRunner;
-        use testcontainers_modules::kafka::Kafka;
+        use testcontainers_modules::kafka::apache::Kafka;
 
         info!("Starting Kafka container...");
 
         let container = Kafka::default().start().await?;
 
-        let host = container.get_host().await?.to_string();
+        // Use 127.0.0.1 – krafka requires numeric IP for SocketAddr parsing,
+        // and the advertised listener also uses 127.0.0.1.
+        let host = "127.0.0.1".to_string();
 
         // Use port 9092 (PLAINTEXT listener) – its advertised address
         // contains the real mapped port, so krafka's metadata-driven
@@ -1769,20 +1781,96 @@ impl TestKafka {
         })
     }
 
-    /// Wait for Kafka to become ready by attempting to connect.
+    /// Wait for Kafka to become ready by attempting to connect and verifying
+    /// the group coordinator is available.
     async fn wait_for_kafka(host: &str, port: u16) -> Result<()> {
         let bootstrap = format!("{}:{}", host, port);
 
+        // 1. Wait for TCP to be reachable
+        let mut tcp_ready = false;
         for i in 0..60 {
             match tokio::net::TcpStream::connect(&bootstrap).await {
                 Ok(_) => {
                     info!("Kafka TCP ready after {} attempts", i + 1);
-                    // Give Kafka a bit more time after TCP is available
-                    sleep(Duration::from_millis(1000)).await;
-                    return Ok(());
+                    tcp_ready = true;
+                    break;
                 }
                 Err(e) => {
-                    tracing::debug!("Waiting for Kafka (attempt {}): {}", i + 1, e);
+                    tracing::debug!("Waiting for Kafka TCP (attempt {}): {}", i + 1, e);
+                }
+            }
+            sleep(Duration::from_millis(500)).await;
+        }
+        if !tcp_ready {
+            anyhow::bail!("Kafka TCP not reachable at {} after 60 attempts", bootstrap);
+        }
+
+        // 2. Wait for the broker to be fully functional (group coordinator ready)
+        //    by attempting to create an admin client and list topics.
+        let mut metadata_ready = false;
+        for i in 0..30 {
+            match krafka::admin::AdminClient::builder()
+                .bootstrap_servers(&bootstrap)
+                .build()
+                .await
+            {
+                Ok(admin) => {
+                    // Try listing topics to verify the broker is fully operational
+                    match admin.list_topics().await {
+                        Ok(_) => {
+                            info!("Kafka broker fully ready after {} metadata attempts", i + 1);
+                            metadata_ready = true;
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::debug!("Kafka metadata not ready (attempt {}): {}", i + 1, e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("Kafka not ready (attempt {}): {}", i + 1, e);
+                }
+            }
+            sleep(Duration::from_millis(500)).await;
+        }
+        if !metadata_ready {
+            anyhow::bail!(
+                "Kafka metadata not available at {} after 30 attempts",
+                bootstrap
+            );
+        }
+
+        // 3. Wait for the group coordinator to be available.
+        //    Consumer group tests fail with CoordinatorNotAvailable if this
+        //    internal subsystem hasn't finished initializing.
+        for i in 0..30 {
+            let consumer_result = krafka::consumer::Consumer::builder()
+                .bootstrap_servers(&bootstrap)
+                .group_id("__readiness_check")
+                .build()
+                .await;
+
+            match consumer_result {
+                Ok(consumer) => {
+                    // Try subscribing to trigger group coordinator lookup
+                    match consumer.subscribe(&["__consumer_offsets"]).await {
+                        Ok(_) => {
+                            info!("Kafka group coordinator ready after {} attempts", i + 1);
+                            consumer.close().await;
+                            return Ok(());
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                "Group coordinator not ready (attempt {}): {}",
+                                i + 1,
+                                e
+                            );
+                            consumer.close().await;
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("Consumer creation failed (attempt {}): {}", i + 1, e);
                 }
             }
             sleep(Duration::from_millis(500)).await;
@@ -1811,29 +1899,32 @@ impl TestKafka {
 
     /// Create a topic with the specified configuration.
     ///
-    /// Uses rskafka to create the topic via the Kafka protocol.
+    /// Uses krafka to create the topic via the Kafka protocol.
     pub async fn create_topic(
         &self,
         name: &str,
         num_partitions: i32,
         replication_factor: i16,
     ) -> Result<()> {
-        use rskafka::client::ClientBuilder;
+        use krafka::admin::{AdminClient, NewTopic};
 
-        let client = ClientBuilder::new(vec![self.bootstrap_servers()])
+        let admin = AdminClient::builder()
+            .bootstrap_servers(self.bootstrap_servers())
             .build()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to create Kafka client: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to create admin client: {}", e))?;
 
-        // Create topic using controller client
-        let controller = client
-            .controller_client()
-            .map_err(|e| anyhow::anyhow!("Failed to get controller client: {}", e))?;
-
-        controller
-            .create_topic(name, num_partitions, replication_factor, 5000)
+        let topic = NewTopic::new(name, num_partitions, replication_factor);
+        let results = admin
+            .create_topics(vec![topic], Duration::from_secs(30))
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create topic {}: {}", name, e))?;
+
+        for result in &results {
+            if let Some(ref err) = result.error {
+                anyhow::bail!("Failed to create topic {}: {}", result.name, err);
+            }
+        }
 
         info!(
             "Created Kafka topic '{}' with {} partitions",
@@ -1851,37 +1942,28 @@ impl TestKafka {
         partition: i32,
         messages: Vec<(Option<Vec<u8>>, Vec<u8>)>,
     ) -> Result<Vec<i64>> {
-        use rskafka::client::partition::UnknownTopicHandling;
-        use rskafka::client::ClientBuilder;
-        use rskafka::record::Record;
+        use krafka::producer::{Producer, ProducerRecord};
 
-        let client = ClientBuilder::new(vec![self.bootstrap_servers()])
+        let producer = Producer::builder()
+            .bootstrap_servers(self.bootstrap_servers())
             .build()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to create Kafka client: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to create producer: {}", e))?;
 
-        let partition_client = client
-            .partition_client(topic, partition, UnknownTopicHandling::Error)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get partition client: {}", e))?;
+        let mut offsets = Vec::with_capacity(messages.len());
+        for (key, value) in messages {
+            let record = ProducerRecord::new(topic, value)
+                .with_key(key)
+                .with_partition(partition);
+            let metadata = producer
+                .send_record(record)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to produce message: {}", e))?;
+            offsets.push(metadata.offset);
+        }
 
-        let records: Vec<Record> = messages
-            .into_iter()
-            .map(|(key, value)| Record {
-                key,
-                value: Some(value),
-                headers: Default::default(),
-                timestamp: chrono::Utc::now(),
-            })
-            .collect();
-
-        let offsets = partition_client
-            .produce(
-                records,
-                rskafka::client::partition::Compression::NoCompression,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to produce messages: {}", e))?;
+        producer.flush().await.ok();
+        producer.close().await;
 
         info!(
             "Produced {} messages to {}/{}",
@@ -1899,26 +1981,42 @@ impl TestKafka {
         partition: i32,
         start_offset: i64,
         max_messages: usize,
-    ) -> Result<Vec<rskafka::record::RecordAndOffset>> {
-        use rskafka::client::partition::UnknownTopicHandling;
-        use rskafka::client::ClientBuilder;
+    ) -> Result<Vec<krafka::consumer::ConsumerRecord>> {
+        use krafka::consumer::Consumer;
 
-        let client = ClientBuilder::new(vec![self.bootstrap_servers()])
+        let consumer = Consumer::builder()
+            .bootstrap_servers(self.bootstrap_servers())
             .build()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to create Kafka client: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to create consumer: {}", e))?;
 
-        let partition_client = client
-            .partition_client(topic, partition, UnknownTopicHandling::Error)
+        consumer
+            .assign(topic, vec![partition])
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to get partition client: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to assign partition: {}", e))?;
 
-        let (records, _high_watermark) = partition_client
-            .fetch_records(start_offset, 1..1_048_576, 5000)
+        consumer
+            .seek(topic, partition, start_offset)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to fetch records: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to seek to offset {}: {}", start_offset, e))?;
 
-        let result: Vec<_> = records.into_iter().take(max_messages).collect();
+        let mut result = Vec::new();
+        // Poll until we have enough records or timeout
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while result.len() < max_messages && tokio::time::Instant::now() < deadline {
+            let records = consumer
+                .poll(Duration::from_secs(1))
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to poll records: {}", e))?;
+            if records.is_empty() && !result.is_empty() {
+                break;
+            }
+            result.extend(records);
+        }
+
+        result.truncate(max_messages);
+        consumer.close().await;
+
         info!(
             "Consumed {} messages from {}/{} starting at offset {}",
             result.len(),
@@ -1932,25 +2030,31 @@ impl TestKafka {
     /// Get the current high watermark for a topic partition.
     ///
     /// The high watermark is the offset of the last committed message + 1.
-    #[inline]
     pub async fn get_high_watermark(&self, topic: &str, partition: i32) -> Result<i64> {
-        use rskafka::client::partition::{OffsetAt, UnknownTopicHandling};
-        use rskafka::client::ClientBuilder;
+        use krafka::consumer::Consumer;
 
-        let client = ClientBuilder::new(vec![self.bootstrap_servers()])
+        let consumer = Consumer::builder()
+            .bootstrap_servers(self.bootstrap_servers())
             .build()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to create Kafka client: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to create consumer: {}", e))?;
 
-        let partition_client = client
-            .partition_client(topic, partition, UnknownTopicHandling::Error)
+        consumer
+            .assign(topic, vec![partition])
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to get partition client: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to assign partition: {}", e))?;
 
-        let offset = partition_client
-            .get_offset(OffsetAt::Latest)
+        consumer
+            .seek_to_end(topic, partition)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to get high watermark: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to seek to end: {}", e))?;
+
+        // Poll once to commit the seek position
+        let _ = consumer.poll(Duration::from_millis(100)).await;
+
+        let offset = consumer.position(topic, partition).await.unwrap_or(0);
+
+        consumer.close().await;
 
         Ok(offset)
     }
