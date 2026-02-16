@@ -1739,10 +1739,12 @@ impl TestKafka {
 
         let host = container.get_host().await?.to_string();
 
-        // Retry port retrieval to handle testcontainers race condition
+        // Use port 9092 (PLAINTEXT listener) – its advertised address
+        // contains the real mapped port, so krafka's metadata-driven
+        // reconnection works correctly from the host.
         let mut port = None;
         for i in 0..20 {
-            match container.get_host_port_ipv4(9093).await {
+            match container.get_host_port_ipv4(9092).await {
                 Ok(p) => {
                     port = Some(p);
                     break;
