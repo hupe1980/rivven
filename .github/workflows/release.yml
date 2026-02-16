@@ -89,16 +89,17 @@ jobs:
         run: cargo publish -p rivven-rdbc --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
       
-      - name: Publish rivven-cdc
-        run: cargo publish -p rivven-cdc --token ${{ secrets.CRATES_IO_TOKEN }}
-        continue-on-error: true
-      
       - name: Publish rivven-llm
         run: cargo publish -p rivven-llm --token ${{ secrets.CRATES_IO_TOKEN }}
         continue-on-error: true
       
       - name: Wait for crates.io index
         run: sleep 30
+      
+      # Layer 1: Depends on rivven-core
+      - name: Publish rivven-cdc
+        run: cargo publish -p rivven-cdc --token ${{ secrets.CRATES_IO_TOKEN }}
+        continue-on-error: true
       
       # Layer 1: Depends on rivven-core
       - name: Publish rivven-cluster
