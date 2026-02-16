@@ -174,6 +174,9 @@ impl From<rivven_client::Error> for RivvenError {
             rivven_client::Error::ResponseTooLarge(size, max) => {
                 Self::server(format!("Response too large: {} bytes (max: {})", size, max))
             }
+            rivven_client::Error::RequestTooLarge(size, max) => {
+                Self::server(format!("Request too large: {} bytes (max: {})", size, max))
+            }
             rivven_client::Error::CircuitBreakerOpen(server) => {
                 Self::connection(format!("Circuit breaker open for server: {}", server))
             }

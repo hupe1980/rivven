@@ -155,7 +155,7 @@ async fn test_rdbc_source_check() -> Result<()> {
     setup_rdbc_source_table(&pg).await?;
 
     let config = RdbcSourceConfig {
-        connection_url: pg.cdc_connection_url(),
+        connection_url: pg.cdc_connection_url().into(),
         table: "rdbc_source_test".to_string(),
         mode: RdbcQueryMode::Bulk,
         pool_size: 2,
@@ -179,7 +179,7 @@ async fn test_rdbc_source_discover() -> Result<()> {
     setup_rdbc_source_table(&pg).await?;
 
     let config = RdbcSourceConfig {
-        connection_url: pg.cdc_connection_url(),
+        connection_url: pg.cdc_connection_url().into(),
         table: "rdbc_source_test".to_string(),
         mode: RdbcQueryMode::Bulk,
         pool_size: 1,
@@ -206,7 +206,7 @@ async fn test_rdbc_source_bulk_read() -> Result<()> {
     insert_source_test_data(&pg, 5).await?;
 
     let config = RdbcSourceConfig {
-        connection_url: pg.cdc_connection_url(),
+        connection_url: pg.cdc_connection_url().into(),
         table: "rdbc_source_test".to_string(),
         mode: RdbcQueryMode::Bulk,
         batch_size: 10,
@@ -268,7 +268,7 @@ async fn test_rdbc_source_incrementing() -> Result<()> {
     insert_source_test_data(&pg, 3).await?;
 
     let config = RdbcSourceConfig {
-        connection_url: pg.cdc_connection_url(),
+        connection_url: pg.cdc_connection_url().into(),
         table: "rdbc_source_test".to_string(),
         mode: RdbcQueryMode::Incrementing,
         incrementing_column: Some("id".to_string()),
@@ -325,7 +325,7 @@ async fn test_rdbc_sink_check() -> Result<()> {
     setup_rdbc_sink_table(&pg).await?;
 
     let config = RdbcSinkConfig {
-        connection_url: pg.cdc_connection_url(),
+        connection_url: pg.cdc_connection_url().into(),
         table: "rdbc_sink_test".to_string(),
         write_mode: RdbcWriteMode::Insert,
         pool_size: 4,
@@ -349,7 +349,7 @@ async fn test_rdbc_sink_insert() -> Result<()> {
     setup_rdbc_sink_table(&pg).await?;
 
     let config = RdbcSinkConfig {
-        connection_url: pg.cdc_connection_url(),
+        connection_url: pg.cdc_connection_url().into(),
         table: "rdbc_sink_test".to_string(),
         write_mode: RdbcWriteMode::Insert,
         batch_size: 10,
@@ -401,7 +401,7 @@ async fn test_rdbc_sink_upsert() -> Result<()> {
     setup_rdbc_sink_table(&pg).await?;
 
     let config = RdbcSinkConfig {
-        connection_url: pg.cdc_connection_url(),
+        connection_url: pg.cdc_connection_url().into(),
         table: "rdbc_sink_test".to_string(),
         write_mode: RdbcWriteMode::Upsert,
         pk_columns: Some(vec!["id".to_string()]),
@@ -479,7 +479,7 @@ async fn test_rdbc_sink_transactional() -> Result<()> {
     setup_rdbc_sink_table(&pg).await?;
 
     let config = RdbcSinkConfig {
-        connection_url: pg.cdc_connection_url(),
+        connection_url: pg.cdc_connection_url().into(),
         table: "rdbc_sink_test".to_string(),
         write_mode: RdbcWriteMode::Insert,
         transactional: true, // Enable transactional mode
@@ -534,7 +534,7 @@ async fn test_rdbc_connection_pool() -> Result<()> {
 
     // Use a larger pool size
     let config = RdbcSinkConfig {
-        connection_url: pg.cdc_connection_url(),
+        connection_url: pg.cdc_connection_url().into(),
         table: "rdbc_sink_test".to_string(),
         write_mode: RdbcWriteMode::Insert,
         batch_size: 5,         // Smaller batches to exercise pool more
@@ -586,7 +586,7 @@ async fn test_rdbc_pool_min_size() -> Result<()> {
 
     // Minimum pool size of 1
     let config = RdbcSourceConfig {
-        connection_url: pg.cdc_connection_url(),
+        connection_url: pg.cdc_connection_url().into(),
         table: "rdbc_source_test".to_string(),
         mode: RdbcQueryMode::Bulk,
         pool_size: 1, // Minimum pool
@@ -636,7 +636,7 @@ async fn test_rdbc_source_to_sink_pipeline() -> Result<()> {
 
     // Read from source
     let source_config = RdbcSourceConfig {
-        connection_url: pg.cdc_connection_url(),
+        connection_url: pg.cdc_connection_url().into(),
         table: "pipeline_source".to_string(),
         mode: RdbcQueryMode::Bulk,
         batch_size: 100,
@@ -680,7 +680,7 @@ async fn test_rdbc_source_to_sink_pipeline() -> Result<()> {
 
     // Write to sink
     let sink_config = RdbcSinkConfig {
-        connection_url: pg.cdc_connection_url(),
+        connection_url: pg.cdc_connection_url().into(),
         table: "pipeline_sink".to_string(),
         write_mode: RdbcWriteMode::Insert,
         batch_size: 10,
@@ -733,7 +733,7 @@ async fn test_rdbc_source_timestamp() -> Result<()> {
         .await?;
 
     let config = RdbcSourceConfig {
-        connection_url: pg.cdc_connection_url(),
+        connection_url: pg.cdc_connection_url().into(),
         table: "timestamp_test".to_string(),
         mode: RdbcQueryMode::Timestamp,
         timestamp_column: Some("updated_at".to_string()),
@@ -796,7 +796,7 @@ async fn test_rdbc_sink_delete() -> Result<()> {
         .await?;
 
     let config = RdbcSinkConfig {
-        connection_url: pg.cdc_connection_url(),
+        connection_url: pg.cdc_connection_url().into(),
         table: "delete_test".to_string(),
         write_mode: RdbcWriteMode::Upsert,
         pk_columns: Some(vec!["id".to_string()]),
@@ -858,7 +858,7 @@ async fn test_rdbc_schema_qualification() -> Result<()> {
 
     // Test sink with schema
     let config = RdbcSinkConfig {
-        connection_url: pg.cdc_connection_url(),
+        connection_url: pg.cdc_connection_url().into(),
         schema: Some("custom_schema".to_string()),
         table: "qualified_table".to_string(),
         write_mode: RdbcWriteMode::Insert,
@@ -921,7 +921,7 @@ async fn test_rdbc_source_state_resume() -> Result<()> {
         .await?;
 
     let config = RdbcSourceConfig {
-        connection_url: pg.cdc_connection_url(),
+        connection_url: pg.cdc_connection_url().into(),
         table: "resume_test".to_string(),
         mode: RdbcQueryMode::Incrementing,
         incrementing_column: Some("id".to_string()),
@@ -979,7 +979,9 @@ async fn test_rdbc_error_handling() -> Result<()> {
     init_tracing();
 
     let config = RdbcSourceConfig {
-        connection_url: "postgres://invalid:invalid@nonexistent:5432/invalid".to_string(),
+        connection_url: "postgres://invalid:invalid@nonexistent:5432/invalid"
+            .to_string()
+            .into(),
         table: "nonexistent".to_string(),
         mode: RdbcQueryMode::Bulk,
         pool_size: 1,
@@ -1007,7 +1009,7 @@ async fn test_rdbc_large_batch_performance() -> Result<()> {
     setup_rdbc_sink_table(&pg).await?;
 
     let config = RdbcSinkConfig {
-        connection_url: pg.cdc_connection_url(),
+        connection_url: pg.cdc_connection_url().into(),
         table: "rdbc_sink_test".to_string(),
         write_mode: RdbcWriteMode::Insert,
         batch_size: 100,
@@ -1079,7 +1081,7 @@ async fn test_rdbc_sink_update() -> Result<()> {
         .await?;
 
     let config = RdbcSinkConfig {
-        connection_url: pg.cdc_connection_url(),
+        connection_url: pg.cdc_connection_url().into(),
         table: "update_test".to_string(),
         write_mode: RdbcWriteMode::Update,
         pk_columns: Some(vec!["id".to_string()]),

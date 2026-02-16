@@ -48,10 +48,11 @@ use validator::Validate;
 // ============================================================================
 
 /// Security protocol for Kafka connections
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SecurityProtocol {
     /// No encryption or authentication
+    #[default]
     Plaintext,
     /// TLS encryption without SASL
     Ssl,
@@ -61,16 +62,11 @@ pub enum SecurityProtocol {
     SaslSsl,
 }
 
-impl Default for SecurityProtocol {
-    fn default() -> Self {
-        Self::Plaintext
-    }
-}
-
 /// SASL authentication mechanism
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum SaslMechanism {
     /// PLAIN mechanism (username/password in cleartext)
+    #[default]
     #[serde(rename = "PLAIN")]
     Plain,
     /// SCRAM-SHA-256 mechanism (salted challenge-response)
@@ -85,12 +81,6 @@ pub enum SaslMechanism {
     /// AWS MSK IAM authentication
     #[serde(rename = "AWS_MSK_IAM")]
     AwsMskIam,
-}
-
-impl Default for SaslMechanism {
-    fn default() -> Self {
-        Self::Plain
-    }
 }
 
 /// Kafka security configuration
@@ -225,10 +215,11 @@ impl KafkaSecurityConfig {
 }
 
 /// Compression codec for Kafka messages
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum CompressionCodec {
     /// No compression
+    #[default]
     None,
     /// Gzip compression
     Gzip,
@@ -238,12 +229,6 @@ pub enum CompressionCodec {
     Lz4,
     /// Zstd compression
     Zstd,
-}
-
-impl Default for CompressionCodec {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 impl From<CompressionCodec> for krafka::protocol::Compression {
@@ -259,19 +244,14 @@ impl From<CompressionCodec> for krafka::protocol::Compression {
 }
 
 /// Where to start reading from when no committed offset exists
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum StartOffset {
     /// Start from the earliest available message
+    #[default]
     Earliest,
     /// Start from the latest message (new messages only)
     Latest,
-}
-
-impl Default for StartOffset {
-    fn default() -> Self {
-        Self::Earliest
-    }
 }
 
 impl From<StartOffset> for krafka::consumer::AutoOffsetReset {
@@ -284,7 +264,7 @@ impl From<StartOffset> for krafka::consumer::AutoOffsetReset {
 }
 
 /// Acknowledgment level for produced messages
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum AckLevel {
     /// No acknowledgment (fire-and-forget)
@@ -292,13 +272,8 @@ pub enum AckLevel {
     /// Leader acknowledgment only
     Leader,
     /// All in-sync replicas must acknowledge
+    #[default]
     All,
-}
-
-impl Default for AckLevel {
-    fn default() -> Self {
-        Self::All
-    }
 }
 
 impl From<AckLevel> for krafka::producer::Acks {
@@ -971,19 +946,14 @@ pub struct KafkaSourceConfig {
 }
 
 /// Isolation level for Kafka consumers (transactional read semantics)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum IsolationLevel {
     /// Return all records including aborted transactions
+    #[default]
     ReadUncommitted,
     /// Return only committed transactional records
     ReadCommitted,
-}
-
-impl Default for IsolationLevel {
-    fn default() -> Self {
-        Self::ReadUncommitted
-    }
 }
 
 impl From<IsolationLevel> for krafka::consumer::IsolationLevel {

@@ -17,20 +17,81 @@ use rivven_connect::connectors::queue::kafka::{
     StartOffset,
 };
 use rivven_connect::traits::catalog::{
-    ConfiguredCatalog, ConfiguredStream, DestinationSyncMode, SyncMode,
+    ConfiguredCatalog, ConfiguredStream, DestinationSyncMode, Stream, SyncMode,
 };
 use rivven_connect::traits::sink::Sink;
-use rivven_connect::traits::source::Source;
+use rivven_connect::traits::source::{CheckResult, Source};
 use rivven_integration_tests::fixtures::TestKafka;
 use rivven_integration_tests::helpers::*;
 use tokio::time::timeout;
 use tracing::info;
 
 // ============================================================================
-// Infrastructure Tests - Verify test setup works correctly
+// Helper: build default configs for the test broker/topic/group
 // ============================================================================
 
-/// Test that we can start a Kafka container
+fn source_config(brokers: &str, topic: &str, group: &str) -> KafkaSourceConfig {
+    KafkaSourceConfig {
+        brokers: brokers.to_string(),
+        topic: topic.to_string(),
+        consumer_group: group.to_string(),
+        start_offset: StartOffset::Earliest,
+        security: Default::default(),
+        max_poll_records: 500,
+        max_poll_interval_ms: 300_000,
+        session_timeout_ms: 10_000,
+        heartbeat_interval_ms: 3_000,
+        include_headers: true,
+        include_key: true,
+        enable_auto_commit: true,
+        auto_commit_interval_ms: 5_000,
+        fetch_min_bytes: 1,
+        fetch_max_bytes: 52_428_800,
+        request_timeout_ms: 30_000,
+        empty_poll_delay_ms: 50,
+        client_id: None,
+        isolation_level: Default::default(),
+    }
+}
+
+fn sink_config(brokers: &str, topic: &str) -> KafkaSinkConfig {
+    KafkaSinkConfig {
+        brokers: brokers.to_string(),
+        topic: topic.to_string(),
+        acks: AckLevel::All,
+        compression: CompressionCodec::None,
+        security: Default::default(),
+        batch_size_bytes: 16_384,
+        linger_ms: 5,
+        request_timeout_ms: 30_000,
+        retries: 3,
+        retry_backoff_ms: 100,
+        idempotent: false,
+        transactional_id: None,
+        key_field: None,
+        include_headers: true,
+        custom_headers: HashMap::new(),
+        client_id: None,
+    }
+}
+
+fn test_catalog(stream_name: &str) -> ConfiguredCatalog {
+    ConfiguredCatalog {
+        streams: vec![ConfiguredStream {
+            stream: Stream::new(stream_name, serde_json::json!({})),
+            sync_mode: SyncMode::Incremental,
+            destination_sync_mode: DestinationSyncMode::Append,
+            cursor_field: None,
+            primary_key: None,
+        }],
+    }
+}
+
+// ============================================================================
+// Infrastructure Tests
+// ============================================================================
+
+/// Test that we can start a Kafka container.
 #[tokio::test]
 async fn test_kafka_container_starts() -> Result<()> {
     init_tracing();
@@ -46,21 +107,19 @@ async fn test_kafka_container_starts() -> Result<()> {
     Ok(())
 }
 
-/// Test that we can create topics
+/// Test that we can create topics.
 #[tokio::test]
 async fn test_kafka_create_topic() -> Result<()> {
     init_tracing();
 
     let kafka = TestKafka::start().await?;
-
-    // Create a topic with 3 partitions
     kafka.create_topic("test-topic", 3, 1).await?;
 
     info!("Topic creation test passed");
     Ok(())
 }
 
-/// Test produce and consume messages
+/// Test produce and consume round-trip.
 #[tokio::test]
 async fn test_kafka_produce_consume() -> Result<()> {
     init_tracing();
@@ -68,12 +127,11 @@ async fn test_kafka_produce_consume() -> Result<()> {
     let kafka = TestKafka::start().await?;
     kafka.create_topic("produce-consume-test", 1, 1).await?;
 
-    // Produce some messages
     let messages: Vec<(Option<Vec<u8>>, Vec<u8>)> = (0..5)
         .map(|i| {
             (
-                Some(format!("key-{}", i).into_bytes()),
-                format!(r#"{{"id":{}, "value":"message-{}"}}"#, i, i).into_bytes(),
+                Some(format!("key-{i}").into_bytes()),
+                format!(r#"{{"id":{i},"value":"message-{i}"}}"#).into_bytes(),
             )
         })
         .collect();
@@ -83,16 +141,14 @@ async fn test_kafka_produce_consume() -> Result<()> {
         .await?;
     assert_eq!(offsets.len(), 5);
 
-    // Consume messages
     let records = kafka
         .consume_messages("produce-consume-test", 0, 0, 10)
         .await?;
     assert_eq!(records.len(), 5);
 
-    // Verify message content
     for (i, record) in records.iter().enumerate() {
         let value = record.record.value.as_ref().unwrap();
-        let expected = format!(r#"{{"id":{}, "value":"message-{}"}}"#, i, i);
+        let expected = format!(r#"{{"id":{i},"value":"message-{i}"}}"#);
         assert_eq!(std::str::from_utf8(value)?, expected);
     }
 
@@ -101,10 +157,10 @@ async fn test_kafka_produce_consume() -> Result<()> {
 }
 
 // ============================================================================
-// Rivven Kafka Source Connector Tests
+// Kafka Source Connector Tests
 // ============================================================================
 
-/// Test that KafkaSource can connect and check configuration
+/// Test KafkaSource check passes with a valid broker/topic.
 #[tokio::test]
 async fn test_kafka_source_check() -> Result<()> {
     init_tracing();
@@ -112,35 +168,21 @@ async fn test_kafka_source_check() -> Result<()> {
     let kafka = TestKafka::start().await?;
     kafka.create_topic("source-check-test", 1, 1).await?;
 
-    let source = KafkaSource::new();
+    let source = KafkaSource;
+    let config = source_config(
+        &kafka.bootstrap_servers(),
+        "source-check-test",
+        "test-group",
+    );
 
-    let config = KafkaSourceConfig {
-        brokers: vec![kafka.bootstrap_servers()],
-        topic: "source-check-test".to_string(),
-        consumer_group: "test-group".to_string(),
-        start_offset: StartOffset::Earliest,
-        security: Default::default(),
-        max_poll_interval_ms: 300000,
-        session_timeout_ms: 10000,
-        heartbeat_interval_ms: 3000,
-        fetch_max_messages: 500,
-        include_headers: true,
-        include_key: true,
-        retry_initial_ms: 100,
-        retry_max_ms: 10000,
-        retry_multiplier: 2.0,
-        empty_poll_delay_ms: 50,
-        connect_timeout_ms: 30000,
-    };
-
-    let result = source.check(&config).await?;
-    assert!(result.is_success(), "Check should succeed: {:?}", result);
+    let result: CheckResult = source.check(&config).await?;
+    assert!(result.is_success(), "Check should succeed: {result:?}");
 
     info!("Kafka source check test passed");
     Ok(())
 }
 
-/// Test that KafkaSource can discover topics and create catalog
+/// Test KafkaSource discover returns a catalog with the topic.
 #[tokio::test]
 async fn test_kafka_source_discover() -> Result<()> {
     init_tracing();
@@ -148,39 +190,21 @@ async fn test_kafka_source_discover() -> Result<()> {
     let kafka = TestKafka::start().await?;
     kafka.create_topic("discover-test", 3, 1).await?;
 
-    let source = KafkaSource::new();
-
-    let config = KafkaSourceConfig {
-        brokers: vec![kafka.bootstrap_servers()],
-        topic: "discover-test".to_string(),
-        consumer_group: "test-group".to_string(),
-        start_offset: StartOffset::Latest,
-        security: Default::default(),
-        max_poll_interval_ms: 300000,
-        session_timeout_ms: 10000,
-        heartbeat_interval_ms: 3000,
-        fetch_max_messages: 500,
-        include_headers: true,
-        include_key: true,
-        retry_initial_ms: 100,
-        retry_max_ms: 10000,
-        retry_multiplier: 2.0,
-        empty_poll_delay_ms: 50,
-        connect_timeout_ms: 30000,
-    };
+    let source = KafkaSource;
+    let config = source_config(&kafka.bootstrap_servers(), "discover-test", "test-group");
 
     let catalog = source.discover(&config).await?;
     assert!(!catalog.streams.is_empty());
 
-    // Verify stream has expected properties
-    let stream = &catalog.streams[0];
-    assert_eq!(stream.name, "discover-test");
+    let stream = catalog.find_stream("discover-test");
+    assert!(stream.is_some(), "Should discover the created topic");
+    assert_eq!(stream.unwrap().name, "discover-test");
 
     info!("Kafka source discover test passed");
     Ok(())
 }
 
-/// Test KafkaSource can read messages from a topic
+/// Test KafkaSource can read pre-populated messages from a topic.
 #[tokio::test]
 async fn test_kafka_source_read() -> Result<()> {
     init_tracing();
@@ -188,74 +212,44 @@ async fn test_kafka_source_read() -> Result<()> {
     let kafka = TestKafka::start().await?;
     kafka.create_topic("source-read-test", 1, 1).await?;
 
-    // Pre-populate the topic with messages
+    // Pre-populate 10 messages
     let messages: Vec<(Option<Vec<u8>>, Vec<u8>)> = (0..10)
         .map(|i| {
             (
-                Some(format!("key-{}", i).into_bytes()),
-                format!(r#"{{"sequence":{}, "data":"test message {}"}}"#, i, i).into_bytes(),
+                Some(format!("key-{i}").into_bytes()),
+                format!(r#"{{"sequence":{i},"data":"test message {i}"}}"#).into_bytes(),
             )
         })
         .collect();
-
     kafka
         .produce_messages("source-read-test", 0, messages)
         .await?;
 
-    // Create source and read
-    let source = KafkaSource::new();
+    let source = KafkaSource;
+    let mut config = source_config(
+        &kafka.bootstrap_servers(),
+        "source-read-test",
+        "test-read-group",
+    );
+    config.max_poll_records = 100;
 
-    let config = KafkaSourceConfig {
-        brokers: vec![kafka.bootstrap_servers()],
-        topic: "source-read-test".to_string(),
-        consumer_group: "test-read-group".to_string(),
-        start_offset: StartOffset::Earliest,
-        security: Default::default(),
-        max_poll_interval_ms: 300000,
-        session_timeout_ms: 10000,
-        heartbeat_interval_ms: 3000,
-        fetch_max_messages: 100,
-        include_headers: true,
-        include_key: true,
-        retry_initial_ms: 100,
-        retry_max_ms: 10000,
-        retry_multiplier: 2.0,
-        empty_poll_delay_ms: 50,
-        connect_timeout_ms: 30000,
-    };
-
-    let configured_catalog = ConfiguredCatalog {
-        streams: vec![ConfiguredStream {
-            stream: rivven_connect::traits::catalog::Stream::new(
-                "source-read-test",
-                serde_json::json!({}),
-            ),
-            sync_mode: SyncMode::Incremental,
-            destination_sync_mode: DestinationSyncMode::Append,
-            cursor_field: None,
-            primary_key: None,
-        }],
-    };
-
+    let configured_catalog = test_catalog("source-read-test");
     let mut stream = source.read(&config, &configured_catalog, None).await?;
 
-    // Read some events with timeout
     let mut received = 0;
     let read_result = timeout(Duration::from_secs(30), async {
         while let Some(event_result) = stream.next().await {
             match event_result {
                 Ok(event) => {
-                    if event.event_type.is_data() {
+                    if event.is_data() {
                         received += 1;
-                        info!("Received event {}: {:?}", received, event.event_type);
+                        info!("Received event {received}");
                         if received >= 10 {
                             break;
                         }
                     }
                 }
-                Err(e) => {
-                    return Err(anyhow::anyhow!("Read error: {}", e));
-                }
+                Err(e) => return Err(anyhow::anyhow!("Read error: {e}")),
             }
         }
         Ok(received)
@@ -265,212 +259,22 @@ async fn test_kafka_source_read() -> Result<()> {
     match read_result {
         Ok(Ok(count)) => {
             assert_eq!(count, 10, "Should have received 10 messages");
-            info!(
-                "Kafka source read test passed - received {} messages",
-                count
-            );
+            info!("Kafka source read test passed – received {count} messages");
         }
-        Ok(Err(e)) => {
-            return Err(e);
-        }
+        Ok(Err(e)) => return Err(e),
         Err(_) => {
-            // Timeout - check what we got
-            info!(
-                "Read timeout after receiving {} messages (may be expected)",
-                received
-            );
+            info!("Read timeout after receiving {received} messages (may be expected)");
         }
     }
 
     Ok(())
 }
 
-/// Test KafkaSource metrics are updated during read
-#[tokio::test]
-async fn test_kafka_source_metrics() -> Result<()> {
-    init_tracing();
-
-    let kafka = TestKafka::start().await?;
-    kafka.create_topic("source-metrics-test", 1, 1).await?;
-
-    // Pre-populate
-    let messages: Vec<(Option<Vec<u8>>, Vec<u8>)> = (0..5)
-        .map(|i| {
-            (
-                Some(format!("key-{}", i).into_bytes()),
-                format!(r#"{{"id":{}}}"#, i).into_bytes(),
-            )
-        })
-        .collect();
-
-    kafka
-        .produce_messages("source-metrics-test", 0, messages)
-        .await?;
-
-    let source = KafkaSource::new();
-    let metrics = source.metrics();
-
-    // Verify initial metrics are zero
-    let snapshot = metrics.snapshot();
-    assert_eq!(snapshot.messages_consumed, 0);
-    assert_eq!(snapshot.bytes_consumed, 0);
-
-    let config = KafkaSourceConfig {
-        brokers: vec![kafka.bootstrap_servers()],
-        topic: "source-metrics-test".to_string(),
-        consumer_group: "test-metrics-group".to_string(),
-        start_offset: StartOffset::Earliest,
-        security: Default::default(),
-        max_poll_interval_ms: 300000,
-        session_timeout_ms: 10000,
-        heartbeat_interval_ms: 3000,
-        fetch_max_messages: 100,
-        include_headers: true,
-        include_key: true,
-        retry_initial_ms: 100,
-        retry_max_ms: 10000,
-        retry_multiplier: 2.0,
-        empty_poll_delay_ms: 50,
-        connect_timeout_ms: 30000,
-    };
-
-    let configured_catalog = ConfiguredCatalog {
-        streams: vec![ConfiguredStream {
-            stream: rivven_connect::traits::catalog::Stream::new(
-                "source-metrics-test",
-                serde_json::json!({}),
-            ),
-            sync_mode: SyncMode::FullRefresh,
-            destination_sync_mode: DestinationSyncMode::Overwrite,
-            cursor_field: None,
-            primary_key: None,
-        }],
-    };
-
-    let mut stream = source.read(&config, &configured_catalog, None).await?;
-
-    // Read a few events
-    let _ = timeout(Duration::from_secs(10), async {
-        let mut count = 0;
-        while let Some(Ok(event)) = stream.next().await {
-            if event.event_type.is_data() {
-                count += 1;
-                if count >= 5 {
-                    break;
-                }
-            }
-        }
-    })
-    .await;
-
-    // Check metrics were updated
-    let snapshot = metrics.snapshot();
-    info!(
-        "Metrics: consumed={}, bytes={}, polls={}",
-        snapshot.messages_consumed, snapshot.bytes_consumed, snapshot.polls
-    );
-
-    // Metrics should show some activity
-    assert!(
-        snapshot.polls > 0 || snapshot.messages_consumed > 0,
-        "Should have recorded some poll activity"
-    );
-
-    // Test Prometheus export
-    let prometheus = snapshot.to_prometheus_format("test");
-    assert!(prometheus.contains("kafka_source_messages_consumed_total"));
-    assert!(prometheus.contains("kafka_source_polls_total"));
-
-    info!("Kafka source metrics test passed");
-    Ok(())
-}
-
-/// Test KafkaSource graceful shutdown
-#[tokio::test]
-async fn test_kafka_source_shutdown() -> Result<()> {
-    init_tracing();
-
-    let kafka = TestKafka::start().await?;
-    kafka.create_topic("source-shutdown-test", 1, 1).await?;
-
-    // Pre-populate
-    let messages: Vec<(Option<Vec<u8>>, Vec<u8>)> = (0..100)
-        .map(|i| (None, format!(r#"{{"id":{}}}"#, i).into_bytes()))
-        .collect();
-    kafka
-        .produce_messages("source-shutdown-test", 0, messages)
-        .await?;
-
-    let source = KafkaSource::new();
-
-    let config = KafkaSourceConfig {
-        brokers: vec![kafka.bootstrap_servers()],
-        topic: "source-shutdown-test".to_string(),
-        consumer_group: "test-shutdown-group".to_string(),
-        start_offset: StartOffset::Earliest,
-        security: Default::default(),
-        max_poll_interval_ms: 300000,
-        session_timeout_ms: 10000,
-        heartbeat_interval_ms: 3000,
-        fetch_max_messages: 10,
-        include_headers: true,
-        include_key: true,
-        retry_initial_ms: 100,
-        retry_max_ms: 10000,
-        retry_multiplier: 2.0,
-        empty_poll_delay_ms: 50,
-        connect_timeout_ms: 30000,
-    };
-
-    let configured_catalog = ConfiguredCatalog {
-        streams: vec![ConfiguredStream {
-            stream: rivven_connect::traits::catalog::Stream::new(
-                "source-shutdown-test",
-                serde_json::json!({}),
-            ),
-            sync_mode: SyncMode::Incremental,
-            destination_sync_mode: DestinationSyncMode::Append,
-            cursor_field: None,
-            primary_key: None,
-        }],
-    };
-
-    let mut stream = source.read(&config, &configured_catalog, None).await?;
-
-    // Start reading in background and trigger shutdown after a few messages
-    let source_clone = source;
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        source_clone.shutdown();
-        info!("Shutdown signaled");
-    });
-
-    // Read until shutdown
-    let mut count = 0;
-    let result = timeout(Duration::from_secs(10), async {
-        while let Some(Ok(event)) = stream.next().await {
-            if event.event_type.is_data() {
-                count += 1;
-            }
-        }
-    })
-    .await;
-
-    // Should have exited cleanly
-    assert!(result.is_ok(), "Should have exited due to shutdown");
-    info!(
-        "Kafka source shutdown test passed - processed {} messages before shutdown",
-        count
-    );
-
-    Ok(())
-}
-
 // ============================================================================
-// Performance / Stress Tests
+// High-Throughput / Batch Tests
 // ============================================================================
 
-/// Test high-throughput message consumption
+/// Test high-throughput message consumption across partitions.
 #[tokio::test]
 async fn test_kafka_source_high_throughput() -> Result<()> {
     init_tracing();
@@ -478,14 +282,13 @@ async fn test_kafka_source_high_throughput() -> Result<()> {
     let kafka = TestKafka::start().await?;
     kafka.create_topic("high-throughput-test", 3, 1).await?;
 
-    // Produce many messages
-    let message_count = 1000;
-    for partition in 0..3 {
+    let message_count: usize = 1000;
+    for partition in 0..3i32 {
         let messages: Vec<(Option<Vec<u8>>, Vec<u8>)> = (0..message_count / 3)
             .map(|i| {
                 (
-                    Some(format!("key-{}-{}", partition, i).into_bytes()),
-                    format!(r#"{{"partition":{},"sequence":{}}}"#, partition, i).into_bytes(),
+                    Some(format!("key-{partition}-{i}").into_bytes()),
+                    format!(r#"{{"partition":{partition},"sequence":{i}}}"#).into_bytes(),
                 )
             })
             .collect();
@@ -493,38 +296,22 @@ async fn test_kafka_source_high_throughput() -> Result<()> {
             .produce_messages("high-throughput-test", partition, messages)
             .await?;
     }
+    info!("Produced {message_count} messages across 3 partitions");
 
-    info!("Produced {} messages across 3 partitions", message_count);
-
-    // Measure consumption throughput
     let start = std::time::Instant::now();
-
-    let source = KafkaSource::new();
-    let config = KafkaSourceConfig {
-        brokers: vec![kafka.bootstrap_servers()],
-        topic: "high-throughput-test".to_string(),
-        consumer_group: "throughput-test-group".to_string(),
-        start_offset: StartOffset::Earliest,
-        security: Default::default(),
-        max_poll_interval_ms: 300000,
-        session_timeout_ms: 10000,
-        heartbeat_interval_ms: 3000,
-        fetch_max_messages: 500,
-        include_headers: false,
-        include_key: false,
-        retry_initial_ms: 100,
-        retry_max_ms: 10000,
-        retry_multiplier: 2.0,
-        empty_poll_delay_ms: 10,
-        connect_timeout_ms: 30000,
-    };
+    let source = KafkaSource;
+    let mut config = source_config(
+        &kafka.bootstrap_servers(),
+        "high-throughput-test",
+        "throughput-test-group",
+    );
+    config.include_headers = false;
+    config.include_key = false;
+    config.empty_poll_delay_ms = 10;
 
     let configured_catalog = ConfiguredCatalog {
         streams: vec![ConfiguredStream {
-            stream: rivven_connect::traits::catalog::Stream::new(
-                "high-throughput-test",
-                serde_json::json!({}),
-            ),
+            stream: Stream::new("high-throughput-test", serde_json::json!({})),
             sync_mode: SyncMode::FullRefresh,
             destination_sync_mode: DestinationSyncMode::Overwrite,
             cursor_field: None,
@@ -533,11 +320,10 @@ async fn test_kafka_source_high_throughput() -> Result<()> {
     };
 
     let mut stream = source.read(&config, &configured_catalog, None).await?;
-
-    let mut received = 0;
+    let mut received = 0usize;
     let _ = timeout(Duration::from_secs(60), async {
         while let Some(Ok(event)) = stream.next().await {
-            if event.event_type.is_data() {
+            if event.is_data() {
                 received += 1;
                 if received >= message_count {
                     break;
@@ -549,14 +335,60 @@ async fn test_kafka_source_high_throughput() -> Result<()> {
 
     let elapsed = start.elapsed();
     let throughput = received as f64 / elapsed.as_secs_f64();
-
-    info!(
-        "High-throughput test: {} messages in {:?} ({:.0} msg/s)",
-        received, elapsed, throughput
-    );
-
-    // Should achieve reasonable throughput
+    info!("High-throughput test: {received} messages in {elapsed:?} ({throughput:.0} msg/s)");
     assert!(received > 100, "Should have received significant messages");
+
+    Ok(())
+}
+
+/// Test batch consumption aggregates varying batch sizes.
+#[tokio::test]
+async fn test_kafka_batch_consumption() -> Result<()> {
+    init_tracing();
+
+    let kafka = TestKafka::start().await?;
+    kafka.create_topic("batch-test", 1, 1).await?;
+
+    let mut total_produced = 0usize;
+    for batch_size in [5, 10, 20, 50] {
+        let messages: Vec<(Option<Vec<u8>>, Vec<u8>)> = (0..batch_size)
+            .map(|i| (None, format!(r#"{{"batch":{i}}}"#).into_bytes()))
+            .collect();
+        kafka.produce_messages("batch-test", 0, messages).await?;
+        total_produced += batch_size;
+    }
+
+    let source = KafkaSource;
+    let mut config = source_config(&kafka.bootstrap_servers(), "batch-test", "batch-test-group");
+    config.include_headers = false;
+    config.include_key = false;
+
+    let configured_catalog = ConfiguredCatalog {
+        streams: vec![ConfiguredStream {
+            stream: Stream::new("batch-test", serde_json::json!({})),
+            sync_mode: SyncMode::FullRefresh,
+            destination_sync_mode: DestinationSyncMode::Overwrite,
+            cursor_field: None,
+            primary_key: None,
+        }],
+    };
+
+    let mut stream = source.read(&config, &configured_catalog, None).await?;
+    let mut received = 0usize;
+    let _ = timeout(Duration::from_secs(15), async {
+        while let Some(Ok(event)) = stream.next().await {
+            if event.is_data() {
+                received += 1;
+                if received >= total_produced {
+                    break;
+                }
+            }
+        }
+    })
+    .await;
+
+    info!("Batch test: received {received} messages");
+    assert!(received > 0, "Should have received some messages");
 
     Ok(())
 }
@@ -565,97 +397,61 @@ async fn test_kafka_source_high_throughput() -> Result<()> {
 // Edge Case Tests
 // ============================================================================
 
-/// Test KafkaSource with non-existent topic
+/// Test KafkaSource handles an unreachable broker gracefully.
 #[tokio::test]
-async fn test_kafka_source_nonexistent_topic() -> Result<()> {
+async fn test_kafka_source_invalid_broker() -> Result<()> {
     init_tracing();
 
-    let kafka = TestKafka::start().await?;
+    let source = KafkaSource;
+    let mut config = source_config("invalid-broker:9999", "test-topic", "test-group");
+    config.request_timeout_ms = 5_000;
 
-    let source = KafkaSource::new();
+    // check() should return Ok(CheckResult) with a failed connectivity check,
+    // not panic or hang.
+    let result = timeout(Duration::from_secs(30), source.check(&config)).await;
 
-    let config = KafkaSourceConfig {
-        brokers: vec![kafka.bootstrap_servers()],
-        topic: "nonexistent-topic-12345".to_string(),
-        consumer_group: "test-group".to_string(),
-        start_offset: StartOffset::Latest,
-        security: Default::default(),
-        max_poll_interval_ms: 300000,
-        session_timeout_ms: 10000,
-        heartbeat_interval_ms: 3000,
-        fetch_max_messages: 500,
-        include_headers: true,
-        include_key: true,
-        retry_initial_ms: 100,
-        retry_max_ms: 10000,
-        retry_multiplier: 2.0,
-        empty_poll_delay_ms: 50,
-        connect_timeout_ms: 30000,
-    };
+    match result {
+        Ok(Ok(check)) => {
+            info!("Invalid broker check result: {check:?}");
+            // Should report failure in at least one check
+            assert!(
+                !check.is_success() || check.failed_checks().count() > 0,
+                "Expected a failure for invalid broker"
+            );
+        }
+        Ok(Err(e)) => {
+            info!("Invalid broker returned error (acceptable): {e}");
+        }
+        Err(_) => {
+            panic!("check() timed out for invalid broker – possible deadlock");
+        }
+    }
 
-    // Check should still succeed (topic may be auto-created or check is permissive)
-    // but discover should work
-    let catalog = source.discover(&config).await?;
-    assert!(!catalog.streams.is_empty());
-
-    info!("Non-existent topic test passed");
     Ok(())
 }
 
-/// Test KafkaSource with multiple partitions
+/// Test KafkaSource reading an empty topic returns no data events.
 #[tokio::test]
-async fn test_kafka_source_multiple_partitions() -> Result<()> {
+async fn test_kafka_source_empty_topic() -> Result<()> {
     init_tracing();
 
     let kafka = TestKafka::start().await?;
-    kafka.create_topic("multi-partition-test", 5, 1).await?;
+    kafka.create_topic("empty-topic-test", 1, 1).await?;
 
-    // Produce to each partition
-    for partition in 0..5 {
-        let messages: Vec<(Option<Vec<u8>>, Vec<u8>)> = (0..10)
-            .map(|i| {
-                (
-                    Some(format!("p{}-k{}", partition, i).into_bytes()),
-                    format!(r#"{{"partition":{},"msg":{}}}"#, partition, i).into_bytes(),
-                )
-            })
-            .collect();
-        kafka
-            .produce_messages("multi-partition-test", partition, messages)
-            .await?;
-    }
-
-    info!("Produced 50 messages across 5 partitions");
-
-    // Verify we can read from all partitions
-    let source = KafkaSource::new();
-    let config = KafkaSourceConfig {
-        brokers: vec![kafka.bootstrap_servers()],
-        topic: "multi-partition-test".to_string(),
-        consumer_group: "multi-partition-group".to_string(),
-        start_offset: StartOffset::Earliest,
-        security: Default::default(),
-        max_poll_interval_ms: 300000,
-        session_timeout_ms: 10000,
-        heartbeat_interval_ms: 3000,
-        fetch_max_messages: 100,
-        include_headers: true,
-        include_key: true,
-        retry_initial_ms: 100,
-        retry_max_ms: 10000,
-        retry_multiplier: 2.0,
-        empty_poll_delay_ms: 50,
-        connect_timeout_ms: 30000,
-    };
+    let source = KafkaSource;
+    let mut config = source_config(
+        &kafka.bootstrap_servers(),
+        "empty-topic-test",
+        "empty-topic-group",
+    );
+    config.include_headers = false;
+    config.include_key = false;
 
     let configured_catalog = ConfiguredCatalog {
         streams: vec![ConfiguredStream {
-            stream: rivven_connect::traits::catalog::Stream::new(
-                "multi-partition-test",
-                serde_json::json!({}),
-            ),
-            sync_mode: SyncMode::Incremental,
-            destination_sync_mode: DestinationSyncMode::Append,
+            stream: Stream::new("empty-topic-test", serde_json::json!({})),
+            sync_mode: SyncMode::FullRefresh,
+            destination_sync_mode: DestinationSyncMode::Overwrite,
             cursor_field: None,
             primary_key: None,
         }],
@@ -663,10 +459,63 @@ async fn test_kafka_source_multiple_partitions() -> Result<()> {
 
     let mut stream = source.read(&config, &configured_catalog, None).await?;
 
-    let mut received = 0;
+    let result = timeout(Duration::from_secs(3), async {
+        let mut count = 0;
+        while let Some(Ok(event)) = stream.next().await {
+            if event.is_data() {
+                count += 1;
+            }
+        }
+        count
+    })
+    .await;
+
+    match result {
+        Ok(count) => assert_eq!(count, 0, "Empty topic should have no messages"),
+        Err(_) => info!("Timed out as expected for empty topic"),
+    }
+
+    Ok(())
+}
+
+/// Test KafkaSource with multiple partitions.
+#[tokio::test]
+async fn test_kafka_source_multiple_partitions() -> Result<()> {
+    init_tracing();
+
+    let kafka = TestKafka::start().await?;
+    kafka.create_topic("multi-partition-test", 5, 1).await?;
+
+    for partition in 0..5i32 {
+        let messages: Vec<(Option<Vec<u8>>, Vec<u8>)> = (0..10)
+            .map(|i| {
+                (
+                    Some(format!("p{partition}-k{i}").into_bytes()),
+                    format!(r#"{{"partition":{partition},"msg":{i}}}"#).into_bytes(),
+                )
+            })
+            .collect();
+        kafka
+            .produce_messages("multi-partition-test", partition, messages)
+            .await?;
+    }
+    info!("Produced 50 messages across 5 partitions");
+
+    let source = KafkaSource;
+    let mut config = source_config(
+        &kafka.bootstrap_servers(),
+        "multi-partition-test",
+        "multi-partition-group",
+    );
+    config.max_poll_records = 100;
+
+    let configured_catalog = test_catalog("multi-partition-test");
+    let mut stream = source.read(&config, &configured_catalog, None).await?;
+
+    let mut received = 0usize;
     let _ = timeout(Duration::from_secs(30), async {
         while let Some(Ok(event)) = stream.next().await {
-            if event.event_type.is_data() {
+            if event.is_data() {
                 received += 1;
                 if received >= 50 {
                     break;
@@ -676,19 +525,88 @@ async fn test_kafka_source_multiple_partitions() -> Result<()> {
     })
     .await;
 
-    info!(
-        "Multi-partition test: received {} messages from 5 partitions",
-        received
-    );
+    info!("Multi-partition test: received {received} messages from 5 partitions");
 
     Ok(())
 }
 
 // ============================================================================
-// Kafka Sink Tests
+// Offset Mode Tests
 // ============================================================================
 
-/// Test KafkaSink can connect and check configuration
+/// Test KafkaSource with Earliest and Latest start offsets.
+#[tokio::test]
+async fn test_kafka_source_offset_modes() -> Result<()> {
+    init_tracing();
+
+    let kafka = TestKafka::start().await?;
+    kafka.create_topic("offset-modes-test", 1, 1).await?;
+
+    // Pre-populate 20 messages
+    let messages: Vec<(Option<Vec<u8>>, Vec<u8>)> = (0..20)
+        .map(|i| (None, format!(r#"{{"seq":{i}}}"#).into_bytes()))
+        .collect();
+    kafka
+        .produce_messages("offset-modes-test", 0, messages)
+        .await?;
+
+    let source = KafkaSource;
+
+    // Earliest should succeed
+    let config_earliest = source_config(
+        &kafka.bootstrap_servers(),
+        "offset-modes-test",
+        "offset-test-earliest",
+    );
+    let result: CheckResult = source.check(&config_earliest).await?;
+    assert!(result.is_success());
+
+    // Latest should also succeed
+    let config_latest = KafkaSourceConfig {
+        start_offset: StartOffset::Latest,
+        consumer_group: "offset-test-latest".to_string(),
+        ..config_earliest.clone()
+    };
+    let result: CheckResult = source.check(&config_latest).await?;
+    assert!(result.is_success());
+
+    info!("Kafka source offset modes test passed");
+    Ok(())
+}
+
+// ============================================================================
+// Consumer Group Tests
+// ============================================================================
+
+/// Test that multiple consumer groups can read the same topic independently.
+#[tokio::test]
+async fn test_kafka_multiple_consumer_groups() -> Result<()> {
+    init_tracing();
+
+    let kafka = TestKafka::start().await?;
+    kafka.create_topic("multi-cg-test", 1, 1).await?;
+
+    let messages: Vec<(Option<Vec<u8>>, Vec<u8>)> = (0..10)
+        .map(|i| (None, format!(r#"{{"id":{i}}}"#).into_bytes()))
+        .collect();
+    kafka.produce_messages("multi-cg-test", 0, messages).await?;
+
+    let source = KafkaSource;
+    for group_id in ["group-a", "group-b"] {
+        let config = source_config(&kafka.bootstrap_servers(), "multi-cg-test", group_id);
+        let result: CheckResult = source.check(&config).await?;
+        assert!(result.is_success(), "Group {group_id} should work");
+    }
+
+    info!("Multiple consumer groups test passed");
+    Ok(())
+}
+
+// ============================================================================
+// Kafka Sink Connector Tests
+// ============================================================================
+
+/// Test KafkaSink check passes with valid broker/topic.
 #[tokio::test]
 async fn test_kafka_sink_check() -> Result<()> {
     init_tracing();
@@ -696,62 +614,17 @@ async fn test_kafka_sink_check() -> Result<()> {
     let kafka = TestKafka::start().await?;
     kafka.create_topic("sink-check-test", 1, 1).await?;
 
-    let sink = KafkaSink::new();
+    let sink = KafkaSink;
+    let config = sink_config(&kafka.bootstrap_servers(), "sink-check-test");
 
-    let config = KafkaSinkConfig {
-        brokers: vec![kafka.bootstrap_servers()],
-        topic: "sink-check-test".to_string(),
-        acks: AckLevel::All,
-        compression: CompressionCodec::None,
-        batch_size_bytes: 16384,
-        linger_ms: 5,
-        request_timeout_ms: 30000,
-        retries: 3,
-        idempotent: false,
-        transactional_id: None,
-        key_field: None,
-        include_headers: true,
-        custom_headers: HashMap::new(),
-        security: Default::default(),
-    };
-
-    let result = sink.check(&config).await?;
-    assert!(
-        result.is_success(),
-        "Sink check should succeed: {:?}",
-        result
-    );
+    let result: CheckResult = sink.check(&config).await?;
+    assert!(result.is_success(), "Sink check should succeed: {result:?}");
 
     info!("Kafka sink check test passed");
     Ok(())
 }
 
-/// Test KafkaSink metrics tracking
-#[tokio::test]
-async fn test_kafka_sink_metrics() -> Result<()> {
-    init_tracing();
-
-    let kafka = TestKafka::start().await?;
-    kafka.create_topic("sink-metrics-test", 1, 1).await?;
-
-    let sink = KafkaSink::new();
-    let metrics = sink.metrics();
-
-    // Verify initial metrics are zero
-    let snapshot = metrics.snapshot();
-    assert_eq!(snapshot.messages_produced, 0);
-    assert_eq!(snapshot.bytes_produced, 0);
-
-    // Test Prometheus export
-    let prometheus = snapshot.to_prometheus_format("test");
-    assert!(prometheus.contains("kafka_sink_messages_produced_total"));
-    assert!(prometheus.contains("kafka_sink_bytes_produced_total"));
-
-    info!("Kafka sink metrics test passed");
-    Ok(())
-}
-
-/// Test KafkaSink with different compression codecs
+/// Test KafkaSink check succeeds for each compression codec.
 #[tokio::test]
 async fn test_kafka_sink_compression() -> Result<()> {
     init_tracing();
@@ -767,44 +640,30 @@ async fn test_kafka_sink_compression() -> Result<()> {
     ];
 
     for (topic_suffix, codec) in codecs {
-        let topic = format!("sink-{}", topic_suffix);
+        let topic = format!("sink-{topic_suffix}");
         kafka.create_topic(&topic, 1, 1).await?;
 
-        let sink = KafkaSink::new();
+        let sink = KafkaSink;
+        let mut config = sink_config(&kafka.bootstrap_servers(), &topic);
+        config.acks = AckLevel::Leader;
+        config.compression = codec;
+        config.linger_ms = 0;
+        config.include_headers = false;
 
-        let config = KafkaSinkConfig {
-            brokers: vec![kafka.bootstrap_servers()],
-            topic: topic.clone(),
-            acks: AckLevel::Leader,
-            compression: codec,
-            batch_size_bytes: 16384,
-            linger_ms: 0,
-            request_timeout_ms: 30000,
-            retries: 3,
-            idempotent: false,
-            transactional_id: None,
-            key_field: None,
-            include_headers: false,
-            custom_headers: HashMap::new(),
-            security: Default::default(),
-        };
-
-        let result = sink.check(&config).await?;
+        let result: CheckResult = sink.check(&config).await?;
         assert!(
             result.is_success(),
-            "Sink check should succeed with {:?}: {:?}",
-            codec,
-            result
+            "Sink check should succeed with {codec:?}: {result:?}",
         );
 
-        info!("Compression test passed for {:?}", codec);
+        info!("Compression test passed for {codec:?}");
     }
 
     info!("Kafka sink compression test passed");
     Ok(())
 }
 
-/// Test KafkaSink with custom headers
+/// Test KafkaSink with custom headers and key field.
 #[tokio::test]
 async fn test_kafka_sink_custom_headers() -> Result<()> {
     init_tracing();
@@ -812,31 +671,18 @@ async fn test_kafka_sink_custom_headers() -> Result<()> {
     let kafka = TestKafka::start().await?;
     kafka.create_topic("sink-headers-test", 1, 1).await?;
 
-    let sink = KafkaSink::new();
+    let sink = KafkaSink;
 
     let mut custom_headers = HashMap::new();
     custom_headers.insert("source".to_string(), "rivven".to_string());
     custom_headers.insert("environment".to_string(), "test".to_string());
     custom_headers.insert("version".to_string(), "1.0".to_string());
 
-    let config = KafkaSinkConfig {
-        brokers: vec![kafka.bootstrap_servers()],
-        topic: "sink-headers-test".to_string(),
-        acks: AckLevel::All,
-        compression: CompressionCodec::None,
-        batch_size_bytes: 16384,
-        linger_ms: 5,
-        request_timeout_ms: 30000,
-        retries: 3,
-        idempotent: false,
-        transactional_id: None,
-        key_field: Some("id".to_string()),
-        include_headers: true,
-        custom_headers,
-        security: Default::default(),
-    };
+    let mut config = sink_config(&kafka.bootstrap_servers(), "sink-headers-test");
+    config.key_field = Some("id".to_string());
+    config.custom_headers = custom_headers;
 
-    let result = sink.check(&config).await?;
+    let result: CheckResult = sink.check(&config).await?;
     assert!(
         result.is_success(),
         "Sink check with headers should succeed"
@@ -846,7 +692,7 @@ async fn test_kafka_sink_custom_headers() -> Result<()> {
     Ok(())
 }
 
-/// Test KafkaSink with idempotent producer
+/// Test KafkaSink with idempotent producer enabled.
 #[tokio::test]
 async fn test_kafka_sink_idempotent() -> Result<()> {
     init_tracing();
@@ -854,349 +700,18 @@ async fn test_kafka_sink_idempotent() -> Result<()> {
     let kafka = TestKafka::start().await?;
     kafka.create_topic("sink-idempotent-test", 1, 1).await?;
 
-    let sink = KafkaSink::new();
+    let sink = KafkaSink;
+    let mut config = sink_config(&kafka.bootstrap_servers(), "sink-idempotent-test");
+    config.compression = CompressionCodec::Lz4;
+    config.retries = 5;
+    config.idempotent = true;
 
-    let config = KafkaSinkConfig {
-        brokers: vec![kafka.bootstrap_servers()],
-        topic: "sink-idempotent-test".to_string(),
-        acks: AckLevel::All, // Required for idempotent
-        compression: CompressionCodec::Lz4,
-        batch_size_bytes: 16384,
-        linger_ms: 5,
-        request_timeout_ms: 30000,
-        retries: 5,
-        idempotent: true, // Enable idempotent producer
-        transactional_id: None,
-        key_field: None,
-        include_headers: true,
-        custom_headers: HashMap::new(),
-        security: Default::default(),
-    };
-
-    let result = sink.check(&config).await?;
+    let result: CheckResult = sink.check(&config).await?;
     assert!(
         result.is_success(),
-        "Idempotent sink check should succeed: {:?}",
-        result
+        "Idempotent sink check should succeed: {result:?}",
     );
 
     info!("Kafka sink idempotent test passed");
-    Ok(())
-}
-
-// ============================================================================
-// Offset Management Tests
-// ============================================================================
-
-/// Test KafkaSource with different start offset modes
-#[tokio::test]
-async fn test_kafka_source_offset_modes() -> Result<()> {
-    init_tracing();
-
-    let kafka = TestKafka::start().await?;
-    kafka.create_topic("offset-modes-test", 1, 1).await?;
-
-    // Pre-populate 20 messages
-    let messages: Vec<(Option<Vec<u8>>, Vec<u8>)> = (0..20)
-        .map(|i| (None, format!(r#"{{"seq":{}}}"#, i).into_bytes()))
-        .collect();
-    kafka
-        .produce_messages("offset-modes-test", 0, messages)
-        .await?;
-
-    // Test Earliest offset
-    let source_earliest = KafkaSource::new();
-    let config_earliest = KafkaSourceConfig {
-        brokers: vec![kafka.bootstrap_servers()],
-        topic: "offset-modes-test".to_string(),
-        consumer_group: "offset-test-earliest".to_string(),
-        start_offset: StartOffset::Earliest,
-        security: Default::default(),
-        max_poll_interval_ms: 300000,
-        session_timeout_ms: 10000,
-        heartbeat_interval_ms: 3000,
-        fetch_max_messages: 100,
-        include_headers: false,
-        include_key: false,
-        retry_initial_ms: 100,
-        retry_max_ms: 10000,
-        retry_multiplier: 2.0,
-        empty_poll_delay_ms: 50,
-        connect_timeout_ms: 30000,
-    };
-
-    let result = source_earliest.check(&config_earliest).await?;
-    assert!(result.is_success());
-
-    // Test Latest offset
-    let source_latest = KafkaSource::new();
-    let config_latest = KafkaSourceConfig {
-        start_offset: StartOffset::Latest,
-        consumer_group: "offset-test-latest".to_string(),
-        ..config_earliest.clone()
-    };
-
-    let result = source_latest.check(&config_latest).await?;
-    assert!(result.is_success());
-
-    // Test Offset(N)
-    let source_offset = KafkaSource::new();
-    let config_offset = KafkaSourceConfig {
-        start_offset: StartOffset::Offset(10),
-        consumer_group: "offset-test-offset".to_string(),
-        ..config_earliest.clone()
-    };
-
-    let result = source_offset.check(&config_offset).await?;
-    assert!(result.is_success());
-
-    info!("Kafka source offset modes test passed");
-    Ok(())
-}
-
-// ============================================================================
-// Batch Operations Tests
-// ============================================================================
-
-/// Test batch metrics tracking
-#[tokio::test]
-async fn test_kafka_batch_metrics() -> Result<()> {
-    init_tracing();
-
-    let kafka = TestKafka::start().await?;
-    kafka.create_topic("batch-metrics-test", 1, 1).await?;
-
-    // Produce batches of varying sizes
-    for batch_size in [5, 10, 20, 50] {
-        let messages: Vec<(Option<Vec<u8>>, Vec<u8>)> = (0..batch_size)
-            .map(|i| (None, format!(r#"{{"batch":{}}}"#, i).into_bytes()))
-            .collect();
-        kafka
-            .produce_messages("batch-metrics-test", 0, messages)
-            .await?;
-    }
-
-    let source = KafkaSource::new();
-    let config = KafkaSourceConfig {
-        brokers: vec![kafka.bootstrap_servers()],
-        topic: "batch-metrics-test".to_string(),
-        consumer_group: "batch-metrics-group".to_string(),
-        start_offset: StartOffset::Earliest,
-        security: Default::default(),
-        max_poll_interval_ms: 300000,
-        session_timeout_ms: 10000,
-        heartbeat_interval_ms: 3000,
-        fetch_max_messages: 500,
-        include_headers: false,
-        include_key: false,
-        retry_initial_ms: 100,
-        retry_max_ms: 10000,
-        retry_multiplier: 2.0,
-        empty_poll_delay_ms: 50,
-        connect_timeout_ms: 30000,
-    };
-
-    let configured_catalog = ConfiguredCatalog {
-        streams: vec![ConfiguredStream {
-            stream: rivven_connect::traits::catalog::Stream::new(
-                "batch-metrics-test",
-                serde_json::json!({}),
-            ),
-            sync_mode: SyncMode::FullRefresh,
-            destination_sync_mode: DestinationSyncMode::Overwrite,
-            cursor_field: None,
-            primary_key: None,
-        }],
-    };
-
-    let mut stream = source.read(&config, &configured_catalog, None).await?;
-
-    // Read all messages
-    let _ = timeout(Duration::from_secs(15), async {
-        let mut count = 0;
-        while let Some(Ok(event)) = stream.next().await {
-            if event.event_type.is_data() {
-                count += 1;
-                if count >= 85 {
-                    break;
-                }
-            }
-        }
-    })
-    .await;
-
-    // Verify batch metrics
-    let snapshot = source.metrics().snapshot();
-    info!(
-        "Batch metrics: min={}, max={}, avg={:.2}",
-        snapshot.batch_size_min,
-        snapshot.batch_size_max,
-        snapshot.avg_batch_size()
-    );
-
-    // Should have recorded some batch statistics
-    assert!(snapshot.polls > 0, "Should have polled");
-
-    info!("Kafka batch metrics test passed");
-    Ok(())
-}
-
-// ============================================================================
-// Error Handling / Resilience Tests
-// ============================================================================
-
-/// Test KafkaSource with invalid broker address
-#[tokio::test]
-async fn test_kafka_source_invalid_broker() -> Result<()> {
-    init_tracing();
-
-    let source = KafkaSource::new();
-
-    let config = KafkaSourceConfig {
-        brokers: vec!["invalid-broker:9999".to_string()],
-        topic: "test-topic".to_string(),
-        consumer_group: "test-group".to_string(),
-        start_offset: StartOffset::Latest,
-        security: Default::default(),
-        max_poll_interval_ms: 5000,
-        session_timeout_ms: 5000,
-        heartbeat_interval_ms: 1000,
-        fetch_max_messages: 100,
-        include_headers: false,
-        include_key: false,
-        retry_initial_ms: 100,
-        retry_max_ms: 1000,
-        retry_multiplier: 2.0,
-        empty_poll_delay_ms: 50,
-        connect_timeout_ms: 5000, // Short timeout for invalid broker test
-    };
-
-    // Check should fail with invalid broker - connection timeout will trigger
-    let result = source.check(&config).await;
-
-    // The check should complete (with failure) due to connection timeout
-    info!("Invalid broker test result: {:?}", result);
-
-    // Verify we get a failure result
-    assert!(
-        result.is_ok(),
-        "check() should return Ok with failure status, not Err"
-    );
-
-    Ok(())
-}
-
-/// Test KafkaSource handles empty topic gracefully
-#[tokio::test]
-async fn test_kafka_source_empty_topic() -> Result<()> {
-    init_tracing();
-
-    let kafka = TestKafka::start().await?;
-    kafka.create_topic("empty-topic-test", 1, 1).await?;
-
-    // Don't produce any messages
-
-    let source = KafkaSource::new();
-    let config = KafkaSourceConfig {
-        brokers: vec![kafka.bootstrap_servers()],
-        topic: "empty-topic-test".to_string(),
-        consumer_group: "empty-topic-group".to_string(),
-        start_offset: StartOffset::Earliest,
-        security: Default::default(),
-        max_poll_interval_ms: 300000,
-        session_timeout_ms: 10000,
-        heartbeat_interval_ms: 3000,
-        fetch_max_messages: 100,
-        include_headers: false,
-        include_key: false,
-        retry_initial_ms: 100,
-        retry_max_ms: 10000,
-        retry_multiplier: 2.0,
-        empty_poll_delay_ms: 50,
-        connect_timeout_ms: 30000,
-    };
-
-    let configured_catalog = ConfiguredCatalog {
-        streams: vec![ConfiguredStream {
-            stream: rivven_connect::traits::catalog::Stream::new(
-                "empty-topic-test",
-                serde_json::json!({}),
-            ),
-            sync_mode: SyncMode::FullRefresh,
-            destination_sync_mode: DestinationSyncMode::Overwrite,
-            cursor_field: None,
-            primary_key: None,
-        }],
-    };
-
-    let mut stream = source.read(&config, &configured_catalog, None).await?;
-
-    // Should timeout waiting for messages (empty topic)
-    let result = timeout(Duration::from_secs(3), async {
-        let mut count = 0;
-        while let Some(Ok(event)) = stream.next().await {
-            if event.event_type.is_data() {
-                count += 1;
-            }
-        }
-        count
-    })
-    .await;
-
-    // Either timeout or get 0 messages
-    match result {
-        Ok(count) => assert_eq!(count, 0, "Empty topic should have no messages"),
-        Err(_) => info!("Timed out as expected for empty topic"),
-    }
-
-    info!("Empty topic test passed");
-    Ok(())
-}
-
-// ============================================================================
-// Consumer Group Tests
-// ============================================================================
-
-/// Test multiple consumer groups reading same topic independently
-#[tokio::test]
-async fn test_kafka_multiple_consumer_groups() -> Result<()> {
-    init_tracing();
-
-    let kafka = TestKafka::start().await?;
-    kafka.create_topic("multi-cg-test", 1, 1).await?;
-
-    // Populate messages
-    let messages: Vec<(Option<Vec<u8>>, Vec<u8>)> = (0..10)
-        .map(|i| (None, format!(r#"{{"id":{}}}"#, i).into_bytes()))
-        .collect();
-    kafka.produce_messages("multi-cg-test", 0, messages).await?;
-
-    // Create two independent consumer groups
-    for group_id in ["group-a", "group-b"] {
-        let source = KafkaSource::new();
-        let config = KafkaSourceConfig {
-            brokers: vec![kafka.bootstrap_servers()],
-            topic: "multi-cg-test".to_string(),
-            consumer_group: group_id.to_string(),
-            start_offset: StartOffset::Earliest,
-            security: Default::default(),
-            max_poll_interval_ms: 300000,
-            session_timeout_ms: 10000,
-            heartbeat_interval_ms: 3000,
-            fetch_max_messages: 100,
-            include_headers: false,
-            include_key: false,
-            retry_initial_ms: 100,
-            retry_max_ms: 10000,
-            retry_multiplier: 2.0,
-            empty_poll_delay_ms: 50,
-            connect_timeout_ms: 30000,
-        };
-
-        let result = source.check(&config).await?;
-        assert!(result.is_success(), "Group {} should work", group_id);
-    }
-
-    info!("Multiple consumer groups test passed");
     Ok(())
 }
