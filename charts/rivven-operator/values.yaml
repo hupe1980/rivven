@@ -180,7 +180,7 @@ terminationGracePeriodSeconds: 30
 
 # Default values for RivvenCluster instances
 defaultCluster:
-  image: ghcr.io/hupe1980/rivven:0.0.17
+  image: ghcr.io/hupe1980/rivven:0.0.18
   broker:
     clientPort: 9092
     clusterPort: 9093
@@ -196,8 +196,8 @@ defaultCluster:
 
 # Default values for RivvenConnect instances
 defaultConnect:
-  version: "0.0.17"
-  image: ghcr.io/hupe1980/rivven-connect:0.0.17
+  version: "0.0.18"
+  image: ghcr.io/hupe1980/rivven-connect:0.0.18
   replicas: 1
   stateDir: "/data/connect-state"
   logLevel: "info"
@@ -219,8 +219,8 @@ defaultConnect:
 
 # Default values for RivvenSchemaRegistry instances
 defaultSchemaRegistry:
-  version: "0.0.17"
-  image: ghcr.io/hupe1980/rivven-schema:0.0.17
+  version: "0.0.18"
+  image: ghcr.io/hupe1980/rivven-schema:0.0.18
   replicas: 1
   server:
     port: 8081
