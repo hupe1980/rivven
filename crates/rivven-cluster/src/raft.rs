@@ -386,13 +386,13 @@ pub struct NetworkFactory {
 
 impl NetworkFactory {
     /// Create new network factory with binary serialization (fastest)
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self> {
         Self::with_format(SerializationFormat::Binary)
     }
 
     /// Create network factory with specific serialization format
-    pub fn with_format(format: SerializationFormat) -> Self {
-        Self {
+    pub fn with_format(format: SerializationFormat) -> Result<Self> {
+        Ok(Self {
             nodes: Arc::new(RwLock::new(BTreeMap::new())),
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(5))
@@ -401,21 +401,21 @@ impl NetworkFactory {
                 .tcp_keepalive(std::time::Duration::from_secs(30))
                 .tcp_nodelay(true) // Low latency
                 .build()
-                .expect("Failed to create HTTP client"),
+                .map_err(|e| ClusterError::Network(format!("Failed to create HTTP client: {}", e)))?,
             format,
             compression: RaftCompressionConfig::default(),
-        }
+        })
     }
 
     /// Create network factory with compression config
     pub fn with_compression(
         format: SerializationFormat,
         compression: RaftCompressionConfig,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        Ok(Self {
             compression,
-            ..Self::with_format(format)
-        }
+            ..Self::with_format(format)?
+        })
     }
 
     /// Register a node address
@@ -431,7 +431,7 @@ impl NetworkFactory {
 
 impl Default for NetworkFactory {
     fn default() -> Self {
-        Self::new()
+        Self::new().expect("Failed to create default HTTP client for Raft network")
     }
 }
 
@@ -989,7 +989,8 @@ impl RaftNode {
             .map_err(|e| ClusterError::RaftStorage(e.to_string()))?;
 
         let state_machine = StateMachine::new();
-        let network = NetworkFactory::new();
+        let network = NetworkFactory::new()
+            .map_err(|e| ClusterError::RaftStorage(format!("Failed to create network factory: {}", e)))?;
         let node_id = hash_node_id(&config.node_id);
 
         info!(
@@ -1048,7 +1049,8 @@ impl RaftNode {
         let state_machine = StateMachine::new();
 
         // Create a new network factory for openraft (it takes ownership)
-        let network = NetworkFactory::new();
+        let network = NetworkFactory::new()
+            .map_err(|e| ClusterError::Network(format!("Failed to create network factory: {}", e)))?;
         // Copy node addresses to the new network
         for (id, addr) in self.network.nodes.read().await.iter() {
             network.add_node(*id, addr.clone()).await;

@@ -315,10 +315,15 @@ impl ClusterServer {
             self.raft_node.clone(),
             self.coordinator.clone(),
             &tls_config,
-        )
+        )?
         .with_cluster_auth_token(self.cli.cluster_auth_token.clone());
         let tls_config_clone = tls_config.clone();
         let mut shutdown_rx_api = self.shutdown_tx.subscribe();
+
+        // F-145 fix: Track all infrastructure task JoinHandles for graceful shutdown.
+        // Previously these were fire-and-forget spawns, which leaked resources on
+        // shutdown and silently swallowed panics.
+        let mut infra_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
         // Start the API server (with or without dashboard based on feature)
         #[cfg(feature = "dashboard")]
@@ -328,7 +333,7 @@ impl ClusterServer {
             let topic_manager_clone = self.topic_manager.clone();
             let offset_manager_clone = self.offset_manager.clone();
 
-            tokio::spawn(async move {
+            infra_handles.push(tokio::spawn(async move {
                 let dashboard_config = crate::raft_api::DashboardConfig {
                     enabled: dashboard_enabled,
                     stats: stats_clone,
@@ -350,11 +355,11 @@ impl ClusterServer {
                         info!("API server shutting down");
                     }
                 }
-            });
+            }));
         }
 
         #[cfg(not(feature = "dashboard"))]
-        tokio::spawn(async move {
+        infra_handles.push(tokio::spawn(async move {
             tokio::select! {
                 result = crate::raft_api::start_raft_api_server_with_tls(api_bind_addr, raft_api_state, &tls_config_clone) => {
                     if let Err(e) = result {
@@ -365,23 +370,31 @@ impl ClusterServer {
                     info!("Raft API server shutting down");
                 }
             }
-        });
+        }));
 
         // Start cluster coordinator if in cluster mode
         if let Some(coordinator) = &self.coordinator {
             let coord = coordinator.clone();
-            tokio::spawn(async move {
+            let mut coord_shutdown = self.shutdown_tx.subscribe();
+            infra_handles.push(tokio::spawn(async move {
                 let mut coord = coord.write().await;
-                if let Err(e) = coord.start().await {
-                    error!("Cluster coordinator failed: {}", e);
+                tokio::select! {
+                    result = coord.start() => {
+                        if let Err(e) = result {
+                            error!("Cluster coordinator failed: {}", e);
+                        }
+                    }
+                    _ = coord_shutdown.recv() => {
+                        info!("Cluster coordinator shutting down");
+                    }
                 }
-            });
+            }));
 
             // Start cluster transport
             if let Some(transport) = &self.transport {
                 let t = transport.clone();
                 let mut shutdown_rx = self.shutdown_tx.subscribe();
-                tokio::spawn(async move {
+                infra_handles.push(tokio::spawn(async move {
                     tokio::select! {
                         result = async {
                             let mut transport = t.lock().await;
@@ -395,26 +408,34 @@ impl ClusterServer {
                             info!("Cluster transport shutting down");
                         }
                     }
-                });
+                }));
             }
 
             // Log cluster health periodically
             let coordinator_clone = coordinator.clone();
-            tokio::spawn(async move {
+            let mut health_shutdown = self.shutdown_tx.subscribe();
+            infra_handles.push(tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(30));
                 loop {
-                    interval.tick().await;
-                    let coord = coordinator_clone.read().await;
-                    let health = coord.health().await;
-                    info!(
-                        nodes = health.node_count,
-                        healthy = health.healthy_nodes,
-                        offline_partitions = health.offline_partitions,
-                        under_replicated = health.under_replicated_partitions,
-                        "Cluster health"
-                    );
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            let coord = coordinator_clone.read().await;
+                            let health = coord.health().await;
+                            info!(
+                                nodes = health.node_count,
+                                healthy = health.healthy_nodes,
+                                offline_partitions = health.offline_partitions,
+                                under_replicated = health.under_replicated_partitions,
+                                "Cluster health"
+                            );
+                        }
+                        _ = health_shutdown.recv() => {
+                            info!("Cluster health logger shutting down");
+                            break;
+                        }
+                    }
                 }
-            });
+            }));
         }
 
         // Start client listener
@@ -456,7 +477,7 @@ impl ClusterServer {
         {
             let txn_coordinator = handler.transaction_coordinator().clone();
             let mut txn_shutdown = self.shutdown_tx.subscribe();
-            tokio::spawn(async move {
+            infra_handles.push(tokio::spawn(async move {
                 let mut interval = tokio::time::interval(Duration::from_secs(5));
                 loop {
                     tokio::select! {
@@ -474,7 +495,7 @@ impl ClusterServer {
                         }
                     }
                 }
-            });
+            }));
         }
 
         // Create router for partition-aware request handling
@@ -508,7 +529,7 @@ impl ClusterServer {
         // Spawn periodic rate limiter cleanup task
         let cleanup_limiter = rate_limiter.clone();
         let cleanup_shutdown = self.shutdown_tx.subscribe();
-        tokio::spawn(async move {
+        infra_handles.push(tokio::spawn(async move {
             let mut shutdown_rx = cleanup_shutdown;
             loop {
                 tokio::select! {
@@ -520,7 +541,47 @@ impl ClusterServer {
                     }
                 }
             }
-        });
+        }));
+
+        // F-125 fix: Background log compaction worker.
+        // Periodically iterates topics whose cleanup policy includes compaction
+        // and runs key-based dedup + tombstone removal on sealed segments.
+        {
+            let compaction_topic_manager = self.topic_manager.clone();
+            let compaction_config_manager = handler.topic_config_manager().clone();
+            let mut compaction_shutdown = self.shutdown_tx.subscribe();
+            infra_handles.push(tokio::spawn(async move {
+                // Initial delay to avoid compaction during startup recovery
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                let mut interval = tokio::time::interval(Duration::from_secs(300));
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            match compaction_topic_manager
+                                .compact_topics(&compaction_config_manager)
+                                .await
+                            {
+                                Ok(removed) => {
+                                    if removed > 0 {
+                                        info!(
+                                            removed,
+                                            "Background compaction cycle completed"
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(error = %e, "Background compaction cycle failed");
+                                }
+                            }
+                        }
+                        _ = compaction_shutdown.recv() => {
+                            info!("Background compaction worker shutting down");
+                            break;
+                        }
+                    }
+                }
+            }));
+        }
 
         loop {
             tokio::select! {
@@ -697,6 +758,30 @@ impl ClusterServer {
             }
         }
         drop(active);
+
+        // F-145 fix: Await all infrastructure task handles with timeout.
+        // The shutdown broadcast has already been sent above, so tasks that
+        // listen on shutdown_rx will begin their graceful exit path.
+        let infra_count = infra_handles.iter().filter(|h| !h.is_finished()).count();
+        if infra_count > 0 {
+            info!(
+                "Waiting for {} infrastructure tasks to complete...",
+                infra_count
+            );
+            let infra_timeout = Duration::from_secs(5);
+            match tokio::time::timeout(infra_timeout, async {
+                for handle in infra_handles {
+                    if let Err(e) = handle.await {
+                        warn!("Infrastructure task panicked: {}", e);
+                    }
+                }
+            })
+            .await
+            {
+                Ok(_) => info!("All infrastructure tasks stopped"),
+                Err(_) => warn!("Infrastructure task drain timeout"),
+            }
+        }
 
         // Flush topic data
         info!("Flushing topic data...");

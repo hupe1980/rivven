@@ -378,15 +378,26 @@ impl PartitionReplication {
         }
     }
 
-    /// Complete pending acks up to the given offset
+    /// Complete pending acks up to the given offset.
+    ///
+    /// Collects completeable offsets in a single scan, then batch-removes
+    /// and sends completion signals. This avoids holding DashMap shard locks
+    /// while executing `oneshot::send()`.
     async fn complete_pending_acks(&self, up_to_offset: u64) {
-        let to_complete: Vec<_> = self
+        // Phase 1: Collect keys to complete (single scan, shard locks held briefly)
+        let to_complete: Vec<u64> = self
             .pending_acks
             .iter()
-            .filter(|e| e.key() <= &up_to_offset)
-            .map(|e| *e.key())
+            .filter_map(|e| {
+                if *e.key() <= up_to_offset {
+                    Some(*e.key())
+                } else {
+                    None
+                }
+            })
             .collect();
 
+        // Phase 2: Remove and signal (no shard locks held during send)
         for offset in to_complete {
             if let Some((_, pending)) = self.pending_acks.remove(&offset) {
                 let _ = pending.completion.send(Ok(()));
@@ -631,7 +642,7 @@ impl ReplicationManager {
 ///
 /// Implements ISR (In-Sync Replica) follower logic:
 /// 1. Periodically fetches records from partition leader
-/// 2. Applies records to local storage
+/// 2. Applies records to local storage via the local `Partition`
 /// 3. Reports replica state back to leader
 /// 4. Leader tracks follower progress and updates ISR
 pub struct FollowerFetcher {
@@ -653,6 +664,11 @@ pub struct FollowerFetcher {
     /// Transport for network communication
     transport: Arc<Mutex<crate::Transport>>,
 
+    /// Local partition storage for persisting replicated data (F-101 fix).
+    /// Without this, followers would track offsets without actually writing
+    /// data — causing complete data loss on leader failover.
+    local_partition: Arc<rivven_core::Partition>,
+
     /// Configuration
     config: ReplicationConfig,
 
@@ -661,6 +677,9 @@ pub struct FollowerFetcher {
 
     /// Last successful fetch timestamp
     last_fetch: std::time::Instant,
+
+    /// Consecutive report failures (F-107 fix: retry with backoff)
+    report_failures: u32,
 }
 
 impl FollowerFetcher {
@@ -670,6 +689,7 @@ impl FollowerFetcher {
         leader_id: NodeId,
         start_offset: u64,
         transport: Arc<Mutex<crate::Transport>>,
+        local_partition: Arc<rivven_core::Partition>,
         config: ReplicationConfig,
         shutdown: tokio::sync::broadcast::Receiver<()>,
     ) -> Self {
@@ -680,9 +700,11 @@ impl FollowerFetcher {
             fetch_offset: start_offset,
             high_watermark: 0,
             transport,
+            local_partition,
             config,
             shutdown,
             last_fetch: std::time::Instant::now(),
+            report_failures: 0,
         }
     }
 
@@ -785,11 +807,19 @@ impl FollowerFetcher {
         }
     }
 
-    /// Apply fetched records to local storage
+    /// Apply fetched records to local storage (F-101 fix).
+    ///
+    /// Deserializes each record from the leader's response and persists it
+    /// to the local `Partition` via `append_replicated_batch`, which writes
+    /// to the log segment preserving the leader-assigned offset.
+    ///
+    /// The fetch_offset is advanced only AFTER successful persistence,
+    /// guaranteeing at-least-once delivery to local storage.
     async fn apply_records(&mut self, records: &[u8]) -> Result<()> {
-        // Properly deserialize the record batch instead of estimating
-        // offsets from byte count. Each record is length-prefixed (4-byte BE u32).
+        // Properly deserialize the record batch.
+        // Each record is length-prefixed (4-byte BE u32).
         let mut cursor = 0;
+        let mut messages: Vec<rivven_core::Message> = Vec::new();
         let mut last_offset: Option<u64> = None;
 
         while cursor + 4 <= records.len() {
@@ -814,6 +844,7 @@ impl FollowerFetcher {
             match rivven_core::Message::from_bytes(&records[cursor..cursor + len]) {
                 Ok(msg) => {
                     last_offset = Some(msg.offset);
+                    messages.push(msg);
                 }
                 Err(e) => {
                     tracing::warn!("Failed to deserialize record at byte {}: {}", cursor, e);
@@ -823,7 +854,22 @@ impl FollowerFetcher {
             cursor += len;
         }
 
-        // Advance fetch_offset to one past the last successfully parsed record
+        // Persist to local storage BEFORE advancing fetch_offset.
+        // This ensures that if we crash after persisting but before reporting,
+        // we'll re-fetch (idempotent) rather than lose data.
+        if !messages.is_empty() {
+            self.local_partition
+                .append_replicated_batch(messages)
+                .await
+                .map_err(|e| {
+                    ClusterError::Internal(format!(
+                        "Failed to persist replicated records to partition {}: {}",
+                        self.partition_id, e
+                    ))
+                })?;
+        }
+
+        // Advance fetch_offset to one past the last successfully persisted record
         if let Some(offset) = last_offset {
             self.fetch_offset = offset + 1;
         }
@@ -831,7 +877,7 @@ impl FollowerFetcher {
         Ok(())
     }
 
-    /// Report replica state to leader
+    /// Report replica state to leader (F-107 fix: retry with backoff + logging)
     async fn report_replica_state(&mut self) -> Result<()> {
         use crate::protocol::{ClusterRequest, RequestHeader};
 
@@ -844,11 +890,36 @@ impl FollowerFetcher {
             high_watermark: self.high_watermark,
         };
 
-        // Send state update (fire and forget)
         let transport = self.transport.lock().await;
-        let _ = transport.send(&self.leader_id, request).await;
-
-        Ok(())
+        match transport.send(&self.leader_id, request).await {
+            Ok(_) => {
+                if self.report_failures > 0 {
+                    info!(
+                        partition = %self.partition_id,
+                        previous_failures = self.report_failures,
+                        "Replica state report succeeded after previous failures"
+                    );
+                }
+                self.report_failures = 0;
+                Ok(())
+            }
+            Err(e) => {
+                self.report_failures += 1;
+                if self.report_failures >= 5 {
+                    warn!(
+                        partition = %self.partition_id,
+                        consecutive_failures = self.report_failures,
+                        error = %e,
+                        "Replica state report to leader consistently failing — \
+                         leader may not update ISR for this replica"
+                    );
+                }
+                // Still return Ok — report failure should not stop the fetch loop.
+                // The leader will eventually notice the stale last_fetch and may
+                // shrink the ISR, which is the correct self-healing behavior.
+                Ok(())
+            }
+        }
     }
 
     /// Get current replication lag (bytes behind leader)
@@ -951,12 +1022,24 @@ mod tests {
             transport_config,
         );
 
+        // Create local partition for the follower
+        let core_config = rivven_core::Config {
+            data_dir: format!("/tmp/rivven-test-follower-{}", uuid::Uuid::new_v4()),
+            ..Default::default()
+        };
+        let local_partition = Arc::new(
+            rivven_core::Partition::new(&core_config, "test", 0)
+                .await
+                .unwrap(),
+        );
+
         let fetcher = FollowerFetcher::new(
             "follower-1".to_string(),
             partition_id,
             "leader-1".to_string(),
             0,
             Arc::new(Mutex::new(transport)),
+            local_partition,
             config,
             shutdown_rx,
         );
@@ -968,6 +1051,7 @@ mod tests {
 
         // Cleanup
         drop(shutdown_tx);
+        let _ = std::fs::remove_dir_all(&core_config.data_dir);
     }
 
     #[tokio::test]

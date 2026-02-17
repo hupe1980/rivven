@@ -541,17 +541,24 @@ impl EncryptionManager {
         self.current_key_version.load(Ordering::Relaxed)
     }
 
-    /// Generate a nonce from LSN (deterministic but unique per record)
+    /// Generate a fully random 96-bit nonce for AES-256-GCM.
+    ///
+    /// Uses the full 96-bit nonce space (all random) instead of LSN+random.
+    /// With random 96-bit nonces, the birthday bound allows ~$2^{48}$ encryptions
+    /// per key before collision probability reaches $2^{-32}$ — far beyond any
+    /// realistic WAL lifetime. The LSN parameter is retained for structured logging
+    /// on RNG failure but does not constrain the nonce.
     ///
     /// F-063 fix: propagate RNG failure instead of silently using zero bytes.
     fn generate_nonce(&self, lsn: u64) -> Result<[u8; NONCE_SIZE]> {
         let mut nonce = [0u8; NONCE_SIZE];
-        // Use LSN as 8 bytes + 4 random bytes for uniqueness
-        nonce[0..8].copy_from_slice(&lsn.to_be_bytes());
-        self.rng.fill(&mut nonce[8..12]).map_err(|_| {
+        self.rng.fill(&mut nonce).map_err(|_| {
             EncryptionError::Encryption(
-                "RNG failure during nonce generation — refusing to encrypt with zero nonce bytes"
-                    .into(),
+                format!(
+                    "RNG failure during nonce generation for LSN {} — refusing to encrypt",
+                    lsn
+                )
+                .into(),
             )
         })?;
         Ok(nonce)

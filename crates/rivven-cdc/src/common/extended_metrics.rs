@@ -389,8 +389,7 @@ impl ExtendedCdcMetrics {
     pub fn start_table_snapshot(&self, table: &str) {
         *self.current_snapshot_table.write_recovered() = Some(table.to_string());
         self.rows_scanned
-            .write()
-            .unwrap()
+            .write_recovered()
             .entry(table.to_string())
             .or_insert(0);
         *self.snapshot_phase.write_recovered() = SnapshotPhase::Read;
@@ -924,8 +923,7 @@ impl ExtendedCdcMetrics {
     /// Record event processing time.
     pub fn record_processing_time(&self, duration: Duration) {
         self.processing_time_histogram
-            .write()
-            .unwrap()
+            .write_recovered()
             .record(duration);
 
         metrics::histogram!(
@@ -1021,8 +1019,7 @@ impl ExtendedCdcMetrics {
             incremental_snapshot_paused: self.incremental_snapshot_paused.load(Ordering::Relaxed),
             incremental_snapshot_chunk_id: self
                 .incremental_snapshot_chunk_id
-                .read()
-                .unwrap()
+                .read_recovered()
                 .clone(),
             incremental_snapshot_window_open: self
                 .incremental_snapshot_window_open
@@ -1239,8 +1236,7 @@ impl ExtendedCdcMetrics {
     /// Get rows scanned for a specific table.
     pub fn get_rows_scanned(&self, table: &str) -> u64 {
         self.rows_scanned
-            .read()
-            .unwrap()
+            .read_recovered()
             .get(table)
             .copied()
             .unwrap_or(0)
@@ -1254,8 +1250,7 @@ impl ExtendedCdcMetrics {
     /// Get error count by category.
     pub fn get_errors_by_category(&self, category: &str) -> u64 {
         self.errors_by_category
-            .read()
-            .unwrap()
+            .read_recovered()
             .get(category)
             .copied()
             .unwrap_or(0)

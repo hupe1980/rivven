@@ -131,23 +131,38 @@ impl WalRecord {
     /// Serialize to bytes
     pub fn to_bytes(&self) -> Bytes {
         let mut buf = BytesMut::with_capacity(RECORD_HEADER_SIZE + self.data.len());
+        self.write_to_buf(&mut buf);
+        buf.freeze()
+    }
 
+    /// Serialize directly into an existing buffer (avoids intermediate allocation).
+    ///
+    /// Use this on the hot path (group commit) to avoid per-record BytesMut
+    /// allocation. The caller provides the batch buffer.
+    #[inline]
+    pub fn write_to_buf(&self, buf: &mut BytesMut) {
         // Calculate CRC of data
         let mut hasher = Hasher::new();
         hasher.update(&self.data);
         let crc = hasher.finalize();
 
         // Write header
+        let data_len = u32::try_from(self.data.len()).unwrap_or_else(|_| {
+            // WAL records should never exceed 4GB; max_request_size is typically 1-10MB.
+            // If this fires, something is deeply wrong upstream.
+            panic!(
+                "WAL record data length {} exceeds u32::MAX — this indicates a bug in the caller",
+                self.data.len()
+            )
+        });
         buf.put_u32(WAL_MAGIC);
         buf.put_u32(crc);
-        buf.put_u32(self.data.len() as u32);
+        buf.put_u32(data_len);
         buf.put_u8(self.record_type as u8);
         buf.put_u8(self.flags.0);
 
         // Write data
         buf.extend_from_slice(&self.data);
-
-        buf.freeze()
     }
 
     /// Parse from bytes
@@ -658,7 +673,15 @@ impl GroupCommitWal {
         let group_size = pending.len();
 
         // Build batch
-        batch_buffer.clear();
+        // F-110 fix: periodically shrink an oversized batch_buffer.
+        // After a burst, the buffer retains peak allocation indefinitely.
+        // If capacity exceeds 2x max_batch_size, re-allocate to default.
+        let max_batch = self.config.max_batch_size;
+        if batch_buffer.capacity() > max_batch * 2 {
+            *batch_buffer = BytesMut::with_capacity(max_batch);
+        } else {
+            batch_buffer.clear();
+        }
         let mut lsns = Vec::with_capacity(group_size);
         let mut sizes = Vec::with_capacity(group_size);
 
@@ -700,9 +723,10 @@ impl GroupCommitWal {
                 data,
             };
 
-            let record_bytes = record.to_bytes();
-            sizes.push(record_bytes.len());
-            batch_buffer.extend_from_slice(&record_bytes);
+            // Write directly into batch_buffer — avoids per-record BytesMut allocation
+            let pos_before = batch_buffer.len();
+            record.write_to_buf(batch_buffer);
+            sizes.push(batch_buffer.len() - pos_before);
         }
 
         // Write batch to disk and rotate if file exceeds max_file_size
@@ -800,7 +824,11 @@ impl WalWriter {
         })
     }
 
-    /// Find the actual end of valid data in the file
+    /// Find the actual end of valid data in the file (F-104 fix: validates CRC).
+    ///
+    /// Scans from the beginning, checking magic + CRC for each record.
+    /// Stops at the first invalid or corrupted record, returning the byte
+    /// position up to which data is known good. New writes start here.
     fn find_actual_end(file: &File, file_len: u64) -> io::Result<u64> {
         use std::io::Read;
 
@@ -824,11 +852,34 @@ impl WalWriter {
                 break;
             }
 
+            // F-104 fix: Read and validate CRC, matching scan_wal_file() logic
+            let stored_crc = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
+
             let data_len =
                 u32::from_be_bytes([header[8], header[9], header[10], header[11]]) as u64;
             let record_size = RECORD_HEADER_SIZE as u64 + data_len;
 
             if position + record_size > file_len {
+                break;
+            }
+
+            // Read record payload and validate CRC
+            let mut payload = vec![0u8; data_len as usize];
+            if file.read_exact(&mut payload).is_err() {
+                break;
+            }
+
+            let mut hasher = crc32fast::Hasher::new();
+            hasher.update(&payload);
+            let computed_crc = hasher.finalize();
+
+            if computed_crc != stored_crc {
+                tracing::warn!(
+                    position = position,
+                    expected_crc = stored_crc,
+                    computed_crc = computed_crc,
+                    "WAL record CRC mismatch in find_actual_end — truncating at this position"
+                );
                 break;
             }
 
@@ -927,14 +978,14 @@ impl WalWriter {
         self.path = new_path;
         self.position = 0;
 
-        // Eagerly pre-allocate the NEXT file in a background thread so the next
-        // rotation can be instant. Uses estimated LSN (current + max_file_size as a
-        // placeholder — the real LSN will be validated on use).
+        // F-102 fix: Use tokio::task::spawn_blocking instead of std::thread::spawn
+        // to avoid unbounded OS thread creation under rapid WAL rotation.
+        // spawn_blocking uses Tokio's bounded blocking thread pool (default: 512).
         if self.config.preallocate_size > 0 {
             let dir = self.config.dir.clone();
             let prealloc_size = self.config.preallocate_size;
             let estimated_next_lsn = next_lsn + self.config.max_file_size;
-            std::thread::spawn(move || {
+            tokio::task::spawn_blocking(move || {
                 let next_path = dir.join(format!("{:020}.wal", estimated_next_lsn));
                 if let Ok(f) = OpenOptions::new()
                     .create(true)

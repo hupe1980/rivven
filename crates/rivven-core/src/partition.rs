@@ -1,11 +1,27 @@
 use crate::metrics::{CoreMetrics, Timer};
 use crate::storage::{LogManager, TieredStorage};
-use crate::{Config, Message, Result};
+use crate::{Config, Error, Message, Result};
 use bytes::Bytes;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
+
+/// F-136 fix: Execute deferred fsync via `spawn_blocking`.
+///
+/// Takes the dup'd file descriptor from `LogManager::take_pending_sync()`
+/// and runs `sync_data()` (fdatasync) on a blocking thread pool thread.
+/// This must be called AFTER releasing the `LogManager` write lock so that
+/// readers and other writers are not blocked during the slow syscall.
+async fn deferred_fsync(sync_handle: Option<Arc<std::fs::File>>) -> Result<()> {
+    if let Some(sync_fd) = sync_handle {
+        tokio::task::spawn_blocking(move || -> std::io::Result<()> { sync_fd.sync_data() })
+            .await
+            .map_err(|e| Error::Other(format!("sync task join: {}", e)))?
+            .map_err(|e| Error::Other(format!("fsync: {}", e)))?;
+    }
+    Ok(())
+}
 
 /// A single partition within a topic
 #[derive(Debug)]
@@ -141,7 +157,17 @@ impl Partition {
             }
             return Err(e);
         }
+
+        // F-136 fix: Take the deferred sync handle BEFORE releasing the write lock,
+        // then release the lock so readers and other writers can proceed during
+        // the slow fdatasync syscall.
+        let deferred_sync = log.take_pending_sync();
         drop(log);
+
+        // Deferred fsync — runs via spawn_blocking to avoid blocking the
+        // tokio runtime. Readers are unblocked because the RwLock is released.
+        // Data is already visible via mmap (flushed to OS page cache above).
+        deferred_fsync(deferred_sync).await?;
 
         // Write pre-serialized bytes to tiered storage (no second serialization)
         if let (Some(tiered), Some(data)) = (&self.tiered_storage, tiered_bytes) {
@@ -290,6 +316,7 @@ impl Partition {
         }
 
         // Write to log manager using optimized batch append
+        let deferred_sync;
         {
             let mut log = self.log_manager.write().await;
             if let Err(e) = log.append_batch(batch_messages).await {
@@ -313,7 +340,12 @@ impl Partition {
                 }
                 return Err(e);
             }
+            // F-136 fix: Take sync handle before releasing write lock
+            deferred_sync = log.take_pending_sync();
         }
+
+        // F-136 fix: Deferred fsync — readers and other writers are unblocked
+        deferred_fsync(deferred_sync).await?;
 
         // Also write to tiered storage if enabled
         if let Some(tiered) = &self.tiered_storage {
@@ -354,6 +386,74 @@ impl Partition {
         Ok(offsets)
     }
 
+    /// Append a replicated message preserving the leader-assigned offset.
+    ///
+    /// Used by followers (ISR replication) to persist records fetched from the
+    /// leader. Unlike `append()`, this does NOT allocate a new offset — it uses
+    /// the offset already set on the message by the leader.
+    ///
+    /// The `next_offset` counter is advanced to `max(current, msg.offset + 1)`
+    /// so that if this node is later promoted to leader, offset allocation is
+    /// monotonically increasing.
+    pub async fn append_replicated(&self, message: Message) -> Result<u64> {
+        let offset = message.offset;
+
+        // Write to log manager preserving leader-assigned offset
+        let deferred_sync;
+        {
+            let mut log = self.log_manager.write().await;
+            log.append(offset, message).await?;
+            // F-136 fix: Take sync handle before releasing write lock
+            deferred_sync = log.take_pending_sync();
+        }
+
+        // F-136 fix: Deferred fsync — unblocks readers during fdatasync
+        deferred_fsync(deferred_sync).await?;
+
+        // Advance next_offset to max(current, offset + 1) so that a future
+        // leader promotion allocates offsets beyond what was replicated.
+        self.next_offset.fetch_max(offset + 1, Ordering::Release);
+
+        Ok(offset)
+    }
+
+    /// Append a batch of replicated messages preserving leader-assigned offsets.
+    ///
+    /// Batch variant of `append_replicated` for efficient follower writes.
+    pub async fn append_replicated_batch(&self, messages: Vec<Message>) -> Result<Vec<u64>> {
+        if messages.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let batch: Vec<(u64, Message)> = messages
+            .into_iter()
+            .map(|m| {
+                let offset = m.offset;
+                (offset, m)
+            })
+            .collect();
+
+        let max_offset = batch.iter().map(|(o, _)| *o).max().unwrap_or(0);
+
+        let deferred_sync;
+        let positions = {
+            let mut log = self.log_manager.write().await;
+            let pos = log.append_batch(batch).await?;
+            // F-136 fix: Take sync handle before releasing write lock
+            deferred_sync = log.take_pending_sync();
+            pos
+        };
+
+        // F-136 fix: Deferred fsync — unblocks readers during fdatasync
+        deferred_fsync(deferred_sync).await?;
+
+        // Advance next_offset past the highest replicated offset
+        self.next_offset
+            .fetch_max(max_offset + 1, Ordering::Release);
+
+        Ok(positions)
+    }
+
     /// Flush partition data to disk ensuring durability
     pub async fn flush(&self) -> Result<()> {
         let log = self.log_manager.read().await;
@@ -377,6 +477,20 @@ impl Partition {
     /// Get tiered storage statistics for this partition
     pub fn tiered_storage_stats(&self) -> Option<crate::storage::TieredStorageStatsSnapshot> {
         self.tiered_storage.as_ref().map(|ts| ts.stats())
+    }
+
+    /// F-125 fix: Run key-based log compaction on sealed segments.
+    ///
+    /// Keeps only the latest value per key and removes tombstones (empty value).
+    /// Only sealed (non-active) segments are compacted — the active segment is
+    /// untouched. Returns the number of messages removed.
+    pub async fn compact(&self) -> Result<usize> {
+        let mut log = self.log_manager.write().await;
+        let removed = log.compact().await?;
+        let deferred_sync = log.take_pending_sync();
+        drop(log);
+        deferred_fsync(deferred_sync).await?;
+        Ok(removed)
     }
 }
 

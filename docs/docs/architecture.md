@@ -219,11 +219,25 @@ The sync policy propagates through the full write path:
 `EveryNWrites` triggers, both the log file and pending index entries are
 fsynced atomically.
 
+#### Deferred Fsync Architecture
+
+To maximize concurrent throughput, the write path uses a **deferred fsync** design:
+
+1. **Under write lock** (~µs): `BufWriter::flush()` pushes data to OS page cache, index entries are synced, a `pending_sync` flag is set atomically. Data is immediately visible to readers via mmap.
+2. **After lock release** (~1–10ms): `fdatasync` runs on a dup'd file descriptor (`File::try_clone()`) via `tokio::task::spawn_blocking`, ensuring durability without holding the partition-wide `RwLock`.
+
+This means readers are never blocked by fsync latency — they see new data as soon as it reaches the page cache. Durability follows asynchronously. The dup'd fd ensures fsync covers all data written before lock release, and `fdatasync` is idempotent so concurrent syncs are safe.
+
 #### WAL Recovery with CRC Validation
 
-The Write-Ahead Log validates CRC32 checksums during recovery. If a record
-fails CRC verification (e.g., partial write from crash), the recovery scan
-stops at the last valid record — no corrupted data is silently loaded.
+The Write-Ahead Log validates CRC32 checksums consistently across all scan paths:
+
+- **`scan_wal_file()`** (recovery): Validates CRC for every record; stops at first corruption
+- **`find_actual_end()`** (WAL open): Validates CRC to find the true end of valid data, preventing new writes from landing after corrupted records
+- **`timestamp_bounds()`** (segment scan): Skips CRC-invalid records to prevent corrupted timestamps from skewing min/max bounds
+- **`find_offset_for_timestamp()`** (consumer seek): Validates CRC per record during timestamp-based lookups
+
+WAL file pre-allocation uses `tokio::task::spawn_blocking` to avoid creating unbounded OS threads during rapid rotation.
 
 #### Topic Metadata Persistence
 
@@ -320,8 +334,10 @@ use rivven_core::zero_copy::{ZeroCopyBuffer, BufferSlice};
 let mut buffer = ZeroCopyBuffer::new(64 * 1024);
 let slice = buffer.write_slice(data.len());
 slice.copy_from_slice(&data);
-let frozen = buffer.freeze();  // Zero-copy transfer to consumer
+let frozen = buffer.freeze();  // True zero-copy via Bytes::from_owner()
 ```
+
+The `freeze()` method uses `Bytes::from_owner()` to wrap the buffer in an `Arc`-backed `Bytes` — no `memcpy` occurs. The `ZeroCopyBufferPool` enforces a `max_buffers` limit (default: `initial_count * 4`) to prevent unbounded memory growth under backpressure.
 
 #### Lock-Free Data Structures
 
@@ -335,12 +351,14 @@ Optimized for streaming workloads:
 | `ConcurrentSkipList` | Range queries | Lock-free traversal |
 | `TokenBucketRateLimiter` | Connector throughput control | Fully lock-free (AtomicU64 CAS for refill + acquire) |
 
+The `LogSegment` backing `AppendOnlyLog` uses raw pointer access (no `UnsafeCell<Vec>`) to avoid Rust aliasing violations during concurrent CAS-reserved writes and committed-range reads. The buffer is pre-allocated at segment creation and never resized.
+
 #### Partition Append Optimization
 
 The partition append path avoids unnecessary copies:
 
 - **Zero-alloc serialization**: `Segment::append()` uses `postcard::to_extend` with an 8-byte header placeholder, then patches CRC + length in-place — **1 allocation, 0 copies** per message. Batch append reuses a single serialization buffer across all messages.
-- **No message clone**: When tiered storage is enabled, the message is serialized once before being consumed by the log manager. The pre-serialized bytes are reused for the tiered storage write path.
+- **No message clone**: `LogManager::append_batch()` uses `split_off()` ownership transfer to partition batches across segments without cloning `Message` structs (avoids header `String`/`Vec<u8>` allocations). When tiered storage is enabled, the message is serialized once before being consumed by the log manager.
 - **Lock-free offset allocation**: Next offset is allocated via `AtomicU64::fetch_add` (AcqRel ordering).
 - **Single-pass consume**: The consume handler combines isolation-level filtering and protocol conversion into a single iterator pass, avoiding intermediate `Vec` allocations.
 
@@ -367,6 +385,19 @@ Write batching for 10-100x throughput improvement:
 - **Batch Window**: Configurable commit interval (default: 200μs)
 - **Batch Size**: Trigger flush at threshold (default: 4 MB)
 - **Pending Writes**: Flush after N writes (default: 1000)
+- **Zero-alloc serialization**: `WalRecord::write_to_buf()` serializes header + CRC + data directly into the shared batch buffer — no per-record `BytesMut` intermediate allocation
+- **Buffer shrink**: After burst traffic, batch buffer re-allocates to default capacity when oversized (>2x max)
+- **CRC-validated recovery**: Both `find_actual_end()` and `scan_wal_file()` validate CRC32 for every record
+
+#### Segment Read Path
+
+The read path minimizes lock contention:
+
+- **Dirty flag**: An atomic `write_dirty` flag tracks whether buffered data exists. Reads check the flag first and skip the write-mutex acquisition when no data is pending — eliminates head-of-line blocking behind concurrent appends
+- **Cached mmap**: Read-only memory maps are cached and only invalidated on write, avoiding per-read `mmap()` syscalls
+- **Sparse index**: Binary search over 4KB-interval index entries for O(log n) position lookup
+- **CRC validation**: Every read validates CRC32 before deserialization
+- **Varint offset extraction**: Messages below the target offset are skipped using `postcard::take_from_bytes::<u64>()` — extracting only the 1–10 byte varint-encoded offset without allocating key, value, or headers. Full deserialization is deferred until a matching message is found
 
 ### Async I/O (Portable, io_uring-style API)
 
@@ -468,6 +499,15 @@ Kafka-style In-Sync Replica management:
 - Follower must fetch within `replica_lag_max_time` (default: 10s)
 - Follower must be within `replica_lag_max_messages` (default: 1000)
 - High watermark advances when all ISR members acknowledge
+
+**Automatic Partition Reassignment:**
+When a broker fails (detected via SWIM gossip `NodeFailed` event), the cluster coordinator automatically reassigns affected partitions:
+1. The Raft leader queries all partitions led by the failed node
+2. For each partition, the dead node is removed from ISR candidates
+3. A new leader is elected from remaining replicas (deterministic sort)
+4. The new assignment is proposed via Raft with an incremented epoch
+
+This ensures partitions regain leadership within seconds of broker failure detection.
 
 ### Ack Modes
 

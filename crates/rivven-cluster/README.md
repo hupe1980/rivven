@@ -127,6 +127,8 @@ let partition = manager.get_or_create(partition_id, is_leader);
 manager.handle_replica_fetch(&partition_id, &replica_id, fetch_offset).await?;
 ```
 
+**Follower Persistence**: `FollowerFetcher` persists records via `Partition::append_replicated_batch()` before advancing the fetch offset. This ensures ISR followers hold real data — leader failure does not cause data loss. Replica state reporting tracks consecutive failures and logs warnings after 5+ failures for operator visibility.
+
 ### Partition Placement
 
 Consistent hashing with rack awareness:

@@ -128,13 +128,17 @@ impl ZeroCopyBuffer {
         }
     }
 
-    /// Get a mutable slice for the reserved range
+    /// Get a mutable slice for the reserved range.
+    ///
     /// # Safety
-    /// Caller must ensure exclusive access to this range.
-    /// The mutable borrow from immutable self is intentional - this is interior
-    /// mutability via raw pointers with atomic coordination for lock-free access.
+    /// - Caller must ensure exclusive access to `[offset..offset+len]`.
+    /// - No other `get_mut_slice` or `get_slice` call may alias this range
+    ///   concurrently.
+    ///
+    /// F-116 fix: restricted to `pub(crate)` to limit the blast radius of
+    /// unsound usage. External users should go through `BufferSlice::write()`.
     #[allow(clippy::mut_from_ref)]
-    pub unsafe fn get_mut_slice(&self, offset: usize, len: usize) -> &mut [u8] {
+    pub(crate) unsafe fn get_mut_slice(&self, offset: usize, len: usize) -> &mut [u8] {
         assert!(
             offset + len <= self.capacity,
             "get_mut_slice out of bounds: offset={} len={} capacity={}",
@@ -231,15 +235,46 @@ impl ZeroCopyBuffer {
         0
     }
 
-    /// Convert entire written portion to Bytes (zero-copy if possible)
-    pub fn freeze(&self) -> Bytes {
+    /// Convert entire written portion to `Bytes` (F-113 fix: true zero-copy).
+    ///
+    /// Uses `Bytes::from_owner()` to wrap the `Arc<ZeroCopyBuffer>` without
+    /// copying. The `Arc` keeps the buffer alive as long as the `Bytes`
+    /// handle exists.
+    pub fn freeze(self: &Arc<Self>) -> Bytes {
         let len = self.len();
         if len == 0 {
             return Bytes::new();
         }
-        // This does copy, but we could implement a custom Bytes wrapper
-        // that holds a reference to this buffer for true zero-copy
-        Bytes::copy_from_slice(self.get_slice(0, len))
+        // F-113 fix: true zero-copy conversion.
+        // We create a temporary struct that owns an Arc clone and implements
+        // AsRef<[u8]> for interop with Bytes::from_owner (available since bytes 1.9+).
+        // This avoids the Bytes::copy_from_slice that doubled memory usage.
+        let owner = OwnedBufferSlice {
+            buffer: Arc::clone(self),
+            len,
+        };
+        Bytes::from_owner(owner)
+    }
+}
+
+/// F-113: Owned wrapper for true zero-copy `Bytes` conversion.
+///
+/// Holds an `Arc<ZeroCopyBuffer>` and its length, implementing the traits
+/// needed for `Bytes::from_owner()`. The `Arc` keeps the underlying buffer
+/// alive for the lifetime of the `Bytes` handle.
+struct OwnedBufferSlice {
+    buffer: Arc<ZeroCopyBuffer>,
+    len: usize,
+}
+
+// Safety: ZeroCopyBuffer is Send+Sync and we only expose immutable access
+// through the owned slice.
+unsafe impl Send for OwnedBufferSlice {}
+unsafe impl Sync for OwnedBufferSlice {}
+
+impl AsRef<[u8]> for OwnedBufferSlice {
+    fn as_ref(&self) -> &[u8] {
+        self.buffer.get_slice(0, self.len)
     }
 }
 
@@ -266,8 +301,12 @@ pub struct BufferSlice {
 }
 
 impl BufferSlice {
-    /// Create a BufferSlice from an Arc reference
-    pub fn new(buffer: Arc<ZeroCopyBuffer>, offset: usize, len: usize) -> Self {
+    /// Create a BufferSlice from an Arc reference.
+    ///
+    /// `pub(crate)` — external callers must use `ZeroCopyBuffer::reserve()` which
+    /// guarantees exclusive (non-overlapping) ranges, preventing aliased `&mut [u8]`
+    /// from `write()` / `as_mut_bytes()`. Making this `pub` would be a soundness hole.
+    pub(crate) fn new(buffer: Arc<ZeroCopyBuffer>, offset: usize, len: usize) -> Self {
         Self {
             buffer,
             offset,
@@ -344,7 +383,10 @@ impl AsRef<[u8]> for BufferSlice {
     }
 }
 
-/// Pool of zero-copy buffers for efficient allocation
+/// Pool of zero-copy buffers for efficient allocation.
+///
+/// F-114 fix: enforces a maximum total buffer count to prevent unbounded
+/// memory growth under sustained high concurrency.
 pub struct ZeroCopyBufferPool {
     /// Free buffers available for use
     free_buffers: crossbeam_channel::Sender<Arc<ZeroCopyBuffer>>,
@@ -358,11 +400,22 @@ pub struct ZeroCopyBufferPool {
     total_created: AtomicU64,
     /// Buffers currently in use
     in_use: AtomicU64,
+    /// Maximum total buffers allowed (F-114 fix)
+    max_buffers: u64,
 }
 
 impl ZeroCopyBufferPool {
-    /// Create a new buffer pool
+    /// Create a new buffer pool.
+    ///
+    /// `initial_count` buffers are pre-allocated. Up to `initial_count * 4`
+    /// total buffers may be created under load (F-114 fix). Use
+    /// `with_max_buffers` for explicit control.
     pub fn new(buffer_size: usize, initial_count: usize) -> Self {
+        Self::with_max_buffers(buffer_size, initial_count, (initial_count * 4) as u64)
+    }
+
+    /// Create a buffer pool with an explicit maximum buffer count.
+    pub fn with_max_buffers(buffer_size: usize, initial_count: usize, max_buffers: u64) -> Self {
         let (tx, rx) = crossbeam_channel::bounded(initial_count * 2);
 
         let pool = Self {
@@ -372,6 +425,7 @@ impl ZeroCopyBufferPool {
             next_id: AtomicU64::new(0),
             total_created: AtomicU64::new(0),
             in_use: AtomicU64::new(0),
+            max_buffers: max_buffers.max(initial_count as u64),
         };
 
         // Pre-allocate buffers
@@ -385,8 +439,11 @@ impl ZeroCopyBufferPool {
         pool
     }
 
-    /// Get a buffer from the pool (or create new one)
-    pub fn acquire(&self) -> Arc<ZeroCopyBuffer> {
+    /// Get a buffer from the pool (or create a new one if under `max_buffers`).
+    ///
+    /// Returns `None` if the pool is exhausted and `max_buffers` has been
+    /// reached (F-114 fix). The caller should apply back-pressure.
+    pub fn acquire(&self) -> Option<Arc<ZeroCopyBuffer>> {
         match self.buffer_receiver.try_recv() {
             Ok(buffer) => {
                 // Try to reset the buffer
@@ -394,17 +451,36 @@ impl ZeroCopyBufferPool {
                     buffer.reset();
                 }
                 self.in_use.fetch_add(1, Ordering::Relaxed);
-                buffer
+                Some(buffer)
             }
             Err(_) => {
+                // F-114 fix: enforce max_buffers limit
+                let created = self.total_created.load(Ordering::Relaxed);
+                if created >= self.max_buffers {
+                    tracing::warn!(
+                        total_created = created,
+                        max_buffers = self.max_buffers,
+                        in_use = self.in_use.load(Ordering::Relaxed),
+                        "Buffer pool exhausted — apply back-pressure"
+                    );
+                    return None;
+                }
+
                 // Create new buffer
                 let id = self.next_id.fetch_add(1, Ordering::Relaxed);
                 let buffer = Arc::new(ZeroCopyBuffer::with_id(self.buffer_size, id));
                 self.total_created.fetch_add(1, Ordering::Relaxed);
                 self.in_use.fetch_add(1, Ordering::Relaxed);
-                buffer
+                Some(buffer)
             }
         }
+    }
+
+    /// Convenience wrapper that panics on pool exhaustion (for non-critical paths).
+    ///
+    /// Prefer `acquire()` with proper back-pressure handling on the hot path.
+    pub fn acquire_or_panic(&self) -> Arc<ZeroCopyBuffer> {
+        self.acquire().expect("ZeroCopyBufferPool exhausted")
     }
 
     /// Return a buffer to the pool
@@ -707,7 +783,7 @@ impl ZeroCopyProducer {
         }
 
         // Need a new buffer
-        let buffer = self.buffer_pool.acquire();
+        let buffer = self.buffer_pool.acquire()?;
         if let Some(offset) = buffer.try_allocate(size) {
             *guard = Some(buffer.clone());
             return Some((buffer, offset));
@@ -932,8 +1008,8 @@ mod tests {
         assert_eq!(stats.available, 4);
 
         // Acquire buffers
-        let b1 = pool.acquire();
-        let b2 = pool.acquire();
+        let b1 = pool.acquire().unwrap();
+        let b2 = pool.acquire().unwrap();
 
         let stats = pool.stats();
         assert_eq!(stats.in_use, 2);

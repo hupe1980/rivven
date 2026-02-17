@@ -14,6 +14,7 @@
 
 use bytes::Bytes;
 use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,7 +26,7 @@ use tokio::time::interval;
 use crate::{Error, Result};
 
 /// Storage tier classification
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum StorageTier {
     /// Hot tier: In-memory + fast SSD, < 1ms access
     Hot,
@@ -729,8 +730,16 @@ impl WarmTier {
                 Ok(Some(data)) => Some(data),
                 _ => None,
             };
-            // Remove the segment (ignore errors — best effort)
-            let _ = self.remove(&topic, partition, base_offset).await;
+            // Remove the segment — best effort, log failure
+            if let Err(e) = self.remove(&topic, partition, base_offset).await {
+                tracing::warn!(
+                    topic = %topic,
+                    partition,
+                    base_offset,
+                    error = %e,
+                    "Failed to remove warm tier segment during eviction"
+                );
+            }
             data.map(|d| (topic, partition, base_offset, d))
         } else {
             None
@@ -1142,7 +1151,7 @@ impl ColdStorageBackend for ObjectStoreColdStorage {
 }
 
 /// Migration task
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 enum MigrationTask {
     Demote {
         topic: Arc<str>,
@@ -1163,6 +1172,258 @@ enum MigrationTask {
     },
 }
 
+// ============================================================================
+// Migration Journal (F-103 fix)
+// ============================================================================
+
+/// Crash-recovery journal for tier migrations.
+///
+/// Records in-flight migrations to an append-only, line-delimited JSON file.
+/// On startup, incomplete entries are replayed so that no migration is silently
+/// lost across process restarts. The journal is compacted after every N entries
+/// to keep the file bounded.
+///
+/// Format: Each line is a JSON object with `{ id, task, state, ts }`.
+/// States: `started` → `completed` | `failed`.
+struct MigrationJournal {
+    /// Path to the journal file
+    path: PathBuf,
+    /// Next entry ID
+    next_id: std::sync::atomic::AtomicU64,
+    /// Serialization lock — ensures ordered writes to the journal file
+    write_lock: Mutex<()>,
+}
+
+/// A single journal entry (serialized as one JSON line)
+#[derive(Debug, Serialize, Deserialize)]
+struct JournalEntry {
+    /// Unique monotonic ID
+    id: u64,
+    /// The migration task
+    task: MigrationTask,
+    /// `"started"`, `"completed"`, or `"failed"`
+    state: String,
+    /// Unix timestamp (seconds)
+    ts: u64,
+}
+
+impl MigrationJournal {
+    /// Create or open the journal file at the given path.
+    fn new(path: PathBuf) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        // Determine next_id by scanning existing entries (if any)
+        let max_id = Self::read_entries_from_path(&path)
+            .unwrap_or_default()
+            .iter()
+            .map(|e| e.id)
+            .max()
+            .unwrap_or(0);
+
+        Ok(Self {
+            path,
+            next_id: std::sync::atomic::AtomicU64::new(max_id + 1),
+            write_lock: Mutex::new(()),
+        })
+    }
+
+    /// Record that a migration has started. Returns the entry ID.
+    async fn record_start(&self, task: &MigrationTask) -> Result<u64> {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.append_entry(&JournalEntry {
+            id,
+            task: Self::clone_task(task),
+            state: "started".to_string(),
+            ts: Self::now_secs(),
+        })
+        .await?;
+        Ok(id)
+    }
+
+    /// Record that a migration completed (success or failure).
+    async fn record_finish(&self, id: u64, task: &MigrationTask, success: bool) -> Result<()> {
+        self.append_entry(&JournalEntry {
+            id,
+            task: Self::clone_task(task),
+            state: if success { "completed" } else { "failed" }.to_string(),
+            ts: Self::now_secs(),
+        })
+        .await
+    }
+
+    /// On startup, recover any incomplete migrations (started but not completed/failed).
+    fn recover_incomplete(&self) -> Vec<MigrationTask> {
+        let entries = match Self::read_entries_from_path(&self.path) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(
+                    path = %self.path.display(),
+                    error = %e,
+                    "Failed to read migration journal — starting fresh"
+                );
+                return Vec::new();
+            }
+        };
+
+        // Build set of IDs that have a terminal state
+        let finished: std::collections::HashSet<u64> = entries
+            .iter()
+            .filter(|e| e.state == "completed" || e.state == "failed")
+            .map(|e| e.id)
+            .collect();
+
+        // Return tasks whose start entry has no matching finish
+        let incomplete: Vec<MigrationTask> = entries
+            .into_iter()
+            .filter(|e| e.state == "started" && !finished.contains(&e.id))
+            .map(|e| e.task)
+            .collect();
+
+        if !incomplete.is_empty() {
+            tracing::info!(
+                count = incomplete.len(),
+                "Recovered incomplete migrations from journal — will replay"
+            );
+        }
+
+        incomplete
+    }
+
+    /// Compact the journal by removing entries that have both start + finish.
+    /// Keeps only incomplete (started-only) entries.
+    async fn compact(&self) -> Result<()> {
+        let _lock = self.write_lock.lock().await;
+
+        let entries = Self::read_entries_from_path(&self.path).unwrap_or_default();
+
+        let finished: std::collections::HashSet<u64> = entries
+            .iter()
+            .filter(|e| e.state == "completed" || e.state == "failed")
+            .map(|e| e.id)
+            .collect();
+
+        // Keep only incomplete entries
+        let retained: Vec<&JournalEntry> = entries
+            .iter()
+            .filter(|e| e.state == "started" && !finished.contains(&e.id))
+            .collect();
+
+        // Rewrite journal atomically
+        let tmp = self.path.with_extension("tmp");
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&tmp)?;
+            for entry in &retained {
+                let line = serde_json::to_string(entry)
+                    .map_err(|e| Error::Other(format!("journal serialize: {}", e)))?;
+                writeln!(f, "{}", line)?;
+            }
+            f.sync_all()?;
+        }
+        std::fs::rename(&tmp, &self.path)?;
+
+        if !retained.is_empty() || !entries.is_empty() {
+            tracing::debug!(
+                before = entries.len(),
+                after = retained.len(),
+                "Compacted migration journal"
+            );
+        }
+
+        Ok(())
+    }
+
+    // -- internals --
+
+    async fn append_entry(&self, entry: &JournalEntry) -> Result<()> {
+        let _lock = self.write_lock.lock().await;
+        use std::io::Write;
+
+        let line = serde_json::to_string(entry)
+            .map_err(|e| Error::Other(format!("journal serialize: {}", e)))?;
+
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        writeln!(f, "{}", line)?;
+        f.sync_all()?;
+        Ok(())
+    }
+
+    fn read_entries_from_path(path: &std::path::Path) -> Result<Vec<JournalEntry>> {
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let content = std::fs::read_to_string(path)?;
+        let mut entries = Vec::new();
+        for (i, line) in content.lines().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<JournalEntry>(trimmed) {
+                Ok(entry) => entries.push(entry),
+                Err(e) => {
+                    tracing::warn!(
+                        line = i + 1,
+                        error = %e,
+                        "Skipping corrupt journal entry"
+                    );
+                }
+            }
+        }
+        Ok(entries)
+    }
+
+    fn clone_task(task: &MigrationTask) -> MigrationTask {
+        match task {
+            MigrationTask::Demote {
+                topic,
+                partition,
+                base_offset,
+                from_tier,
+            } => MigrationTask::Demote {
+                topic: topic.clone(),
+                partition: *partition,
+                base_offset: *base_offset,
+                from_tier: *from_tier,
+            },
+            MigrationTask::Promote {
+                topic,
+                partition,
+                base_offset,
+                to_tier,
+            } => MigrationTask::Promote {
+                topic: topic.clone(),
+                partition: *partition,
+                base_offset: *base_offset,
+                to_tier: *to_tier,
+            },
+            MigrationTask::Compact {
+                topic,
+                partition,
+                base_offset,
+            } => MigrationTask::Compact {
+                topic: topic.clone(),
+                partition: *partition,
+                base_offset: *base_offset,
+            },
+        }
+    }
+
+    fn now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+}
+
 /// Main tiered storage manager
 pub struct TieredStorage {
     config: TieredStorageConfig,
@@ -1173,6 +1434,8 @@ pub struct TieredStorage {
     segment_index: RwLock<BTreeMap<SegmentKey, Arc<SegmentMetadata>>>,
     /// Migration task queue
     migration_tx: mpsc::Sender<MigrationTask>,
+    /// Crash-recovery journal for in-flight migrations (F-103 fix)
+    journal: Arc<MigrationJournal>,
     /// Statistics
     stats: Arc<TieredStorageStats>,
     /// Shutdown signal
@@ -1191,6 +1454,20 @@ impl std::fmt::Debug for TieredStorage {
 }
 
 impl TieredStorage {
+    /// Send a migration task to the background worker.
+    ///
+    /// Logs at `debug` level if the receiver is dropped (i.e. during shutdown).
+    /// This is intentionally non-fatal: migration is best-effort and
+    /// will be retried on the next lifecycle check cycle.
+    async fn send_migration(&self, task: MigrationTask) {
+        if let Err(e) = self.migration_tx.send(task).await {
+            tracing::debug!(
+                task = ?e.0,
+                "Migration channel closed (shutdown in progress), task dropped"
+            );
+        }
+    }
+
     /// Create new tiered storage system
     pub async fn new(config: TieredStorageConfig) -> Result<Arc<Self>> {
         let hot_tier = Arc::new(HotTier::new(config.hot_tier_max_bytes));
@@ -1267,6 +1544,15 @@ impl TieredStorage {
         let (migration_tx, migration_rx) = mpsc::channel(1024);
         let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
 
+        // F-103 fix: Create crash-recovery journal for tier migrations.
+        // On startup, any incomplete migrations (started but not completed/failed)
+        // are replayed through the migration channel.
+        let journal_path = config.warm_tier_path_buf().join("migrations.journal");
+        let journal = Arc::new(MigrationJournal::new(journal_path)?);
+
+        // Recover incomplete migrations before starting workers
+        let incomplete = journal.recover_incomplete();
+
         let storage = Arc::new(Self {
             config: config.clone(),
             hot_tier,
@@ -1274,12 +1560,23 @@ impl TieredStorage {
             cold_storage,
             segment_index: RwLock::new(BTreeMap::new()),
             migration_tx,
+            journal,
             stats: Arc::new(TieredStorageStats::new()),
             shutdown: shutdown_tx,
         });
 
         // Start background migration worker
         storage.clone().start_migration_worker(migration_rx);
+
+        // Replay incomplete migrations from the journal
+        for task in incomplete {
+            storage.send_migration(task).await;
+        }
+
+        // Compact the journal after replay to remove finished entries
+        if let Err(e) = storage.journal.compact().await {
+            tracing::warn!(error = %e, "Failed to compact migration journal on startup");
+        }
 
         // Start background tier manager
         storage.clone().start_tier_manager();
@@ -1395,15 +1692,12 @@ impl TieredStorage {
                         if self.config.enable_promotion {
                             let access_count = metadata.access_count.load(Ordering::Relaxed);
                             if access_count >= self.config.promotion_threshold {
-                                let _ = self
-                                    .migration_tx
-                                    .send(MigrationTask::Promote {
-                                        topic: Arc::from(topic),
-                                        partition,
-                                        base_offset,
-                                        to_tier: StorageTier::Hot,
-                                    })
-                                    .await;
+                                self.send_migration(MigrationTask::Promote {
+                                    topic: Arc::from(topic),
+                                    partition,
+                                    base_offset,
+                                    to_tier: StorageTier::Hot,
+                                }).await;
                             }
                         }
 
@@ -1418,15 +1712,12 @@ impl TieredStorage {
                             if self.config.enable_promotion {
                                 let access_count = metadata.access_count.load(Ordering::Relaxed);
                                 if access_count >= self.config.promotion_threshold {
-                                    let _ = self
-                                        .migration_tx
-                                        .send(MigrationTask::Promote {
-                                            topic: Arc::from(topic),
-                                            partition,
-                                            base_offset,
-                                            to_tier: StorageTier::Warm,
-                                        })
-                                        .await;
+                                    self.send_migration(MigrationTask::Promote {
+                                        topic: Arc::from(topic),
+                                        partition,
+                                        base_offset,
+                                        to_tier: StorageTier::Warm,
+                                    }).await;
                                 }
                             }
 
@@ -1476,15 +1767,12 @@ impl TieredStorage {
         };
 
         for base_offset in segments {
-            let _ = self
-                .migration_tx
-                .send(MigrationTask::Demote {
-                    topic: Arc::from(topic),
-                    partition,
-                    base_offset,
-                    from_tier: StorageTier::Hot,
-                })
-                .await;
+            self.send_migration(MigrationTask::Demote {
+                topic: Arc::from(topic),
+                partition,
+                base_offset,
+                from_tier: StorageTier::Hot,
+            }).await;
         }
 
         Ok(())
@@ -1514,6 +1802,8 @@ impl TieredStorage {
         let mut shutdown_rx = self.shutdown.subscribe();
 
         tokio::spawn(async move {
+            let mut ops_since_compact: u64 = 0;
+
             loop {
                 tokio::select! {
                     Some(task) = rx.recv() => {
@@ -1522,15 +1812,45 @@ impl TieredStorage {
                         let permit = semaphore.clone().acquire_owned().await.expect("semaphore closed unexpectedly");
                         let storage = self.clone();
 
+                        // F-103 fix: Journal the migration before execution
+                        let task_clone = MigrationJournal::clone_task(&task);
+                        let journal_id = match storage.journal.record_start(&task).await {
+                            Ok(id) => Some(id),
+                            Err(e) => {
+                                tracing::warn!(error = %e, "Failed to journal migration start — proceeding without journal");
+                                None
+                            }
+                        };
+
                         tokio::spawn(async move {
                             let result = storage.execute_migration(task).await;
-                            if result.is_ok() {
+                            let success = result.is_ok();
+
+                            if success {
                                 storage.stats.migrations_completed.fetch_add(1, Ordering::Relaxed);
                             } else {
                                 storage.stats.migrations_failed.fetch_add(1, Ordering::Relaxed);
                             }
+
+                            // F-103 fix: Record completion in journal
+                            if let Some(id) = journal_id {
+                                if let Err(e) = storage.journal.record_finish(id, &task_clone, success).await {
+                                    tracing::warn!(id, error = %e, "Failed to journal migration finish");
+                                }
+                            }
+
                             drop(permit);
                         });
+
+                        ops_since_compact += 1;
+
+                        // Compact journal every 100 operations to keep file bounded
+                        if ops_since_compact >= 100 {
+                            if let Err(e) = self.journal.compact().await {
+                                tracing::warn!(error = %e, "Failed to compact migration journal");
+                            }
+                            ops_since_compact = 0;
+                        }
                     }
                     _ = shutdown_rx.recv() => {
                         break;
@@ -1582,30 +1902,24 @@ impl TieredStorage {
         };
 
         for (topic, partition, base_offset) in hot_candidates {
-            let _ = self
-                .migration_tx
-                .send(MigrationTask::Demote {
-                    topic,
-                    partition,
-                    base_offset,
-                    from_tier: StorageTier::Hot,
-                })
-                .await;
+            self.send_migration(MigrationTask::Demote {
+                topic,
+                partition,
+                base_offset,
+                from_tier: StorageTier::Hot,
+            }).await;
         }
 
         // Check warm tier for demotions to cold
         let warm_candidates = self.warm_tier.get_demotion_candidates(warm_max_age).await;
 
         for (topic, partition, base_offset) in warm_candidates {
-            let _ = self
-                .migration_tx
-                .send(MigrationTask::Demote {
-                    topic,
-                    partition,
-                    base_offset,
-                    from_tier: StorageTier::Warm,
-                })
-                .await;
+            self.send_migration(MigrationTask::Demote {
+                topic,
+                partition,
+                base_offset,
+                from_tier: StorageTier::Warm,
+            }).await;
         }
 
         // Check for compaction candidates
@@ -1620,14 +1934,11 @@ impl TieredStorage {
         };
 
         for (topic, partition, base_offset) in compaction_candidates {
-            let _ = self
-                .migration_tx
-                .send(MigrationTask::Compact {
-                    topic,
-                    partition,
-                    base_offset,
-                })
-                .await;
+            self.send_migration(MigrationTask::Compact {
+                topic,
+                partition,
+                base_offset,
+            }).await;
         }
 
         Ok(())

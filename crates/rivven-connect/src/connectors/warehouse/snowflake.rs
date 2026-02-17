@@ -471,33 +471,44 @@ pub struct SnowflakeSink {
 
 #[cfg(feature = "snowflake")]
 impl SnowflakeSink {
-    /// Create a new Snowflake sink with default configuration
+    /// Create a new Snowflake sink with default configuration.
+    ///
+    /// Uses a basic reqwest client without TLS configuration, which is
+    /// infallible in practice. For production use with custom config,
+    /// prefer `try_with_config()` which returns `Result`.
     pub fn new() -> Self {
-        Self::with_config(&SnowflakeSinkConfig::default())
+        Self::try_with_config(&SnowflakeSinkConfig::default())
+            .expect("Failed to create default Snowflake HTTP client (no TLS)")
     }
 
-    /// Create a new Snowflake sink with custom timeout (legacy)
-    pub fn with_timeout(timeout: Duration) -> Self {
+    /// Create a new Snowflake sink with custom timeout (F-117 fix: returns Result)
+    pub fn try_with_timeout(timeout: Duration) -> std::result::Result<Self, reqwest::Error> {
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .pool_max_idle_per_host(10)
             .pool_idle_timeout(Duration::from_secs(90))
-            .build()
-            .expect("Failed to create HTTP client");
-        Self {
+            .build()?;
+        Ok(Self {
             client,
             circuit_breaker: Some(CircuitBreaker::from_config(&CircuitBreakerConfig::default())),
-        }
+        })
     }
 
-    /// Create a new Snowflake sink with full configuration
-    pub fn with_config(config: &SnowflakeSinkConfig) -> Self {
+    /// Create a new Snowflake sink with custom timeout.
+    ///
+    /// # Errors
+    /// Returns `reqwest::Error` if the HTTP client cannot be built.
+    pub fn with_timeout(timeout: Duration) -> std::result::Result<Self, reqwest::Error> {
+        Self::try_with_timeout(timeout)
+    }
+
+    /// Create a new Snowflake sink with full configuration (F-117 fix: returns Result)
+    pub fn try_with_config(config: &SnowflakeSinkConfig) -> std::result::Result<Self, reqwest::Error> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(config.request_timeout_secs))
             .pool_max_idle_per_host(10)
             .pool_idle_timeout(Duration::from_secs(90))
-            .build()
-            .expect("Failed to create HTTP client");
+            .build()?;
 
         let circuit_breaker = if config.circuit_breaker.enabled {
             Some(CircuitBreaker::from_config(&config.circuit_breaker))
@@ -505,10 +516,18 @@ impl SnowflakeSink {
             None
         };
 
-        Self {
+        Ok(Self {
             client,
             circuit_breaker,
-        }
+        })
+    }
+
+    /// Create a new Snowflake sink with full configuration.
+    ///
+    /// # Errors
+    /// Returns `reqwest::Error` if the HTTP client cannot be built.
+    pub fn with_config(config: &SnowflakeSinkConfig) -> std::result::Result<Self, reqwest::Error> {
+        Self::try_with_config(config)
     }
 
     /// Build the Snowpipe Streaming API base URL
@@ -1389,7 +1408,7 @@ mod tests {
                 },
                 ..Default::default()
             };
-            let sink = SnowflakeSink::with_config(&config);
+            let sink = SnowflakeSink::with_config(&config).unwrap();
             assert!(sink.circuit_breaker.is_none());
         }
 

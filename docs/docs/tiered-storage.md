@@ -298,6 +298,17 @@ storage:
 
 Compaction runs during tier migration to minimize I/O impact.
 
+### Crash-Recovery Journal
+
+Tier migrations are protected by an append-only journal (`migrations.journal`) stored in the warm tier directory:
+
+- **Before execution**: Each migration task (demote, promote, compact) is journaled with a `"started"` entry
+- **After execution**: A `"completed"` or `"failed"` entry is appended
+- **On startup**: Incomplete migrations (started but never completed) are automatically recovered and replayed
+- **Compaction**: The journal is periodically compacted to remove fully-resolved entries, preventing unbounded growth
+
+Since migrations are inherently idempotent (file moves and copies are overwrite-safe), the journal ensures no migration is silently lost across broker restarts — critical for data lifecycle correctness.
+
 ---
 
 ## Monitoring

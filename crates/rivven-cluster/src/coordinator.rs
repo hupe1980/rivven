@@ -251,6 +251,9 @@ impl ClusterCoordinator {
     /// When Raft is wired, proposes RegisterNode/DeregisterNode through Raft consensus
     /// for replicated consistency. Falls back to local MetadataStore hints when Raft
     /// is not yet available (e.g. during bootstrap before set_raft_node() is called).
+    ///
+    /// F-124 fix: On NodeFailed, automatically triggers leader election for all
+    /// partitions that were led by the dead node, preventing partition unavailability.
     async fn handle_membership_event(
         metadata: &MetadataStore,
         _local_node_id: &str,
@@ -270,8 +273,15 @@ impl ClusterCoordinator {
             }
             MembershipEvent::NodeFailed(node_id) => {
                 warn!(node_id = %node_id, "Node failed");
-                let cmd = MetadataCommand::DeregisterNode { node_id };
+                let cmd = MetadataCommand::DeregisterNode {
+                    node_id: node_id.clone(),
+                };
                 Self::apply_membership_command(metadata, cmd, raft_node).await;
+
+                // F-124 fix: Automatically reassign partitions led by the dead node.
+                // Only the Raft leader should trigger reassignment to avoid duplicate
+                // proposals from multiple nodes.
+                Self::reassign_dead_node_partitions(&node_id, raft_node).await;
             }
             MembershipEvent::NodeSuspected(node_id) => {
                 debug!(node_id = %node_id, "Node suspected");
@@ -319,6 +329,109 @@ impl ClusterCoordinator {
             drop(raft_guard);
             metadata.apply(0, cmd).await;
         }
+    }
+
+    /// F-124 fix: Automatic partition reassignment when a broker fails.
+    ///
+    /// For every partition that was led by the dead node, proposes a leader election
+    /// via Raft using the deterministic "smallest ISR member" strategy. This ensures
+    /// partitions automatically recover leadership without manual intervention.
+    ///
+    /// Only the Raft leader executes this to avoid duplicate proposals.
+    async fn reassign_dead_node_partitions(
+        dead_node_id: &str,
+        raft_node: &RwLock<Option<Arc<RwLock<RaftNode>>>>,
+    ) {
+        let raft_guard = raft_node.read().await;
+        let Some(ref raft) = *raft_guard else {
+            return; // No Raft — standalone mode, nothing to reassign
+        };
+        let raft_lock = raft.read().await;
+
+        if !raft_lock.is_leader() {
+            return; // Only the leader drives reassignment
+        }
+
+        // Find all partitions that were led by the dead node
+        let affected_partitions: Vec<(PartitionId, std::collections::HashSet<String>, u64)> = {
+            let meta = raft_lock.metadata().await;
+            meta.partitions_led_by(&dead_node_id.to_string())
+                .into_iter()
+                .filter_map(|pid| {
+                    meta.topics.get(&pid.topic).and_then(|t| {
+                        t.partition(pid.partition).map(|ps| {
+                            (pid, ps.isr.clone(), ps.leader_epoch)
+                        })
+                    })
+                })
+                .collect()
+        };
+
+        if affected_partitions.is_empty() {
+            debug!(dead_node = dead_node_id, "Dead node had no leader partitions");
+            return;
+        }
+
+        info!(
+            dead_node = dead_node_id,
+            affected = affected_partitions.len(),
+            "Reassigning partitions from failed node"
+        );
+
+        let mut reassigned = 0u32;
+        let mut failed = 0u32;
+
+        for (partition_id, isr, leader_epoch) in affected_partitions {
+            // Remove the dead node from ISR candidates
+            let mut candidates: Vec<_> = isr
+                .into_iter()
+                .filter(|n| n != dead_node_id)
+                .collect();
+            candidates.sort(); // Deterministic: smallest ISR member wins
+
+            let Some(new_leader) = candidates.first().cloned() else {
+                warn!(
+                    topic = partition_id.topic,
+                    partition = partition_id.partition,
+                    "No ISR candidates remaining — partition is offline"
+                );
+                failed += 1;
+                continue;
+            };
+
+            let cmd = MetadataCommand::UpdatePartitionLeader {
+                partition: partition_id.clone(),
+                leader: new_leader.clone(),
+                epoch: leader_epoch + 1,
+            };
+
+            if let Err(e) = raft_lock.propose(cmd).await {
+                warn!(
+                    topic = partition_id.topic,
+                    partition = partition_id.partition,
+                    new_leader = new_leader,
+                    error = %e,
+                    "Failed to propose partition leader reassignment"
+                );
+                failed += 1;
+            } else {
+                info!(
+                    topic = partition_id.topic,
+                    partition = partition_id.partition,
+                    new_leader = new_leader,
+                    epoch = leader_epoch + 1,
+                    "Partition leader reassigned"
+                );
+                reassigned += 1;
+            }
+        }
+
+        info!(
+            dead_node = dead_node_id,
+            reassigned,
+            failed,
+            "Partition reassignment complete"
+        );
     }
 
     /// Wire a Raft consensus node into this coordinator.

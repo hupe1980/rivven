@@ -337,6 +337,8 @@ storage:
       region: us-east-1
 ```
 
+**Nonce construction**: AES-256-GCM uses fully random 96-bit nonces generated via `SystemRandom`. The birthday bound allows approximately $2^{48}$ encryptions per key before collision probability becomes non-negligible — far beyond any realistic WAL lifetime. Nonce uniqueness does not depend on monotonic counters, making the scheme safe across crash recovery and WAL replay scenarios.
+
 ### Field-Level Masking
 
 Mask sensitive data in transit:

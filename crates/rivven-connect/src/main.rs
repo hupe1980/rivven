@@ -901,7 +901,8 @@ async fn check_sink_config(_name: &str, sink: &config::SinkConfig) -> Result<Str
             let http_config: HttpWebhookConfig = serde_yaml::from_value(sink.config.clone())
                 .map_err(|e| anyhow::anyhow!("invalid config: {}", e))?;
 
-            let connector = HttpWebhookSink::new();
+            let connector = HttpWebhookSink::try_new()
+                .map_err(|e| anyhow::anyhow!("Failed to create HTTP client: {}", e))?;
             let check_result = connector
                 .check(&http_config)
                 .await

@@ -1,7 +1,9 @@
 use super::segment::{Segment, SegmentSyncPolicy};
 use crate::{Message, Result};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Maximum number of messages to return per read operation (F-030)
 const MAX_MESSAGES_PER_READ: usize = 10_000;
@@ -111,6 +113,15 @@ impl LogManager {
         segment.append(offset, message).await
     }
 
+    /// F-136 fix: Take the deferred sync handle from the active segment.
+    ///
+    /// Call this while still holding the write lock, then release the lock
+    /// and run `sync_data()` on the returned file descriptor. This allows
+    /// concurrent readers to proceed during the slow fdatasync syscall.
+    pub fn take_pending_sync(&self) -> Option<Arc<std::fs::File>> {
+        self.segments[self.active_segment_index].take_pending_sync()
+    }
+
     /// Batch append for high-throughput scenarios
     /// Splits batches across segment boundaries when needed
     pub async fn append_batch(&mut self, messages: Vec<(u64, Message)>) -> Result<Vec<u64>> {
@@ -119,7 +130,7 @@ impl LogManager {
         }
 
         let mut all_positions = Vec::with_capacity(messages.len());
-        let mut remaining = messages.as_slice();
+        let mut remaining = messages;
 
         while !remaining.is_empty() {
             let segment = &mut self.segments[self.active_segment_index];
@@ -160,9 +171,11 @@ impl LogManager {
                 }
             }
 
-            let (batch, rest) = remaining.split_at(split_at);
+            // Split without cloning: drain the batch portion, keep the rest
+            let rest = remaining.split_off(split_at);
+            let batch = remaining;
             let segment = &mut self.segments[self.active_segment_index];
-            let positions = segment.append_batch(batch.to_vec()).await?;
+            let positions = segment.append_batch(batch).await?;
             all_positions.extend(positions);
             remaining = rest;
         }
@@ -297,5 +310,121 @@ impl LogManager {
             }
         }
         Ok(None)
+    }
+
+    /// F-125 fix: Key-based log compaction for sealed (non-active) segments.
+    ///
+    /// Reads all messages from eligible segments, keeps only the latest value
+    /// per key (by highest offset), removes tombstones (empty value = deletion
+    /// marker), and rewrites compacted segments in-place.
+    ///
+    /// Only sealed segments (not the active segment) are compacted. The active
+    /// segment is left untouched to avoid interfering with concurrent appends.
+    ///
+    /// Returns the number of messages removed by compaction.
+    pub async fn compact(&mut self) -> Result<usize> {
+        // Need at least 2 segments (1 sealed + 1 active) to compact
+        if self.segments.len() <= 1 {
+            return Ok(0);
+        }
+
+        let sealed_count = self.segments.len() - 1; // exclude active segment
+        let mut total_removed = 0;
+
+        // Phase 1: Read all messages from sealed segments, build key→latest map
+        let mut key_latest: HashMap<Vec<u8>, (u64, usize)> = HashMap::new(); // key → (offset, segment_idx)
+        let mut all_messages: Vec<Vec<Message>> = Vec::with_capacity(sealed_count);
+
+        for seg_idx in 0..sealed_count {
+            let messages = self.segments[seg_idx]
+                .read(self.segments[seg_idx].base_offset(), usize::MAX)
+                .await?;
+            for msg in &messages {
+                if let Some(key) = &msg.key {
+                    let key_bytes = key.to_vec();
+                    // Later offsets always win (higher offset = more recent)
+                    match key_latest.get(&key_bytes) {
+                        Some(&(existing_offset, _)) if existing_offset >= msg.offset => {}
+                        _ => {
+                            key_latest.insert(key_bytes, (msg.offset, seg_idx));
+                        }
+                    }
+                }
+            }
+            all_messages.push(messages);
+        }
+
+        // Phase 2: For each sealed segment, filter to keep only latest-keyed
+        // messages and non-tombstones, then rewrite if any messages were removed
+        for seg_idx in 0..sealed_count {
+            let messages = &all_messages[seg_idx];
+            let base_offset = self.segments[seg_idx].base_offset();
+
+            let compacted: Vec<&Message> = messages
+                .iter()
+                .filter(|msg| {
+                    match &msg.key {
+                        Some(key) => {
+                            let key_bytes = key.to_vec();
+                            // Keep if this is the latest value for this key
+                            if let Some(&(latest_offset, _)) = key_latest.get(&key_bytes) {
+                                if msg.offset != latest_offset {
+                                    return false; // superseded by later write
+                                }
+                                // Remove tombstones (empty value)
+                                if msg.value.is_empty() {
+                                    return false;
+                                }
+                                true
+                            } else {
+                                true // shouldn't happen, but keep
+                            }
+                        }
+                        None => true, // keyless messages are always kept
+                    }
+                })
+                .collect();
+
+            let removed = messages.len() - compacted.len();
+            if removed == 0 {
+                continue; // no compaction needed for this segment
+            }
+
+            total_removed += removed;
+
+            // Phase 3: Rewrite the segment — delete old files, create new segment,
+            // re-append the compacted messages
+            self.segments[seg_idx].delete_files()?;
+            let mut new_segment =
+                Segment::with_sync_policy(&self.dir, base_offset, self.sync_policy)?;
+
+            let batch: Vec<(u64, Message)> = compacted
+                .into_iter()
+                .map(|m| (m.offset, m.clone()))
+                .collect();
+
+            if !batch.is_empty() {
+                new_segment.append_batch(batch).await?;
+                new_segment.flush().await?;
+            }
+
+            self.segments[seg_idx] = new_segment;
+
+            tracing::debug!(
+                segment_base = base_offset,
+                removed,
+                "Compacted segment"
+            );
+        }
+
+        if total_removed > 0 {
+            tracing::info!(
+                removed = total_removed,
+                segments = sealed_count,
+                "Log compaction complete"
+            );
+        }
+
+        Ok(total_removed)
     }
 }

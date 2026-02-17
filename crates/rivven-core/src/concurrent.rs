@@ -269,11 +269,18 @@ impl Default for AppendLogConfig {
 
 /// A segment in the append-only log
 struct LogSegment {
-    /// Segment data — UnsafeCell for interior mutability (lock-free writes via CAS)
-    data: UnsafeCell<Vec<u8>>,
+    /// Segment data — raw pointer for lock-free access.
+    ///
+    /// We store a raw `*mut u8` + length instead of `UnsafeCell<Vec<u8>>` to avoid
+    /// creating `&mut Vec<u8>` / `&Vec<u8>` references that would violate Rust's
+    /// aliasing rules under concurrent read+write. All accesses go through raw
+    /// pointer arithmetic, which has no aliasing constraints.
+    data_ptr: *mut u8,
+    /// Owned allocation tracked for Drop
+    _data: Vec<u8>,
     /// Current write position
     write_pos: AtomicUsize,
-    /// Segment capacity (cached to avoid accessing data through UnsafeCell)
+    /// Segment capacity
     capacity: usize,
     /// Segment base offset
     base_offset: u64,
@@ -281,24 +288,23 @@ struct LogSegment {
     sealed: AtomicBool,
 }
 
-// SAFETY: All accesses to `data` are coordinated through atomic `write_pos`.
-// The CAS on write_pos guarantees exclusive write access to the reserved range.
-// Reads are bounded by write_pos (Acquire ordering) to prevent torn reads.
+// SAFETY: All accesses to the data buffer go through raw pointer arithmetic
+// coordinated by atomic `write_pos`. The CAS on write_pos guarantees exclusive
+// write access to each reserved byte range. Reads are bounded by write_pos
+// (Acquire ordering), ensuring all data before that position is fully written.
+// No `&mut` / `&` references to the buffer are ever created concurrently.
 unsafe impl Send for LogSegment {}
 unsafe impl Sync for LogSegment {}
 
 impl LogSegment {
-    fn new(base_offset: u64, capacity: usize, preallocate: bool) -> Self {
-        let data = if preallocate {
-            vec![0u8; capacity]
-        } else {
-            let v = vec![0; capacity];
-            v
-        };
+    fn new(base_offset: u64, capacity: usize, _preallocate: bool) -> Self {
+        let mut data = vec![0u8; capacity];
+        let data_ptr = data.as_mut_ptr();
 
         Self {
+            data_ptr,
+            _data: data,
             capacity,
-            data: UnsafeCell::new(data),
             write_pos: AtomicUsize::new(0),
             base_offset,
             sealed: AtomicBool::new(false),
@@ -333,13 +339,12 @@ impl LogSegment {
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    // Space reserved, write data
+                    // Space reserved, write data via raw pointer — no references created.
                     // SAFETY: The CAS above guarantees exclusive access to
-                    // [current_pos..new_pos]. The UnsafeCell provides interior
-                    // mutability. No other writer can touch this range.
+                    // [current_pos..new_pos]. No other writer can touch this range.
+                    // The buffer is pre-allocated to `capacity` bytes and never resized.
                     unsafe {
-                        let buf = &mut *self.data.get();
-                        let ptr = buf.as_mut_ptr();
+                        let ptr = self.data_ptr;
                         // Write length prefix (big-endian)
                         let len = data.len() as u32;
                         let len_bytes = len.to_be_bytes();
@@ -373,18 +378,24 @@ impl LogSegment {
         }
 
         // SAFETY: position..position+4 is within committed range,
-        // and all data up to committed has been fully written.
-        let buf = unsafe { &*self.data.get() };
+        // all data up to committed has been fully written, and we
+        // only create a shared slice over the committed (immutable) region.
+        // The raw pointer avoids creating `&Vec<u8>` which would alias
+        // with concurrent `try_append` writes to higher positions.
+        unsafe {
+            let ptr = self.data_ptr;
 
-        // Read length prefix
-        let len_bytes: [u8; 4] = buf[position..position + 4].try_into().ok()?;
-        let len = u32::from_be_bytes(len_bytes) as usize;
+            // Read length prefix
+            let mut len_bytes = [0u8; 4];
+            std::ptr::copy_nonoverlapping(ptr.add(position), len_bytes.as_mut_ptr(), 4);
+            let len = u32::from_be_bytes(len_bytes) as usize;
 
-        if position + 4 + len > committed {
-            return None;
+            if position + 4 + len > committed {
+                return None;
+            }
+
+            Some(std::slice::from_raw_parts(ptr.add(position + 4), len))
         }
-
-        Some(&buf[position + 4..position + 4 + len])
     }
 
     /// Get committed size

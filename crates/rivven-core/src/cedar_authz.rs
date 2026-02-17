@@ -131,6 +131,22 @@ mod cedar_impl {
     pub type CedarResult<T> = Result<T, CedarError>;
 
     // ============================================================================
+    // Helper: safe EntityUid construction (F-119 fix)
+    // ============================================================================
+
+    /// Create an `EntityUid` from type name and ID strings, mapping parse errors
+    /// to `CedarError::Entity` instead of panicking. This eliminates all
+    /// `.unwrap()` calls on user-supplied entity names (usernames, topic names,
+    /// group names) that could crash the authorization engine on malformed input.
+    fn make_entity_uid(type_name: &str, id: &str) -> CedarResult<EntityUid> {
+        let tn = EntityTypeName::from_str(type_name)
+            .map_err(|e| CedarError::Entity(format!("invalid entity type '{}': {}", type_name, e)))?;
+        let eid = EntityId::from_str(id)
+            .map_err(|e| CedarError::Entity(format!("invalid entity id '{}': {}", id, e)))?;
+        Ok(EntityUid::from_type_name_and_id(tn, eid))
+    }
+
+    // ============================================================================
     // Rivven Actions
     // ============================================================================
 
@@ -177,11 +193,8 @@ mod cedar_impl {
             }
         }
 
-        fn to_entity_uid(self) -> EntityUid {
-            EntityUid::from_type_name_and_id(
-                EntityTypeName::from_str("Rivven::Action").unwrap(),
-                EntityId::from_str(self.as_str()).unwrap(),
-            )
+        fn to_entity_uid(self) -> CedarResult<EntityUid> {
+            make_entity_uid("Rivven::Action", self.as_str())
         }
     }
 
@@ -218,11 +231,8 @@ mod cedar_impl {
             }
         }
 
-        fn to_entity_uid(&self) -> EntityUid {
-            EntityUid::from_type_name_and_id(
-                EntityTypeName::from_str(self.type_name()).unwrap(),
-                EntityId::from_str(self.id()).unwrap(),
-            )
+        fn to_entity_uid(&self) -> CedarResult<EntityUid> {
+            make_entity_uid(self.type_name(), self.id())
         }
     }
 
@@ -651,21 +661,13 @@ mod cedar_impl {
             groups: &[&str],
             is_service_account: bool,
         ) -> CedarResult<()> {
-            let uid = EntityUid::from_type_name_and_id(
-                EntityTypeName::from_str("Rivven::User").unwrap(),
-                EntityId::from_str(username).unwrap(),
-            );
+            let uid = make_entity_uid("Rivven::User", username)?;
 
             // Build parent groups
             let parents: HashSet<EntityUid> = groups
                 .iter()
-                .map(|g| {
-                    EntityUid::from_type_name_and_id(
-                        EntityTypeName::from_str("Rivven::Group").unwrap(),
-                        EntityId::from_str(g).unwrap(),
-                    )
-                })
-                .collect();
+                .map(|g| make_entity_uid("Rivven::Group", g))
+                .collect::<CedarResult<_>>()?;
 
             // Build attributes
             let mut attrs = HashMap::new();
@@ -701,20 +703,12 @@ mod cedar_impl {
 
         /// Add a group entity
         pub fn add_group(&self, name: &str, parent_groups: &[&str]) -> CedarResult<()> {
-            let uid = EntityUid::from_type_name_and_id(
-                EntityTypeName::from_str("Rivven::Group").unwrap(),
-                EntityId::from_str(name).unwrap(),
-            );
+            let uid = make_entity_uid("Rivven::Group", name)?;
 
             let parents: HashSet<EntityUid> = parent_groups
                 .iter()
-                .map(|g| {
-                    EntityUid::from_type_name_and_id(
-                        EntityTypeName::from_str("Rivven::Group").unwrap(),
-                        EntityId::from_str(g).unwrap(),
-                    )
-                })
-                .collect();
+                .map(|g| make_entity_uid("Rivven::Group", g))
+                .collect::<CedarResult<_>>()?;
 
             let entity = Entity::new_no_attrs(uid, parents);
 
@@ -733,10 +727,7 @@ mod cedar_impl {
             replication_factor: i64,
             retention_ms: i64,
         ) -> CedarResult<()> {
-            let uid = EntityUid::from_type_name_and_id(
-                EntityTypeName::from_str("Rivven::Topic").unwrap(),
-                EntityId::from_str(name).unwrap(),
-            );
+            let uid = make_entity_uid("Rivven::Topic", name)?;
 
             let mut attrs = HashMap::new();
             attrs.insert(
@@ -745,10 +736,7 @@ mod cedar_impl {
             );
 
             if let Some(o) = owner {
-                let owner_uid = EntityUid::from_type_name_and_id(
-                    EntityTypeName::from_str("Rivven::User").unwrap(),
-                    EntityId::from_str(o).unwrap(),
-                );
+                let owner_uid = make_entity_uid("Rivven::User", o)?;
                 attrs.insert(
                     "owner".to_string(),
                     cedar_policy::RestrictedExpression::new_entity_uid(owner_uid),
@@ -779,10 +767,7 @@ mod cedar_impl {
 
         /// Add a consumer group entity
         pub fn add_consumer_group(&self, name: &str) -> CedarResult<()> {
-            let uid = EntityUid::from_type_name_and_id(
-                EntityTypeName::from_str("Rivven::ConsumerGroup").unwrap(),
-                EntityId::from_str(name).unwrap(),
-            );
+            let uid = make_entity_uid("Rivven::ConsumerGroup", name)?;
 
             let mut attrs = HashMap::new();
             attrs.insert(
@@ -801,10 +786,7 @@ mod cedar_impl {
 
         /// Add a schema entity
         pub fn add_schema(&self, name: &str, version: i64) -> CedarResult<()> {
-            let uid = EntityUid::from_type_name_and_id(
-                EntityTypeName::from_str("Rivven::Schema").unwrap(),
-                EntityId::from_str(name).unwrap(),
-            );
+            let uid = make_entity_uid("Rivven::Schema", name)?;
 
             let mut attrs = HashMap::new();
             attrs.insert(
@@ -833,13 +815,10 @@ mod cedar_impl {
             resource: &RivvenResource,
             context: &AuthzContext,
         ) -> CedarResult<AuthzDecision> {
-            let principal_uid = EntityUid::from_type_name_and_id(
-                EntityTypeName::from_str("Rivven::User").unwrap(),
-                EntityId::from_str(principal).unwrap(),
-            );
+            let principal_uid = make_entity_uid("Rivven::User", principal)?;
 
-            let action_uid = action.to_entity_uid();
-            let resource_uid = resource.to_entity_uid();
+            let action_uid = action.to_entity_uid()?;
+            let resource_uid = resource.to_entity_uid()?;
             let cedar_context = context.to_cedar_context()?;
 
             let request = Request::new(
@@ -965,8 +944,20 @@ permit(
     }
 
     impl Default for CedarAuthorizer {
+        /// F-117 fix: logs error and returns a deny-all authorizer instead of panicking.
+        ///
+        /// On schema-parse failure, falls back to a schema-less authorizer with
+        /// empty policies (deny-all). This avoids re-calling the same failing
+        /// constructor and eliminates the panic path.
         fn default() -> Self {
-            Self::new().expect("Failed to create default authorizer")
+            match Self::new() {
+                Ok(authorizer) => authorizer,
+                Err(e) => {
+                    tracing::error!("Failed to create default Cedar authorizer: {}. Using deny-all fallback.", e);
+                    // Use new_without_schema() — cannot fail, avoids re-calling new().
+                    Self::new_without_schema()
+                }
+            }
         }
     }
 

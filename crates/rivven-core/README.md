@@ -131,6 +131,18 @@ Batch append — 2 allocations for N messages:
   Single BytesMut ◀── accumulates all framed records
 ```
 
+### Batch Append (Zero-Clone Ownership Transfer)
+
+`LogManager::append_batch()` uses `split_off()` to partition batches across segment
+boundaries without cloning `Message` structs — eliminates per-message `String`/`Vec<u8>`
+header allocations that occurred with the prior `to_vec()` approach.
+
+### Read Path (Dirty-Flag Lock Elision)
+
+Segment reads check an atomic `write_dirty` flag before acquiring the write mutex.
+When no writes are pending (common case for consumer-heavy workloads), the read path
+bypasses the mutex entirely — eliminating head-of-line blocking behind concurrent appends.
+
 ### Zero-Copy Buffers
 
 Cache-line aligned (64-byte) buffers eliminate unnecessary memory copies:
@@ -145,14 +157,16 @@ let mut buffer = ZeroCopyBuffer::new(64 * 1024); // 64 KB
 let slice = buffer.write_slice(1024);
 slice.copy_from_slice(&data);
 
-// Transfer ownership to consumer (zero-copy)
+// Transfer ownership to consumer (true zero-copy via Bytes::from_owner())
 let consumer_view = buffer.freeze();
 ```
 
 **Performance Impact:**
+- **True zero-copy** `freeze()` via `Bytes::from_owner()` — no `memcpy` on buffer conversion
 - **4x reduction** in memory bandwidth for large messages
 - **Cache-friendly** access patterns with 64-byte alignment
 - **Reference counting** for safe shared access
+- **Bounded pool** with `max_buffers` limit to prevent unbounded memory growth
 
 ### Lock-Free Data Structures
 
@@ -374,6 +388,10 @@ committed.await?;  // Wait for fsync
 ```
 
 **Group Commit Performance:**
+
+- **Zero-alloc serialization**: `WalRecord::write_to_buf()` serializes directly into the shared batch buffer — no per-record `BytesMut` intermediate allocation
+- **Buffer shrink**: Batch buffer re-allocates to default capacity after burst traffic when oversized (>2x max)
+- **CRC-validated recovery**: Both `find_actual_end()` and `scan_wal_file()` validate CRC32 for every record
 
 | Batch Size | fsync/sec | Throughput |
 |:-----------|:----------|:-----------|

@@ -37,7 +37,8 @@ impl StorageBackend for MemoryStorage {
         offset: u64,
         data: &[u8],
     ) -> crate::Result<()> {
-        let mut guard = self.data.write().unwrap();
+        // F-119 fix: recover from poisoned lock instead of panicking
+        let mut guard = self.data.write().unwrap_or_else(|e| e.into_inner());
         guard
             .entry((topic.to_string(), partition))
             .or_default()
@@ -52,7 +53,8 @@ impl StorageBackend for MemoryStorage {
         start_offset: u64,
         max_messages: usize,
     ) -> crate::Result<Vec<(u64, Vec<u8>)>> {
-        let guard = self.data.read().unwrap();
+        // F-119 fix: recover from poisoned lock instead of panicking
+        let guard = self.data.read().unwrap_or_else(|e| e.into_inner());
         let key = (topic.to_string(), partition);
         match guard.get(&key) {
             Some(offsets) => Ok(offsets
@@ -65,7 +67,8 @@ impl StorageBackend for MemoryStorage {
     }
 
     fn trim(&self, topic: &str, partition: u32, before_offset: u64) -> crate::Result<()> {
-        let mut guard = self.data.write().unwrap();
+        // F-119 fix: recover from poisoned lock instead of panicking
+        let mut guard = self.data.write().unwrap_or_else(|e| e.into_inner());
         let key = (topic.to_string(), partition);
         if let Some(offsets) = guard.get_mut(&key) {
             let to_remove: Vec<u64> = offsets

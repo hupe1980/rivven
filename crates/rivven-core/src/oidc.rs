@@ -388,16 +388,18 @@ mod oidc_impl {
     }
 
     impl OidcAuthenticator {
-        /// Create a new authenticator with no providers
-        pub fn new() -> Self {
-            Self {
+        /// Create a new authenticator with no providers (F-117 fix: returns Result)
+        pub fn new() -> Result<Self> {
+            let http_client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .map_err(|e| Error::Other(format!("Failed to create OIDC HTTP client: {}", e)))?;
+
+            Ok(Self {
                 providers: HashMap::new(),
                 jwks_cache: RwLock::new(HashMap::new()),
-                http_client: reqwest::Client::builder()
-                    .timeout(Duration::from_secs(10))
-                    .build()
-                    .expect("Failed to create HTTP client"),
-            }
+                http_client,
+            })
         }
 
         /// Add a provider
@@ -711,7 +713,14 @@ mod oidc_impl {
 
     impl Default for OidcAuthenticator {
         fn default() -> Self {
-            Self::new()
+            Self::new().unwrap_or_else(|e| {
+                tracing::error!("OIDC authenticator default creation failed: {}. Using no-op.", e);
+                Self {
+                    providers: HashMap::new(),
+                    jwks_cache: RwLock::new(HashMap::new()),
+                    http_client: reqwest::Client::new(),
+                }
+            })
         }
     }
 

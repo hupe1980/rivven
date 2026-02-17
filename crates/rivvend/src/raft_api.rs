@@ -21,6 +21,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use anyhow::Context;
 use openraft::BasicNode;
 use rivven_cluster::{
     hash_node_id, ClusterCoordinator, MetadataCommand, MetadataResponse, RaftNode, RaftTypeConfig,
@@ -122,49 +123,50 @@ impl RaftApiState {
     pub fn new(
         raft_node: Arc<RwLock<RaftNode>>,
         coordinator: Option<Arc<RwLock<ClusterCoordinator>>>,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         Self::with_tls(raft_node, coordinator, &TlsConfig::default())
     }
 
-    /// Create new RaftApiState with optional TLS support
+    /// Create new RaftApiState with optional TLS support (F-117 fix: returns Result)
     pub fn with_tls(
         raft_node: Arc<RwLock<RaftNode>>,
         coordinator: Option<Arc<RwLock<ClusterCoordinator>>>,
         tls_config: &TlsConfig,
-    ) -> Self {
+    ) -> anyhow::Result<Self> {
         let http_client = if tls_config.enabled {
             if let Some(ca_path) = tls_config.ca_path.as_ref() {
                 // Build client with custom CA for verifying server certificates
-                let ca_cert = std::fs::read(ca_path).expect("Failed to read CA certificate");
+                let ca_cert = std::fs::read(ca_path)
+                    .with_context(|| format!("Failed to read CA certificate {:?}", ca_path))?;
                 let ca_cert = reqwest::Certificate::from_pem(&ca_cert)
-                    .expect("Failed to parse CA certificate");
+                    .context("Failed to parse CA certificate")?;
 
                 reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(10))
                     .add_root_certificate(ca_cert)
                     .build()
-                    .expect("Failed to create TLS HTTP client")
+                    .context("Failed to create TLS HTTP client")?
             } else {
                 // TLS enabled but no CA specified - use system roots
                 reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(10))
                     .build()
-                    .expect("Failed to create TLS HTTP client")
+                    .context("Failed to create TLS HTTP client")?
             }
         } else {
             reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(10))
                 .build()
-                .expect("Failed to create HTTP client")
+                .context("Failed to create HTTP client")?
         };
 
-        Self {
+        Ok(Self {
             raft_node,
             coordinator,
             http_client,
             node_addresses: Arc::new(RwLock::new(std::collections::HashMap::new())),
             cluster_auth_token: None,
-        }
+        })
     }
 
     /// Set the cluster authentication token. When set, all `/api/v1/*` and
@@ -1487,7 +1489,9 @@ pub async fn start_raft_api_server_with_dashboard(
         // deploy a reverse proxy with appropriate CORS headers.
         let cors = CorsLayer::new()
             .allow_origin(tower_http::cors::AllowOrigin::exact(
-                format!("http://{}", bind_addr).parse().unwrap(),
+                format!("http://{}", bind_addr)
+                    .parse()
+                    .expect("bind_addr must be a valid socket address for CORS origin"),
             ))
             .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
             .allow_headers([

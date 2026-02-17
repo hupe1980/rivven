@@ -204,22 +204,25 @@ impl TaskAssigner {
 
     /// Assign a singleton task (leader election)
     fn assign_singleton_task(&mut self, task: &mut ConnectorTask) -> AssignmentDecision {
-        // Ensure singleton state exists
-        if !self.singletons.contains_key(&task.connector) {
-            self.singletons.insert(
-                task.connector.clone(),
-                SingletonState::new(task.connector.clone()),
-            );
-        }
+        // Ensure singleton state exists — entry() avoids the contains_key + insert race
+        self.singletons
+            .entry(task.connector.clone())
+            .or_insert_with(|| SingletonState::new(task.connector.clone()));
 
         // First, gather information we need
         let connector = task.connector.clone();
         let task_assigned_node = task.assigned_node.clone();
         let task_id = task.id.clone();
 
+        // F-119 fix: Replace all `.get().unwrap()` with `get/get_mut` and defensive
+        // early-return. The entry is guaranteed by the `entry().or_insert_with()` above,
+        // but we avoid `.unwrap()` to prevent cascading panics if invariants break.
+
         // Check current leader status
         let leader_status = {
-            let state = self.singletons.get(&connector).unwrap();
+            let Some(state) = self.singletons.get(&connector) else {
+                return AssignmentDecision::Unassign;
+            };
             if let Some(leader) = &state.leader {
                 if let Some(load) = self.node_loads.get(leader) {
                     if load.is_healthy {
@@ -248,7 +251,9 @@ impl TaskAssigner {
             }
             Some((old_leader, false)) => {
                 // Leader unhealthy - trigger failover
-                let state = self.singletons.get_mut(&connector).unwrap();
+                let Some(state) = self.singletons.get_mut(&connector) else {
+                    return AssignmentDecision::Unassign;
+                };
                 if let Some(new_leader) = state.start_failover() {
                     self.assignments.insert(task_id, new_leader.clone());
                     return AssignmentDecision::Reassign {
@@ -275,14 +280,18 @@ impl TaskAssigner {
 
         // Get standbys
         let standbys: Vec<NodeId> = {
-            let state = self.singletons.get(&connector).unwrap();
+            let Some(state) = self.singletons.get(&connector) else {
+                return AssignmentDecision::Unassign;
+            };
             state.standbys.clone()
         };
 
         // Prefer nodes in standby list first
         for standby in standbys {
             if healthy.contains(&standby) {
-                let state = self.singletons.get_mut(&connector).unwrap();
+                let Some(state) = self.singletons.get_mut(&connector) else {
+                    return AssignmentDecision::Unassign;
+                };
                 state.set_leader(standby.clone());
                 self.assignments.insert(task_id, standby.clone());
                 return AssignmentDecision::Assign(standby);
@@ -291,7 +300,9 @@ impl TaskAssigner {
 
         // Otherwise pick the least loaded healthy node
         if let Some(node) = self.least_loaded_node() {
-            let state = self.singletons.get_mut(&connector).unwrap();
+            let Some(state) = self.singletons.get_mut(&connector) else {
+                return AssignmentDecision::Unassign;
+            };
             state.set_leader(node.clone());
             self.assignments.insert(task_id, node.clone());
             return AssignmentDecision::Assign(node);

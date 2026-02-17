@@ -1,5 +1,6 @@
 use crate::storage::TieredStorage;
-use crate::{Config, Error, Message, Partition, Result};
+use crate::topic_config::CleanupPolicy;
+use crate::{Config, Error, Message, Partition, Result, TopicConfigManager};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -112,6 +113,22 @@ impl Topic {
             partition.flush().await?;
         }
         Ok(())
+    }
+
+    /// Run log compaction on all partitions.
+    ///
+    /// For each partition, keeps only the latest message per key and removes
+    /// tombstone records (empty value). Only sealed (non-active) segments are
+    /// compacted; the currently active segment is left untouched.
+    ///
+    /// Returns the total number of messages removed across all partitions.
+    pub async fn compact(&self) -> Result<usize> {
+        let partitions = self.partitions.read().clone();
+        let mut total_removed = 0;
+        for partition in &partitions {
+            total_removed += partition.compact().await?;
+        }
+        Ok(total_removed)
     }
 
     /// Find the first offset with timestamp >= target_timestamp (milliseconds since epoch)
@@ -351,7 +368,9 @@ impl TopicManager {
 
         // Save discovered topics to metadata file for faster recovery next time
         if recovered > 0 {
-            let _ = self.persist_metadata().await;
+            if let Err(e) = self.persist_metadata().await {
+                warn!("Failed to persist topic metadata after recovery: {}", e);
+            }
         }
 
         Ok(recovered)
@@ -424,7 +443,9 @@ impl TopicManager {
         drop(topics); // Release lock before persistence
 
         // Persist metadata asynchronously
-        let _ = self.persist_metadata().await;
+        if let Err(e) = self.persist_metadata().await {
+            warn!("Failed to persist topic metadata after create_topic: {}", e);
+        }
 
         Ok(topic)
     }
@@ -461,7 +482,9 @@ impl TopicManager {
         drop(topics); // Release lock before persistence
 
         // Persist metadata asynchronously
-        let _ = self.persist_metadata().await;
+        if let Err(e) = self.persist_metadata().await {
+            warn!("Failed to persist topic metadata after get_or_create_topic: {}", e);
+        }
 
         Ok(topic)
     }
@@ -483,7 +506,9 @@ impl TopicManager {
         info!("Deleted topic '{}'", name);
 
         // Update persisted metadata
-        let _ = self.persist_metadata().await;
+        if let Err(e) = self.persist_metadata().await {
+            warn!("Failed to persist topic metadata after delete_topic: {}", e);
+        }
 
         Ok(())
     }
@@ -496,6 +521,51 @@ impl TopicManager {
             topic.flush().await?;
         }
         Ok(())
+    }
+
+    /// Run log compaction on topics whose cleanup policy includes compaction.
+    ///
+    /// Iterates all topics, checks the policy via `topic_config_manager`, and
+    /// compacts partitions where the policy is `Compact` or `CompactDelete`.
+    /// Returns the total number of messages removed across all eligible topics.
+    pub async fn compact_topics(
+        &self,
+        topic_config_manager: &TopicConfigManager,
+    ) -> Result<usize> {
+        let topics = self.topics.read().await;
+        let mut total_removed = 0usize;
+
+        for (name, topic) in topics.iter() {
+            let config = topic_config_manager.get_or_default(name);
+            match config.cleanup_policy {
+                CleanupPolicy::Compact | CleanupPolicy::CompactDelete => {
+                    match topic.compact().await {
+                        Ok(removed) => {
+                            if removed > 0 {
+                                info!(
+                                    topic = %name,
+                                    removed,
+                                    "Log compaction completed"
+                                );
+                            }
+                            total_removed += removed;
+                        }
+                        Err(e) => {
+                            warn!(
+                                topic = %name,
+                                error = %e,
+                                "Log compaction failed"
+                            );
+                        }
+                    }
+                }
+                CleanupPolicy::Delete => {
+                    // Delete-only policy — no compaction needed
+                }
+            }
+        }
+
+        Ok(total_removed)
     }
 
     /// Add partitions to an existing topic.
@@ -519,7 +589,9 @@ impl TopicManager {
             .await?;
 
         // Update persisted metadata
-        let _ = self.persist_metadata().await;
+        if let Err(e) = self.persist_metadata().await {
+            warn!("Failed to persist topic metadata after add_partitions: {}", e);
+        }
 
         Ok(added)
     }

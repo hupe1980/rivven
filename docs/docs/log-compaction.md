@@ -59,6 +59,26 @@ Log compaction is a **retention mechanism** that keeps the latest record for eac
 
 ---
 
+## Background Compaction Worker
+
+The server runs a background compaction worker that automatically compacts eligible topics:
+
+- **Interval**: Every 5 minutes (with a 60-second initial delay after startup)
+- **Eligibility**: Only topics with `cleanup.policy` set to `compact` or `compact,delete`
+- **Scope**: Compacts only sealed (non-active) segments; the active segment is never compacted
+- **Shutdown**: Worker responds to the server's shutdown signal for graceful termination
+
+The compaction process for each segment:
+
+1. **Key scan**: Reads all messages from sealed segments, building a map of key → latest offset
+2. **Dedup**: For each segment, filters to keep only the latest-keyed messages
+3. **Tombstone removal**: Messages with empty values (deletion markers) are removed
+4. **Segment rewrite**: If compaction removed any messages, the old segment is deleted and a new segment with only the surviving messages is created
+
+Compaction is safe under concurrent reads — the partition write lock is held only during segment rewriting, and deferred fsync ensures the lock is released before `fdatasync`.
+
+---
+
 ## Configuration
 
 ### Enable Compaction
