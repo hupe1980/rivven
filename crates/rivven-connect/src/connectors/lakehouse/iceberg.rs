@@ -1253,7 +1253,7 @@ impl IcebergSink {
     }
 
     /// Create default Iceberg schema for events
-    fn create_default_schema(&self) -> IcebergSchema {
+    fn create_default_schema(&self) -> std::result::Result<IcebergSchema, ConnectorError> {
         use iceberg::spec::{NestedField, PrimitiveType, Type};
 
         IcebergSchema::builder()
@@ -1266,7 +1266,9 @@ impl IcebergSink {
                 NestedField::optional(4, "stream", Type::Primitive(PrimitiveType::String)).into(),
             ])
             .build()
-            .expect("Failed to build default schema")
+            .map_err(|e| {
+                ConnectorError::config(format!("Failed to build default Iceberg schema: {}", e))
+            })
     }
 
     /// Ensure table exists, creating if necessary
@@ -1332,7 +1334,7 @@ impl IcebergSink {
 
         // Create table with default schema
         info!("Creating table {}.{}", config.namespace, config.table);
-        let schema = self.create_default_schema();
+        let schema = self.create_default_schema()?;
 
         let creation = TableCreation::builder()
             .name(config.table.clone())
@@ -1916,8 +1918,8 @@ impl SinkFactory for IcebergSinkFactory {
         IcebergSink::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySink> {
-        Box::new(IcebergSink::new())
+    fn create(&self) -> Result<Box<dyn AnySink>> {
+        Ok(Box::new(IcebergSink::new()))
     }
 }
 

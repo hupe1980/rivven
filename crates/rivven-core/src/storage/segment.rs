@@ -622,8 +622,9 @@ impl Segment {
             // without deserializing the full message. This avoids allocating/copying
             // key, value, and headers for messages below the target offset — a
             // significant win when seeking into large segments.
-            let (msg_offset, _rest) = postcard::take_from_bytes::<u64>(payload)
-                .map_err(|e| Error::Other(format!("offset decode at pos {}: {}", current_pos, e)))?;
+            let (msg_offset, _rest) = postcard::take_from_bytes::<u64>(payload).map_err(|e| {
+                Error::Other(format!("offset decode at pos {}: {}", current_pos, e))
+            })?;
 
             if msg_offset >= offset {
                 let msg = Message::from_bytes(payload)?;

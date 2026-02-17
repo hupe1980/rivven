@@ -36,8 +36,12 @@ impl OffsetManager {
     /// Create an offset manager that persists offsets to disk.
     ///
     /// Loads existing offsets from `<data_dir>/offsets.json` if the file exists.
-    pub fn with_persistence(data_dir: PathBuf) -> Self {
-        std::fs::create_dir_all(&data_dir).ok();
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the data directory cannot be created.
+    pub fn with_persistence(data_dir: PathBuf) -> std::io::Result<Self> {
+        std::fs::create_dir_all(&data_dir)?;
         let path = data_dir.join("offsets.json");
 
         let offsets = if path.exists() {
@@ -65,10 +69,10 @@ impl OffsetManager {
             HashMap::new()
         };
 
-        Self {
+        Ok(Self {
             offsets: Arc::new(RwLock::new(offsets)),
             data_dir: Some(data_dir),
-        }
+        })
     }
 
     /// Atomically checkpoint offsets to disk (if persistence is enabled).
@@ -233,14 +237,14 @@ mod tests {
 
         // Commit offsets
         {
-            let manager = OffsetManager::with_persistence(data_dir.clone());
+            let manager = OffsetManager::with_persistence(data_dir.clone()).unwrap();
             manager.commit_offset("grp1", "orders", 0, 42).await;
             manager.commit_offset("grp1", "orders", 1, 99).await;
             manager.commit_offset("grp2", "events", 0, 7).await;
         }
 
         // Reload from disk
-        let manager = OffsetManager::with_persistence(data_dir);
+        let manager = OffsetManager::with_persistence(data_dir).unwrap();
         assert_eq!(manager.get_offset("grp1", "orders", 0).await, Some(42));
         assert_eq!(manager.get_offset("grp1", "orders", 1).await, Some(99));
         assert_eq!(manager.get_offset("grp2", "events", 0).await, Some(7));
@@ -251,12 +255,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let data_dir = dir.path().to_path_buf();
 
-        let manager = OffsetManager::with_persistence(data_dir.clone());
+        let manager = OffsetManager::with_persistence(data_dir.clone()).unwrap();
         manager.commit_offset("grp1", "t", 0, 10).await;
         assert!(manager.delete_group("grp1").await);
 
         // Reload — should be gone
-        let manager2 = OffsetManager::with_persistence(data_dir);
+        let manager2 = OffsetManager::with_persistence(data_dir).unwrap();
         assert_eq!(manager2.get_offset("grp1", "t", 0).await, None);
     }
 }

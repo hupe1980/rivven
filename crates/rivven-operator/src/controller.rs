@@ -181,7 +181,7 @@ async fn apply_cluster(cluster: Arc<RivvenCluster>, ctx: Arc<ControllerContext>)
     let builder = ResourceBuilder::new(&cluster)?;
 
     // Apply ConfigMap
-    let configmap = builder.build_configmap();
+    let configmap = builder.build_configmap()?;
     apply_configmap(&ctx.client, &namespace, configmap).await?;
 
     // Apply headless service
@@ -284,7 +284,10 @@ async fn cleanup_cluster(
 /// Apply a ConfigMap using server-side apply
 async fn apply_configmap(client: &Client, namespace: &str, cm: ConfigMap) -> Result<()> {
     let api: Api<ConfigMap> = Api::namespaced(client.clone(), namespace);
-    let name = cm.metadata.name.as_ref().unwrap();
+    let name =
+        cm.metadata.name.as_ref().ok_or_else(|| {
+            OperatorError::InvalidConfig("ConfigMap missing metadata.name".into())
+        })?;
 
     debug!(name = %name, "Applying ConfigMap");
 
@@ -299,7 +302,11 @@ async fn apply_configmap(client: &Client, namespace: &str, cm: ConfigMap) -> Res
 /// Apply a Service using server-side apply
 async fn apply_service(client: &Client, namespace: &str, svc: Service) -> Result<()> {
     let api: Api<Service> = Api::namespaced(client.clone(), namespace);
-    let name = svc.metadata.name.as_ref().unwrap();
+    let name = svc
+        .metadata
+        .name
+        .as_ref()
+        .ok_or_else(|| OperatorError::InvalidConfig("Service missing metadata.name".into()))?;
 
     debug!(name = %name, "Applying Service");
 
@@ -318,7 +325,10 @@ async fn apply_statefulset(
     sts: StatefulSet,
 ) -> Result<Option<k8s_openapi::api::apps::v1::StatefulSetStatus>> {
     let api: Api<StatefulSet> = Api::namespaced(client.clone(), namespace);
-    let name = sts.metadata.name.as_ref().unwrap();
+    let name =
+        sts.metadata.name.as_ref().ok_or_else(|| {
+            OperatorError::InvalidConfig("StatefulSet missing metadata.name".into())
+        })?;
 
     debug!(name = %name, "Applying StatefulSet");
 
@@ -334,7 +344,11 @@ async fn apply_statefulset(
 /// Apply a PodDisruptionBudget using server-side apply
 async fn apply_pdb(client: &Client, namespace: &str, pdb: PodDisruptionBudget) -> Result<()> {
     let api: Api<PodDisruptionBudget> = Api::namespaced(client.clone(), namespace);
-    let name = pdb.metadata.name.as_ref().unwrap();
+    let name = pdb
+        .metadata
+        .name
+        .as_ref()
+        .ok_or_else(|| OperatorError::InvalidConfig("PDB missing metadata.name".into()))?;
 
     debug!(name = %name, "Applying PodDisruptionBudget");
 

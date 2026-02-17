@@ -38,7 +38,7 @@ async fn main() -> Result<()> {
     let config = ConnectionConfig::new("postgresql://user:pass@localhost/mydb");
     
     // Connect using the PostgreSQL factory
-    let factory = PostgresConnectionFactory;
+    let factory = PgConnectionFactory;
     let conn = factory.connect(&config).await?;
     
     // Execute queries
@@ -62,9 +62,9 @@ async fn main() -> Result<()> {
 ### PostgreSQL
 
 ```rust
-use rivven_rdbc::postgres::PostgresConnectionFactory;
+use rivven_rdbc::postgres::PgConnectionFactory;
 
-let factory = PostgresConnectionFactory;
+let factory = PgConnectionFactory;
 let conn = factory.connect(&config).await?;
 
 // PostgreSQL-specific features

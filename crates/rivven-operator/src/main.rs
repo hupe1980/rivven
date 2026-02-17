@@ -3,11 +3,15 @@
 //! This operator manages RivvenCluster custom resources in Kubernetes,
 //! automatically deploying and managing Rivven distributed streaming clusters.
 
+mod cluster_client;
+mod connect_controller;
 mod controller;
-#[allow(dead_code)] // CRD types are API types deserialized by Kubernetes, not constructed directly
+#[allow(dead_code)] // CRD spec types are used by K8s API schema/serde, not constructed in Rust
 mod crd;
 mod error;
 mod resources;
+mod schema_registry_controller;
+mod topic_controller;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -102,10 +106,62 @@ async fn main() -> Result<()> {
         Some(args.namespace)
     };
 
-    // Run the controller
-    controller::run_controller(client, namespace)
-        .await
-        .context("Controller failed")?;
+    // Run all controllers concurrently
+    let cluster_handle = tokio::spawn({
+        let client = client.clone();
+        let namespace = namespace.clone();
+        async move {
+            controller::run_controller(client, namespace)
+                .await
+                .context("RivvenCluster controller failed")
+        }
+    });
+
+    let connect_handle = tokio::spawn({
+        let client = client.clone();
+        let namespace = namespace.clone();
+        async move {
+            connect_controller::run_connect_controller(client, namespace)
+                .await
+                .context("RivvenConnect controller failed")
+        }
+    });
+
+    let topic_handle = tokio::spawn({
+        let client = client.clone();
+        let namespace = namespace.clone();
+        async move {
+            topic_controller::run_topic_controller(client, namespace)
+                .await
+                .context("RivvenTopic controller failed")
+        }
+    });
+
+    let schema_handle = tokio::spawn({
+        let client = client.clone();
+        let namespace = namespace.clone();
+        async move {
+            schema_registry_controller::run_schema_registry_controller(client, namespace)
+                .await
+                .context("RivvenSchemaRegistry controller failed")
+        }
+    });
+
+    // Wait for any controller to finish (they run forever, so this means one failed)
+    tokio::select! {
+        res = cluster_handle => {
+            res.context("Cluster controller task panicked")??;
+        }
+        res = connect_handle => {
+            res.context("Connect controller task panicked")??;
+        }
+        res = topic_handle => {
+            res.context("Topic controller task panicked")??;
+        }
+        res = schema_handle => {
+            res.context("Schema registry controller task panicked")??;
+        }
+    }
 
     Ok(())
 }
@@ -163,26 +219,45 @@ async fn start_health_server(addr: SocketAddr) -> Result<()> {
             let mut buf = [0; 1024];
             if socket.read(&mut buf).await.is_ok() {
                 let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
-                let _ = socket.write_all(response.as_bytes()).await;
+                if let Err(e) = socket.write_all(response.as_bytes()).await {
+                    tracing::debug!(error = %e, "Health check response write failed");
+                }
             }
         });
     }
 }
 
-/// Print the CRD YAML for installation
+/// Print all CRD YAMLs for installation
 fn print_crd() -> Result<()> {
     use kube::CustomResourceExt;
 
-    let crd = crd::RivvenCluster::crd();
-    let yaml = serde_yaml::to_string(&crd)?;
-    println!("{}", yaml);
+    let crds = [
+        crd::RivvenCluster::crd(),
+        crd::RivvenConnect::crd(),
+        crd::RivvenTopic::crd(),
+        crd::RivvenSchemaRegistry::crd(),
+    ];
+
+    for (i, crd) in crds.iter().enumerate() {
+        if i > 0 {
+            println!("---");
+        }
+        let yaml = serde_yaml::to_string(crd)?;
+        print!("{}", yaml);
+    }
 
     Ok(())
 }
 
 pub mod prelude {
     //! Re-exports for convenient usage
+    pub use crate::connect_controller::run_connect_controller;
     pub use crate::controller::run_controller;
-    pub use crate::crd::{RivvenCluster, RivvenClusterSpec, RivvenClusterStatus};
+    pub use crate::crd::{
+        RivvenCluster, RivvenClusterSpec, RivvenClusterStatus, RivvenConnect, RivvenConnectSpec,
+        RivvenConnectStatus, RivvenSchemaRegistry, RivvenTopic,
+    };
     pub use crate::error::{OperatorError, Result};
+    pub use crate::schema_registry_controller::run_schema_registry_controller;
+    pub use crate::topic_controller::run_topic_controller;
 }

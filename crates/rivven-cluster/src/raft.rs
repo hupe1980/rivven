@@ -401,7 +401,9 @@ impl NetworkFactory {
                 .tcp_keepalive(std::time::Duration::from_secs(30))
                 .tcp_nodelay(true) // Low latency
                 .build()
-                .map_err(|e| ClusterError::Network(format!("Failed to create HTTP client: {}", e)))?,
+                .map_err(|e| {
+                    ClusterError::Network(format!("Failed to create HTTP client: {}", e))
+                })?,
             format,
             compression: RaftCompressionConfig::default(),
         })
@@ -426,12 +428,6 @@ impl NetworkFactory {
     /// Remove a node
     pub async fn remove_node(&self, node_id: NodeId) {
         self.nodes.write().await.remove(&node_id);
-    }
-}
-
-impl Default for NetworkFactory {
-    fn default() -> Self {
-        Self::new().expect("Failed to create default HTTP client for Raft network")
     }
 }
 
@@ -989,8 +985,9 @@ impl RaftNode {
             .map_err(|e| ClusterError::RaftStorage(e.to_string()))?;
 
         let state_machine = StateMachine::new();
-        let network = NetworkFactory::new()
-            .map_err(|e| ClusterError::RaftStorage(format!("Failed to create network factory: {}", e)))?;
+        let network = NetworkFactory::new().map_err(|e| {
+            ClusterError::RaftStorage(format!("Failed to create network factory: {}", e))
+        })?;
         let node_id = hash_node_id(&config.node_id);
 
         info!(
@@ -1049,8 +1046,9 @@ impl RaftNode {
         let state_machine = StateMachine::new();
 
         // Create a new network factory for openraft (it takes ownership)
-        let network = NetworkFactory::new()
-            .map_err(|e| ClusterError::Network(format!("Failed to create network factory: {}", e)))?;
+        let network = NetworkFactory::new().map_err(|e| {
+            ClusterError::Network(format!("Failed to create network factory: {}", e))
+        })?;
         // Copy node addresses to the new network
         for (id, addr) in self.network.nodes.read().await.iter() {
             network.add_node(*id, addr.clone()).await;

@@ -354,11 +354,21 @@ impl RegistryMetrics {
 
     /// Decrement subject count
     pub fn dec_subjects_count(&self) {
-        let new_val = self
-            .subjects_count
-            .fetch_sub(1, Ordering::Relaxed)
-            .saturating_sub(1);
-        gauge!(format!("{}_subjects_count", self.config.prefix)).set(new_val as f64);
+        // Use CAS loop to prevent underflow wrapping
+        loop {
+            let current = self.subjects_count.load(Ordering::Relaxed);
+            if current == 0 {
+                return; // Already at zero, nothing to decrement
+            }
+            if self
+                .subjects_count
+                .compare_exchange_weak(current, current - 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                gauge!(format!("{}_subjects_count", self.config.prefix)).set((current - 1) as f64);
+                return;
+            }
+        }
     }
 
     /// Get current schemas count

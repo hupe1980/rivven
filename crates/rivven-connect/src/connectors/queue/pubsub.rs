@@ -2549,8 +2549,8 @@ impl SourceFactory for PubSubSourceFactory {
         PubSubSource::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySource> {
-        Box::new(PubSubSource::new())
+    fn create(&self) -> Result<Box<dyn AnySource>> {
+        Ok(Box::new(PubSubSource::new()))
     }
 }
 
@@ -2592,8 +2592,8 @@ impl SinkFactory for PubSubSinkFactory {
         PubSubSink::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySink> {
-        Box::new(PubSubSink::new())
+    fn create(&self) -> Result<Box<dyn AnySink>> {
+        Ok(Box::new(PubSubSink::new()))
     }
 }
 

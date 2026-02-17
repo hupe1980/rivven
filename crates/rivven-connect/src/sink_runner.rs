@@ -38,26 +38,26 @@ pub struct SinkRunner {
     sink_registry: Arc<SinkRegistry>,
 }
 
-// Methods for health monitoring - reserved for future integration with health.rs
-#[allow(dead_code)]
+// Methods for health monitoring
+#[allow(dead_code)] // Wired into health endpoint in future
 impl SinkRunner {
     /// Get current status
-    pub async fn status(&self) -> ConnectorStatus {
+    pub(crate) async fn status(&self) -> ConnectorStatus {
         *self.status.read().await
     }
 
     /// Get events written count
-    pub fn events_written(&self) -> u64 {
+    pub(crate) fn events_written(&self) -> u64 {
         self.events_written.load(Ordering::Relaxed)
     }
 
     /// Get error count
-    pub fn errors_count(&self) -> u64 {
+    pub(crate) fn errors_count(&self) -> u64 {
         self.errors_count.load(Ordering::Relaxed)
     }
 
     /// Get rate limiter statistics
-    pub fn rate_limiter_stats(&self) -> RateLimiterStats {
+    pub(crate) fn rate_limiter_stats(&self) -> RateLimiterStats {
         self.rate_limiter.stats()
     }
 }
@@ -267,7 +267,13 @@ impl SinkRunner {
                         );
                         match self.broker.get_offset_bounds(topic, 0).await {
                             Ok((_earliest, latest)) => Ok(latest),
-                            Err(_) => Ok(0),
+                            Err(e) => {
+                                warn!(
+                                    "Sink '{}': Failed to get offset bounds for topic '{}': {}. Starting from 0.",
+                                    self.name, topic, e
+                                );
+                                Ok(0)
+                            }
                         }
                     }
                     Err(e) => {
@@ -342,8 +348,10 @@ impl SinkRunner {
             true
         }
 
-        let legacy_config: LegacyStdoutConfig =
-            serde_yaml::from_value(self.config.config.clone()).unwrap_or_default();
+        let legacy_config: LegacyStdoutConfig = serde_yaml::from_value(self.config.config.clone())
+            .map_err(|e| {
+                ConnectError::Config(format!("Failed to parse stdout sink config: {}", e))
+            })?;
 
         // Convert to SDK config
         let sdk_config = StdoutSinkConfig {
@@ -630,7 +638,9 @@ impl SinkRunner {
                             .load(std::sync::atomic::Ordering::Relaxed)
                             .is_multiple_of(1000)
                         {
-                            let _ = self.commit_all_offsets().await;
+                            if let Err(e) = self.commit_all_offsets().await {
+                                warn!("Sink '{}': periodic offset commit failed: {}", self.name, e);
+                            }
                         }
                     }
                     Ok(_) => {} // No messages
@@ -655,7 +665,7 @@ impl SinkRunner {
         use super::prelude::*;
         use futures::StreamExt;
 
-        let sink = factory.create();
+        let sink = factory.create()?;
 
         // Check connectivity first
         let check = sink.check_raw(&self.config.config).await?;

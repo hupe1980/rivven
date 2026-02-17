@@ -489,19 +489,6 @@ impl HotTier {
         }
     }
 
-    /// Evict least recently used segment (front of the map)
-    #[allow(dead_code)]
-    async fn evict_one(&self) -> bool {
-        let mut entries = self.entries.lock().await;
-        if let Some((_key, data)) = entries.shift_remove_index(0) {
-            self.current_size
-                .fetch_sub(data.len() as u64, Ordering::Relaxed);
-            true
-        } else {
-            false
-        }
-    }
-
     /// Get current usage statistics
     pub fn stats(&self) -> HotTierStats {
         HotTierStats {
@@ -1697,7 +1684,8 @@ impl TieredStorage {
                                     partition,
                                     base_offset,
                                     to_tier: StorageTier::Hot,
-                                }).await;
+                                })
+                                .await;
                             }
                         }
 
@@ -1717,7 +1705,8 @@ impl TieredStorage {
                                         partition,
                                         base_offset,
                                         to_tier: StorageTier::Warm,
-                                    }).await;
+                                    })
+                                    .await;
                                 }
                             }
 
@@ -1772,7 +1761,8 @@ impl TieredStorage {
                 partition,
                 base_offset,
                 from_tier: StorageTier::Hot,
-            }).await;
+            })
+            .await;
         }
 
         Ok(())
@@ -1807,9 +1797,13 @@ impl TieredStorage {
             loop {
                 tokio::select! {
                     Some(task) = rx.recv() => {
-                        // SAFETY: acquire_owned only fails if semaphore is closed, which never
-                        // happens since we own the Arc<Semaphore> in this function scope.
-                        let permit = semaphore.clone().acquire_owned().await.expect("semaphore closed unexpectedly");
+                        let permit = match semaphore.clone().acquire_owned().await {
+                            Ok(p) => p,
+                            Err(_) => {
+                                tracing::warn!("Migration semaphore closed, skipping task");
+                                return;
+                            }
+                        };
                         let storage = self.clone();
 
                         // F-103 fix: Journal the migration before execution
@@ -1907,7 +1901,8 @@ impl TieredStorage {
                 partition,
                 base_offset,
                 from_tier: StorageTier::Hot,
-            }).await;
+            })
+            .await;
         }
 
         // Check warm tier for demotions to cold
@@ -1919,7 +1914,8 @@ impl TieredStorage {
                 partition,
                 base_offset,
                 from_tier: StorageTier::Warm,
-            }).await;
+            })
+            .await;
         }
 
         // Check for compaction candidates
@@ -1938,7 +1934,8 @@ impl TieredStorage {
                 topic,
                 partition,
                 base_offset,
-            }).await;
+            })
+            .await;
         }
 
         Ok(())

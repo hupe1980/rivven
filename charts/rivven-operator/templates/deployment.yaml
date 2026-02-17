@@ -7,6 +7,12 @@ metadata:
     {{- include "rivven-operator.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       {{- include "rivven-operator.selectorLabels" . | nindent 6 }}
@@ -27,12 +33,13 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "rivven-operator.serviceAccountName" . }}
+      automountServiceAccountToken: true
       {{- with .Values.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.priorityClassName }}
-      priorityClassName: {{ . }}
+      priorityClassName: {{ . | quote }}
       {{- end }}
       containers:
         - name: operator
@@ -44,6 +51,8 @@ spec:
             {{- end }}
             - --metrics-addr={{ .Values.operator.metricsAddr }}
             - --health-addr={{ .Values.operator.healthAddr }}
+            - --reconcile-interval={{ .Values.operator.reconcileInterval }}
+            - --max-concurrent-reconciles={{ .Values.operator.maxConcurrentReconciles }}
           env:
             - name: WATCH_NAMESPACE
               value: {{ .Values.operator.watchNamespace | quote }}
@@ -54,10 +63,10 @@ spec:
             {{- end }}
           ports:
             - name: metrics
-              containerPort: 8080
+              containerPort: {{ (split ":" .Values.operator.metricsAddr)._1 | default "8080" | int }}
               protocol: TCP
             - name: health
-              containerPort: 8081
+              containerPort: {{ (split ":" .Values.operator.healthAddr)._1 | default "8081" | int }}
               protocol: TCP
           {{- with .Values.livenessProbe }}
           livenessProbe:
@@ -65,6 +74,10 @@ spec:
           {{- end }}
           {{- with .Values.readinessProbe }}
           readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.startupProbe }}
+          startupProbe:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           {{- with .Values.resources }}
@@ -99,4 +112,4 @@ spec:
       topologySpreadConstraints:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      terminationGracePeriodSeconds: 10
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds | default 30 }}

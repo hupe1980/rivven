@@ -81,7 +81,24 @@ fn validate_env_vars(vars: &[k8s_openapi::api::core::v1::EnvVar]) -> Result<(), 
                 .with_message("environment variable name must be 1-256 characters".into()));
         }
         // Check for dangerous env var names that could override security settings
-        let forbidden_prefixes = ["LD_", "DYLD_", "PATH", "HOME", "USER"];
+        let forbidden_names = [
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "DYLD_INSERT_LIBRARIES",
+            "DYLD_LIBRARY_PATH",
+        ];
+        let forbidden_prefixes = ["LD_AUDIT"];
+        for name in forbidden_names {
+            if var.name == name && var.value.is_some() {
+                return Err(ValidationError::new("forbidden_env_var").with_message(
+                    format!(
+                        "environment variable '{}' is not allowed for security",
+                        var.name
+                    )
+                    .into(),
+                ));
+            }
+        }
         for prefix in forbidden_prefixes {
             if var.name.starts_with(prefix) && var.value.is_some() {
                 return Err(ValidationError::new("forbidden_env_var").with_message(
@@ -918,23 +935,19 @@ impl RivvenClusterSpec {
 // ============================================================================
 // RivvenConnect CRD - Connector Framework for Rivven
 // ============================================================================
-// Note: The RivvenConnect CRD is defined here but the controller is not yet
-// implemented. The #[allow(dead_code)] attributes are temporary until the
-// connect_controller module is added.
 
 /// RivvenConnect custom resource for managing connectors
 ///
 /// This CRD allows declarative management of Rivven Connect pipelines,
 /// including source connectors (CDC, HTTP, etc.) and sink connectors
 /// (S3, stdout, HTTP webhooks, etc.).
-#[allow(dead_code)]
 #[derive(CustomResource, Debug, Clone, Deserialize, Serialize, JsonSchema, Validate)]
 #[kube(
     group = "rivven.hupe1980.github.io",
     version = "v1alpha1",
     kind = "RivvenConnect",
     plural = "rivvenconnects",
-    shortname = "rc",
+    shortname = "rcon",
     namespaced,
     status = "RivvenConnectStatus",
     printcolumn = r#"{"name":"Cluster","type":"string","jsonPath":".spec.clusterRef.name"}"#,
@@ -1045,7 +1058,6 @@ pub struct RivvenConnectSpec {
 }
 
 /// Reference to a RivvenCluster
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct ClusterReference {
@@ -1094,7 +1106,6 @@ pub struct ClusterReference {
 /// ```
 // Note: These types are defined for CRD generation and future controller use.
 // They are intentionally not yet constructed - the controller will use them.
-#[allow(dead_code)]
 #[derive(CustomResource, Debug, Clone, Deserialize, Serialize, JsonSchema, Validate)]
 #[kube(
     group = "rivven.hupe1980.github.io",
@@ -1158,18 +1169,15 @@ pub struct RivvenTopicSpec {
     pub topic_labels: BTreeMap<String, String>,
 }
 
-#[allow(dead_code)]
 fn default_rivven_topic_partitions() -> i32 {
     3
 }
 
-#[allow(dead_code)]
 fn default_rivven_topic_replication() -> i32 {
     1
 }
 
 /// Topic configuration parameters
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct TopicConfig {
@@ -1238,42 +1246,34 @@ pub struct TopicConfig {
     pub custom: BTreeMap<String, String>,
 }
 
-#[allow(dead_code)]
 fn default_topic_retention_ms() -> i64 {
     604800000 // 7 days
 }
 
-#[allow(dead_code)]
 fn default_topic_retention_bytes() -> i64 {
     -1 // unlimited
 }
 
-#[allow(dead_code)]
 fn default_topic_segment_bytes() -> i64 {
     1073741824 // 1GB
 }
 
-#[allow(dead_code)]
 fn default_topic_cleanup_policy() -> String {
     "delete".to_string()
 }
 
-#[allow(dead_code)]
 fn default_topic_compression() -> String {
     "lz4".to_string()
 }
 
-#[allow(dead_code)]
 fn default_topic_min_isr() -> i32 {
     1
 }
 
-#[allow(dead_code)]
 fn default_topic_timestamp_type() -> String {
     "CreateTime".to_string()
 }
 
-#[allow(dead_code)]
 fn validate_topic_retention_bytes(value: i64) -> Result<(), ValidationError> {
     if value == -1 || (1048576..=10995116277760).contains(&value) {
         Ok(())
@@ -1283,7 +1283,6 @@ fn validate_topic_retention_bytes(value: i64) -> Result<(), ValidationError> {
     }
 }
 
-#[allow(dead_code)]
 fn validate_topic_cleanup_policy(policy: &str) -> Result<(), ValidationError> {
     match policy {
         "delete" | "compact" | "delete,compact" | "compact,delete" => Ok(()),
@@ -1293,7 +1292,6 @@ fn validate_topic_cleanup_policy(policy: &str) -> Result<(), ValidationError> {
     }
 }
 
-#[allow(dead_code)]
 fn validate_topic_compression(compression: &str) -> Result<(), ValidationError> {
     match compression {
         "none" | "gzip" | "snappy" | "lz4" | "zstd" | "producer" => Ok(()),
@@ -1302,7 +1300,6 @@ fn validate_topic_compression(compression: &str) -> Result<(), ValidationError> 
     }
 }
 
-#[allow(dead_code)]
 fn validate_topic_timestamp_type(ts_type: &str) -> Result<(), ValidationError> {
     match ts_type {
         "CreateTime" | "LogAppendTime" => Ok(()),
@@ -1311,7 +1308,6 @@ fn validate_topic_timestamp_type(ts_type: &str) -> Result<(), ValidationError> {
     }
 }
 
-#[allow(dead_code)]
 fn validate_topic_custom_config(config: &BTreeMap<String, String>) -> Result<(), ValidationError> {
     if config.len() > 50 {
         return Err(ValidationError::new("too_many_custom_configs")
@@ -1343,7 +1339,6 @@ fn validate_topic_custom_config(config: &BTreeMap<String, String>) -> Result<(),
 }
 
 /// Topic ACL entry
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct TopicAcl {
@@ -1368,17 +1363,14 @@ pub struct TopicAcl {
     pub host: String,
 }
 
-#[allow(dead_code)]
 fn default_permission_type() -> String {
     "Allow".to_string()
 }
 
-#[allow(dead_code)]
 fn default_acl_host() -> String {
     "*".to_string()
 }
 
-#[allow(dead_code)]
 fn validate_principal(principal: &str) -> Result<(), ValidationError> {
     if principal == "*" {
         return Ok(());
@@ -1421,7 +1413,6 @@ fn validate_operations(ops: &[String]) -> Result<(), ValidationError> {
     Ok(())
 }
 
-#[allow(dead_code)]
 fn validate_permission_type(perm: &str) -> Result<(), ValidationError> {
     match perm {
         "Allow" | "Deny" => Ok(()),
@@ -1430,7 +1421,6 @@ fn validate_permission_type(perm: &str) -> Result<(), ValidationError> {
     }
 }
 
-#[allow(dead_code)]
 fn validate_topic_acls(acls: &[TopicAcl]) -> Result<(), ValidationError> {
     // Check for duplicate principal+operation combinations
     let mut seen = std::collections::HashSet::new();
@@ -1447,7 +1437,6 @@ fn validate_topic_acls(acls: &[TopicAcl]) -> Result<(), ValidationError> {
 }
 
 /// Status of the RivvenTopic resource
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RivvenTopicStatus {
@@ -1489,7 +1478,6 @@ pub struct RivvenTopicStatus {
 }
 
 /// Condition for tracking topic status
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TopicCondition {
@@ -1510,7 +1498,6 @@ pub struct TopicCondition {
 }
 
 /// Information about a topic partition
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PartitionInfo {
@@ -1528,7 +1515,6 @@ pub struct PartitionInfo {
 }
 
 /// Global connect configuration
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectConfigSpec {
@@ -1542,17 +1528,14 @@ pub struct ConnectConfigSpec {
     pub log_level: String,
 }
 
-#[allow(dead_code)]
 fn default_state_dir() -> String {
     "/data/connect-state".to_string()
 }
 
-#[allow(dead_code)]
 fn default_log_level() -> String {
     "info".to_string()
 }
 
-#[allow(dead_code)]
 fn validate_log_level(level: &str) -> Result<(), ValidationError> {
     match level {
         "trace" | "debug" | "info" | "warn" | "error" => Ok(()),
@@ -1566,7 +1549,6 @@ fn validate_log_level(level: &str) -> Result<(), ValidationError> {
 /// All connector-specific configuration goes in the generic `config` field.
 /// Connector validation happens at runtime, not at CRD schema level.
 /// This design scales to 300+ connectors without CRD changes.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceConnectorSpec {
@@ -1613,7 +1595,6 @@ pub struct SourceConnectorSpec {
     pub topic_config: SourceTopicConfigSpec,
 }
 
-#[allow(dead_code)]
 fn validate_connector_type(connector: &str) -> Result<(), ValidationError> {
     // Allow standard connectors and custom ones (must be alphanumeric with hyphens)
     static CONNECTOR_REGEX: LazyLock<Regex> =
@@ -1626,7 +1607,6 @@ fn validate_connector_type(connector: &str) -> Result<(), ValidationError> {
 }
 
 /// Table specification for CDC sources
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct TableSpec {
@@ -1658,7 +1638,6 @@ pub struct TableSpec {
 }
 
 /// Source topic configuration
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceTopicConfigSpec {
@@ -1686,7 +1665,6 @@ pub struct SourceTopicConfigSpec {
 /// All connector-specific configuration goes in the generic `config` field.
 /// Connector validation happens at runtime, not at CRD schema level.
 /// This design scales to 300+ connectors without CRD changes.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct SinkConnectorSpec {
@@ -1739,12 +1717,10 @@ pub struct SinkConnectorSpec {
     pub rate_limit: RateLimitSpec,
 }
 
-#[allow(dead_code)]
 fn default_start_offset() -> String {
     "latest".to_string()
 }
 
-#[allow(dead_code)]
 fn validate_start_offset(offset: &str) -> Result<(), ValidationError> {
     match offset {
         "earliest" | "latest" => Ok(()),
@@ -1756,7 +1732,6 @@ fn validate_start_offset(offset: &str) -> Result<(), ValidationError> {
 }
 
 /// Rate limiting configuration for sinks
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct RateLimitSpec {
@@ -1776,7 +1751,6 @@ pub struct RateLimitSpec {
 }
 
 /// Global settings for all connectors
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct GlobalConnectSettings {
@@ -1802,7 +1776,6 @@ pub struct GlobalConnectSettings {
 }
 
 /// Topic settings for auto-creation
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct TopicSettingsSpec {
@@ -1829,12 +1802,10 @@ pub struct TopicSettingsSpec {
     pub require_topic_exists: bool,
 }
 
-#[allow(dead_code)]
 fn default_topic_partitions() -> i32 {
     1
 }
 
-#[allow(dead_code)]
 fn default_topic_replication() -> i32 {
     1
 }
@@ -1851,7 +1822,6 @@ impl Default for TopicSettingsSpec {
 }
 
 /// Retry configuration
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct RetryConfigSpec {
@@ -1879,22 +1849,18 @@ pub struct RetryConfigSpec {
     pub backoff_multiplier: f64,
 }
 
-#[allow(dead_code)]
 fn default_max_retries() -> i32 {
     10
 }
 
-#[allow(dead_code)]
 fn default_initial_backoff_ms() -> i64 {
     100
 }
 
-#[allow(dead_code)]
 fn default_max_backoff_ms() -> i64 {
     30000
 }
 
-#[allow(dead_code)]
 fn default_backoff_multiplier() -> f64 {
     2.0
 }
@@ -1911,7 +1877,6 @@ impl Default for RetryConfigSpec {
 }
 
 /// Health check configuration
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct HealthConfigSpec {
@@ -1929,12 +1894,10 @@ pub struct HealthConfigSpec {
     pub path: String,
 }
 
-#[allow(dead_code)]
 fn default_health_port() -> i32 {
     8080
 }
 
-#[allow(dead_code)]
 fn default_health_path() -> String {
     "/health".to_string()
 }
@@ -1950,7 +1913,6 @@ impl Default for HealthConfigSpec {
 }
 
 /// Metrics configuration for connect
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectMetricsSpec {
@@ -1964,7 +1926,6 @@ pub struct ConnectMetricsSpec {
     pub port: i32,
 }
 
-#[allow(dead_code)]
 fn default_connect_metrics_port() -> i32 {
     9091
 }
@@ -1979,7 +1940,6 @@ impl Default for ConnectMetricsSpec {
 }
 
 /// TLS configuration for connect broker connection
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectTlsSpec {
@@ -2006,13 +1966,11 @@ pub struct ConnectTlsSpec {
     pub insecure: bool,
 }
 
-#[allow(dead_code)]
 fn default_connect_replicas() -> i32 {
     1
 }
 
 /// Status of a RivvenConnect resource
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RivvenConnectStatus {
@@ -2056,7 +2014,6 @@ pub struct RivvenConnectStatus {
 }
 
 /// Phase of the connect lifecycle
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub enum ConnectPhase {
     /// Connect is being created
@@ -2075,7 +2032,6 @@ pub enum ConnectPhase {
 }
 
 /// Condition describing an aspect of connect state
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectCondition {
@@ -2097,7 +2053,6 @@ pub struct ConnectCondition {
 }
 
 /// Status of an individual connector
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectorStatus {
@@ -2123,7 +2078,6 @@ pub struct ConnectorStatus {
     pub last_success_time: Option<String>,
 }
 
-#[allow(dead_code)]
 impl RivvenConnectSpec {
     /// Get the full container image including version
     pub fn get_image(&self) -> String {

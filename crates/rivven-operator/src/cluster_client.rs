@@ -18,6 +18,7 @@ const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Information about a topic in the Rivven cluster
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Returned by ensure_topic; callers may not read all fields
 pub struct TopicInfo {
     /// Topic name
     pub name: String,
@@ -52,10 +53,12 @@ impl Default for ClusterClientConfig {
 }
 
 /// Client for interacting with a Rivven cluster
+#[allow(dead_code)] // Public API methods used by future controllers
 pub struct ClusterClient {
     config: ClusterClientConfig,
 }
 
+#[allow(dead_code)] // Public API — some methods not yet called by controllers
 impl ClusterClient {
     /// Create a new cluster client with default configuration
     pub fn new() -> Self {
@@ -69,7 +72,7 @@ impl ClusterClient {
         Self { config }
     }
 
-    /// Connect to one of the broker endpoints
+    /// Connect to one of the broker endpoints with retry
     async fn connect(&self, endpoints: &[String]) -> Result<Client> {
         if endpoints.is_empty() {
             return Err(OperatorError::ClusterNotFound(
@@ -79,21 +82,31 @@ impl ClusterClient {
 
         let mut last_error = None;
 
-        for endpoint in endpoints {
-            debug!(endpoint = %endpoint, "Attempting to connect to broker");
+        for attempt in 0..=self.config.max_retries {
+            if attempt > 0 {
+                debug!(
+                    attempt = attempt,
+                    "Retrying broker connection after backoff"
+                );
+                tokio::time::sleep(self.config.retry_backoff).await;
+            }
 
-            match timeout(self.config.connection_timeout, Client::connect(endpoint)).await {
-                Ok(Ok(client)) => {
-                    info!(endpoint = %endpoint, "Successfully connected to broker");
-                    return Ok(client);
-                }
-                Ok(Err(e)) => {
-                    warn!(endpoint = %endpoint, error = %e, "Failed to connect to broker");
-                    last_error = Some(e.to_string());
-                }
-                Err(_) => {
-                    warn!(endpoint = %endpoint, "Connection to broker timed out");
-                    last_error = Some("Connection timed out".to_string());
+            for endpoint in endpoints {
+                debug!(endpoint = %endpoint, attempt = attempt, "Attempting to connect to broker");
+
+                match timeout(self.config.connection_timeout, Client::connect(endpoint)).await {
+                    Ok(Ok(client)) => {
+                        info!(endpoint = %endpoint, "Successfully connected to broker");
+                        return Ok(client);
+                    }
+                    Ok(Err(e)) => {
+                        warn!(endpoint = %endpoint, error = %e, "Failed to connect to broker");
+                        last_error = Some(e.to_string());
+                    }
+                    Err(_) => {
+                        warn!(endpoint = %endpoint, "Connection to broker timed out");
+                        last_error = Some("Connection timed out".to_string());
+                    }
                 }
             }
         }

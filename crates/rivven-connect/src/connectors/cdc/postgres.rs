@@ -1158,8 +1158,8 @@ impl SourceFactory for PostgresCdcSourceFactory {
         PostgresCdcSource::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySource> {
-        Box::new(PostgresCdcSourceWrapper(PostgresCdcSource::new()))
+    fn create(&self) -> Result<Box<dyn AnySource>> {
+        Ok(Box::new(PostgresCdcSourceWrapper(PostgresCdcSource::new())))
     }
 }
 

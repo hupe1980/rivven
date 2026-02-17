@@ -597,8 +597,8 @@ impl SinkFactory for ObjectStorageSinkFactory {
         ObjectStorageSink::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySink> {
-        Box::new(ObjectStorageSink::new())
+    fn create(&self) -> Result<Box<dyn AnySink>> {
+        Ok(Box::new(ObjectStorageSink::new()))
     }
 }
 
@@ -717,7 +717,7 @@ local:
         let factory = ObjectStorageSinkFactory;
         let spec = factory.spec();
         assert_eq!(spec.connector_type, "object-storage");
-        let _sink = factory.create();
+        let _sink = factory.create().unwrap();
     }
 
     #[tokio::test]

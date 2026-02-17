@@ -545,7 +545,7 @@ impl QuicTransport {
         let mut server_config = ServerConfig::with_crypto(Arc::new(server_crypto));
 
         // Configure transport parameters
-        let transport_config = Self::build_transport_config(&config);
+        let transport_config = Self::build_transport_config(&config)?;
         server_config.transport_config(Arc::new(transport_config));
 
         // Build client config
@@ -699,14 +699,14 @@ impl QuicTransport {
         ));
 
         // Apply transport config
-        let transport = Self::build_transport_config(config);
+        let transport = Self::build_transport_config(config)?;
         client_config.transport_config(Arc::new(transport));
 
         Ok(client_config)
     }
 
     /// Build Quinn transport configuration
-    fn build_transport_config(config: &QuicConfig) -> QuinnTransportConfig {
+    fn build_transport_config(config: &QuicConfig) -> Result<QuinnTransportConfig> {
         let mut transport = QuinnTransportConfig::default();
 
         transport.max_concurrent_bidi_streams(VarInt::from_u32(config.max_concurrent_streams));
@@ -714,7 +714,11 @@ impl QuicTransport {
         transport.stream_receive_window(VarInt::from_u32(config.stream_receive_window));
         transport.receive_window(VarInt::from_u32(config.connection_receive_window));
         transport.keep_alive_interval(Some(config.keep_alive_interval));
-        transport.max_idle_timeout(Some(config.idle_timeout.try_into().unwrap()));
+
+        let idle_timeout = config.idle_timeout.try_into().map_err(|e| {
+            ClusterError::InvalidConfig(format!("idle_timeout too large for QUIC: {}", e))
+        })?;
+        transport.max_idle_timeout(Some(idle_timeout));
 
         // Congestion control
         if config.use_bbr {
@@ -723,7 +727,7 @@ impl QuicTransport {
             transport.congestion_controller_factory(Arc::new(congestion::CubicConfig::default()));
         }
 
-        transport
+        Ok(transport)
     }
 
     /// Set the request handler for incoming messages

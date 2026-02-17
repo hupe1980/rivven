@@ -788,8 +788,8 @@ impl SinkFactory for RdbcSinkFactory {
         RdbcSink::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySink> {
-        Box::new(RdbcSinkWrapper(RdbcSink::new()))
+    fn create(&self) -> Result<Box<dyn AnySink>> {
+        Ok(Box::new(RdbcSinkWrapper(RdbcSink::new())))
     }
 }
 

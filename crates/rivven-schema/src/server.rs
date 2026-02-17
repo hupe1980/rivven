@@ -14,8 +14,8 @@ use crate::compatibility::CompatibilityLevel;
 use crate::error::SchemaError;
 use crate::registry::SchemaRegistry;
 use crate::types::{
-    SchemaContext, SchemaId, SchemaType, SchemaVersion, Subject, ValidationLevel, ValidationRule,
-    ValidationRuleType, VersionState,
+    SchemaContext, SchemaId, SchemaReference, SchemaType, SchemaVersion, Subject, ValidationLevel,
+    ValidationRule, ValidationRuleType, VersionState,
 };
 use axum::{
     extract::{Path, Query, State},
@@ -370,13 +370,6 @@ struct RegisterSchemaRequest {
     references: Vec<SchemaReference>,
 }
 
-#[derive(Deserialize, Serialize)]
-struct SchemaReference {
-    name: String,
-    subject: String,
-    version: u32,
-}
-
 #[derive(Serialize)]
 struct RegisterSchemaResponse {
     id: u32,
@@ -455,7 +448,7 @@ struct QueryParams {
 async fn root_handler() -> Json<RootResponse> {
     Json(RootResponse {
         version: env!("CARGO_PKG_VERSION"),
-        commit: "unknown",
+        commit: option_env!("GIT_HASH").unwrap_or("dev"),
     })
 }
 
@@ -501,15 +494,7 @@ async fn get_schema_by_id(
             Json(SchemaResponse {
                 schema: schema.schema,
                 schema_type: schema.schema_type.to_string(),
-                references: schema
-                    .references
-                    .into_iter()
-                    .map(|r| SchemaReference {
-                        name: r.name,
-                        subject: r.subject,
-                        version: r.version,
-                    })
-                    .collect(),
+                references: schema.references,
             })
         })
         .map_err(schema_error_response)
@@ -659,22 +644,16 @@ async fn register_schema(
         .as_deref()
         .unwrap_or("AVRO")
         .parse::<SchemaType>()
-        .unwrap_or(SchemaType::Avro);
-
-    // Convert API references to internal type
-    let references: Vec<crate::types::SchemaReference> = req
-        .references
-        .into_iter()
-        .map(|r| crate::types::SchemaReference {
-            name: r.name,
-            subject: r.subject,
-            version: r.version,
-        })
-        .collect();
+        .map_err(|_| {
+            schema_error_response(crate::SchemaError::InvalidInput(format!(
+                "Invalid schema type: {}",
+                req.schema_type.as_deref().unwrap_or("AVRO")
+            )))
+        })?;
 
     state
         .registry
-        .register_with_references(subject.as_str(), schema_type, &req.schema, references)
+        .register_with_references(subject.as_str(), schema_type, &req.schema, req.references)
         .await
         .map(|id| Json(RegisterSchemaResponse { id: id.0 }))
         .map_err(schema_error_response)
@@ -692,7 +671,16 @@ async fn get_subject_version(
             .map_err(schema_error_response)?
             .version
     } else {
-        SchemaVersion::new(version.parse().unwrap_or(0))
+        let v: u32 = version.parse().map_err(|_| {
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ErrorResponse {
+                    error_code: 42202,
+                    message: format!("Invalid version: '{}'", version),
+                }),
+            )
+        })?;
+        SchemaVersion::new(v)
     };
 
     state
@@ -753,7 +741,12 @@ async fn get_referenced_by(
             .map_err(schema_error_response)?;
         versions.into_iter().max().unwrap_or(1)
     } else {
-        version.parse().unwrap_or(1)
+        version.parse().map_err(|_| {
+            schema_error_response(crate::SchemaError::InvalidInput(format!(
+                "Invalid version: {}",
+                version
+            )))
+        })?
     };
 
     state
@@ -774,12 +767,22 @@ async fn check_compatibility(
         .as_deref()
         .unwrap_or("AVRO")
         .parse::<SchemaType>()
-        .unwrap_or(SchemaType::Avro);
+        .map_err(|_| {
+            schema_error_response(crate::SchemaError::InvalidInput(format!(
+                "Invalid schema type: {}",
+                req.schema_type.as_deref().unwrap_or("AVRO")
+            )))
+        })?;
 
     let version = if version == "latest" {
         None
     } else {
-        Some(SchemaVersion::new(version.parse().unwrap_or(0)))
+        Some(SchemaVersion::new(version.parse().map_err(|_| {
+            schema_error_response(crate::SchemaError::InvalidInput(format!(
+                "Invalid version: {}",
+                version
+            )))
+        })?))
     };
 
     state
@@ -1019,7 +1022,12 @@ async fn validate_schema(
         .as_deref()
         .unwrap_or("AVRO")
         .parse::<SchemaType>()
-        .unwrap_or(SchemaType::Avro);
+        .map_err(|_| {
+            schema_error_response(crate::SchemaError::InvalidInput(format!(
+                "Invalid schema type: {}",
+                req.schema_type.as_deref().unwrap_or("AVRO")
+            )))
+        })?;
 
     state
         .registry

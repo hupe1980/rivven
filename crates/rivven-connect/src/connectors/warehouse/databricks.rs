@@ -1029,8 +1029,8 @@ impl SinkFactory for DatabricksSinkFactory {
         DatabricksSink::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySink> {
-        Box::new(DatabricksSink::new())
+    fn create(&self) -> Result<Box<dyn AnySink>> {
+        Ok(Box::new(DatabricksSink::new()))
     }
 }
 
@@ -1084,7 +1084,7 @@ mod tests {
         let factory = DatabricksSinkFactory;
         let spec = factory.spec();
         assert_eq!(spec.connector_type, "databricks");
-        let _sink = factory.create();
+        let _sink = factory.create().unwrap();
     }
 
     #[test]

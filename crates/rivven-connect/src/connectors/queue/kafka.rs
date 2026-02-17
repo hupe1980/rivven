@@ -1664,8 +1664,8 @@ impl SourceFactory for KafkaSourceFactory {
         KafkaSource::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySource> {
-        Box::new(KafkaSource)
+    fn create(&self) -> Result<Box<dyn AnySource>> {
+        Ok(Box::new(KafkaSource))
     }
 }
 
@@ -1703,8 +1703,8 @@ impl SinkFactory for KafkaSinkFactory {
         KafkaSink::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySink> {
-        Box::new(KafkaSink)
+    fn create(&self) -> Result<Box<dyn AnySink>> {
+        Ok(Box::new(KafkaSink))
     }
 }
 

@@ -1006,12 +1006,6 @@ impl WalWriter {
         self.file.flush()?;
         self.file.get_ref().sync_all()
     }
-
-    /// Get the path of this WAL file
-    #[allow(dead_code)]
-    fn path(&self) -> &std::path::Path {
-        &self.path
-    }
 }
 
 /// WAL statistics

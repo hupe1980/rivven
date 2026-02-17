@@ -101,7 +101,7 @@ impl SchemaError {
             SchemaError::TypeMismatch { .. } => error_codes::INVALID_SCHEMA,
             SchemaError::AlreadyExists(_) => error_codes::INVALID_SCHEMA,
             SchemaError::Storage(_) => error_codes::STORAGE_ERROR,
-            SchemaError::Config(_) => error_codes::INVALID_COMPATIBILITY_LEVEL,
+            SchemaError::Config(_) => error_codes::INTERNAL_ERROR,
             SchemaError::Serialization(_) => error_codes::INTERNAL_ERROR,
             SchemaError::Io(_) => error_codes::INTERNAL_ERROR,
             SchemaError::Internal(_) => error_codes::INTERNAL_ERROR,
@@ -113,8 +113,9 @@ impl SchemaError {
         match self {
             SchemaError::NotFound(_)
             | SchemaError::SubjectNotFound(_)
-            | SchemaError::VersionNotFound { .. } => 404,
-            SchemaError::VersionDisabled { .. } => 403,
+            | SchemaError::VersionNotFound { .. }
+            | SchemaError::ReferenceNotFound { .. } => 404,
+            SchemaError::VersionDisabled { .. } => 422,
             SchemaError::InvalidSchema(_)
             | SchemaError::ParseError(_)
             | SchemaError::Validation(_)

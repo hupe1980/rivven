@@ -1407,8 +1407,8 @@ impl SinkFactory for PineconeSinkFactory {
         PineconeSink::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySink> {
-        Box::new(PineconeSink::new())
+    fn create(&self) -> Result<Box<dyn AnySink>> {
+        Ok(Box::new(PineconeSink::new()))
     }
 }
 
@@ -1474,7 +1474,7 @@ mod tests {
         let factory = PineconeSinkFactory;
         let spec = factory.spec();
         assert_eq!(spec.connector_type, "pinecone");
-        let _sink = factory.create();
+        let _sink = factory.create().unwrap();
     }
 
     #[test]

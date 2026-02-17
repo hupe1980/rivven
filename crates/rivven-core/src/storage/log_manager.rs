@@ -356,8 +356,7 @@ impl LogManager {
 
         // Phase 2: For each sealed segment, filter to keep only latest-keyed
         // messages and non-tombstones, then rewrite if any messages were removed
-        for seg_idx in 0..sealed_count {
-            let messages = &all_messages[seg_idx];
+        for (seg_idx, messages) in all_messages.iter().enumerate().take(sealed_count) {
             let base_offset = self.segments[seg_idx].base_offset();
 
             let compacted: Vec<&Message> = messages
@@ -410,11 +409,7 @@ impl LogManager {
 
             self.segments[seg_idx] = new_segment;
 
-            tracing::debug!(
-                segment_base = base_offset,
-                removed,
-                "Compacted segment"
-            );
+            tracing::debug!(segment_base = base_offset, removed, "Compacted segment");
         }
 
         if total_removed > 0 {

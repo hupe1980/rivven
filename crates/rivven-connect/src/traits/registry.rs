@@ -52,7 +52,7 @@ pub trait SourceFactory: Send + Sync {
     fn spec(&self) -> ConnectorSpec;
 
     /// Create a boxed source instance for runtime dispatch
-    fn create(&self) -> Box<dyn AnySource>;
+    fn create(&self) -> Result<Box<dyn AnySource>>;
 }
 
 /// Type-erased source for runtime dispatch
@@ -83,7 +83,7 @@ pub trait SinkFactory: Send + Sync {
     fn spec(&self) -> ConnectorSpec;
 
     /// Create a boxed sink instance for runtime dispatch
-    fn create(&self) -> Box<dyn AnySink>;
+    fn create(&self) -> Result<Box<dyn AnySink>>;
 }
 
 /// Type-erased sink for runtime dispatch

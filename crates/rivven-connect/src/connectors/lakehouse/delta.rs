@@ -1456,8 +1456,8 @@ impl SinkFactory for DeltaLakeSinkFactory {
         DeltaLakeSink::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySink> {
-        Box::new(DeltaLakeSink::new())
+    fn create(&self) -> Result<Box<dyn AnySink>> {
+        Ok(Box::new(DeltaLakeSink::new()))
     }
 }
 
@@ -1962,7 +1962,7 @@ mod tests {
         let spec = factory.spec();
         assert_eq!(spec.connector_type, "delta-lake");
 
-        let sink = factory.create();
+        let sink = factory.create().unwrap();
         // Just verify it creates without panic
         let _ = sink;
     }

@@ -197,8 +197,11 @@ pub enum OutputFormat {
 
 impl OutputFormat {
     /// Create a format writer for this output format with default configuration
-    pub fn create_writer(&self) -> Box<dyn FormatWriter> {
-        match self {
+    ///
+    /// # Errors
+    /// Returns an error if the format writer cannot be initialized (e.g., Avro schema setup fails).
+    pub fn create_writer(&self) -> crate::error::Result<Box<dyn FormatWriter>> {
+        Ok(match self {
             OutputFormat::Json => Box::new(JsonWriter::new(JsonWriterConfig {
                 format: JsonFormat::Json,
                 ..Default::default()
@@ -210,14 +213,16 @@ impl OutputFormat {
             #[cfg(feature = "parquet")]
             OutputFormat::Parquet => Box::new(ParquetWriter::new(ParquetWriterConfig::default())),
             OutputFormat::Avro => {
-                Box::new(AvroWriter::new(AvroWriterConfig::default()).expect("default Avro config"))
+                Box::new(AvroWriter::new(AvroWriterConfig::default()).map_err(|e| {
+                    crate::error::ConnectorError::config(format!("Avro writer init failed: {}", e))
+                })?)
             }
             OutputFormat::Csv => Box::new(CsvWriter::new(CsvWriterConfig::default())),
             OutputFormat::Tsv => Box::new(CsvWriter::new(CsvWriterConfig {
                 delimiter: CsvDelimiter::Tab,
                 ..Default::default()
             })),
-        }
+        })
     }
 
     /// Get the file extension for this format
@@ -257,25 +262,25 @@ mod tests {
         let events = vec![json!({"a": 1}), json!({"a": 2})];
 
         // Test JSON
-        let writer = OutputFormat::Json.create_writer();
+        let writer = OutputFormat::Json.create_writer().unwrap();
         assert_eq!(writer.name(), "json");
         let bytes = writer.write_batch(&events).unwrap();
         assert!(!bytes.is_empty());
 
         // Test JSONL
-        let writer = OutputFormat::Jsonl.create_writer();
+        let writer = OutputFormat::Jsonl.create_writer().unwrap();
         assert_eq!(writer.name(), "jsonl");
 
         // Test Avro
-        let writer = OutputFormat::Avro.create_writer();
+        let writer = OutputFormat::Avro.create_writer().unwrap();
         assert_eq!(writer.name(), "avro");
 
         // Test CSV
-        let writer = OutputFormat::Csv.create_writer();
+        let writer = OutputFormat::Csv.create_writer().unwrap();
         assert_eq!(writer.name(), "csv");
 
         // Test TSV
-        let writer = OutputFormat::Tsv.create_writer();
+        let writer = OutputFormat::Tsv.create_writer().unwrap();
         assert_eq!(writer.name(), "tsv");
     }
 

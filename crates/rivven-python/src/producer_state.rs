@@ -20,7 +20,7 @@ use tokio::sync::Mutex;
 ///     ... )
 ///
 ///     >>> # Transactional producing
-///     >>> producer_state = await client.init_producer_id(transactional_id="my-txn")
+///     >>> producer_state = await client.init_producer_id()
 ///     >>> await client.begin_transaction("my-txn", producer_state)
 ///     >>> await client.publish_idempotent("events", b"msg1", producer_state)
 ///     >>> await client.commit_transaction("my-txn", producer_state)

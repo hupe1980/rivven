@@ -86,6 +86,7 @@ sha2 = "0.10"
 md5 = "0.7"
 hex = "0.4"
 regex = "1"
+subtle = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

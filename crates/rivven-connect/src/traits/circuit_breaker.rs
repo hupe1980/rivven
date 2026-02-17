@@ -262,11 +262,6 @@ impl CircuitBreaker {
         }
     }
 
-    /// Legacy alias for [`allow_request`](Self::allow_request).
-    pub fn is_allowed(&self) -> bool {
-        self.allow_request()
-    }
-
     // -- Async wrapper -------------------------------------------------------
 
     /// Execute a fallible async function through the circuit breaker.

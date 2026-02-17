@@ -148,7 +148,6 @@ rivven-connect run --config rivven-connect.yaml
 | `sqlserver-cdc` | `sqlserver` | SQL Server Change Data Capture |
 | `rdbc-source` | `rdbc` | Query-based polling source (PostgreSQL, MySQL, SQL Server) |
 | `kafka-source` | `kafka` | Apache Kafka consumer (pure Rust, zero C deps) |
-| `external-queue` | `external-queue` | External message queue consumer |
 | `mqtt` | `mqtt` | MQTT broker subscriber (rumqttc, TLS, exponential backoff) |
 | `sqs` | `sqs` | AWS SQS queue consumer |
 | `pubsub` | `pubsub` | Google Cloud Pub/Sub subscriber |
@@ -162,7 +161,6 @@ rivven-connect run --config rivven-connect.yaml
 | `rdbc-sink` | `rdbc` | Batch database sink (PostgreSQL, MySQL, SQL Server) |
 | `kafka-sink` | `kafka` | Apache Kafka producer (pure Rust, zero C deps) |
 | `sqs-sink` | `sqs` | AWS SQS queue producer (batch sending, FIFO support) |
-| `external-queue` | `external-queue` | External message queue producer |
 | `object-storage` | `cloud-storage` | Unified object storage (S3, GCS, Azure, local) |
 | `s3` | `s3` | Amazon S3 / MinIO / R2 (via object-storage) |
 | `gcs` | `gcs` | Google Cloud Storage (via object-storage) |
@@ -474,7 +472,10 @@ rivven-connect = { version = "0.0.17", features = ["postgres", "s3"] }
 | `lakehouse-full` | iceberg, delta-lake |
 | `warehouse-full` | snowflake, bigquery, redshift, databricks, clickhouse |
 | `vectordb-full` | qdrant, pinecone, s3-vectors |
-| `full` | All connectors (including rdbc-full) |
+| `llm-openai` | LLM transforms via OpenAI |
+| `llm-bedrock` | LLM transforms via AWS Bedrock |
+| `llm-full` | llm-openai, llm-bedrock |
+| `full` | All connectors (including rdbc-full, llm-full) |
 
 ### Single Message Transforms (SMT)
 
@@ -500,6 +501,15 @@ No code required - fully configurable at deployment time.
 | `set_null` | Set fields to null conditionally |
 | `compute_field` | Compute new fields (concat, hash, etc.) |
 | `externalize_blob` | Store large blobs in object storage (S3/GCS/Azure/local) |
+
+#### LLM Transforms
+
+AI-powered transforms using the `rivven-llm` crate. Requires `llm-openai` or `llm-bedrock` feature gates.
+
+| Transform | Feature | Description |
+|-----------|---------|-------------|
+| `llm-chat` | `llm-openai` / `llm-bedrock` | Enrich events via LLM chat completions (summarization, classification, extraction) |
+| `llm-embedding` | `llm-openai` / `llm-bedrock` | Generate vector embeddings from text fields for similarity search |
 
 #### Predicates (Conditional Transforms)
 

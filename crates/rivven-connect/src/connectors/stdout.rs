@@ -305,8 +305,8 @@ impl SinkFactory for StdoutSinkFactory {
         StdoutSink::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySink> {
-        Box::new(StdoutSinkWrapper(StdoutSink::new()))
+    fn create(&self) -> Result<Box<dyn AnySink>> {
+        Ok(Box::new(StdoutSinkWrapper(StdoutSink::new())))
     }
 }
 

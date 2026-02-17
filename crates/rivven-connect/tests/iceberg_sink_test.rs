@@ -607,7 +607,7 @@ fn test_iceberg_factory() {
     let spec = factory.spec();
     assert_eq!(spec.connector_type, "iceberg");
 
-    let _sink = factory.create();
+    let _sink = factory.create().unwrap();
     // Successfully created sink
 }
 

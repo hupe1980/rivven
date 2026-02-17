@@ -359,16 +359,18 @@ impl ClusterCoordinator {
                 .into_iter()
                 .filter_map(|pid| {
                     meta.topics.get(&pid.topic).and_then(|t| {
-                        t.partition(pid.partition).map(|ps| {
-                            (pid, ps.isr.clone(), ps.leader_epoch)
-                        })
+                        t.partition(pid.partition)
+                            .map(|ps| (pid, ps.isr.clone(), ps.leader_epoch))
                     })
                 })
                 .collect()
         };
 
         if affected_partitions.is_empty() {
-            debug!(dead_node = dead_node_id, "Dead node had no leader partitions");
+            debug!(
+                dead_node = dead_node_id,
+                "Dead node had no leader partitions"
+            );
             return;
         }
 
@@ -383,10 +385,7 @@ impl ClusterCoordinator {
 
         for (partition_id, isr, leader_epoch) in affected_partitions {
             // Remove the dead node from ISR candidates
-            let mut candidates: Vec<_> = isr
-                .into_iter()
-                .filter(|n| n != dead_node_id)
-                .collect();
+            let mut candidates: Vec<_> = isr.into_iter().filter(|n| n != dead_node_id).collect();
             candidates.sort(); // Deterministic: smallest ISR member wins
 
             let Some(new_leader) = candidates.first().cloned() else {
@@ -428,9 +427,7 @@ impl ClusterCoordinator {
 
         info!(
             dead_node = dead_node_id,
-            reassigned,
-            failed,
-            "Partition reassignment complete"
+            reassigned, failed, "Partition reassignment complete"
         );
     }
 

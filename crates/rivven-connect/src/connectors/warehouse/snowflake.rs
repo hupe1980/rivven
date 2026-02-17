@@ -471,16 +471,6 @@ pub struct SnowflakeSink {
 
 #[cfg(feature = "snowflake")]
 impl SnowflakeSink {
-    /// Create a new Snowflake sink with default configuration.
-    ///
-    /// Uses a basic reqwest client without TLS configuration, which is
-    /// infallible in practice. For production use with custom config,
-    /// prefer `try_with_config()` which returns `Result`.
-    pub fn new() -> Self {
-        Self::try_with_config(&SnowflakeSinkConfig::default())
-            .expect("Failed to create default Snowflake HTTP client (no TLS)")
-    }
-
     /// Create a new Snowflake sink with custom timeout (F-117 fix: returns Result)
     pub fn try_with_timeout(timeout: Duration) -> std::result::Result<Self, reqwest::Error> {
         let client = reqwest::Client::builder()
@@ -503,7 +493,9 @@ impl SnowflakeSink {
     }
 
     /// Create a new Snowflake sink with full configuration (F-117 fix: returns Result)
-    pub fn try_with_config(config: &SnowflakeSinkConfig) -> std::result::Result<Self, reqwest::Error> {
+    pub fn try_with_config(
+        config: &SnowflakeSinkConfig,
+    ) -> std::result::Result<Self, reqwest::Error> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(config.request_timeout_secs))
             .pool_max_idle_per_host(10)
@@ -840,13 +832,6 @@ impl SnowflakeSink {
             }
         })
         .await
-    }
-}
-
-#[cfg(feature = "snowflake")]
-impl Default for SnowflakeSink {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -1190,8 +1175,12 @@ impl SinkFactory for SnowflakeSinkFactory {
         SnowflakeSink::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySink> {
-        Box::new(SnowflakeSink::new())
+    fn create(&self) -> Result<Box<dyn AnySink>> {
+        Ok(Box::new(
+            SnowflakeSink::try_with_config(&SnowflakeSinkConfig::default()).map_err(|e| {
+                ConnectError::config(format!("Failed to create Snowflake HTTP client: {}", e))
+            })?,
+        ))
     }
 }
 
@@ -1230,7 +1219,7 @@ mod tests {
         let factory = SnowflakeSinkFactory;
         let spec = factory.spec();
         assert_eq!(spec.connector_type, "snowflake");
-        let _sink = factory.create();
+        let _sink = factory.create().unwrap();
     }
 
     #[test]

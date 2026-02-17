@@ -604,8 +604,17 @@ impl ProtobufCodec {
         // Schema ID
         let schema_id = buf.get_u32();
 
-        // Message index (varint) - simplified: assuming single byte for index 0
-        let _msg_index = buf.get_u8();
+        // Message index array (Confluent wire format uses varint-encoded array).
+        // First varint = number of message indices, then that many varint indices.
+        // Index [0] (length=1, value=0) means root message; deeper indices for nested types.
+        let count = decode_varint(&mut buf).map_err(|e| {
+            ProtobufError::InvalidWireFormat(format!("Failed to decode message index count: {e}"))
+        })?;
+        for _ in 0..count {
+            let _index = decode_varint(&mut buf).map_err(|e| {
+                ProtobufError::InvalidWireFormat(format!("Failed to decode message index: {e}"))
+            })?;
+        }
 
         // Remaining is protobuf data
         let json = self.decode(buf)?;
@@ -928,6 +937,31 @@ impl ProtobufCompatibility {
 
         false
     }
+}
+
+/// Decode a protobuf-style unsigned varint from a `Buf`.
+/// Returns an error if the varint exceeds 10 bytes (u64 max) or the buffer is exhausted.
+fn decode_varint(buf: &mut &[u8]) -> Result<u64, std::io::Error> {
+    let mut value: u64 = 0;
+    let mut shift: u32 = 0;
+    for _ in 0..10 {
+        if !buf.has_remaining() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "varint truncated",
+            ));
+        }
+        let byte = buf.get_u8();
+        value |= u64::from(byte & 0x7F) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+        shift += 7;
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "varint too long",
+    ))
 }
 
 #[cfg(test)]

@@ -17,7 +17,7 @@ spec:
     # Allow Prometheus scraping
     - ports:
         - protocol: TCP
-          port: 8080
+          port: {{ (split ":" .Values.operator.metricsAddr)._1 | default "8080" | int }}
     {{- with .Values.networkPolicy.ingress }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

@@ -1603,8 +1603,8 @@ impl SinkFactory for S3VectorSinkFactory {
         S3VectorSink::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySink> {
-        Box::new(S3VectorSink::new())
+    fn create(&self) -> Result<Box<dyn AnySink>> {
+        Ok(Box::new(S3VectorSink::new()))
     }
 }
 
@@ -2823,7 +2823,7 @@ metadata_fields:
     #[test]
     fn test_factory_create() {
         let factory = S3VectorSinkFactory;
-        let _sink = factory.create();
+        let _sink = factory.create().unwrap();
         // Verify it returns a boxed sink without panicking
     }
 

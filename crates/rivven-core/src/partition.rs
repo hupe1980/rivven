@@ -306,8 +306,13 @@ impl Partition {
 
             // Collect data for tiered storage
             if self.tiered_storage.is_some() {
-                if let Ok(data) = message.to_bytes() {
-                    batch_data.extend_from_slice(&data);
+                match message.to_bytes() {
+                    Ok(data) => batch_data.extend_from_slice(&data),
+                    Err(e) => tracing::warn!(
+                        offset = offset,
+                        error = %e,
+                        "Failed to serialize message for tiered storage"
+                    ),
                 }
             }
 

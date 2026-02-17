@@ -43,7 +43,7 @@ use crate::types::{
 };
 use serde::Deserialize;
 use std::collections::HashMap;
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Configuration for the validation engine
 #[derive(Debug, Clone)]
@@ -218,9 +218,11 @@ impl ValidationEngine {
             ValidationRuleType::Regex => self.validate_regex(rule, schema),
             ValidationRuleType::JsonSchema => self.validate_json_schema(rule, schema),
             ValidationRuleType::Cel => {
-                // CEL expressions would require a CEL evaluator
-                warn!("CEL validation not yet implemented for rule: {}", rule.name);
-                Ok(ValidationResult::pass(&rule.name))
+                // CEL expressions require a CEL evaluator which is not yet available
+                Err(crate::error::SchemaError::Validation(format!(
+                    "CEL validation rule '{}' is not supported; remove it or use a supported rule type",
+                    rule.name
+                )))
             }
         }
     }
@@ -499,7 +501,7 @@ impl ValidationEngine {
         #[cfg(not(feature = "json-schema"))]
         {
             let _ = (rule, schema); // Suppress unused warnings
-            warn!("JSON Schema validation requires the 'json-schema' feature");
+            tracing::warn!("JSON Schema validation requires the 'json-schema' feature");
             Ok(ValidationResult::pass(&rule.name))
         }
     }

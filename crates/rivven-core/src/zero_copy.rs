@@ -196,10 +196,6 @@ impl ZeroCopyBuffer {
         true
     }
 
-    /// Compatibility shim — ref counting is now handled by `Arc`.
-    #[deprecated(note = "Use Arc::clone instead")]
-    pub fn add_ref(&self) {}
-
     /// Allocate `len` bytes and advance the write position, returning the start offset.
     /// Does NOT create a `BufferSlice` — the caller is expected
     /// to hold an `Arc<ZeroCopyBuffer>` which keeps the buffer alive.
@@ -221,18 +217,6 @@ impl ZeroCopyBuffer {
             }
             std::hint::spin_loop();
         }
-    }
-
-    /// Compatibility shim — ref counting is now handled by `Arc`.
-    #[deprecated(note = "Use Arc::strong_count instead")]
-    pub fn release(&self) -> bool {
-        false
-    }
-
-    /// Compatibility shim — ref counting is now handled by `Arc`.
-    #[deprecated(note = "Use Arc::strong_count instead")]
-    pub fn ref_count(&self) -> u32 {
-        0
     }
 
     /// Convert entire written portion to `Bytes` (F-113 fix: true zero-copy).

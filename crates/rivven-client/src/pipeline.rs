@@ -593,7 +593,9 @@ async fn writer_task<W: tokio::io::AsyncWrite + Unpin>(
 
     // Flush any remaining requests
     if !batch.is_empty() {
-        let _ = flush_batch(&mut writer, &mut batch, &pending, &stats).await;
+        if let Err(e) = flush_batch(&mut writer, &mut batch, &pending, &stats).await {
+            tracing::warn!(error = %e, "Failed to flush remaining batch on shutdown");
+        }
     }
 }
 

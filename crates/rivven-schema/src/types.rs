@@ -6,7 +6,7 @@
 //! - [`SchemaContext`] - Multi-tenant context/group support
 //! - [`VersionState`] - Version lifecycle management
 //! - [`ValidationRule`] - Custom content validation rules
-//! - [`Mode`], [`CompatibilityLevel`] - Registry configuration
+//! - [`RegistryMode`](crate::server::RegistryMode), [`CompatibilityLevel`] - Registry configuration
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -891,29 +891,6 @@ impl SubjectVersion {
     /// Check if this version is usable
     pub fn is_usable(&self) -> bool {
         self.state.is_usable()
-    }
-}
-
-/// Mode for schema registration
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "UPPERCASE")]
-pub enum Mode {
-    /// Read-write mode (default)
-    #[default]
-    Readwrite,
-    /// Read-only mode
-    Readonly,
-    /// Import mode (for migrations)
-    Import,
-}
-
-impl std::fmt::Display for Mode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Mode::Readwrite => write!(f, "READWRITE"),
-            Mode::Readonly => write!(f, "READONLY"),
-            Mode::Import => write!(f, "IMPORT"),
-        }
     }
 }
 

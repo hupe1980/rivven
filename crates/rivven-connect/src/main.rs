@@ -132,7 +132,9 @@ async fn main() -> Result<()> {
         Commands::Check { source, sink } => check_connectivity(config, source, sink).await,
         Commands::Discover { source, format } => discover_source(config, source, format).await,
         Commands::Status { url } => show_status(config, url).await,
-        Commands::Connectors | Commands::Schema { .. } => unreachable!(), // handled above
+        Commands::Connectors | Commands::Schema { .. } => {
+            Err(anyhow::anyhow!("Command should have been handled earlier"))
+        }
     }
 }
 

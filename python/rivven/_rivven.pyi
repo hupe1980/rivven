@@ -321,8 +321,12 @@ class RivvenClient:
         """Get topic configuration as key-value pairs"""
         ...
     
-    async def alter_topic_config(self, topic: str, key: str, value: str) -> None:
-        """Alter a topic configuration value"""
+    async def alter_topic_config(
+        self,
+        topic: str,
+        configs: List[Tuple[str, Optional[str]]],
+    ) -> int:
+        """Alter topic configuration values. Returns number of configs changed."""
         ...
     
     async def create_partitions(self, topic: str, new_total: int) -> int:
@@ -358,7 +362,7 @@ class RivvenClient:
     
     async def init_producer_id(
         self,
-        transactional_id: Optional[str] = None,
+        previous_producer_id: Optional[int] = None,
     ) -> ProducerState:
         """Initialize producer for idempotent/transactional producing.
         

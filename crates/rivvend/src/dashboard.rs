@@ -244,13 +244,21 @@ async fn static_handler(uri: Uri) -> impl IntoResponse {
                     },
                 )
                 .body(Body::from(content.data.into_owned()))
-                .unwrap()
+                .unwrap_or_else(|_| {
+                    let mut resp = Response::new(Body::from("Internal Server Error"));
+                    *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+                    resp
+                })
         }
-        None => Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .header(header::CONTENT_TYPE, "text/plain")
-            .body(Body::from("Not Found"))
-            .unwrap(),
+        None => {
+            let mut resp = Response::new(Body::from("Not Found"));
+            *resp.status_mut() = StatusCode::NOT_FOUND;
+            resp.headers_mut().insert(
+                header::CONTENT_TYPE,
+                "text/plain".parse().expect("static header value"),
+            );
+            resp
+        }
     }
 }
 

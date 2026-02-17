@@ -159,9 +159,9 @@ pub use server::{RegistryMode, SchemaServer, ServerConfig, ServerState};
 pub use storage::BrokerStorage;
 pub use storage::{MemoryStorage, Storage, StorageBackend};
 pub use types::{
-    Mode, Schema, SchemaContext, SchemaId, SchemaMetadata, SchemaReference, SchemaType,
-    SchemaVersion, Subject, SubjectVersion, ValidationLevel, ValidationReport, ValidationResult,
-    ValidationRule, ValidationRuleType, ValidationSummary, VersionState,
+    Schema, SchemaContext, SchemaId, SchemaMetadata, SchemaReference, SchemaType, SchemaVersion,
+    Subject, SubjectVersion, ValidationLevel, ValidationReport, ValidationResult, ValidationRule,
+    ValidationRuleType, ValidationSummary, VersionState,
 };
 pub use validation::{ValidationEngine, ValidationEngineConfig};
 

@@ -251,7 +251,7 @@ impl SqlServerCdcSource {
             .port(config.port)
             .database(&config.database)
             .username(&config.username)
-            .password(config.password.expose())
+            .password(config.password.expose_secret())
             .poll_interval_ms(config.poll_interval_ms)
             .encrypt(config.encrypt)
             .trust_server_certificate(config.trust_server_certificate);
@@ -547,8 +547,10 @@ impl SourceFactory for SqlServerCdcSourceFactory {
         SqlServerCdcSource::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySource> {
-        Box::new(SqlServerCdcSourceWrapper(SqlServerCdcSource::new()))
+    fn create(&self) -> Result<Box<dyn AnySource>> {
+        Ok(Box::new(SqlServerCdcSourceWrapper(
+            SqlServerCdcSource::new(),
+        )))
     }
 }
 

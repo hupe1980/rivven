@@ -5,6 +5,16 @@
 use crate::error::{SchemaError, SchemaResult};
 use crate::types::SchemaType;
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
+
+// Compiled regexes for protobuf compatibility checking
+static PROTO_FIELD_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?:(?:optional|repeated|required)\s+)?\w+\s+(\w+)\s*=\s*(\d+)").unwrap()
+});
+static PROTO_RESERVED_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"reserved\s+(\d+(?:,\s*\d+)*)").unwrap());
+static PROTO_REQUIRED_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"required\s+\w+\s+(\w+)").unwrap());
 
 // Re-export CompatibilityLevel from types for backward compatibility
 pub use crate::types::CompatibilityLevel;
@@ -389,9 +399,7 @@ impl CompatibilityChecker {
         // Pattern matches: [optional|repeated|required] type field_name = field_number
         // The label is optional (proto3 omits it), and we require a type word
         // before the field name to avoid matching option values or reserved numbers.
-        let field_pattern =
-            regex::Regex::new(r"(?:(?:optional|repeated|required)\s+)?\w+\s+(\w+)\s*=\s*(\d+)")
-                .map_err(|e| SchemaError::ParseError(format!("Regex error: {}", e)))?;
+        let field_pattern = &*PROTO_FIELD_RE;
 
         let old_fields: HashMap<u32, String> = field_pattern
             .captures_iter(&clean_existing)
@@ -424,8 +432,7 @@ impl CompatibilityChecker {
         }
 
         // Rule 2: Reserved field numbers cannot be reused
-        let reserved_pattern = regex::Regex::new(r"reserved\s+(\d+(?:,\s*\d+)*)")
-            .map_err(|e| SchemaError::ParseError(format!("Regex error: {}", e)))?;
+        let reserved_pattern = &*PROTO_RESERVED_RE;
 
         let old_reserved: HashSet<u32> = reserved_pattern
             .captures_iter(&clean_existing)
@@ -451,8 +458,7 @@ impl CompatibilityChecker {
         }
 
         // Rule 3: Required fields cannot be removed (proto2)
-        let required_pattern = regex::Regex::new(r"required\s+\w+\s+(\w+)")
-            .map_err(|e| SchemaError::ParseError(format!("Regex error: {}", e)))?;
+        let required_pattern = &*PROTO_REQUIRED_RE;
 
         let old_required: HashSet<&str> = required_pattern
             .captures_iter(&clean_existing)

@@ -425,8 +425,8 @@ impl SinkFactory for BigQuerySinkFactory {
         BigQuerySink::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySink> {
-        Box::new(BigQuerySink::new())
+    fn create(&self) -> Result<Box<dyn AnySink>> {
+        Ok(Box::new(BigQuerySink::new()))
     }
 }
 
@@ -464,7 +464,7 @@ mod tests {
         let factory = BigQuerySinkFactory;
         let spec = factory.spec();
         assert_eq!(spec.connector_type, "bigquery");
-        let _sink = factory.create();
+        let _sink = factory.create().unwrap();
     }
 
     #[test]

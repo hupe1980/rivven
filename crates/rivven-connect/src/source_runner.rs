@@ -45,16 +45,16 @@ pub struct SourceRunner {
     source_registry: Arc<SourceRegistry>,
 }
 
-// Methods for health monitoring - reserved for future integration with health.rs
-#[allow(dead_code)]
+// Methods for health monitoring
+#[allow(dead_code)] // Wired into health endpoint in future
 impl SourceRunner {
     /// Get current status
-    pub async fn status(&self) -> ConnectorStatus {
+    pub(crate) async fn status(&self) -> ConnectorStatus {
         *self.status.read().await
     }
 
     /// Get error count
-    pub fn errors_count(&self) -> u64 {
+    pub(crate) fn errors_count(&self) -> u64 {
         self.errors_count.load(Ordering::Relaxed)
     }
 }
@@ -380,8 +380,13 @@ impl SourceRunner {
                     ) {
                         if let Some(obj) = value.as_object_mut() {
                             // Convert serde_yaml::Value to serde_json::Value
-                            let json_val =
-                                serde_json::to_value(val).unwrap_or(serde_json::Value::Null);
+                            let json_val = match serde_json::to_value(val) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    warn!(field = field, error = %e, "Transform add_field: value conversion failed, inserting null");
+                                    serde_json::Value::Null
+                                }
+                            };
                             obj.insert(field.to_string(), json_val);
                         }
                     }
@@ -739,7 +744,7 @@ impl SourceRunner {
         use super::prelude::*;
         use futures::StreamExt;
 
-        let source = factory.create();
+        let source = factory.create()?;
 
         // Check connectivity first
         let check = source.check_raw(&self.config.config).await?;

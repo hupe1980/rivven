@@ -570,8 +570,8 @@ impl SourceFactory for RdbcSourceFactory {
         RdbcSource::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySource> {
-        Box::new(RdbcSourceWrapper(RdbcSource::new()))
+    fn create(&self) -> Result<Box<dyn AnySource>> {
+        Ok(Box::new(RdbcSourceWrapper(RdbcSource::new())))
     }
 }
 

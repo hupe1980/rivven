@@ -22,7 +22,7 @@ spec:
       - {{ .Release.Namespace }}
   endpoints:
     - port: metrics
-      interval: {{ .Values.serviceMonitor.interval }}
-      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
+      interval: {{ .Values.serviceMonitor.interval | quote }}
+      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout | quote }}
       path: /metrics
 {{- end }}

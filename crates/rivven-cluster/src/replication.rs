@@ -683,6 +683,7 @@ pub struct FollowerFetcher {
 }
 
 impl FollowerFetcher {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         local_node: NodeId,
         partition_id: PartitionId,

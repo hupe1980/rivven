@@ -1,8 +1,15 @@
 //! AWS Glue Schema Registry adapter
 //!
-//! Provides integration with AWS Glue Schema Registry for schema management.
+//! **⚠️ EXPERIMENTAL — NOT PRODUCTION READY**
 //!
-//! # Features
+//! This module provides a *partial* integration with AWS Glue Schema Registry.
+//! AWS SigV4 request signing is **not yet implemented**, so all authenticated
+//! API calls will fail with a 403 Forbidden. This adapter currently only works
+//! against unauthenticated endpoints (e.g., LocalStack).
+//!
+//! Tracking issue: see BACKLOG.md — "Glue registry: implement AWS SigV4 signing"
+//!
+//! # Features (planned)
 //!
 //! - Full AWS Glue Schema Registry API support
 //! - Avro, JSON Schema, and Protobuf schema types
@@ -133,7 +140,16 @@ pub struct GlueRegistry {
 
 impl GlueRegistry {
     /// Create a new Glue registry client
+    ///
+    /// **Warning:** AWS SigV4 signing is not yet implemented. Requests to
+    /// authenticated AWS endpoints will fail. Only use with unauthenticated
+    /// endpoints (e.g., LocalStack with `endpoint_url` set).
     pub async fn new(config: &GlueConfig) -> SchemaRegistryResult<Self> {
+        tracing::warn!(
+            "AWS Glue Schema Registry adapter is EXPERIMENTAL: SigV4 signing is not implemented. \
+             Only unauthenticated endpoints (e.g., LocalStack) are supported."
+        );
+
         let http_client = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .build()

@@ -4,7 +4,9 @@
 
 ## Overview
 
-`rivven` provides a unified CLI for managing topics, producing/consuming messages, and administering clusters. Designed for both interactive use and scripting.
+`rivven` provides a CLI for managing topics, producing/consuming messages, and administering consumer groups. Designed for both interactive use and scripting.
+
+For CDC (Change Data Capture), use the separate `rivven-connect` binary.
 
 ## Installation
 
@@ -15,14 +17,17 @@ cargo install rivven
 ## Quick Start
 
 ```bash
+# Check connectivity
+rivven ping --server 127.0.0.1:9092
+
 # Create a topic
 rivven topic create my-topic --partitions 3
 
-# Produce messages
+# Produce a message
 rivven produce my-topic "Hello, Rivven!"
 
 # Consume messages
-rivven consume my-topic --from-beginning
+rivven consume my-topic --partition 0 --offset 0 --max 10
 ```
 
 ## Commands
@@ -30,82 +35,81 @@ rivven consume my-topic --from-beginning
 ### Topic Management
 
 ```bash
-# List topics
+# List all topics
 rivven topic list
 
-# Create topic with partitions
-rivven topic create my-topic --partitions 3
+# Create topic with partitions (default: 3)
+rivven topic create my-topic --partitions 6
 
-# Describe topic details
-rivven topic describe my-topic
+# Get topic metadata (name + partition count)
+rivven topic info my-topic
 
-# Delete topic
+# Delete a topic
 rivven topic delete my-topic
 ```
 
 ### Produce Messages
 
 ```bash
-# Produce from stdin
-echo '{"event": "test"}' | rivven produce my-topic
+# Produce a message (positional arguments: topic, message)
+rivven produce my-topic "Hello, Rivven!"
 
-# Produce with key
-rivven produce my-topic --key user-123 --value '{"action": "login"}'
+# Produce with a key
+rivven produce my-topic '{"event": "login"}' --key user-123
 
-# Produce from file
-rivven produce my-topic --file events.jsonl
+# Produce to a specific partition
+rivven produce my-topic "partitioned" --partition 0
+
+# Connect to a different server
+rivven produce my-topic "msg" --server 10.0.0.1:9092
 ```
 
 ### Consume Messages
 
 ```bash
-# Consume from beginning
-rivven consume my-topic --from-beginning
+# Consume from partition 0, offset 0 (defaults)
+rivven consume my-topic
 
-# Consume with consumer group
-rivven consume my-topic --group my-group
+# Consume from a specific partition and offset
+rivven consume my-topic --partition 2 --offset 100
 
-# Consume specific partition/offset
-rivven consume my-topic --partition 0 --offset 100
+# Limit number of messages (default: 100)
+rivven consume my-topic --max 10
 
-# Consume with limit
-rivven consume my-topic --max-messages 10
+# Follow mode — continuously consume new messages (like tail -f)
+rivven consume my-topic --follow
 ```
 
-### Cluster Operations
+### Consumer Group Management
 
 ```bash
-# Cluster status
-rivven cluster status
-
-# List brokers
-rivven cluster brokers
-
-# Consumer groups
+# List all consumer groups
 rivven group list
+
+# Describe a group (show committed offsets per topic/partition)
 rivven group describe my-group
+
+# Delete a consumer group
+rivven group delete my-group
 ```
 
-## Configuration
-
-| Variable | Description |
-|:---------|:------------|
-| `RIVVEN_BOOTSTRAP_SERVERS` | Default bootstrap servers |
-| `RIVVEN_TLS_ENABLED` | Enable TLS |
-| `RIVVEN_TLS_CA_FILE` | CA certificate file |
-
-## Output Formats
+### Connectivity
 
 ```bash
-rivven topic list --output json    # JSON output
-rivven topic list --output table   # Table output (default)
-rivven topic list --output compact # Compact output
+# Ping the server
+rivven ping
+
+# Ping a specific server
+rivven ping --server 10.0.0.1:9092
 ```
+
+## Global Options
+
+All commands accept `--server <address>` to override the default server address (`127.0.0.1:9092`).
 
 ## Documentation
 
 - [Getting Started](https://rivven.hupe1980.github.io/rivven/docs/getting-started)
-- [CLI Reference](https://rivven.hupe1980.github.io/rivven/docs/cli)
 
 ## License
 

@@ -606,13 +606,13 @@ impl SqsSource {
                 .auth
                 .secret_access_key
                 .as_ref()
-                .map(|s| s.expose().to_string())
+                .map(|s| s.expose_secret().to_string())
                 .unwrap_or_default();
             let session_token = config
                 .auth
                 .session_token
                 .as_ref()
-                .map(|s| s.expose().to_string());
+                .map(|s| s.expose_secret().to_string());
 
             let credentials =
                 Credentials::new(access_key, secret_key, session_token, None, "rivven-sqs");
@@ -1011,7 +1011,7 @@ impl Source for SqsSource {
 
                             // Batch delete if configured
                             if config.delete_after_receive && !receipt_handles.is_empty() {
-                                let entries: Vec<_> = receipt_handles
+                                let entries: std::result::Result<Vec<_>, _> = receipt_handles
                                     .iter()
                                     .enumerate()
                                     .map(|(i, (_id, handle))| {
@@ -1019,9 +1019,16 @@ impl Source for SqsSource {
                                             .id(format!("del_{}", i))
                                             .receipt_handle(handle)
                                             .build()
-                                            .expect("valid delete entry")
                                     })
                                     .collect();
+
+                                let entries = match entries {
+                                    Ok(e) => e,
+                                    Err(e) => {
+                                        warn!("Failed to build SQS delete entries: {}", e);
+                                        continue;
+                                    }
+                                };
 
                                 match client
                                     .delete_message_batch()
@@ -1191,8 +1198,8 @@ impl SourceFactory for SqsSourceFactory {
         SqsSource::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySource> {
-        Box::new(SqsSource::new())
+    fn create(&self) -> Result<Box<dyn AnySource>> {
+        Ok(Box::new(SqsSource::new()))
     }
 }
 
@@ -1813,13 +1820,13 @@ impl SqsSink {
                 .auth
                 .secret_access_key
                 .as_ref()
-                .map(|s| s.expose().to_string())
+                .map(|s| s.expose_secret().to_string())
                 .unwrap_or_default();
             let session_token = config
                 .auth
                 .session_token
                 .as_ref()
-                .map(|s| s.expose().to_string());
+                .map(|s| s.expose_secret().to_string());
 
             let credentials = Credentials::new(
                 access_key,
@@ -2600,8 +2607,8 @@ impl SinkFactory for SqsSinkFactory {
         SqsSink::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySink> {
-        Box::new(SqsSink::new())
+    fn create(&self) -> Result<Box<dyn AnySink>> {
+        Ok(Box::new(SqsSink::new()))
     }
 }
 

@@ -849,8 +849,8 @@ impl SourceFactory for DatagenSourceFactory {
         DatagenSource::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySource> {
-        Box::new(DatagenSourceWrapper(DatagenSource::new()))
+    fn create(&self) -> Result<Box<dyn AnySource>> {
+        Ok(Box::new(DatagenSourceWrapper(DatagenSource::new())))
     }
 }
 
@@ -1088,13 +1088,13 @@ mod tests {
     fn test_factory_create() {
         let factory = DatagenSourceFactory;
         // Factory creates a boxed source, validation happens in check_raw/read_raw
-        let _source = factory.create();
+        let _source = factory.create().unwrap();
     }
 
     #[tokio::test]
     async fn test_factory_check_raw_valid() {
         let factory = DatagenSourceFactory;
-        let source = factory.create();
+        let source = factory.create().unwrap();
         let config = serde_yaml::from_str(
             r#"
             pattern: orders
@@ -1112,7 +1112,7 @@ mod tests {
     #[tokio::test]
     async fn test_factory_check_raw_invalid() {
         let factory = DatagenSourceFactory;
-        let source = factory.create();
+        let source = factory.create().unwrap();
         let config = serde_yaml::from_str(
             r#"
             events_per_second: 999999

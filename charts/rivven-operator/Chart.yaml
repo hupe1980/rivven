@@ -36,3 +36,8 @@ annotations:
       name: rivvenschemaregistries.rivven.hupe1980.github.io
       displayName: Rivven Schema Registry
       description: Confluent-compatible schema registry
+    - kind: RivvenTopic
+      version: v1alpha1
+      name: rivventopics.rivven.hupe1980.github.io
+      displayName: Rivven Topic
+      description: GitOps-friendly topic management

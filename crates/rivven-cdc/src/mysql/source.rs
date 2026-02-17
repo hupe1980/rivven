@@ -847,7 +847,7 @@ fn process_row_event(
     // Get column names from cache
     let column_names = schema_cache
         .read()
-        .unwrap()
+        .unwrap_or_else(|e| e.into_inner())
         .get_columns(&table_map.schema_name, &table_map.table_name);
 
     for row in &rows.rows {

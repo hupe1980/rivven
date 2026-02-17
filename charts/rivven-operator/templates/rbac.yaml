@@ -8,8 +8,11 @@ metadata:
 rules:
   # Core resources
   - apiGroups: [""]
-    resources: ["configmaps", "services", "secrets", "persistentvolumeclaims"]
+    resources: ["configmaps", "services", "persistentvolumeclaims"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch"]
@@ -47,6 +50,28 @@ rules:
     verbs: ["get", "update", "patch"]
   - apiGroups: ["rivven.hupe1980.github.io"]
     resources: ["rivvenconnects/finalizers"]
+    verbs: ["update"]
+  
+  # Rivven Topic CRDs
+  - apiGroups: ["rivven.hupe1980.github.io"]
+    resources: ["rivventopics"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["rivven.hupe1980.github.io"]
+    resources: ["rivventopics/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["rivven.hupe1980.github.io"]
+    resources: ["rivventopics/finalizers"]
+    verbs: ["update"]
+  
+  # Rivven Schema Registry CRDs
+  - apiGroups: ["rivven.hupe1980.github.io"]
+    resources: ["rivvenschemaregistries"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["rivven.hupe1980.github.io"]
+    resources: ["rivvenschemaregistries/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["rivven.hupe1980.github.io"]
+    resources: ["rivvenschemaregistries/finalizers"]
     verbs: ["update"]
   
   # Coordination for leader election

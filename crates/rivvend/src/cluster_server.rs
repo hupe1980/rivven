@@ -169,7 +169,7 @@ impl ClusterServer {
 
         let offset_manager = OffsetManager::with_persistence(
             std::path::PathBuf::from(&core_config.data_dir).join("offsets"),
-        );
+        )?;
 
         let (shutdown_tx, _) = broadcast::channel(1);
 
@@ -501,6 +501,7 @@ impl ClusterServer {
         // Create router for partition-aware request handling
         let router = Arc::new(RequestRouter::new(
             self.cli.effective_node_id(),
+            self.cli.bind,
             self.coordinator.clone(),
             self.raft_node.clone(),
             handler.clone(),
@@ -707,7 +708,7 @@ impl ClusterServer {
                                 }
                                 Err(crate::rate_limiter::ConnectionResult::Allowed) => {
                                     // This shouldn't happen, but handle gracefully
-                                    unreachable!("Allowed returned as error");
+                                    error!("BUG: Allowed returned as error variant in rate limiter");
                                 }
                             }
                         }
@@ -858,6 +859,8 @@ impl ShutdownHandle {
 pub struct RequestRouter {
     /// Our node ID
     local_node_id: String,
+    /// Server bind address (for standalone metadata)
+    bind_address: SocketAddr,
     /// Cluster coordinator (None in standalone)
     coordinator: Option<Arc<RwLock<ClusterCoordinator>>>,
     /// Raft node for leader information
@@ -881,12 +884,14 @@ impl RequestRouter {
     /// Create a new request router
     pub fn new(
         local_node_id: String,
+        bind_address: SocketAddr,
         coordinator: Option<Arc<RwLock<ClusterCoordinator>>>,
         raft_node: Arc<RwLock<RaftNode>>,
         handler: Arc<RequestHandler>,
     ) -> Self {
         Self {
             local_node_id,
+            bind_address,
             coordinator,
             raft_node,
             handler,
@@ -969,8 +974,8 @@ impl RequestRouter {
                 controller_id: Some(self.local_node_id.clone()),
                 brokers: vec![BrokerInfo {
                     node_id: self.local_node_id.clone(),
-                    host: "localhost".to_string(),
-                    port: 9092, // Default port
+                    host: self.bind_address.ip().to_string(),
+                    port: self.bind_address.port(),
                     rack: None,
                 }],
                 topics: vec![], // Standalone doesn't track topics in coordinator

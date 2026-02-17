@@ -1,0 +1,30 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "rivven-operator.fullname" . }}-test-connection"
+  labels:
+    {{- include "rivven-operator.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: wget
+      image: busybox:1.36
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      command: ['wget']
+      args:
+        - '--spider'
+        - '--timeout=5'
+        - 'http://{{ include "rivven-operator.fullname" . }}-metrics:{{ .Values.service.port }}/metrics'
+  restartPolicy: Never

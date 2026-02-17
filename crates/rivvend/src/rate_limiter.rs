@@ -68,22 +68,22 @@ impl TokenBucket {
         let refill_amount = (elapsed.as_secs_f64() * self.refill_rate as f64) as u64;
 
         if refill_amount > 0 {
-            let current = self.tokens.load(Ordering::Relaxed);
+            let current = self.tokens.load(Ordering::Acquire);
             let new_tokens = (current + refill_amount).min(self.capacity);
-            self.tokens.store(new_tokens, Ordering::Relaxed);
+            self.tokens.store(new_tokens, Ordering::Release);
             *last = Instant::now();
         }
         drop(last);
 
         // Try to consume a token
         loop {
-            let current = self.tokens.load(Ordering::Relaxed);
+            let current = self.tokens.load(Ordering::Acquire);
             if current == 0 {
                 return false;
             }
             if self
                 .tokens
-                .compare_exchange(current, current - 1, Ordering::SeqCst, Ordering::Relaxed)
+                .compare_exchange_weak(current, current - 1, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
                 return true;
@@ -110,11 +110,6 @@ impl IpState {
             rate_bucket: TokenBucket::new(capacity, capacity), // refill fully per second
             last_activity: RwLock::new(Instant::now()),
         }
-    }
-
-    #[allow(dead_code)]
-    fn increment_connections(&self) -> u32 {
-        self.connections.fetch_add(1, Ordering::Relaxed) + 1
     }
 
     fn decrement_connections(&self) {

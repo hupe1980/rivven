@@ -634,7 +634,7 @@ impl MqttSource {
 
         // Configure authentication if provided
         if let (Some(username), Some(password)) = (&config.auth.username, &config.auth.password) {
-            mqtt_options.set_credentials(username.clone(), password.expose().to_string());
+            mqtt_options.set_credentials(username.clone(), password.expose_secret().to_string());
         }
 
         // Configure Last Will and Testament (LWT)
@@ -1113,8 +1113,8 @@ impl SourceFactory for MqttSourceFactory {
         MqttSource::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySource> {
-        Box::new(MqttSource::new())
+    fn create(&self) -> Result<Box<dyn AnySource>> {
+        Ok(Box::new(MqttSource::new()))
     }
 }
 

@@ -107,8 +107,26 @@ impl<'a> ResourceBuilder<'a> {
             })
         });
 
+        // Build volumes for TLS if enabled
+        let volumes = if spec.tls.enabled {
+            spec.tls.cert_secret_name.as_ref().map(|secret_name| {
+                vec![k8s_openapi::api::core::v1::Volume {
+                    name: "tls".to_string(),
+                    secret: Some(k8s_openapi::api::core::v1::SecretVolumeSource {
+                        secret_name: Some(secret_name.clone()),
+                        default_mode: Some(0o400),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]
+            })
+        } else {
+            None
+        };
+
         let pod_spec = PodSpec {
             containers: vec![container],
+            volumes,
             affinity: spec.affinity.clone(),
             security_context: pod_security_context,
             node_selector: if spec.node_selector.is_empty() {
@@ -271,7 +289,7 @@ impl<'a> ResourceBuilder<'a> {
                 value: Some("true".to_string()),
                 ..Default::default()
             });
-            if let Some(ref cert_secret) = spec.tls.cert_secret_name {
+            if let Some(ref _cert_secret) = spec.tls.cert_secret_name {
                 env.push(EnvVar {
                     name: "RIVVEN_TLS_CERT_PATH".to_string(),
                     value: Some("/tls/tls.crt".to_string()),
@@ -282,8 +300,6 @@ impl<'a> ResourceBuilder<'a> {
                     value: Some("/tls/tls.key".to_string()),
                     ..Default::default()
                 });
-                // Note: Volume mount for TLS secret would be added here
-                let _ = cert_secret; // Suppress unused warning
             }
         }
 
@@ -347,11 +363,21 @@ impl<'a> ResourceBuilder<'a> {
         };
 
         // Build volume mounts
-        let volume_mounts = vec![VolumeMount {
+        let mut volume_mounts = vec![VolumeMount {
             name: "data".to_string(),
             mount_path: "/data".to_string(),
             ..Default::default()
         }];
+
+        // Add TLS volume mount if TLS is enabled with a cert secret
+        if spec.tls.enabled && spec.tls.cert_secret_name.is_some() {
+            volume_mounts.push(VolumeMount {
+                name: "tls".to_string(),
+                mount_path: "/tls".to_string(),
+                read_only: Some(true),
+                ..Default::default()
+            });
+        }
 
         // Apply secure defaults for container security context if not specified
         let container_security_context = spec.container_security_context.clone().or_else(|| {
@@ -506,7 +532,7 @@ impl<'a> ResourceBuilder<'a> {
     }
 
     /// Build ConfigMap for broker configuration
-    pub fn build_configmap(&self) -> ConfigMap {
+    pub fn build_configmap(&self) -> Result<ConfigMap> {
         let spec = &self.cluster.spec;
         let name = format!("{}-config", self.resource_name());
         let labels = spec.get_labels(&self.name);
@@ -559,12 +585,12 @@ impl<'a> ResourceBuilder<'a> {
             config.insert(k.clone(), v.clone());
         }
 
-        let config_yaml = serde_yaml::to_string(&config).unwrap_or_default();
+        let config_yaml = serde_yaml::to_string(&config)?;
 
         let mut data = BTreeMap::new();
         data.insert("config.yaml".to_string(), config_yaml);
 
-        ConfigMap {
+        Ok(ConfigMap {
             metadata: ObjectMeta {
                 name: Some(name),
                 namespace: Some(self.namespace.clone()),
@@ -574,7 +600,7 @@ impl<'a> ResourceBuilder<'a> {
             },
             data: Some(data),
             ..Default::default()
-        }
+        })
     }
 
     /// Build PodDisruptionBudget
@@ -707,7 +733,7 @@ mod tests {
     fn test_build_configmap() {
         let cluster = create_test_cluster("my-cluster");
         let builder = ResourceBuilder::new(&cluster).unwrap();
-        let cm = builder.build_configmap();
+        let cm = builder.build_configmap().unwrap();
 
         assert_eq!(
             cm.metadata.name,

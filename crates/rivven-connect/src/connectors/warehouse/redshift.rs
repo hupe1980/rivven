@@ -259,21 +259,10 @@ impl RedshiftSink {
         }
     }
 
-    fn escape_value(value: &serde_json::Value) -> String {
-        match value {
-            serde_json::Value::Null => "NULL".to_string(),
-            serde_json::Value::Bool(b) => b.to_string(),
-            serde_json::Value::Number(n) => n.to_string(),
-            serde_json::Value::String(s) => {
-                // Escape single quotes
-                format!("'{}'", s.replace('\'', "''"))
-            }
-            _ => {
-                // JSON objects/arrays are stored as strings
-                let json_str = value.to_string().replace('\'', "''");
-                format!("'{}'", json_str)
-            }
-        }
+    /// Escape a SQL identifier by doubling any embedded double-quotes.
+    /// Combined with wrapping in `"..."`, this prevents identifier injection.
+    fn quote_ident(ident: &str) -> String {
+        format!("\"{}\"", ident.replace('"', "\"\""))
     }
 
     async fn insert_batch(
@@ -286,40 +275,48 @@ impl RedshiftSink {
             return Ok(0);
         }
 
-        // Build multi-row INSERT statement
-        let mut values_clauses: Vec<String> = Vec::with_capacity(rows.len());
+        // Build parameterized multi-row INSERT to prevent SQL injection.
+        // Each row has 7 columns, so parameters are $1..$7, $8..$14, etc.
+        let cols_per_row: usize = 7;
+        let mut placeholders: Vec<String> = Vec::with_capacity(rows.len());
+        let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> =
+            Vec::with_capacity(rows.len() * cols_per_row);
 
-        for row in rows {
-            let namespace = row
-                .namespace
-                .as_ref()
-                .map(|n| format!("'{}'", n.replace('\'', "''")))
-                .unwrap_or_else(|| "NULL".to_string());
-
-            let data_str = Self::escape_value(&row.data);
-            let metadata_str = Self::escape_value(&row.metadata);
-
-            values_clauses.push(format!(
-                "('{}', '{}', {}, '{}', {}, {}, '{}')",
-                row.event_type.replace('\'', "''"),
-                row.stream.replace('\'', "''"),
-                namespace,
-                row.timestamp,
-                data_str,
-                metadata_str,
-                row.ingested_at
+        for (i, row) in rows.iter().enumerate() {
+            let base = i * cols_per_row + 1;
+            placeholders.push(format!(
+                "(${}, ${}, ${}, ${}, ${}, ${}, ${})",
+                base,
+                base + 1,
+                base + 2,
+                base + 3,
+                base + 4,
+                base + 5,
+                base + 6
             ));
+
+            params.push(Box::new(row.event_type.clone()));
+            params.push(Box::new(row.stream.clone()));
+            params.push(Box::new(row.namespace.clone()));
+            params.push(Box::new(row.timestamp.clone()));
+            params.push(Box::new(row.data.to_string()));
+            params.push(Box::new(row.metadata.to_string()));
+            params.push(Box::new(row.ingested_at.clone()));
         }
 
+        // Schema/table are admin-set config — quote identifiers to prevent injection.
         let sql = format!(
-            "INSERT INTO \"{}\".\"{}\" (event_type, stream, namespace, timestamp, data, metadata, ingested_at) VALUES {}",
-            schema,
-            table,
-            values_clauses.join(", ")
+            "INSERT INTO {}.{} (event_type, stream, namespace, timestamp, data, metadata, ingested_at) VALUES {}",
+            Self::quote_ident(schema),
+            Self::quote_ident(table),
+            placeholders.join(", ")
         );
 
+        let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+            params.iter().map(|p| p.as_ref() as _).collect();
+
         let affected = client
-            .execute(&sql, &[])
+            .execute(&sql, &param_refs)
             .await
             .map_err(|e| ConnectorError::Transient(format!("Failed to insert rows: {}", e)))?;
 
@@ -354,13 +351,13 @@ impl Sink for RedshiftSink {
 
         let (client, handle) = Self::create_client(config).await?;
 
-        // Try to verify table exists
-        let check_sql = format!(
-            "SELECT 1 FROM information_schema.tables WHERE table_schema = '{}' AND table_name = '{}' LIMIT 1",
-            config.schema, config.table
-        );
+        // Try to verify table exists (parameterized to prevent SQL injection)
+        let check_sql = "SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2 LIMIT 1";
 
-        match client.query_opt(&check_sql, &[]).await {
+        match client
+            .query_opt(check_sql, &[&config.schema, &config.table])
+            .await
+        {
             Ok(Some(_)) => {
                 info!(
                     "Successfully connected to Redshift: {}.{} exists",
@@ -507,8 +504,8 @@ impl SinkFactory for RedshiftSinkFactory {
         RedshiftSink::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySink> {
-        Box::new(RedshiftSink::new())
+    fn create(&self) -> Result<Box<dyn AnySink>> {
+        Ok(Box::new(RedshiftSink::new()))
     }
 }
 
@@ -547,7 +544,7 @@ mod tests {
         let factory = RedshiftSinkFactory;
         let spec = factory.spec();
         assert_eq!(spec.connector_type, "redshift");
-        let _sink = factory.create();
+        let _sink = factory.create().unwrap();
     }
 
     #[test]
@@ -579,28 +576,15 @@ mod tests {
     }
 
     #[test]
-    fn test_escape_value() {
-        // String with quotes
-        let val = serde_json::json!("Hello 'World'");
-        assert_eq!(RedshiftSink::escape_value(&val), "'Hello ''World'''");
+    fn test_quote_ident() {
+        // Normal identifier
+        assert_eq!(RedshiftSink::quote_ident("public"), "\"public\"");
 
-        // Number
-        let val = serde_json::json!(42);
-        assert_eq!(RedshiftSink::escape_value(&val), "42");
+        // Identifier with embedded double-quote
+        assert_eq!(RedshiftSink::quote_ident("my\"schema"), "\"my\"\"schema\"");
 
-        // Boolean
-        let val = serde_json::json!(true);
-        assert_eq!(RedshiftSink::escape_value(&val), "true");
-
-        // Null
-        let val = serde_json::Value::Null;
-        assert_eq!(RedshiftSink::escape_value(&val), "NULL");
-
-        // JSON object
-        let val = serde_json::json!({"key": "value"});
-        let escaped = RedshiftSink::escape_value(&val);
-        assert!(escaped.starts_with('\''));
-        assert!(escaped.ends_with('\''));
+        // Empty identifier
+        assert_eq!(RedshiftSink::quote_ident(""), "\"\"");
     }
 
     #[test]

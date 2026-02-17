@@ -203,6 +203,9 @@ async fn apply_topic(topic: Arc<RivvenTopic>, ctx: Arc<TopicControllerContext>) 
             // Update status to ready
             let status = build_ready_status(&topic, topic_info);
             update_topic_status(&ctx.client, &namespace, &name, status).await?;
+            if let Some(ref metrics) = ctx.metrics {
+                metrics.topics_total.increment(1.0);
+            }
             info!(name = %name, "Topic reconciliation complete");
             Ok(Action::requeue(Duration::from_secs(
                 DEFAULT_REQUEUE_SECONDS,
@@ -527,6 +530,10 @@ async fn cleanup_topic(
     }
 
     info!(name = %name, "Topic cleanup complete");
+
+    if let Some(ref metrics) = ctx.metrics {
+        metrics.topics_total.decrement(1.0);
+    }
 
     Ok(Action::await_change())
 }

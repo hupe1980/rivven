@@ -41,11 +41,6 @@ impl SensitiveString {
     pub fn expose_secret(&self) -> &str {
         self.0.expose_secret()
     }
-
-    /// Alias for `expose_secret()` for backward compatibility with some connectors
-    pub fn expose(&self) -> &str {
-        self.expose_secret()
-    }
 }
 
 impl std::fmt::Debug for SensitiveString {
@@ -129,7 +124,7 @@ mod tests {
     fn test_sensitive_string_expose() {
         let secret = SensitiveString::new("my-secret-password");
         assert_eq!(secret.expose_secret(), "my-secret-password");
-        assert_eq!(secret.expose(), "my-secret-password");
+        assert_eq!(secret.expose_secret(), "my-secret-password");
     }
 
     #[test]

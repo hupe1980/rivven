@@ -8,6 +8,8 @@ image:
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
   tag: ""
+  # Use digest for immutable image references (takes precedence over tag)
+  # digest: "sha256:..."
 
 imagePullSecrets: []
 nameOverride: ""
@@ -33,6 +35,9 @@ podLabels: {}
 # Pod security context
 podSecurityContext:
   runAsNonRoot: true
+  runAsUser: 65534
+  runAsGroup: 65534
+  fsGroup: 65534
   seccompProfile:
     type: RuntimeDefault
 
@@ -65,7 +70,7 @@ operator:
 resources:
   limits:
     cpu: 500m
-    memory: 128Mi
+    memory: 256Mi
   requests:
     cpu: 10m
     memory: 64Mi
@@ -102,7 +107,7 @@ podDisruptionBudget:
 
 # Network policies
 networkPolicy:
-  enabled: false
+  enabled: true
   # Ingress rules
   ingress: []
   # Egress rules  
@@ -144,7 +149,7 @@ extraVolumes: []
 # Liveness probe configuration
 livenessProbe:
   httpGet:
-    path: /
+    path: /healthz
     port: health
   initialDelaySeconds: 15
   periodSeconds: 20
@@ -154,16 +159,28 @@ livenessProbe:
 # Readiness probe configuration
 readinessProbe:
   httpGet:
-    path: /
+    path: /healthz
     port: health
   initialDelaySeconds: 5
   periodSeconds: 10
   timeoutSeconds: 3
   failureThreshold: 3
 
+# Startup probe configuration
+startupProbe:
+  httpGet:
+    path: /healthz
+    port: health
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  failureThreshold: 12
+
+# Termination grace period
+terminationGracePeriodSeconds: 30
+
 # Default values for RivvenCluster instances
 defaultCluster:
-  image: ghcr.io/hupe1980/rivven:latest
+  image: ghcr.io/hupe1980/rivven:0.0.17
   broker:
     clientPort: 9092
     clusterPort: 9093
@@ -179,8 +196,8 @@ defaultCluster:
 
 # Default values for RivvenConnect instances
 defaultConnect:
-  version: "0.0.1"
-  image: ghcr.io/hupe1980/rivven-connect:latest
+  version: "0.0.17"
+  image: ghcr.io/hupe1980/rivven-connect:0.0.17
   replicas: 1
   stateDir: "/data/connect-state"
   logLevel: "info"
@@ -202,8 +219,8 @@ defaultConnect:
 
 # Default values for RivvenSchemaRegistry instances
 defaultSchemaRegistry:
-  version: "0.0.1"
-  image: ghcr.io/hupe1980/rivven-schema:latest
+  version: "0.0.17"
+  image: ghcr.io/hupe1980/rivven-schema:0.0.17
   replicas: 1
   server:
     port: 8081

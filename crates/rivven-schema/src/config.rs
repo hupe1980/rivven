@@ -17,10 +17,6 @@ pub struct RegistryConfig {
     #[serde(default = "default_true")]
     pub normalize_schemas: bool,
 
-    /// Cache configuration
-    #[serde(default)]
-    pub cache: CacheConfig,
-
     /// Schema ID generation mode
     #[serde(default)]
     pub id_generation: IdGeneration,
@@ -36,7 +32,6 @@ impl Default for RegistryConfig {
             storage: StorageConfig::Memory,
             compatibility: CompatibilityLevel::default(),
             normalize_schemas: true,
-            cache: CacheConfig::default(),
             id_generation: IdGeneration::default(),
         }
     }
@@ -222,7 +217,7 @@ pub struct BrokerTlsConfig {
 }
 
 /// Authentication configuration for broker connection
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum BrokerAuthConfig {
     /// SASL/PLAIN authentication
@@ -235,25 +230,24 @@ pub enum BrokerAuthConfig {
     ScramSha512 { username: String, password: String },
 }
 
-/// Cache configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CacheConfig {
-    /// Maximum number of schemas to cache
-    pub max_schemas: usize,
-
-    /// Maximum number of subjects to cache
-    pub max_subjects: usize,
-
-    /// TTL for cache entries in seconds (0 = no expiry)
-    pub ttl_seconds: u64,
-}
-
-impl Default for CacheConfig {
-    fn default() -> Self {
-        Self {
-            max_schemas: 10000,
-            max_subjects: 1000,
-            ttl_seconds: 0, // No expiry by default
+impl std::fmt::Debug for BrokerAuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Plain { username, .. } => f
+                .debug_struct("Plain")
+                .field("username", username)
+                .field("password", &"[REDACTED]")
+                .finish(),
+            Self::ScramSha256 { username, .. } => f
+                .debug_struct("ScramSha256")
+                .field("username", username)
+                .field("password", &"[REDACTED]")
+                .finish(),
+            Self::ScramSha512 { username, .. } => f
+                .debug_struct("ScramSha512")
+                .field("username", username)
+                .field("password", &"[REDACTED]")
+                .finish(),
         }
     }
 }

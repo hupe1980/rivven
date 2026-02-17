@@ -483,7 +483,10 @@ impl TopicManager {
 
         // Persist metadata asynchronously
         if let Err(e) = self.persist_metadata().await {
-            warn!("Failed to persist topic metadata after get_or_create_topic: {}", e);
+            warn!(
+                "Failed to persist topic metadata after get_or_create_topic: {}",
+                e
+            );
         }
 
         Ok(topic)
@@ -528,10 +531,7 @@ impl TopicManager {
     /// Iterates all topics, checks the policy via `topic_config_manager`, and
     /// compacts partitions where the policy is `Compact` or `CompactDelete`.
     /// Returns the total number of messages removed across all eligible topics.
-    pub async fn compact_topics(
-        &self,
-        topic_config_manager: &TopicConfigManager,
-    ) -> Result<usize> {
+    pub async fn compact_topics(&self, topic_config_manager: &TopicConfigManager) -> Result<usize> {
         let topics = self.topics.read().await;
         let mut total_removed = 0usize;
 
@@ -590,7 +590,10 @@ impl TopicManager {
 
         // Update persisted metadata
         if let Err(e) = self.persist_metadata().await {
-            warn!("Failed to persist topic metadata after add_partitions: {}", e);
+            warn!(
+                "Failed to persist topic metadata after add_partitions: {}",
+                e
+            );
         }
 
         Ok(added)

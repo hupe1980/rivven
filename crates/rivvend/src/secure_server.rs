@@ -87,7 +87,7 @@ pub struct SecureServerConfig {
 impl Default for SecureServerConfig {
     fn default() -> Self {
         Self {
-            bind_addr: "0.0.0.0:9092".parse().unwrap(),
+            bind_addr: ([0, 0, 0, 0], 9092).into(),
             #[cfg(feature = "tls")]
             tls_config: None,
             max_connections: 10_000,
@@ -207,7 +207,7 @@ impl SecureServer {
 
         let offset_manager = OffsetManager::with_persistence(
             std::path::PathBuf::from(&core_config.data_dir).join("offsets"),
-        );
+        )?;
 
         // Use provided AuthManager or create a new one with default config
         let auth_manager =

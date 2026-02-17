@@ -553,13 +553,10 @@ impl EncryptionManager {
     fn generate_nonce(&self, lsn: u64) -> Result<[u8; NONCE_SIZE]> {
         let mut nonce = [0u8; NONCE_SIZE];
         self.rng.fill(&mut nonce).map_err(|_| {
-            EncryptionError::Encryption(
-                format!(
-                    "RNG failure during nonce generation for LSN {} — refusing to encrypt",
-                    lsn
-                )
-                .into(),
-            )
+            EncryptionError::Encryption(format!(
+                "RNG failure during nonce generation for LSN {} — refusing to encrypt",
+                lsn
+            ))
         })?;
         Ok(nonce)
     }

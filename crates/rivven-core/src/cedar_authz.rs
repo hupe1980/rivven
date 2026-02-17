@@ -139,8 +139,9 @@ mod cedar_impl {
     /// `.unwrap()` calls on user-supplied entity names (usernames, topic names,
     /// group names) that could crash the authorization engine on malformed input.
     fn make_entity_uid(type_name: &str, id: &str) -> CedarResult<EntityUid> {
-        let tn = EntityTypeName::from_str(type_name)
-            .map_err(|e| CedarError::Entity(format!("invalid entity type '{}': {}", type_name, e)))?;
+        let tn = EntityTypeName::from_str(type_name).map_err(|e| {
+            CedarError::Entity(format!("invalid entity type '{}': {}", type_name, e))
+        })?;
         let eid = EntityId::from_str(id)
             .map_err(|e| CedarError::Entity(format!("invalid entity id '{}': {}", id, e)))?;
         Ok(EntityUid::from_type_name_and_id(tn, eid))
@@ -953,7 +954,10 @@ permit(
             match Self::new() {
                 Ok(authorizer) => authorizer,
                 Err(e) => {
-                    tracing::error!("Failed to create default Cedar authorizer: {}. Using deny-all fallback.", e);
+                    tracing::error!(
+                        "Failed to create default Cedar authorizer: {}. Using deny-all fallback.",
+                        e
+                    );
                     // Use new_without_schema() — cannot fail, avoids re-calling new().
                     Self::new_without_schema()
                 }

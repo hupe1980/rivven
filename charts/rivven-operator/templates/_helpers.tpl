@@ -40,6 +40,7 @@ helm.sh/chart: {{ include "rivven-operator.chart" . }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+app.kubernetes.io/part-of: rivven
 {{- end }}
 
 {{/*
@@ -66,6 +67,10 @@ Create the name of the service account to use
 Image reference
 */}}
 {{- define "rivven-operator.image" -}}
+{{- if .Values.image.digest -}}
+{{- printf "%s@%s" .Values.image.repository .Values.image.digest }}
+{{- else -}}
 {{- $tag := default .Chart.AppVersion .Values.image.tag -}}
 {{- printf "%s:%s" .Values.image.repository $tag }}
+{{- end }}
 {{- end }}

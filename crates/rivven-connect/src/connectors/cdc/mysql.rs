@@ -214,7 +214,7 @@ impl MySqlCdcSource {
     fn build_cdc_config(config: &MySqlCdcConfig) -> rivven_cdc::mysql::MySqlCdcConfig {
         let mut cdc_config = rivven_cdc::mysql::MySqlCdcConfig::new(&config.host, &config.user)
             .with_port(config.port)
-            .with_password(config.password.expose())
+            .with_password(config.password.expose_secret())
             .with_server_id(config.server_id);
 
         if let Some(ref db) = config.database {
@@ -298,7 +298,7 @@ impl Source for MySqlCdcSource {
                 &config.host,
                 config.port,
                 &config.user,
-                Some(config.password.expose()),
+                Some(config.password.expose_secret()),
                 config.database.as_deref(),
             )
             .await
@@ -513,8 +513,8 @@ impl SourceFactory for MySqlCdcSourceFactory {
         MySqlCdcSource::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySource> {
-        Box::new(MySqlCdcSourceWrapper(MySqlCdcSource::new()))
+    fn create(&self) -> Result<Box<dyn AnySource>> {
+        Ok(Box::new(MySqlCdcSourceWrapper(MySqlCdcSource::new())))
     }
 }
 

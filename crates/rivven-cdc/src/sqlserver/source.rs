@@ -634,8 +634,8 @@ impl SqlServerCdc {
         self.metrics.snapshot()
     }
 
-    /// Check if a table should be captured
-    #[allow(dead_code)]
+    /// Check if a table should be captured based on include/exclude config
+    #[cfg(test)]
     fn should_capture_table(&self, schema: &str, table: &str) -> bool {
         // Check excludes first
         for (ex_schema, ex_table) in &self.config.exclude_tables {

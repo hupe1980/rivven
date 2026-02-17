@@ -365,7 +365,7 @@ impl HttpWebhookSink {
     ///
     /// # Errors
     /// Returns an error if the HTTP client cannot be constructed (e.g., TLS initialization fails)
-    pub fn try_new() -> std::result::Result<Self, reqwest::Error> {
+    pub fn try_new() -> std::result::Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         Self::try_new_with_config(None, None)
     }
 
@@ -373,7 +373,7 @@ impl HttpWebhookSink {
     pub fn try_new_with_config(
         tls_config: Option<&TlsConfig>,
         _http2: Option<bool>,
-    ) -> std::result::Result<Self, reqwest::Error> {
+    ) -> std::result::Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let mut builder = reqwest::Client::builder()
             .timeout(Duration::from_secs(30))
             .pool_max_idle_per_host(10)
@@ -386,16 +386,15 @@ impl HttpWebhookSink {
                 builder = builder.danger_accept_invalid_certs(true);
             }
             if let Some(ref ca_path) = tls.ca_cert_path {
-                let cert_data = std::fs::read(ca_path)
-                    .map_err(|e| {
-                        warn!("Failed to read CA certificate: {}", e);
-                    })
-                    .ok();
-                if let Some(data) = cert_data {
-                    if let Ok(cert) = reqwest::Certificate::from_pem(&data) {
-                        builder = builder.add_root_certificate(cert);
-                    }
-                }
+                let cert_data = std::fs::read(ca_path).map_err(|e| {
+                    error!("Failed to read CA certificate from {:?}: {}", ca_path, e);
+                    e
+                })?;
+                let cert = reqwest::Certificate::from_pem(&cert_data).map_err(|e| {
+                    error!("Failed to parse CA certificate from {:?}: {}", ca_path, e);
+                    e
+                })?;
+                builder = builder.add_root_certificate(cert);
             }
         }
 
@@ -407,14 +406,6 @@ impl HttpWebhookSink {
             concurrency_semaphore: Arc::new(Semaphore::new(4)),
             stats: Arc::new(HttpWebhookStats::default()),
         })
-    }
-
-    /// Create a new HttpWebhookSink, panicking on failure
-    ///
-    /// This is a convenience method for cases where failure is not expected.
-    /// Prefer `try_new()` in production code.
-    pub fn new() -> Self {
-        Self::try_new().expect("Failed to create HTTP client - TLS initialization may have failed")
     }
 
     /// Get statistics for this sink
@@ -457,8 +448,8 @@ impl HttpWebhookSink {
     /// Compute HMAC signature for payload
     fn compute_signature(&self, signing: &SigningConfig, payload: &[u8], timestamp: i64) -> String {
         type HmacSha256 = Hmac<Sha256>;
-        let mut mac =
-            HmacSha256::new_from_slice(signing.secret.expose().as_bytes()).expect("HMAC key");
+        let mut mac = HmacSha256::new_from_slice(signing.secret.expose_secret().as_bytes())
+            .expect("HMAC key");
 
         // Include timestamp in signature if enabled
         if signing.include_timestamp {
@@ -532,13 +523,13 @@ impl HttpWebhookSink {
         if let Some(ref auth) = config.auth {
             request = match auth {
                 AuthConfig::Bearer { token } => {
-                    request.header("Authorization", format!("Bearer {}", token.expose()))
+                    request.header("Authorization", format!("Bearer {}", token.expose_secret()))
                 }
                 AuthConfig::Basic { username, password } => {
-                    request.basic_auth(username, Some(password.expose()))
+                    request.basic_auth(username, Some(password.expose_secret()))
                 }
                 AuthConfig::ApiKey { header_name, key } => {
-                    request.header(header_name.as_str(), key.expose())
+                    request.header(header_name.as_str(), key.expose_secret())
                 }
             };
         }
@@ -566,7 +557,7 @@ impl HttpWebhookSink {
     ) -> std::result::Result<reqwest::Response, String> {
         // Check circuit breaker
         if let Some(ref cb) = self.circuit_breaker {
-            if !cb.is_allowed() {
+            if !cb.allow_request() {
                 self.stats
                     .circuit_breaker_rejections
                     .fetch_add(1, Ordering::Relaxed);
@@ -686,12 +677,6 @@ impl HttpWebhookSink {
 
         self.stats.requests_failed.fetch_add(1, Ordering::Relaxed);
         Err(format!("Max retries exceeded. Last error: {}", last_error))
-    }
-}
-
-impl Default for HttpWebhookSink {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -901,8 +886,10 @@ impl SinkFactory for HttpWebhookSinkFactory {
         HttpWebhookSink::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySink> {
-        Box::new(HttpWebhookSink::new())
+    fn create(&self) -> Result<Box<dyn AnySink>> {
+        Ok(Box::new(HttpWebhookSink::try_new().map_err(|e| {
+            ConnectError::config(format!("Failed to create HTTP client: {}", e))
+        })?))
     }
 }
 
@@ -1063,7 +1050,7 @@ mod tests {
         assert_eq!(spec.connector_type, "http-webhook");
 
         // Factory should create a valid sink
-        let _sink = factory.create();
+        let _sink = factory.create().unwrap();
     }
 
     #[test]
@@ -1107,7 +1094,7 @@ mod tests {
 
     #[test]
     fn test_url_interpolation() {
-        let sink = HttpWebhookSink::new();
+        let sink = HttpWebhookSink::try_new().unwrap();
 
         let event = SourceEvent {
             stream: "orders".to_string(),
@@ -1127,7 +1114,7 @@ mod tests {
 
     #[test]
     fn test_compression() {
-        let sink = HttpWebhookSink::new();
+        let sink = HttpWebhookSink::try_new().unwrap();
 
         // Small payload - no compression
         let small_data = b"hello world";
@@ -1144,7 +1131,7 @@ mod tests {
 
     #[test]
     fn test_hmac_signature() {
-        let sink = HttpWebhookSink::new();
+        let sink = HttpWebhookSink::try_new().unwrap();
 
         let signing = SigningConfig {
             secret: SensitiveString::new("test-secret".to_string()),
@@ -1164,7 +1151,7 @@ mod tests {
 
     #[test]
     fn test_backoff_with_jitter() {
-        let sink = HttpWebhookSink::new();
+        let sink = HttpWebhookSink::try_new().unwrap();
 
         let config = HttpWebhookConfig {
             url: "https://example.com".to_string(),

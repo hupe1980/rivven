@@ -568,10 +568,10 @@ pub struct WebhookSink {
 }
 
 impl WebhookSink {
-    pub fn new() -> Self {
-        Self {
-            client: Client::new(),
-        }
+    pub fn try_new() -> Result<Self, reqwest::Error> {
+        Ok(Self {
+            client: Client::builder().build()?,
+        })
     }
 }
 

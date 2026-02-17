@@ -491,7 +491,7 @@ mod tests {
                 .build()
         }
 
-        fn create(&self) -> Box<dyn crate::traits::registry::AnySource> {
+        fn create(&self) -> crate::error::Result<Box<dyn crate::traits::registry::AnySource>> {
             unimplemented!("Mock only")
         }
     }

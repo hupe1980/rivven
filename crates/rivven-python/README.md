@@ -70,7 +70,7 @@ import rivven
 
 async def consume():
     client = await rivven.connect("localhost:9092")
-    consumer = client.consumer("my-topic", group_id="my-group")
+    consumer = client.consumer("my-topic", group="my-group")
     
     # Fetch messages
     messages = await consumer.fetch(max_messages=100)
@@ -109,7 +109,7 @@ async def admin():
     print(f"Configs: {configs}")
     
     # Modify topic configuration
-    await client.alter_topic_config("new-topic", "retention.ms", "86400000")
+    await client.alter_topic_config("new-topic", [("retention.ms", "86400000")])
     
     # Add partitions
     await client.create_partitions("new-topic", new_total=6)
@@ -157,9 +157,10 @@ async def secure():
     # Connect with TLS
     client = await rivven.connect_tls(
         "localhost:9093",
-        ca_cert="/path/to/ca.crt",
-        client_cert="/path/to/client.crt",  # Optional: mTLS
-        client_key="/path/to/client.key",   # Optional: mTLS
+        ca_cert_path="/path/to/ca.pem",
+        server_name="broker.example.com",
+        client_cert_path="/path/to/client.pem",  # Optional: mTLS
+        client_key_path="/path/to/client.key",   # Optional: mTLS
     )
     
     topics = await client.list_topics()
@@ -177,8 +178,8 @@ async def transactional():
     client = await rivven.connect("localhost:9092")
     
     # Initialize transactional producer - returns a ProducerState object
-    producer_state = await client.init_producer_id("my-txn-id")
-    print(f"Producer ID: {producer_state.producer_id}, Epoch: {producer_state.producer_epoch}")
+    producer_state = await client.init_producer_id()
+    print(f"Producer ID: {await producer_state.producer_id}, Epoch: {await producer_state.producer_epoch}")
     
     try:
         # Begin transaction

@@ -34,18 +34,16 @@ Rivven provides a **native connector framework** that scales to 300+ connectors:
 │                 Connector Inventory (Scalable)                   │
 ├─────────────────────────────────────────────────────────────────┤
 │  Database                                                        │
-│  ├── CDC (postgres_cdc, mysql_cdc, mongodb_cdc, ...)            │
-│  ├── Batch (sql_select, sql_insert, ...)                        │
-│  └── NoSQL (redis, cassandra, ...)                              │
+│  ├── CDC (postgres_cdc, mysql_cdc, sqlserver_cdc, ...)          │
+│  ├── RDBC (rdbc source, rdbc sink)                              │
+│  └── Batch (sql_select, sql_insert, ...)                        │
 │                                                                  │
 │  Messaging                                                       │
-│  ├── Queues (kafka, external, ...)                              │
-│  ├── MQTT (mqtt, rabbitmq, ...)                                 │
-│  └── Cloud (sqs, pubsub, azure_queue, ...)                      │
+│  ├── Queues (kafka, sqs, pubsub, ...)                           │
+│  └── MQTT (mqtt, ...)                                           │
 │                                                                  │
 │  Storage                                                         │
-│  ├── Object (s3, gcs, azure_blob, minio, ...)                   │
-│  └── File (file, sftp, hdfs, ...)                               │
+│  └── Object (s3, gcs, azure_blob, minio, ...)                   │
 │                                                                  │
 │  Warehouse                                                       │
 │  └── (snowflake, bigquery, redshift, databricks, clickhouse, ...)│
@@ -230,46 +228,44 @@ sources:
 | `tables` | | `[]` | Tables to include (empty = all) |
 | `table_regex` | | - | Regex filter for tables |
 
-### File Source
+### SQL Server CDC
 
-Read events from files (CSV, JSON, Parquet).
+Capture changes from SQL Server tables using Change Data Capture.
+See [SQL Server CDC](cdc-sqlserver) for full configuration.
 
 ```yaml
 sources:
-  files:
-    connector: file
-    topic: imported-data
+  sqlserver:
+    connector: sqlserver-cdc
+    topic: cdc-events
     config:
-      path: /data/input
-      format: json
-      watch: true
-      poll_interval_secs: 10
+      host: db.example.com
+      port: 1433
+      database: production
+      username: cdc_user
+      password: ${SQLSERVER_PASSWORD}
+      schema: dbo
+      include_tables:
+        - orders
+        - customers
+      snapshot_mode: initial
+      poll_interval_ms: 500
 ```
 
 | Parameter | Required | Default | Description |
 |:----------|:---------|:--------|:------------|
-| `path` | ✓ | - | File or directory path |
-| `format` | | `json` | File format (json, csv, parquet) |
-| `watch` | | `false` | Watch directory for new files |
-| `poll_interval_secs` | | `30` | Poll interval when watching |
-
-### HTTP Polling
-
-Poll an HTTP endpoint for data.
-
-```yaml
-sources:
-  api:
-    connector: http-poll
-    topic: api-events
-    config:
-      url: https://api.example.com/events
-      method: GET
-      headers:
-        Authorization: "Bearer ${API_TOKEN}"
-      poll_interval_secs: 60
-      response_path: "$.data[*]"
-```
+| `host` | ✓ | - | SQL Server host |
+| `port` | | `1433` | SQL Server port |
+| `database` | ✓ | - | Database name |
+| `username` | ✓ | - | Username |
+| `password` | ✓ | - | Password (redacted in logs) |
+| `schema` | | `dbo` | Schema name |
+| `include_tables` | | `[]` | Tables to include (empty = all CDC-enabled) |
+| `exclude_tables` | | `[]` | Tables to exclude |
+| `snapshot_mode` | | `initial` | Snapshot mode: initial, always, never, when_needed, initial_only, schema_only, recovery |
+| `poll_interval_ms` | | `500` | CDC poll interval in milliseconds |
+| `encrypt` | | `false` | Enable TLS |
+| `trust_server_certificate` | | `false` | Trust self-signed certs |
 
 ### Datagen (Synthetic Data)
 
@@ -305,37 +301,6 @@ sources:
 | `orders` | E-commerce orders | order_id, customer_id, product, quantity, total, status |
 | `users` | User profiles | user_id, name, email, created_at |
 | `pageviews` | Web analytics | page_url, user_id, timestamp, referrer |
-
-### External Queue Source
-
-Consume events from external message queues (for migration or hybrid deployments).
-
-```yaml
-sources:
-  external-queue:
-    connector: external-queue
-    topic: rivven-events
-    config:
-      bootstrap_servers: queue-broker:9092
-      source_topics:
-        - upstream-topic-1
-        - upstream-topic-2
-      consumer_group: rivven-consumer
-      auto_offset_reset: earliest
-      security:
-        protocol: sasl_ssl
-        mechanism: SCRAM_SHA_512
-        username: ${QUEUE_USER}
-        password: ${QUEUE_PASSWORD}
-```
-
-| Parameter | Required | Default | Description |
-|:----------|:---------|:--------|:------------|
-| `bootstrap_servers` | ✓ | - | Broker addresses |
-| `source_topics` | ✓ | - | Topics to consume |
-| `consumer_group` | ✓ | - | Consumer group ID |
-| `auto_offset_reset` | | `latest` | Offset reset policy |
-| `security.protocol` | | `plaintext` | Security protocol |
 
 ### Kafka Source
 
@@ -1262,46 +1227,6 @@ sinks:
     config:
       format: json
       pretty: true
-```
-
-### File Sink
-
-Write events to local files.
-
-```yaml
-sinks:
-  files:
-    connector: file
-    topics: [events]
-    consumer_group: file-sink
-    config:
-      path: /data/output
-      format: jsonl
-      rotation:
-        max_size_mb: 100
-        max_age_hours: 24
-```
-
-### External Queue Sink
-
-Forward events to external message queues.
-
-```yaml
-sinks:
-  external-queue:
-    connector: external-queue
-    topics: [events]
-    consumer_group: queue-sink
-    config:
-      bootstrap_servers: queue-broker:9092
-      target_topic: downstream-events
-      acks: all
-      compression: lz4
-      security:
-        protocol: sasl_ssl
-        mechanism: SCRAM_SHA_512
-        username: ${QUEUE_USER}
-        password: ${QUEUE_PASSWORD}
 ```
 
 ### Kafka Sink
@@ -2411,22 +2336,6 @@ impl SourceConnector for MyConnector {
         Ok(vec![])
     }
 }
-```
-
-### Airbyte Compatibility
-
-Use existing Airbyte connectors via Docker:
-
-```yaml
-sources:
-  stripe:
-    connector: airbyte-docker
-    topic: stripe-events
-    config:
-      image: airbyte/source-stripe:latest
-      config:
-        account_id: ${STRIPE_ACCOUNT_ID}
-        client_secret: ${STRIPE_SECRET_KEY}
 ```
 
 ---

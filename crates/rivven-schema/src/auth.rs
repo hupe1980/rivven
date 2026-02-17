@@ -72,6 +72,7 @@ use axum::{body::Body, extract::State, http::Request, middleware::Next, response
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 
 #[cfg(feature = "auth")]
 use axum::{
@@ -99,7 +100,7 @@ use rivven_core::{AuthzContext, CedarAuthorizer, RivvenAction, RivvenResource};
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 
 /// JWT/OIDC Configuration
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct JwtConfig {
     /// Expected token issuer (iss claim)
     pub issuer: Option<String>,
@@ -115,6 +116,23 @@ pub struct JwtConfig {
     pub principal_claim: String,
     /// Claim to use for roles/groups (default: "groups")
     pub roles_claim: String,
+}
+
+impl std::fmt::Debug for JwtConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JwtConfig")
+            .field("issuer", &self.issuer)
+            .field("audience", &self.audience)
+            .field("jwks_url", &self.jwks_url)
+            .field("secret", &self.secret.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "rsa_public_key",
+                &self.rsa_public_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("principal_claim", &self.principal_claim)
+            .field("roles_claim", &self.roles_claim)
+            .finish()
+    }
 }
 
 impl JwtConfig {
@@ -529,16 +547,11 @@ fn validate_api_key(
 
     for (stored_key, entry) in &config.api_keys {
         let stored_bytes = stored_key.as_bytes();
-        // Length-prefixed constant-time comparison:
-        // XOR accumulator is 0 only if all bytes match
-        if stored_bytes.len() == api_key_bytes.len() {
-            let mut diff: u8 = 0;
-            for (a, b) in stored_bytes.iter().zip(api_key_bytes.iter()) {
-                diff |= a ^ b;
-            }
-            if diff == 0 {
-                matched_entry = Some(entry);
-            }
+        // Use subtle::ConstantTimeEq for immune-to-optimization comparison
+        if stored_bytes.len() == api_key_bytes.len()
+            && bool::from(stored_bytes.ct_eq(api_key_bytes))
+        {
+            matched_entry = Some(entry);
         }
         // Continue scanning even after match to prevent timing leak
     }
@@ -781,9 +794,6 @@ impl SchemaPermission {
         }
     }
 }
-
-// Legacy alias for backward compatibility
-pub type SchemaAction = SchemaPermission;
 
 /// Check if the current session has permission on a subject (Simple RBAC)
 #[cfg(all(feature = "auth", not(feature = "cedar")))]

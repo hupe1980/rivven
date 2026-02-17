@@ -873,8 +873,8 @@ impl SinkFactory for ClickHouseSinkFactory {
         ClickHouseSink::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySink> {
-        Box::new(ClickHouseSink::new())
+    fn create(&self) -> Result<Box<dyn AnySink>> {
+        Ok(Box::new(ClickHouseSink::new()))
     }
 }
 
@@ -939,7 +939,7 @@ mod tests {
         let spec = factory.spec();
         assert_eq!(spec.connector_type, "clickhouse");
         // Factory create() → new() → with_config(&default) → CB is always active
-        let _sink = factory.create();
+        let _sink = factory.create().unwrap();
     }
 
     #[test]

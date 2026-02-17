@@ -13,7 +13,6 @@ pub type ConnectorResult<T> = std::result::Result<T, ConnectorError>;
 
 /// Main error type for rivven-connect runtime
 #[derive(Error, Debug)]
-#[allow(dead_code)] // Some variants reserved for future use
 pub enum ConnectError {
     /// Configuration error
     #[error("Configuration error: {0}")]
@@ -168,7 +167,6 @@ impl ConnectorError {
     }
 }
 
-#[allow(dead_code)] // Some methods reserved for future use
 impl ConnectError {
     /// Create a config error
     pub fn config(msg: impl Into<String>) -> Self {

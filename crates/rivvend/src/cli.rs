@@ -344,7 +344,7 @@ impl Cli {
     /// Get cluster bind address (defaults to server port + 1)
     pub fn effective_cluster_bind(&self) -> SocketAddr {
         self.cluster_bind
-            .unwrap_or_else(|| SocketAddr::new(self.bind.ip(), self.bind.port() + 1))
+            .unwrap_or_else(|| SocketAddr::new(self.bind.ip(), self.bind.port().saturating_add(1)))
     }
 
     /// Get effective node ID (generated from hostname if not specified)

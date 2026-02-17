@@ -970,8 +970,8 @@ impl SinkFactory for QdrantSinkFactory {
         QdrantSink::spec()
     }
 
-    fn create(&self) -> Box<dyn AnySink> {
-        Box::new(QdrantSink::new())
+    fn create(&self) -> Result<Box<dyn AnySink>> {
+        Ok(Box::new(QdrantSink::new()))
     }
 }
 
@@ -1036,7 +1036,7 @@ mod tests {
         let factory = QdrantSinkFactory;
         let spec = factory.spec();
         assert_eq!(spec.connector_type, "qdrant");
-        let _sink = factory.create();
+        let _sink = factory.create().unwrap();
     }
 
     #[test]

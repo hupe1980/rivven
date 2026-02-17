@@ -34,7 +34,6 @@ pub struct MetricsState {
 pub struct ConnectorMetrics {
     pub events_total: AtomicU64,
     pub errors_total: AtomicU64,
-    #[allow(dead_code)]
     pub bytes_total: AtomicU64,
     pub is_running: std::sync::atomic::AtomicBool,
     /// Rate limited events count (only for sinks)
@@ -64,7 +63,6 @@ pub struct ConnectorMetrics {
 pub type SharedMetricsState = Arc<RwLock<MetricsState>>;
 
 /// Start the Prometheus metrics HTTP server
-#[allow(dead_code)]
 pub async fn start_metrics_server(
     config: MetricsConfig,
     state: SharedMetricsState,

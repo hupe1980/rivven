@@ -13,6 +13,7 @@
 //! - **Content-Type negotiation**: Supports both `application/octet-stream` (binary) and `application/json`
 //! - **Connection pooling**: HTTP client reuses connections with TCP keepalive
 
+use anyhow::Context;
 use axum::{
     body::Bytes,
     extract::{Json, State},
@@ -21,7 +22,6 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use anyhow::Context;
 use openraft::BasicNode;
 use rivven_cluster::{
     hash_node_id, ClusterCoordinator, MetadataCommand, MetadataResponse, RaftNode, RaftTypeConfig,
@@ -386,20 +386,21 @@ fn create_raft_router_base<S: Clone + Send + Sync + 'static>(state: RaftApiState
     let auth_token: Arc<String> = if let Some(ref token) = state.cluster_auth_token {
         token.clone()
     } else {
-        // Generate a deterministic-enough ephemeral token from entropy sources
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        std::time::SystemTime::now().hash(&mut hasher);
-        std::process::id().hash(&mut hasher);
-        let token = format!("rvn-ephemeral-{:016x}{:016x}", hasher.finish(), {
-            let mut h2 = DefaultHasher::new();
-            hasher.finish().hash(&mut h2);
-            h2.finish()
-        });
+        // Generate a cryptographically secure ephemeral token
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let bytes: [u8; 32] = rng.gen();
+        let token = format!(
+            "rvn-ephemeral-{}",
+            bytes
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>()
+        );
         tracing::warn!(
-            "No cluster_auth_token configured — generated ephemeral token for Raft API: {}",
-            token
+            "No cluster_auth_token configured — generated ephemeral token for Raft API: {}...{}",
+            &token[..20],
+            &token[token.len() - 4..],
         );
         Arc::new(token)
     };
@@ -979,7 +980,14 @@ async fn propose_handler(
             if let Some(leader_addr) = state.get_node_address(leader).await {
                 info!(leader_id = leader, leader_addr = %leader_addr, "Forwarding proposal to leader");
 
-                match forward_to_leader(&state.http_client, &leader_addr, &req).await {
+                match forward_to_leader(
+                    &state.http_client,
+                    &leader_addr,
+                    &req,
+                    state.cluster_auth_token.as_deref().map(|s| s.as_str()),
+                )
+                .await
+                {
                     Ok(response) => return (StatusCode::OK, Json(response)).into_response(),
                     Err(e) => {
                         error!("Failed to forward to leader: {}", e);
@@ -1044,12 +1052,16 @@ async fn forward_to_leader(
     client: &reqwest::Client,
     leader_addr: &str,
     req: &ProposalRequest,
+    auth_token: Option<&str>,
 ) -> Result<ProposalResponse, String> {
     let url = format!("{}/api/v1/propose", leader_addr);
 
-    let response = client
-        .post(&url)
-        .json(req)
+    let mut request = client.post(&url).json(req);
+    if let Some(token) = auth_token {
+        request = request.bearer_auth(token);
+    }
+
+    let response = request
         .send()
         .await
         .map_err(|e| format!("HTTP request failed: {}", e))?;
@@ -1252,16 +1264,8 @@ async fn transfer_leadership_handler(
                 .into_response();
         }
 
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        // Deterministic but varying selection: hash current time to pick a follower
-        let mut hasher = DefaultHasher::new();
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-            .hash(&mut hasher);
-        let idx = (hasher.finish() as usize) % followers.len();
+        use rand::Rng;
+        let idx = rand::thread_rng().gen_range(0..followers.len());
         followers[idx]
     };
 
@@ -1489,9 +1493,12 @@ pub async fn start_raft_api_server_with_dashboard(
         // deploy a reverse proxy with appropriate CORS headers.
         let cors = CorsLayer::new()
             .allow_origin(tower_http::cors::AllowOrigin::exact(
-                format!("http://{}", bind_addr)
-                    .parse()
-                    .expect("bind_addr must be a valid socket address for CORS origin"),
+                format!("http://{}", bind_addr).parse().unwrap_or_else(|_| {
+                    tracing::warn!(
+                        "Failed to parse CORS origin from bind_addr, using permissive origin"
+                    );
+                    "http://localhost".parse().unwrap()
+                }),
             ))
             .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
             .allow_headers([

@@ -1,0 +1,35 @@
+{{- $fullName := include "rivven-operator.fullname" . -}}
+Rivven Operator has been installed.
+
+Namespace: {{ .Release.Namespace }}
+Release:   {{ .Release.Name }}
+
+The operator is now watching for:
+  - RivvenCluster resources
+  - RivvenConnect resources
+  - RivvenTopic resources
+  - RivvenSchemaRegistry resources
+
+To verify the operator is running:
+
+  kubectl get pods -n {{ .Release.Namespace }} -l {{ include "rivven-operator.selectorLabels" . | replace ": " "=" | replace "\n" "," }}
+
+To apply CRDs (if not already installed):
+
+  kubectl apply -f https://raw.githubusercontent.com/hupe1980/rivven/main/crates/rivven-operator/deploy/crds/
+
+To create a Rivven cluster:
+
+  cat <<EOF | kubectl apply -f -
+  apiVersion: rivven.hupe1980.github.io/v1alpha1
+  kind: RivvenCluster
+  metadata:
+    name: my-cluster
+    namespace: {{ .Release.Namespace }}
+  spec:
+    replicas: 3
+    version: "{{ .Chart.AppVersion }}"
+    image: ghcr.io/hupe1980/rivven:{{ .Chart.AppVersion }}
+  EOF
+
+For more information, visit: https://hupe1980.github.io/rivven/

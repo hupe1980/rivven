@@ -913,8 +913,24 @@ fn build_client_config(config: &TlsConfig) -> TlsResult<ClientConfig> {
         // Use system root certificates
         let mut store = rustls::RootCertStore::empty();
         let native_certs = rustls_native_certs::load_native_certs();
+        let (mut loaded, mut failed) = (0u32, 0u32);
         for cert in native_certs.certs {
-            let _ = store.add(cert);
+            match store.add(cert) {
+                Ok(_) => loaded += 1,
+                Err(_) => failed += 1,
+            }
+        }
+        if failed > 0 {
+            tracing::debug!(
+                loaded,
+                failed,
+                "Some native root certificates could not be loaded"
+            );
+        }
+        if loaded == 0 {
+            tracing::warn!(
+                "No system root certificates loaded — TLS verification will likely fail"
+            );
         }
         store
     };

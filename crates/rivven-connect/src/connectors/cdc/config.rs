@@ -469,12 +469,6 @@ pub enum SmtTransformType {
     /// - `prefix`: Custom prefix for object paths
     /// - `fields`: Optional list of fields to process (default: all string fields)
     ExternalizeBlob,
-
-    // ===== Not Yet Implemented =====
-    /// Add/set header fields (planned)
-    InsertHeader,
-    /// Custom transform via WASM plugin (planned)
-    Custom,
 }
 
 // ============================================================================

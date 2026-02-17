@@ -204,7 +204,7 @@ async fn apply_connect(
     let deploy_status = apply_connect_deployment(&ctx.client, &namespace, deployment).await?;
 
     // Build and apply headless Service for connect workers
-    let service = build_connect_service(&connect);
+    let service = build_connect_service(&connect)?;
     apply_connect_service(&ctx.client, &namespace, service).await?;
 
     // Update connect status
@@ -267,7 +267,13 @@ fn build_connect_configmap(connect: &RivvenConnect) -> Result<ConfigMap> {
             name: Some(format!("rivven-connect-{}", name)),
             namespace: Some(namespace),
             labels: Some(labels),
-            owner_references: Some(vec![connect.controller_owner_ref(&()).unwrap()]),
+            owner_references: Some(vec![connect.controller_owner_ref(&()).ok_or_else(
+                || {
+                    OperatorError::InvalidConfig(
+                        "Failed to generate owner reference for ConfigMap".into(),
+                    )
+                },
+            )?]),
             ..Default::default()
         },
         data: Some(data),
@@ -292,7 +298,7 @@ fn build_pipeline_yaml(spec: &RivvenConnectSpec) -> Result<String> {
     // Use cluster service discovery
     let cluster_ns = spec.cluster_ref.namespace.as_deref().unwrap_or("default");
     let cluster_svc = format!(
-        "rivven-{}-client.{}.svc.cluster.local:9092",
+        "rivven-{}.{}.svc.cluster.local:9092",
         spec.cluster_ref.name, cluster_ns
     );
     writeln!(yaml, "    - {}", cluster_svc)
@@ -391,6 +397,16 @@ fn build_connect_deployment(connect: &RivvenConnect) -> Result<Deployment> {
     let namespace = connect.namespace().unwrap_or_else(|| "default".to_string());
     let spec = &connect.spec;
 
+    // Immutable selector labels (must not include user pod_labels)
+    let selector_labels: BTreeMap<String, String> = [
+        (
+            "app.kubernetes.io/name".to_string(),
+            "rivven-connect".to_string(),
+        ),
+        ("app.kubernetes.io/instance".to_string(), name.clone()),
+    ]
+    .into();
+
     let mut labels = BTreeMap::new();
     labels.insert(
         "app.kubernetes.io/name".to_string(),
@@ -406,7 +422,7 @@ fn build_connect_deployment(connect: &RivvenConnect) -> Result<Deployment> {
         "rivven-operator".to_string(),
     );
 
-    // Merge user labels
+    // Merge user labels (only into template labels, not selector)
     for (k, v) in &spec.pod_labels {
         if !k.starts_with("app.kubernetes.io/") {
             labels.insert(k.clone(), v.clone());
@@ -445,11 +461,42 @@ fn build_connect_deployment(connect: &RivvenConnect) -> Result<Deployment> {
         resources: spec
             .resources
             .as_ref()
-            .and_then(|r| serde_json::from_value(r.clone()).ok()),
-        security_context: spec
-            .container_security_context
-            .as_ref()
-            .and_then(|sc| serde_json::from_value(sc.clone()).ok()),
+            .map(|r| serde_json::from_value(r.clone()))
+            .transpose()
+            .map_err(|e| {
+                OperatorError::InvalidConfig(format!("invalid resources config: {}", e))
+            })?,
+        security_context: {
+            let custom = spec
+                .container_security_context
+                .as_ref()
+                .map(|sc| serde_json::from_value(sc.clone()))
+                .transpose()
+                .map_err(|e| {
+                    OperatorError::InvalidConfig(format!(
+                        "invalid container security context: {}",
+                        e
+                    ))
+                })?;
+            Some(
+                custom.unwrap_or_else(|| k8s_openapi::api::core::v1::SecurityContext {
+                    allow_privilege_escalation: Some(false),
+                    read_only_root_filesystem: Some(true),
+                    run_as_non_root: Some(true),
+                    run_as_user: Some(1000),
+                    run_as_group: Some(1000),
+                    capabilities: Some(k8s_openapi::api::core::v1::Capabilities {
+                        drop: Some(vec!["ALL".to_string()]),
+                        ..Default::default()
+                    }),
+                    seccomp_profile: Some(k8s_openapi::api::core::v1::SeccompProfile {
+                        type_: "RuntimeDefault".to_string(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            )
+        },
         liveness_probe: Some(k8s_openapi::api::core::v1::Probe {
             http_get: Some(k8s_openapi::api::core::v1::HTTPGetAction {
                 path: Some("/health".to_string()),
@@ -532,11 +579,33 @@ fn build_connect_deployment(connect: &RivvenConnect) -> Result<Deployment> {
         affinity: spec
             .affinity
             .as_ref()
-            .and_then(|a| serde_json::from_value(a.clone()).ok()),
-        security_context: spec
-            .security_context
-            .as_ref()
-            .and_then(|sc| serde_json::from_value(sc.clone()).ok()),
+            .map(|a| serde_json::from_value(a.clone()))
+            .transpose()
+            .map_err(|e| OperatorError::InvalidConfig(format!("invalid affinity config: {}", e)))?,
+        security_context: {
+            let custom = spec
+                .security_context
+                .as_ref()
+                .map(|sc| serde_json::from_value(sc.clone()))
+                .transpose()
+                .map_err(|e| {
+                    OperatorError::InvalidConfig(format!("invalid pod security context: {}", e))
+                })?;
+            Some(
+                custom.unwrap_or_else(|| k8s_openapi::api::core::v1::PodSecurityContext {
+                    run_as_non_root: Some(true),
+                    run_as_user: Some(1000),
+                    run_as_group: Some(1000),
+                    fs_group: Some(1000),
+                    seccomp_profile: Some(k8s_openapi::api::core::v1::SeccompProfile {
+                        type_: "RuntimeDefault".to_string(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+            )
+        },
+        automount_service_account_token: Some(false),
         ..Default::default()
     };
 
@@ -545,14 +614,19 @@ fn build_connect_deployment(connect: &RivvenConnect) -> Result<Deployment> {
             name: Some(format!("rivven-connect-{}", name)),
             namespace: Some(namespace),
             labels: Some(labels.clone()),
-            annotations: Some(spec.pod_annotations.clone()),
-            owner_references: Some(vec![connect.controller_owner_ref(&()).unwrap()]),
+            owner_references: Some(vec![connect.controller_owner_ref(&()).ok_or_else(
+                || {
+                    OperatorError::InvalidConfig(
+                        "Failed to generate owner reference for Deployment".into(),
+                    )
+                },
+            )?]),
             ..Default::default()
         },
         spec: Some(k8s_openapi::api::apps::v1::DeploymentSpec {
             replicas: Some(spec.replicas),
             selector: k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector {
-                match_labels: Some(labels.clone()),
+                match_labels: Some(selector_labels),
                 ..Default::default()
             },
             template: k8s_openapi::api::core::v1::PodTemplateSpec {
@@ -570,16 +644,21 @@ fn build_connect_deployment(connect: &RivvenConnect) -> Result<Deployment> {
 }
 
 /// Build the Service for connect workers
-fn build_connect_service(connect: &RivvenConnect) -> Service {
+fn build_connect_service(connect: &RivvenConnect) -> Result<Service> {
     let name = connect.name_any();
     let namespace = connect.namespace().unwrap_or_else(|| "default".to_string());
 
-    let mut labels = BTreeMap::new();
-    labels.insert(
-        "app.kubernetes.io/name".to_string(),
-        "rivven-connect".to_string(),
-    );
-    labels.insert("app.kubernetes.io/instance".to_string(), name.clone());
+    // Selector labels must match the Deployment selector (immutable 2-label set)
+    let selector_labels: BTreeMap<String, String> = [
+        (
+            "app.kubernetes.io/name".to_string(),
+            "rivven-connect".to_string(),
+        ),
+        ("app.kubernetes.io/instance".to_string(), name.clone()),
+    ]
+    .into();
+
+    let mut labels = selector_labels.clone();
     labels.insert(
         "app.kubernetes.io/component".to_string(),
         "connect".to_string(),
@@ -589,16 +668,22 @@ fn build_connect_service(connect: &RivvenConnect) -> Service {
         "rivven-operator".to_string(),
     );
 
-    Service {
+    Ok(Service {
         metadata: ObjectMeta {
             name: Some(format!("rivven-connect-{}", name)),
             namespace: Some(namespace),
-            labels: Some(labels.clone()),
-            owner_references: Some(vec![connect.controller_owner_ref(&()).unwrap()]),
+            labels: Some(labels),
+            owner_references: Some(vec![connect.controller_owner_ref(&()).ok_or_else(
+                || {
+                    OperatorError::InvalidConfig(
+                        "Failed to generate owner reference for Service".into(),
+                    )
+                },
+            )?]),
             ..Default::default()
         },
         spec: Some(k8s_openapi::api::core::v1::ServiceSpec {
-            selector: Some(labels),
+            selector: Some(selector_labels),
             ports: Some(vec![
                 k8s_openapi::api::core::v1::ServicePort {
                     name: Some("http".to_string()),
@@ -620,13 +705,16 @@ fn build_connect_service(connect: &RivvenConnect) -> Service {
             ..Default::default()
         }),
         ..Default::default()
-    }
+    })
 }
 
 /// Apply ConfigMap using server-side apply
 async fn apply_connect_configmap(client: &Client, namespace: &str, cm: ConfigMap) -> Result<()> {
     let api: Api<ConfigMap> = Api::namespaced(client.clone(), namespace);
-    let name = cm.metadata.name.as_ref().unwrap();
+    let name =
+        cm.metadata.name.as_ref().ok_or_else(|| {
+            OperatorError::InvalidConfig("ConfigMap missing metadata.name".into())
+        })?;
 
     debug!(name = %name, "Applying Connect ConfigMap");
 
@@ -645,7 +733,10 @@ async fn apply_connect_deployment(
     deployment: Deployment,
 ) -> Result<Option<k8s_openapi::api::apps::v1::DeploymentStatus>> {
     let api: Api<Deployment> = Api::namespaced(client.clone(), namespace);
-    let name = deployment.metadata.name.as_ref().unwrap();
+    let name =
+        deployment.metadata.name.as_ref().ok_or_else(|| {
+            OperatorError::InvalidConfig("Deployment missing metadata.name".into())
+        })?;
 
     debug!(name = %name, "Applying Connect Deployment");
 
@@ -661,7 +752,11 @@ async fn apply_connect_deployment(
 /// Apply Service using server-side apply
 async fn apply_connect_service(client: &Client, namespace: &str, svc: Service) -> Result<()> {
     let api: Api<Service> = Api::namespaced(client.clone(), namespace);
-    let name = svc.metadata.name.as_ref().unwrap();
+    let name = svc
+        .metadata
+        .name
+        .as_ref()
+        .ok_or_else(|| OperatorError::InvalidConfig("Service missing metadata.name".into()))?;
 
     debug!(name = %name, "Applying Connect Service");
 
@@ -1061,7 +1156,7 @@ mod tests {
 
         assert!(yaml.contains("version: \"1.0\""));
         assert!(yaml.contains("bootstrap_servers:"));
-        assert!(yaml.contains("rivven-test-cluster-client"));
+        assert!(yaml.contains("rivven-test-cluster"));
         assert!(yaml.contains("sources:"));
         assert!(yaml.contains("test-source:"));
         assert!(yaml.contains("sinks:"));
@@ -1095,7 +1190,7 @@ mod tests {
     #[test]
     fn test_build_connect_service() {
         let connect = create_test_connect();
-        let service = build_connect_service(&connect);
+        let service = build_connect_service(&connect).unwrap();
 
         assert_eq!(
             service.metadata.name,

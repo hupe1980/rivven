@@ -803,11 +803,6 @@ fn build_base_smt_transform(config: &SmtTransformConfig) -> Result<Arc<dyn Smt>,
         SmtTransformType::ExternalizeBlob => {
             Err("externalize_blob requires the 'cloud-storage' feature to be enabled".to_string())
         }
-
-        SmtTransformType::InsertHeader | SmtTransformType::Custom => Err(format!(
-            "SMT transform type {:?} not yet implemented",
-            config.transform_type
-        )),
     }
 }
 
