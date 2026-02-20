@@ -2,10 +2,10 @@
 //!
 //! | Module | Responsibility |
 //! |--------|---------------|
-//! | [`produce`] | Publish, idempotent publish, producer init |
-//! | [`consume`] | Fetch, offset management, consumer groups, topic CRUD |
-//! | [`transaction`] | Begin/commit/abort transactions, partition/offset txn ops |
-//! | [`admin`] | Quotas, topic config, create partitions, delete records |
+//! | `produce` | Publish, idempotent publish, producer init |
+//! | `consume` | Fetch, offset management, consumer groups, topic CRUD |
+//! | `transaction` | Begin/commit/abort transactions, partition/offset txn ops |
+//! | `admin` | Quotas, topic config, create partitions, delete records |
 
 mod admin;
 mod consume;

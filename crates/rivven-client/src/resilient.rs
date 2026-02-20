@@ -601,7 +601,7 @@ impl ResilientClient {
     ///
     /// **WARNING: At-least-once semantics.** If the server commits the write
     /// but the response is lost (timeout/network partition), the retry produces
-    /// a duplicate. For exactly-once, use [`Self::idempotent_publish`] or
+    /// a duplicate. For exactly-once, use `Client::publish_idempotent` or
     /// `IdempotentPublish` requests instead.
     pub async fn publish(&self, topic: impl Into<String>, value: impl Into<Bytes>) -> Result<u64> {
         let topic = topic.into();
