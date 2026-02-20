@@ -55,7 +55,7 @@ metadata:
   namespace: default
 spec:
   replicas: 3
-  version: "0.0.18"
+  version: "0.0.19"
   
   storage:
     size: 100Gi
@@ -102,7 +102,7 @@ spec:
     name: production
   
   replicas: 2
-  version: "0.0.18"
+  version: "0.0.19"
   
   # PostgreSQL CDC source with generic config
   sources:
@@ -277,7 +277,7 @@ spec:
     name: production
   
   replicas: 3
-  version: "0.0.18"
+  version: "0.0.19"
   
   sources:
     - name: postgres-cdc-advanced
@@ -468,7 +468,7 @@ spec:
     name: production
   
   replicas: 2
-  version: "0.0.18"
+  version: "0.0.19"
   
   # Server configuration
   server:
