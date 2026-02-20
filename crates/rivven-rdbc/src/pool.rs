@@ -156,18 +156,26 @@ impl PooledConnection {
     }
 
     /// Get the underlying connection
+    ///
+    /// # Panics
+    /// Panics if called after the connection has been returned to the pool
+    /// (structurally unreachable in normal usage).
     pub fn connection(&self) -> &dyn Connection {
         self.conn
             .as_ref()
-            .expect("connection already returned")
+            .expect("BUG: PooledConnection used after return to pool")
             .as_ref()
     }
 
     /// Get mutable reference to the underlying connection
+    ///
+    /// # Panics
+    /// Panics if called after the connection has been returned to the pool
+    /// (structurally unreachable in normal usage).
     pub fn connection_mut(&mut self) -> &mut dyn Connection {
         self.conn
             .as_mut()
-            .expect("connection already returned")
+            .expect("BUG: PooledConnection used after return to pool")
             .as_mut()
     }
 }
@@ -178,7 +186,7 @@ impl std::ops::Deref for PooledConnection {
     fn deref(&self) -> &Self::Target {
         self.conn
             .as_ref()
-            .expect("connection already returned")
+            .expect("BUG: PooledConnection used after return to pool")
             .as_ref()
     }
 }
@@ -187,7 +195,7 @@ impl std::ops::DerefMut for PooledConnection {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.conn
             .as_mut()
-            .expect("connection already returned")
+            .expect("BUG: PooledConnection used after return to pool")
             .as_mut()
     }
 }
@@ -310,6 +318,8 @@ pub struct PoolStats {
     pub total_wait_time_ms: u64,
     /// Number of health check failures
     pub health_check_failures: u64,
+    /// Total number of health checks performed
+    pub health_checks_performed: u64,
     /// Connections recycled due to max lifetime exceeded
     pub lifetime_expired_count: u64,
     /// Connections recycled due to idle timeout exceeded
@@ -352,11 +362,10 @@ impl PoolStats {
     /// Get health check failure rate (0.0 to 1.0)
     #[inline]
     pub fn health_failure_rate(&self) -> f64 {
-        let total_checks = self.acquisitions + self.health_check_failures;
-        if total_checks == 0 {
+        if self.health_checks_performed == 0 {
             0.0
         } else {
-            self.health_check_failures as f64 / total_checks as f64
+            self.health_check_failures as f64 / self.health_checks_performed as f64
         }
     }
 
@@ -381,6 +390,7 @@ pub struct AtomicPoolStats {
     pub exhausted_count: AtomicU64,
     pub total_wait_time_ms: AtomicU64,
     pub health_check_failures: AtomicU64,
+    pub health_checks_performed: AtomicU64,
     pub lifetime_expired_count: AtomicU64,
     pub idle_expired_count: AtomicU64,
     pub reused_count: AtomicU64,
@@ -420,6 +430,11 @@ impl AtomicPoolStats {
         self.health_check_failures.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record a health check was performed (pass or fail)
+    pub fn record_health_check(&self) {
+        self.health_checks_performed.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Record connection recycled due to max lifetime exceeded
     pub fn record_lifetime_expired(&self) {
         self.lifetime_expired_count.fetch_add(1, Ordering::Relaxed);
@@ -451,6 +466,7 @@ impl AtomicPoolStats {
             exhausted_count: self.exhausted_count.load(Ordering::Relaxed),
             total_wait_time_ms: self.total_wait_time_ms.load(Ordering::Relaxed),
             health_check_failures: self.health_check_failures.load(Ordering::Relaxed),
+            health_checks_performed: self.health_checks_performed.load(Ordering::Relaxed),
             lifetime_expired_count: self.lifetime_expired_count.load(Ordering::Relaxed),
             idle_expired_count: self.idle_expired_count.load(Ordering::Relaxed),
             reused_count: self.reused_count.load(Ordering::Relaxed),
@@ -690,35 +706,46 @@ impl ConnectionPool for SimpleConnectionPool {
             })?;
 
         // Try to get an idle connection (preserving created_at)
+        // pop entry from idle vec first, release lock, THEN validate
         let conn_with_time: Option<(Box<dyn Connection>, Instant)> = {
-            let mut idle = self.idle.lock().await;
             loop {
-                match idle.pop() {
-                    Some(entry) => {
-                        // Check if connection expired
-                        if let Some(reason) = self.should_recycle(&entry) {
-                            // Record recycling reason for observability
-                            match reason {
-                                RecycleReason::LifetimeExpired => {
-                                    self.stats.record_lifetime_expired();
+                let candidate = {
+                    let mut idle = self.idle.lock().await;
+                    loop {
+                        match idle.pop() {
+                            Some(entry) => {
+                                // Check if connection expired (cheap, no I/O)
+                                if let Some(reason) = self.should_recycle(&entry) {
+                                    match reason {
+                                        RecycleReason::LifetimeExpired => {
+                                            self.stats.record_lifetime_expired();
+                                        }
+                                        RecycleReason::IdleExpired => {
+                                            self.stats.record_idle_expired();
+                                        }
+                                    }
+                                    self.total_connections.fetch_sub(1, Ordering::Release);
+                                    self.stats.record_closed();
+                                    continue;
                                 }
-                                RecycleReason::IdleExpired => {
-                                    self.stats.record_idle_expired();
-                                }
+                                break Some(entry);
                             }
-                            // Drop expired connection, try next
-                            self.total_connections.fetch_sub(1, Ordering::Release);
-                            self.stats.record_closed();
-                            continue;
+                            None => break None,
                         }
-                        // Validate connection
-                        if !self.validate_connection(&*entry.conn).await {
-                            self.total_connections.fetch_sub(1, Ordering::Release);
-                            self.stats.record_closed();
-                            self.stats.record_health_check_failure();
-                            continue;
+                    }
+                };
+                // Lock is released here — validate without holding the idle mutex
+                match candidate {
+                    Some(entry) => {
+                        self.stats.record_health_check();
+                        if self.validate_connection(&*entry.conn).await {
+                            break Some((entry.conn, entry.created_at));
                         }
-                        break Some((entry.conn, entry.created_at));
+                        // Invalid connection — discard and try again
+                        self.total_connections.fetch_sub(1, Ordering::Release);
+                        self.stats.record_closed();
+                        self.stats.record_health_check_failure();
+                        continue;
                     }
                     None => break None,
                 }
@@ -787,11 +814,14 @@ impl ConnectionPool for SimpleConnectionPool {
         }
 
         // Optionally validate on return
-        if self.config.test_on_return && !conn.is_valid().await {
-            self.total_connections.fetch_sub(1, Ordering::Release);
-            self.stats.record_closed();
-            self.stats.record_health_check_failure();
-            return;
+        if self.config.test_on_return {
+            self.stats.record_health_check();
+            if !conn.is_valid().await {
+                self.total_connections.fetch_sub(1, Ordering::Release);
+                self.stats.record_closed();
+                self.stats.record_health_check_failure();
+                return;
+            }
         }
 
         // Return to idle pool with original creation time preserved
@@ -808,8 +838,11 @@ impl ConnectionPool for SimpleConnectionPool {
     }
 
     fn idle(&self) -> usize {
-        // Approximate - can't lock synchronously
-        self.semaphore.available_permits()
+        // return actual idle connection count, not semaphore permits
+        match self.idle.try_lock() {
+            Ok(guard) => guard.len(),
+            Err(_) => 0, // Lock contended — return 0 as best-effort
+        }
     }
 
     fn stats(&self) -> PoolStats {
@@ -892,6 +925,8 @@ mod tests {
         stats.record_closed();
         stats.record_exhausted();
         stats.record_health_check_failure();
+        stats.record_health_check();
+        stats.record_health_check();
         stats.record_lifetime_expired();
         stats.record_lifetime_expired();
         stats.record_idle_expired();
@@ -907,6 +942,7 @@ mod tests {
         assert_eq!(snapshot.total_wait_time_ms, 300);
         assert_eq!(snapshot.exhausted_count, 1);
         assert_eq!(snapshot.health_check_failures, 1);
+        assert_eq!(snapshot.health_checks_performed, 2);
         assert_eq!(snapshot.lifetime_expired_count, 2);
         assert_eq!(snapshot.idle_expired_count, 1);
         assert_eq!(snapshot.reused_count, 3);
@@ -924,6 +960,7 @@ mod tests {
             exhausted_count: 5,
             total_wait_time_ms: 5000,
             health_check_failures: 10,
+            health_checks_performed: 100,
             lifetime_expired_count: 15,
             idle_expired_count: 10,
             reused_count: 800,
@@ -939,8 +976,8 @@ mod tests {
         // avg_wait_time_ms = total_wait / acquisitions
         assert!((stats.avg_wait_time_ms() - 5.0).abs() < 0.001);
 
-        // health_failure_rate = failures / (acquisitions + failures)
-        assert!((stats.health_failure_rate() - 0.0099).abs() < 0.001);
+        // health_failure_rate = failures / health_checks_performed
+        assert!((stats.health_failure_rate() - 0.1).abs() < 0.001);
 
         // active_connections = created - closed
         assert_eq!(stats.active_connections(), 70);

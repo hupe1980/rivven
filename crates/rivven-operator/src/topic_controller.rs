@@ -280,18 +280,27 @@ async fn reconcile_topic_with_cluster(
     );
 
     // Use the real cluster client to ensure the topic exists
+    let partitions_u32 = u32::try_from(spec.partitions).map_err(|_| {
+        OperatorError::ValidationError(format!(
+            "partitions {} is negative or exceeds u32::MAX",
+            spec.partitions
+        ))
+    })?;
     let cluster_topic_info = cluster_client
-        .ensure_topic(broker_endpoints, &topic_name, spec.partitions as u32)
+        .ensure_topic(broker_endpoints, &topic_name, partitions_u32)
         .await?;
 
-    // Build partition info based on the actual partition count
-    // Note: In production, this would come from describe_topic API
-    let partition_info: Vec<PartitionInfo> = (0..cluster_topic_info.partitions as i32)
+    // Build partition info from actual cluster state when available.
+    // report honest unavailable state instead of fabricated topology.
+    // Real partition assignment requires describe_topic API — until then, mark
+    // leader as -1 (no leader) and leave replica/ISR empty.
+    let partition_info: Vec<PartitionInfo> = (0..i32::try_from(cluster_topic_info.partitions)
+        .unwrap_or(i32::MAX))
         .map(|i| PartitionInfo {
             partition: i,
-            leader: (i % 3), // Distribution across brokers
-            replicas: (0..spec.replication_factor).collect(),
-            isr: (0..spec.replication_factor).collect(),
+            leader: -1, // Unknown — requires describe_topic API
+            replicas: vec![],
+            isr: vec![],
         })
         .collect();
 
@@ -303,7 +312,7 @@ async fn reconcile_topic_with_cluster(
     );
 
     Ok(TopicInfo {
-        partitions: cluster_topic_info.partitions as i32,
+        partitions: i32::try_from(cluster_topic_info.partitions).unwrap_or(i32::MAX),
         replication_factor: spec.replication_factor,
         existed: cluster_topic_info.existed,
         partition_info,

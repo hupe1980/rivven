@@ -132,7 +132,7 @@ impl RedbLogStore {
         self.save_states(&[(key, &bytes)])
     }
 
-    /// Save multiple state entries in a single write transaction (F-040 fix).
+    /// Save multiple state entries in a single write transaction.
     ///
     /// Consolidates multiple key-value writes into one ACID transaction,
     /// avoiding the overhead and inconsistency risk of separate transactions.
@@ -252,7 +252,7 @@ impl RedbLogStore {
 
     /// Delete log entries in range [start, end)
     ///
-    /// F-036 fix: Propagate errors instead of silently swallowing them
+    /// Propagate errors instead of silently swallowing them
     /// with `let _ = table.remove(index)`.
     fn delete_logs_range(
         &self,
@@ -285,7 +285,7 @@ impl RedbLogStore {
 
 // Implement RaftLogReader for RedbLogStore
 impl RaftLogReader<TypeConfig> for RedbLogStore {
-    /// F-035 fix: Use a single read transaction with range iteration instead
+    /// Use a single read transaction with range iteration instead
     /// of opening a separate transaction per entry via `get_log()`.
     async fn try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + Send>(
         &mut self,

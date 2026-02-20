@@ -339,11 +339,18 @@ impl SnapshotSource for PostgresSnapshotSource {
         // Get column names
         let columns = self.get_columns(schema, table).await?;
 
+        // Defense-in-depth: escape double-quotes in identifiers even though
+        // TableSpec::new validates them upstream. A double-quote in a PostgreSQL
+        // identifier is escaped by doubling it.
+        let esc_schema = schema.replace('"', "\"\"");
+        let esc_table = table.replace('"', "\"\"");
+        let esc_key = key_column.replace('"', "\"\"");
+
         // Build SELECT query with keyset pagination (efficient, no OFFSET)
         let rows = if let Some(last) = last_key {
             let q = format!(
                 r#"SELECT * FROM "{}"."{}" WHERE "{}" > $1 ORDER BY "{}" LIMIT {}"#,
-                schema, table, key_column, key_column, batch_size
+                esc_schema, esc_table, esc_key, esc_key, batch_size
             );
             self.client
                 .query(&q, &[&last])
@@ -352,7 +359,7 @@ impl SnapshotSource for PostgresSnapshotSource {
         } else {
             let q = format!(
                 r#"SELECT * FROM "{}"."{}" ORDER BY "{}" LIMIT {}"#,
-                schema, table, key_column, batch_size
+                esc_schema, esc_table, esc_key, batch_size
             );
             self.client
                 .query(&q, &[])

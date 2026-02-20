@@ -367,8 +367,13 @@ fn build_pipeline_yaml(spec: &RivvenConnectSpec) -> Result<String> {
                 .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
             writeln!(yaml, "    connector: {}", sink.connector)
                 .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
-            writeln!(yaml, "    topics: {:?}", sink.topics)
+            // emit proper YAML list syntax instead of Rust debug format
+            writeln!(yaml, "    topics:")
                 .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
+            for topic in &sink.topics {
+                writeln!(yaml, "      - {}", topic)
+                    .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
+            }
             writeln!(yaml, "    consumer_group: {}", sink.consumer_group)
                 .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
             writeln!(yaml, "    enabled: {}", sink.enabled)

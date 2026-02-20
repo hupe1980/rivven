@@ -543,6 +543,18 @@ SELECT @@gtid_current_pos;
 
 ---
 
+## Security Considerations
+
+### Identifier Validation
+
+All table, schema, and column identifiers used in snapshot queries are validated via `Validator::validate_identifier()`, which enforces `^[a-zA-Z_][a-zA-Z0-9_]{0,254}$`. Invalid identifiers are rejected at `TableSpec::new()` before any SQL is constructed.
+
+### SQL Injection Prevention
+
+Snapshot `SELECT` queries apply defense-in-depth backtick-doubling (`` ` `` → ` `` ``) on all identifiers, preventing injection even in the unlikely event that validation is bypassed via internal API misuse. Keyset pagination values are always passed as parameterized query parameters.
+
+---
+
 ## Troubleshooting
 
 ### Common Issues

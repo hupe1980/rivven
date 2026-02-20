@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-/// F-136 fix: Execute deferred fsync via `spawn_blocking`.
+/// Execute deferred fsync via `spawn_blocking`.
 ///
 /// Takes the dup'd file descriptor from `LogManager::take_pending_sync()`
 /// and runs `sync_data()` (fdatasync) on a blocking thread pool thread.
@@ -67,7 +67,7 @@ impl Partition {
             tiered_storage.is_some()
         );
         let base_dir = std::path::PathBuf::from(&config.data_dir);
-        let log_manager = LogManager::with_sync_policy(
+        let mut log_manager = LogManager::with_sync_policy(
             base_dir,
             topic,
             id,
@@ -136,29 +136,13 @@ impl Partition {
 
         // Write to log manager (primary storage) — consumes message, no clone needed
         if let Err(e) = log.append(offset, message).await {
-            // F-017 fix: Reclaim the offset on failure using a CAS retry loop.
-            // A single CAS can fail spuriously if a concurrent append advances
-            // past our offset. The loop retries until the offset is rolled back
-            // or we observe it has already been rolled back far enough.
-            loop {
-                let current = self.next_offset.load(Ordering::SeqCst);
-                if current <= offset {
-                    break; // Already rolled back or another thread did it
-                }
-                match self.next_offset.compare_exchange(
-                    current,
-                    offset,
-                    Ordering::SeqCst,
-                    Ordering::SeqCst,
-                ) {
-                    Ok(_) => break,
-                    Err(_) => continue, // Retry
-                }
-            }
+            // Reclaim the offset on failure. We hold the write lock so no
+            // concurrent append can interleave — a simple store suffices.
+            self.next_offset.store(offset, Ordering::Release);
             return Err(e);
         }
 
-        // F-136 fix: Take the deferred sync handle BEFORE releasing the write lock,
+        // Take the deferred sync handle BEFORE releasing the write lock,
         // then release the lock so readers and other writers can proceed during
         // the slow fdatasync syscall.
         let deferred_sync = log.take_pending_sync();
@@ -290,66 +274,63 @@ impl Partition {
         let timer = Timer::new();
         let batch_size = messages.len();
 
-        // Allocate offsets atomically for entire batch
-        let start_offset = self
-            .next_offset
-            .fetch_add(batch_size as u64, Ordering::SeqCst);
-
-        let mut offsets = Vec::with_capacity(batch_size);
-        let mut batch_messages = Vec::with_capacity(batch_size);
-        let mut batch_data = Vec::new();
-
-        // Prepare messages with offsets
-        for (i, mut message) in messages.into_iter().enumerate() {
-            let offset = start_offset + i as u64;
-            message.offset = offset;
-
-            // Collect data for tiered storage
-            if self.tiered_storage.is_some() {
-                match message.to_bytes() {
-                    Ok(data) => batch_data.extend_from_slice(&data),
-                    Err(e) => tracing::warn!(
-                        offset = offset,
-                        error = %e,
-                        "Failed to serialize message for tiered storage"
-                    ),
-                }
-            }
-
-            batch_messages.push((offset, message));
-            offsets.push(offset);
-        }
-
-        // Write to log manager using optimized batch append
+        // /Acquire write lock FIRST, then allocate offsets inside
+        // the critical section. This prevents out-of-order writes from concurrent
+        // callers reserving disjoint offset ranges before acquiring the lock.
+        // On failure, use fetch_sub instead of a CAS loop — since we hold the
+        // exclusive write lock, no concurrent reservation can interleave.
         let deferred_sync;
+        let offsets;
+        let batch_data;
+        let start_offset;
         {
             let mut log = self.log_manager.write().await;
-            if let Err(e) = log.append_batch(batch_messages).await {
-                // F-017 fix: Roll back atomically reserved offsets using a CAS retry loop.
-                // Retries until we successfully roll back or observe the offset is
-                // already at or below our start_offset.
-                loop {
-                    let current = self.next_offset.load(Ordering::SeqCst);
-                    if current <= start_offset {
-                        break; // Already rolled back
-                    }
-                    match self.next_offset.compare_exchange(
-                        current,
-                        start_offset,
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                    ) {
-                        Ok(_) => break,
-                        Err(_) => continue, // Retry
+
+            // Allocate offsets inside write lock to guarantee monotonic ordering
+            start_offset = self
+                .next_offset
+                .fetch_add(batch_size as u64, Ordering::SeqCst);
+
+            let mut local_offsets = Vec::with_capacity(batch_size);
+            let mut batch_messages = Vec::with_capacity(batch_size);
+            let mut local_batch_data = Vec::new();
+
+            // Prepare messages with offsets
+            for (i, mut message) in messages.into_iter().enumerate() {
+                let offset = start_offset + i as u64;
+                message.offset = offset;
+
+                // Collect data for tiered storage
+                if self.tiered_storage.is_some() {
+                    match message.to_bytes() {
+                        Ok(data) => local_batch_data.extend_from_slice(&data),
+                        Err(e) => tracing::warn!(
+                            offset = offset,
+                            error = %e,
+                            "Failed to serialize message for tiered storage"
+                        ),
                     }
                 }
+
+                batch_messages.push((offset, message));
+                local_offsets.push(offset);
+            }
+
+            if let Err(e) = log.append_batch(batch_messages).await {
+                // Simple fetch_sub rollback — safe because we hold the
+                // exclusive write lock, so no concurrent offset reservation exists.
+                self.next_offset
+                    .fetch_sub(batch_size as u64, Ordering::SeqCst);
                 return Err(e);
             }
-            // F-136 fix: Take sync handle before releasing write lock
+
+            // Take sync handle before releasing write lock
             deferred_sync = log.take_pending_sync();
+            offsets = local_offsets;
+            batch_data = local_batch_data;
         }
 
-        // F-136 fix: Deferred fsync — readers and other writers are unblocked
+        // Deferred fsync — readers and other writers are unblocked
         deferred_fsync(deferred_sync).await?;
 
         // Also write to tiered storage if enabled
@@ -408,11 +389,11 @@ impl Partition {
         {
             let mut log = self.log_manager.write().await;
             log.append(offset, message).await?;
-            // F-136 fix: Take sync handle before releasing write lock
+            // Take sync handle before releasing write lock
             deferred_sync = log.take_pending_sync();
         }
 
-        // F-136 fix: Deferred fsync — unblocks readers during fdatasync
+        // Deferred fsync — unblocks readers during fdatasync
         deferred_fsync(deferred_sync).await?;
 
         // Advance next_offset to max(current, offset + 1) so that a future
@@ -444,12 +425,12 @@ impl Partition {
         let positions = {
             let mut log = self.log_manager.write().await;
             let pos = log.append_batch(batch).await?;
-            // F-136 fix: Take sync handle before releasing write lock
+            // Take sync handle before releasing write lock
             deferred_sync = log.take_pending_sync();
             pos
         };
 
-        // F-136 fix: Deferred fsync — unblocks readers during fdatasync
+        // Deferred fsync — unblocks readers during fdatasync
         deferred_fsync(deferred_sync).await?;
 
         // Advance next_offset past the highest replicated offset
@@ -484,7 +465,7 @@ impl Partition {
         self.tiered_storage.as_ref().map(|ts| ts.stats())
     }
 
-    /// F-125 fix: Run key-based log compaction on sealed segments.
+    /// Run key-based log compaction on sealed segments.
     ///
     /// Keeps only the latest value per key and removes tombstones (empty value).
     /// Only sealed (non-active) segments are compacted — the active segment is

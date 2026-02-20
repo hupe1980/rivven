@@ -127,7 +127,7 @@ impl RaftApiState {
         Self::with_tls(raft_node, coordinator, &TlsConfig::default())
     }
 
-    /// Create new RaftApiState with optional TLS support (F-117 fix: returns Result)
+    /// Create new RaftApiState with optional TLS support (returns Result)
     pub fn with_tls(
         raft_node: Arc<RwLock<RaftNode>>,
         coordinator: Option<Arc<RwLock<ClusterCoordinator>>>,
@@ -352,8 +352,7 @@ fn create_raft_router_base<S: Clone + Send + Sync + 'static>(state: RaftApiState
     let public = Router::new()
         .route("/health", get(health_handler))
         .route("/metrics", get(prometheus_metrics_handler))
-        .route("/metrics/json", get(metrics_handler))
-        .route("/membership", get(membership_handler));
+        .route("/metrics/json", get(metrics_handler));
 
     // Protected endpoints — require cluster auth token when configured
     let protected = Router::new()
@@ -370,6 +369,9 @@ fn create_raft_router_base<S: Clone + Send + Sync + 'static>(state: RaftApiState
             post(transfer_leadership_handler),
         )
         .route("/api/v1/trigger-election", post(trigger_election_handler))
+        // Moved /membership behind auth — it exposes internal node
+        // addresses and IDs, enabling targeted infrastructure reconnaissance.
+        .route("/membership", get(membership_handler))
         // Client APIs
         .route("/api/v1/propose", post(propose_handler))
         .route("/api/v1/propose/batch", post(batch_propose_handler))
@@ -379,7 +381,7 @@ fn create_raft_router_base<S: Clone + Send + Sync + 'static>(state: RaftApiState
             get(linearizable_metadata_handler),
         );
 
-    // F-059 fix: ALWAYS apply auth middleware to protected routes.
+    // ALWAYS apply auth middleware to protected routes.
     // In standalone mode without a configured token, we generate a random
     // token and log it at startup. This prevents unauthenticated access to
     // cluster mutation endpoints (/api/v1/bootstrap, /api/v1/propose, etc.).
@@ -1205,7 +1207,7 @@ pub struct TransferLeadershipRequest {
 /// 2. Wait for new leader to be elected
 /// 3. Stop/update the old leader node
 ///
-/// F-095 fix: Instead of calling `trigger().elect()` on the current (leader)
+/// Instead of calling `trigger().elect()` on the current (leader)
 /// node, which would just re-elect the leader itself, we forward the election
 /// trigger to a follower node via HTTP. If `target_node_id` is specified, we
 /// send the request to that node; otherwise we pick a random follower.
@@ -1487,17 +1489,22 @@ pub async fn start_raft_api_server_with_dashboard(
         info!("Dashboard enabled at http://{}/", bind_addr);
 
         // CORS layer for dashboard API requests
-        // F-065/F-067 fix: Only allow same-origin requests by default.
+        // /Only allow same-origin requests by default.
         // The dashboard is served from the same host, so no cross-origin
         // access is needed. If external tools need access, operators should
         // deploy a reverse proxy with appropriate CORS headers.
         let cors = CorsLayer::new()
             .allow_origin(tower_http::cors::AllowOrigin::exact(
                 format!("http://{}", bind_addr).parse().unwrap_or_else(|_| {
+                    // Fall back to the specific bind address rather than
+                    // a permissive "http://localhost". Use 127.0.0.1 with exact port.
                     tracing::warn!(
-                        "Failed to parse CORS origin from bind_addr, using permissive origin"
+                        "Failed to parse CORS origin from bind_addr '{}', trying 127.0.0.1 with port",
+                        bind_addr
                     );
-                    "http://localhost".parse().unwrap()
+                    format!("http://127.0.0.1:{}", bind_addr.port())
+                        .parse()
+                        .expect("127.0.0.1 origin must parse")
                 }),
             ))
             .allow_methods([axum::http::Method::GET, axum::http::Method::POST])

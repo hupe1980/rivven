@@ -124,6 +124,9 @@ pub struct ClusterServer {
     shutdown_tx: broadcast::Sender<()>,
     /// Rate limiter for DoS protection
     rate_limiter: Arc<crate::rate_limiter::RateLimiter>,
+    /// §3.3: Write-ahead log for crash-safe durability on the produce path.
+    /// Instantiated after WAL replay during server startup.
+    wal: Option<Arc<rivven_core::GroupCommitWal>>,
     /// TLS acceptor for secure connections
     #[cfg(feature = "tls")]
     tls_acceptor: Option<Arc<TlsAcceptor>>,
@@ -166,6 +169,67 @@ impl ClusterServer {
         if let Err(e) = topic_manager.recover().await {
             tracing::warn!("Failed to recover topics from disk: {}", e);
         }
+
+        // Replay WAL records at startup.
+        // After topic recovery (which restores partition structure), replay the
+        // WAL to re-apply any committed writes that may not have been flushed
+        // to segment files before the previous shutdown. Records already
+        // reflected in segments are idempotent and safe to skip.
+        {
+            let wal_dir = std::path::PathBuf::from(&core_config.data_dir).join("wal");
+            if wal_dir.exists() {
+                let wal_config = rivven_core::WalConfig {
+                    dir: wal_dir,
+                    ..Default::default()
+                };
+                match rivven_core::GroupCommitWal::replay_all(&wal_config).await {
+                    Ok(records) if !records.is_empty() => {
+                        tracing::info!(
+                            count = records.len(),
+                            "WAL replay: {} records recovered at startup",
+                            records.len()
+                        );
+                        // Apply replayed records to the topic manager
+                        for record in &records {
+                            if let Err(e) = topic_manager.apply_wal_record(record).await {
+                                tracing::warn!(
+                                    lsn = record.lsn,
+                                    error = %e,
+                                    "WAL replay: failed to apply record"
+                                );
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        tracing::debug!("WAL replay: no records to replay");
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "WAL replay: failed to read WAL files — starting with potential data loss!"
+                        );
+                    }
+                }
+            }
+        }
+
+        // §3.3 Instantiate the WAL for the produce path.
+        // This must happen after replay (which reads old WAL files) so that
+        // the new WAL picks up the correct LSN from any existing files.
+        // WAL init failure is a hard error — running without WAL risks silent
+        // data loss on crash, which is worse than refusing to start.
+        let wal = {
+            let wal_dir = std::path::PathBuf::from(&core_config.data_dir).join("wal");
+            let wal_config = rivven_core::WalConfig {
+                dir: wal_dir,
+                ..Default::default()
+            };
+            let w = rivven_core::GroupCommitWal::new(wal_config)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to initialise WAL: {}", e))?;
+            tracing::info!("WAL initialised for produce-path durability");
+            Some(w)
+        };
 
         let offset_manager = OffsetManager::with_persistence(
             std::path::PathBuf::from(&core_config.data_dir).join("offsets"),
@@ -290,6 +354,7 @@ impl ClusterServer {
             stats: Arc::new(ServerStats::new()),
             shutdown_tx,
             rate_limiter,
+            wal,
             #[cfg(feature = "tls")]
             tls_acceptor,
         })
@@ -320,7 +385,7 @@ impl ClusterServer {
         let tls_config_clone = tls_config.clone();
         let mut shutdown_rx_api = self.shutdown_tx.subscribe();
 
-        // F-145 fix: Track all infrastructure task JoinHandles for graceful shutdown.
+        // Track all infrastructure task JoinHandles for graceful shutdown.
         // Previously these were fire-and-forget spawns, which leaked resources on
         // shutdown and silently swallowed panics.
         let mut infra_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
@@ -465,11 +530,18 @@ impl ClusterServer {
             linger_duration: std::time::Duration::from_millis(self.cli.partitioner_linger_ms),
         };
 
-        let handler = Arc::new(RequestHandler::with_partitioner_config(
+        let mut handler = RequestHandler::with_partitioner_config(
             self.topic_manager.clone(),
             self.offset_manager.clone(),
             partitioner_config,
-        ));
+        );
+
+        // §3.3: Wire the WAL into the request handler for produce-path durability
+        if let Some(ref wal) = self.wal {
+            handler.set_wal(wal.clone());
+        }
+
+        let handler = Arc::new(handler);
 
         // Spawn background transaction reaper that aborts timed-out transactions.
         // Without this, a client that begins a transaction and disconnects will leak
@@ -523,9 +595,11 @@ impl ClusterServer {
         #[cfg(feature = "tls")]
         let connection_timeout = Duration::from_secs(30);
 
-        // Track active connection handles for graceful shutdown
-        let active_connections: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
-            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        // Use JoinSet instead of Mutex<Vec<JoinHandle>> to avoid
+        // lock contention on every connection open/close. JoinSet handles
+        // automatic cleanup of finished tasks and provides efficient drain.
+        let active_connections: Arc<tokio::sync::Mutex<tokio::task::JoinSet<()>>> =
+            Arc::new(tokio::sync::Mutex::new(tokio::task::JoinSet::new()));
 
         // Spawn periodic rate limiter cleanup task
         let cleanup_limiter = rate_limiter.clone();
@@ -544,7 +618,7 @@ impl ClusterServer {
             }
         }));
 
-        // F-125 fix: Background log compaction worker.
+        // Background log compaction worker.
         // Periodically iterates topics whose cleanup policy includes compaction
         // and runs key-based dedup + tombstone removal on sealed segments.
         {
@@ -591,7 +665,7 @@ impl ClusterServer {
                         Ok((tcp_stream, addr)) => {
                             let client_ip = addr.ip();
 
-                            // F-091 fix: enable TCP keepalive so dead connections
+                            // enable TCP keepalive so dead connections
                             // (network partition, client crash) are detected instead of
                             // waiting for the full idle timeout.
                             let sock_ref = socket2::SockRef::from(&tcp_stream);
@@ -617,7 +691,10 @@ impl ClusterServer {
                                     // Track connection in stats
                                     conn_stats.connection_opened();
 
-                                    let handle = tokio::spawn(async move {
+                                    // Spawn into JoinSet directly — no separate tokio::spawn
+                                    // + Mutex<Vec> retain loop. JoinSet auto-cleans finished tasks.
+                                    let mut conns = connections.lock().await;
+                                    conns.spawn(async move {
                                         // conn_guard will be dropped when connection ends
 
                                         // Handle TLS handshake if enabled
@@ -691,11 +768,6 @@ impl ClusterServer {
                                             debug!("Connection from {} closed: {}", addr, e);
                                         }
                                     });
-
-                                    // Track the handle for graceful shutdown
-                                    let mut conns = connections.lock().await;
-                                    conns.retain(|h| !h.is_finished());
-                                    conns.push(handle);
                                 }
                                 Err(crate::rate_limiter::ConnectionResult::TooManyConnectionsFromIp) => {
                                     warn!("Connection from {} rejected: too many connections from IP", addr);
@@ -727,7 +799,7 @@ impl ClusterServer {
         // Graceful shutdown: stop accepting new connections and wait for existing ones
         drop(listener);
 
-        // Wait for active connections to complete with timeout
+        // Drain JoinSet — automatically handles finished tasks
         let drain_timeout = tokio::time::Duration::from_secs(10);
         let mut active = active_connections.lock().await;
         let connection_count = active.len();
@@ -738,29 +810,24 @@ impl ClusterServer {
                 connection_count
             );
 
-            // Drain handles out of the vec so we can await them
-            let pending: Vec<_> = active.drain(..).filter(|h| !h.is_finished()).collect();
-
-            if !pending.is_empty() {
-                info!("Draining {} in-flight connections...", pending.len());
-                match tokio::time::timeout(drain_timeout, async {
-                    for handle in pending {
-                        // Actually await each connection handle to drain it
-                        let _ = handle.await;
-                    }
-                })
-                .await
-                {
-                    Ok(_) => info!("All connections drained"),
-                    Err(_) => {
-                        warn!("Connection drain timeout, some connections may be interrupted")
-                    }
+            match tokio::time::timeout(drain_timeout, async {
+                while active.join_next().await.is_some() {}
+            })
+            .await
+            {
+                Ok(_) => info!("All connections drained"),
+                Err(_) => {
+                    warn!(
+                        "Connection drain timeout, aborting {} remaining",
+                        active.len()
+                    );
+                    active.abort_all();
                 }
             }
         }
         drop(active);
 
-        // F-145 fix: Await all infrastructure task handles with timeout.
+        // Await all infrastructure task handles with timeout.
         // The shutdown broadcast has already been sent above, so tasks that
         // listen on shutdown_rx will begin their graceful exit path.
         let infra_count = infra_handles.iter().filter(|h| !h.is_finished()).count();
@@ -784,10 +851,30 @@ impl ClusterServer {
             }
         }
 
+        // §3.3: Shut down WAL before flushing topics.
+        // This ensures all group-commit batches are flushed to disk and the
+        // background writer thread terminates cleanly.
+        if let Some(ref wal) = self.wal {
+            info!("Shutting down WAL...");
+            if let Err(e) = wal.shutdown().await {
+                warn!("WAL shutdown error: {}", e);
+            }
+        }
+
         // Flush topic data
         info!("Flushing topic data...");
         if let Err(e) = self.topic_manager.flush_all().await {
             warn!("Error flushing topic data: {}", e);
+        }
+
+        // §3.3: Checkpoint WAL — remove WAL files after successful segment flush.
+        // All committed writes are now durable in segment files, so WAL records
+        // are no longer needed for recovery. This prevents duplicate replay on
+        // the next startup.
+        if let Some(ref wal) = self.wal {
+            if let Err(e) = wal.checkpoint() {
+                warn!("WAL checkpoint error: {}", e);
+            }
         }
 
         // If we're the leader, try to step down gracefully
@@ -984,7 +1071,18 @@ impl RequestRouter {
 
         let coord = coordinator.read().await;
 
-        // Get cluster metadata from coordinator
+        // §6.4: Double read-lock pattern — coordinator guard + nested metadata guard.
+        //
+        // Both are `tokio::sync::RwLock::read()` guards on **different** objects:
+        //   1. `coordinator: RwLock<ClusterCoordinator>` — outer
+        //   2. `coord.metadata(): RwLock<Metadata>` — inner (field of coordinator)
+        //
+        // No deadlock risk: both are read guards, and Tokio's RwLock permits
+        // concurrent reads. A **writer** waiting on either lock may be delayed
+        // while both reads are held, but the critical section is brief (O(n)
+        // where n = number of nodes/topics — typically <100). Metadata mutations
+        // go through Raft proposals which acquire the write lock independently,
+        // never from within a read guard path.
         let metadata = coord.metadata().read().await;
 
         // Build broker list from registered nodes
@@ -1143,6 +1241,32 @@ impl RequestRouter {
             } => self.route_publish(topic, *partition, key).await,
         };
 
+        // Data-path leader epoch fencing.
+        // If the client supplied a leader_epoch, validate it against the current
+        // partition leader epoch. If the client's epoch is stale, reject the write
+        // immediately instead of letting a stale leader accept it.
+        if let Request::Publish {
+            topic,
+            partition: Some(partition),
+            leader_epoch: Some(client_epoch),
+            ..
+        } = &request
+        {
+            if let Some(coordinator) = &self.coordinator {
+                let coord = coordinator.read().await;
+                if let Some(current_epoch) = coord.partition_leader_epoch(topic, *partition).await {
+                    if *client_epoch < current_epoch {
+                        return Response::Error {
+                            message: format!(
+                                "FENCED_LEADER_EPOCH: client epoch {} < current epoch {} for {}/{}",
+                                client_epoch, current_epoch, topic, partition
+                            ),
+                        };
+                    }
+                }
+            }
+        }
+
         match decision {
             RoutingDecision::Local => {
                 // Handle locally
@@ -1268,7 +1392,9 @@ where
             }
         };
 
-        let len = response_bytes.len() as u32;
+        let len: u32 = response_bytes.len().try_into().map_err(|_| {
+            anyhow::anyhow!("response size {} exceeds u32::MAX", response_bytes.len())
+        })?;
         stream.write_all(&len.to_be_bytes()).await?;
         stream.write_all(&response_bytes).await?;
         stream.flush().await?;

@@ -1033,12 +1033,6 @@ sinks:
       # Connector-specific configuration
 ```
 
-## Security
-
-- Database credentials are isolated to `rivven-connect` - the broker never sees them
-- Supports environment variable substitution: `${VAR_NAME}`
-- TLS support for sink connections
-
 ## Schema Registry
 
 `rivven-connect` provides **3 schema registry modes** for maximum deployment flexibility, with native support for JSON Schema, Apache Avro, and Protocol Buffers.

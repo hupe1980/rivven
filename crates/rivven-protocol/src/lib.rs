@@ -74,7 +74,7 @@ pub const WIRE_HEADER_SIZE: usize = 5;
 ///
 /// Aligned with the server default (`max_request_size` = 10 MB) and
 /// `SecureServerConfig::max_message_size` to avoid silent truncation or
-/// misleading protocol-level limits (F-068 fix).
+/// misleading protocol-level limits.
 pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
 /// Wire format identifier

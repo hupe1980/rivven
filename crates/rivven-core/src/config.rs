@@ -30,7 +30,7 @@ pub struct Config {
     #[serde(default)]
     pub tiered_storage: TieredStorageConfig,
 
-    /// Segment fsync policy controlling durability guarantees (F-001 fix).
+    /// Segment fsync policy controlling durability guarantees.
     ///
     /// - `None`: no fsync — OS page cache only (fastest, data loss on crash)
     /// - `EveryWrite`: fsync after every append (maximum durability)

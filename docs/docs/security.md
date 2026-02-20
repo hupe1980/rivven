@@ -218,21 +218,39 @@ users:
 #### Client Example
 
 ```rust
-use rivven_client::{Request, Response};
+use rivven_client::Client;
 
-// Step 1: Send client-first message
-let client_first = format!("n,,n={},r={}", username, client_nonce);
-let response = client.send(Request::ScramClientFirst { 
-    message: Bytes::from(client_first) 
-}).await?;
+// Low-level: authenticate an existing client connection
+let mut client = Client::connect("localhost:9092").await?;
+client.authenticate_scram("admin", "secure-password").await?;
+```
 
-// Step 2: Process server-first, compute proof, send client-final
-let Response::ScramServerFirst { message } = response else { ... };
-// Parse r=<nonce>,s=<salt>,i=<iterations>
-// Compute client proof and send client-final
+#### Auto-Authentication in High-Level Clients
 
-// Step 3: Receive session on success
-let Response::ScramServerFinal { session_id, expires_in, .. } = response else { ... };
+`Producer`, `ResilientClient`, and `PipelinedClient` perform SCRAM-SHA-256 authentication **automatically** on connection when credentials are configured:
+
+```rust
+use rivven_client::{Producer, ProducerConfig};
+
+let config = ProducerConfig::builder()
+    .bootstrap_servers(vec!["localhost:9092".to_string()])
+    .auth("producer-app", "secure-password")
+    .build();
+
+let producer = Producer::new(config).await?;
+// Connection is authenticated — no manual auth call needed
+```
+
+```rust
+use rivven_client::{ResilientClient, ResilientClientConfig};
+
+let config = ResilientClientConfig::builder()
+    .servers(vec!["node1:9092".to_string(), "node2:9092".to_string()])
+    .auth("my-service", "service-password")
+    .build();
+
+let client = ResilientClient::new(config).await?;
+// All pooled connections are authenticated on creation and re-authenticated on reconnect
 ```
 
 ---
@@ -430,6 +448,37 @@ validation:
     max_key_size: 1024
     max_value_size: 32768
 ```
+
+### CDC Identifier Validation
+
+All CDC table, schema, and column identifiers are validated at construction time via `Validator::validate_identifier()`, which enforces:
+
+- Pattern: `^[a-zA-Z_][a-zA-Z0-9_]{0,254}$`
+- Maximum length: 255 characters
+- No SQL injection characters (quotes, semicolons, comments, etc.)
+
+`TableSpec::new()` returns `Result` — invalid identifiers are rejected before any SQL query is constructed.
+
+**Defense-in-depth:** Snapshot queries additionally escape identifiers at the query site:
+
+| Database | Escaping |
+|----------|----------|
+| MySQL | Backtick-doubling (`` ` `` → ` `` ``) |
+| PostgreSQL | Double-quote-doubling (`"` → `""`) |
+| SQL Server | Bracket-escaping (`]` → `]]`) |
+
+This two-layer approach (validation + escaping) prevents SQL injection even if validation is bypassed via internal API misuse.
+
+### Protocol Numeric Safety
+
+Wire protocol conversions use validated and saturating casts to prevent silent truncation:
+
+| Field | Conversion | Safety |
+|-------|-----------|--------|
+| `producer_epoch` | `u32 → u16` | `safe_producer_epoch()` — returns `ProtocolError` on overflow |
+| `max_messages` | `usize → u32` | `u32::try_from().unwrap_or(u32::MAX)` — saturates instead of truncating |
+| `expires_in` | `u64 → u32` | `u32::try_from().unwrap_or(u32::MAX)` — saturates instead of truncating |
+| `port` | `u32 → u16` | `u16::try_from()` — logs warning and uses 0 on overflow |
 
 ---
 

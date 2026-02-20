@@ -115,7 +115,7 @@ codegen-units = 1
 strip = true
 
 # ============================================================================
-# Dependency Deduplication Analysis (F-096)
+# Dependency Deduplication Analysis
 # ============================================================================
 # Run `cargo tree --duplicates` to see current duplicate count.
 # As of v0.0.18: 172 duplicate versions

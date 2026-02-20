@@ -44,8 +44,10 @@
 
 use crate::{Error, Request, Response, Result};
 use bytes::Bytes;
+#[cfg(feature = "compression")]
+use rivven_core::compression::{CompressionAlgorithm, CompressionConfig, Compressor};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
@@ -105,6 +107,15 @@ pub struct ProducerConfig {
     pub acks: i8,
     /// Connection timeout
     pub connection_timeout: Duration,
+    /// Authentication credentials (optional, for SCRAM-SHA-256)
+    pub auth: Option<ProducerAuthConfig>,
+}
+
+/// Authentication configuration for the producer connection
+#[derive(Debug, Clone)]
+pub struct ProducerAuthConfig {
+    pub username: String,
+    pub password: String,
 }
 
 /// Compression types for producer messages
@@ -116,6 +127,28 @@ pub enum CompressionType {
     Snappy,
     Lz4,
     Zstd,
+}
+
+impl CompressionType {
+    /// Convert client-side `CompressionType` to core's `CompressionAlgorithm`.
+    ///
+    /// maps producer config compression setting to the algorithm
+    /// used by `rivven_core::compression::Compressor`.
+    #[cfg(feature = "compression")]
+    pub fn to_algorithm(self) -> CompressionAlgorithm {
+        match self {
+            CompressionType::None => CompressionAlgorithm::None,
+            // Gzip is not natively supported by the compressor — map to Zstd
+            // which provides better compression ratio at comparable speed.
+            CompressionType::Gzip => {
+                tracing::warn!("Gzip compression not natively supported; using Zstd instead");
+                CompressionAlgorithm::Zstd
+            }
+            CompressionType::Snappy => CompressionAlgorithm::Snappy,
+            CompressionType::Lz4 => CompressionAlgorithm::Lz4,
+            CompressionType::Zstd => CompressionAlgorithm::Zstd,
+        }
+    }
 }
 
 impl Default for ProducerConfig {
@@ -136,6 +169,7 @@ impl Default for ProducerConfig {
             compression_type: CompressionType::None,
             acks: 1,
             connection_timeout: Duration::from_secs(10),
+            auth: None,
         }
     }
 }
@@ -277,6 +311,15 @@ impl ProducerConfigBuilder {
         self
     }
 
+    /// Set authentication credentials (SCRAM-SHA-256)
+    pub fn auth(mut self, username: impl Into<String>, password: impl Into<String>) -> Self {
+        self.config.auth = Some(ProducerAuthConfig {
+            username: username.into(),
+            password: password.into(),
+        });
+        self
+    }
+
     /// Build the configuration
     pub fn build(self) -> ProducerConfig {
         self.config
@@ -413,16 +456,6 @@ impl StickyPartitioner {
 
         state.partition
     }
-
-    /// Force switch to next partition (e.g., after batch send)
-    #[allow(dead_code)]
-    async fn switch_partition(&self, topic: &str) {
-        let mut sticky = self.sticky_partitions.write().await;
-        if let Some(state) = sticky.get_mut(topic) {
-            state.partition = (state.partition + 1) % state.total_partitions;
-            state.batch_count = 0;
-        }
-    }
 }
 
 /// Murmur2 consistent hash — delegates to the canonical shared implementation
@@ -534,11 +567,17 @@ struct ProducerInner {
     /// Memory semaphore for backpressure
     memory_semaphore: Arc<Semaphore>,
     /// Producer ID for idempotence (used when enable_idempotence=true)
-    #[allow(dead_code)]
     producer_id: AtomicU64,
-    /// Sequence numbers per partition (topic-partition -> sequence)
-    #[allow(dead_code)]
-    sequences: RwLock<HashMap<String, AtomicU32>>,
+    /// Whether idempotence is actually active (not just configured).
+    /// Set to true only after successful init_producer_id from broker.
+    idempotence_active: AtomicBool,
+    /// Persistent client for metadata fetches. Avoids creating
+    /// a new TCP connection (with handshake + SCRAM auth) per cache miss.
+    metadata_client: tokio::sync::Mutex<Option<crate::Client>>,
+    /// Compressor instance wired from `config.compression_type`.
+    /// Created once and reused across all send_batch calls.
+    #[cfg(feature = "compression")]
+    compressor: Compressor,
     /// Statistics
     stats: ProducerStats,
     /// Number of records pending delivery (for flush)
@@ -576,6 +615,16 @@ impl Producer {
         let (record_tx, record_rx) = mpsc::channel(config.buffer_memory / config.batch_size);
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
+        // build a Compressor from the configured CompressionType
+        #[cfg(feature = "compression")]
+        let compressor = {
+            let algorithm = config.compression_type.to_algorithm();
+            Compressor::with_config(CompressionConfig {
+                algorithm,
+                ..CompressionConfig::default()
+            })
+        };
+
         let inner = Arc::new(ProducerInner {
             config: config.clone(),
             metadata_cache: MetadataCache::new(config.metadata_max_age),
@@ -583,7 +632,10 @@ impl Producer {
             record_tx,
             memory_semaphore: memory_semaphore.clone(),
             producer_id: AtomicU64::new(0),
-            sequences: RwLock::new(HashMap::new()),
+            idempotence_active: AtomicBool::new(false),
+            metadata_client: tokio::sync::Mutex::new(None),
+            #[cfg(feature = "compression")]
+            compressor,
             stats: ProducerStats::new(),
             pending_records: AtomicU64::new(0),
             flush_notify: Notify::new(),
@@ -591,14 +643,47 @@ impl Producer {
             shutdown_tx,
         });
 
-        // Connect to bootstrap server
-        let addr = config.bootstrap_servers[0].clone();
-        let stream = tokio::time::timeout(config.connection_timeout, TcpStream::connect(&addr))
-            .await
-            .map_err(|_| Error::ConnectionError(format!("Connection timeout to {}", addr)))?
-            .map_err(|e| Error::ConnectionError(e.to_string()))?;
-
-        stream.set_nodelay(true).ok();
+        // Try all bootstrap servers instead of only bootstrap_servers[0].
+        // This provides failover if the first server is down.
+        // Use Client::connect() for protocol handshake and optional
+        // SCRAM-SHA-256 authentication, instead of raw TcpStream.
+        let mut client: Option<crate::Client> = None;
+        let mut last_err = None;
+        for addr in &config.bootstrap_servers {
+            match tokio::time::timeout(config.connection_timeout, crate::Client::connect(addr))
+                .await
+            {
+                Ok(Ok(mut c)) => {
+                    // authenticate if credentials are configured
+                    if let Some(auth) = &config.auth {
+                        if let Err(e) = c.authenticate_scram(&auth.username, &auth.password).await {
+                            debug!("Auth failed on {}: {}", addr, e);
+                            last_err = Some(format!("Authentication failed on {}: {}", addr, e));
+                            continue;
+                        }
+                    }
+                    debug!("Connected to bootstrap server {}", addr);
+                    client = Some(c);
+                    break;
+                }
+                Ok(Err(e)) => {
+                    debug!("Failed to connect to {}: {}", addr, e);
+                    last_err = Some(e.to_string());
+                }
+                Err(_) => {
+                    debug!("Connection timeout to {}", addr);
+                    last_err = Some(format!("Connection timeout to {}", addr));
+                }
+            }
+        }
+        let connected_client = client.ok_or_else(|| {
+            Error::ConnectionError(format!(
+                "Failed to connect to any bootstrap server: {}",
+                last_err.unwrap_or_default()
+            ))
+        })?;
+        // Extract the underlying TcpStream for the sender task
+        let stream = connected_client.into_stream()?;
 
         // Spawn sender task
         let sender_inner = Arc::clone(&inner);
@@ -706,6 +791,22 @@ impl Producer {
         let key: Option<Bytes> = key.map(|k| k.into());
         let value = value.into();
 
+        // Apply the same backpressure, stats, and flush tracking
+        // as send_with_key(). Previously this method bypassed all of these,
+        // causing unbounded memory growth and broken flush().
+        let value_size = value.len() + key.as_ref().map(|k| k.len()).unwrap_or(0);
+        let permits_needed = (value_size / 1024).max(1);
+
+        let _permit = tokio::time::timeout(
+            self.inner.config.request_timeout,
+            self.inner
+                .memory_semaphore
+                .acquire_many(permits_needed as u32),
+        )
+        .await
+        .map_err(|_| Error::Timeout)?
+        .map_err(|_| Error::ConnectionError("Producer closed".into()))?;
+
         let (response_tx, response_rx) = oneshot::channel();
 
         let record = ProducerRecord {
@@ -721,6 +822,12 @@ impl Producer {
             .send(record)
             .await
             .map_err(|_| Error::ConnectionError("Sender task closed".into()))?;
+
+        self.inner
+            .stats
+            .records_sent
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner.pending_records.fetch_add(1, Ordering::Release);
 
         tokio::time::timeout(self.inner.config.delivery_timeout, response_rx)
             .await
@@ -784,6 +891,18 @@ impl Producer {
         }
     }
 
+    /// Check whether idempotent delivery is actually active.
+    ///
+    /// Returns `true` only if both:
+    /// 1. `enable_idempotence` was set in config, AND
+    /// 2. `init_producer_id` succeeded on the broker
+    ///
+    /// If this returns `false` when you configured `exactly_once()`, the
+    /// producer silently degraded to at-least-once delivery.
+    pub fn is_idempotent(&self) -> bool {
+        self.inner.idempotence_active.load(Ordering::Acquire)
+    }
+
     /// Close the producer gracefully
     pub async fn close(&self) {
         self.inner.shutdown.store(true, Ordering::Relaxed);
@@ -799,7 +918,6 @@ impl Producer {
     ///
     /// - Cache hit: ~50ns (single RwLock read)
     /// - Cache miss: ~1-5ms (network round-trip)
-    #[allow(dead_code)]
     pub async fn get_partition_count(&self, topic: &str) -> Result<u32> {
         // Fast path: check cache first
         if let Some(count) = self.inner.metadata_cache.get(topic).await {
@@ -832,28 +950,111 @@ impl Producer {
 
 /// Fetch topic metadata from a bootstrap server and cache the result.
 ///
-/// Opens a short-lived connection, sends a GetMetadata request, and stores
-/// the partition count in the metadata cache so that subsequent lookups hit
-/// the cache instead of the network.
+/// tries all bootstrap servers instead of only the first one.
+/// uses `Client::connect()` for protocol handshake + optional
+/// SCRAM-SHA-256 auth, instead of raw TcpStream.
+/// reuses a persistent metadata client stored in ProducerInner.
+/// Only creates a new connection on first call or after connection failure.
 async fn fetch_topic_metadata(inner: &ProducerInner, topic: &str) -> Result<u32> {
-    let addr = &inner.config.bootstrap_servers[0];
-    let stream = tokio::time::timeout(inner.config.connection_timeout, TcpStream::connect(addr))
+    // Fast path: try the cached metadata client
+    {
+        let mut guard = inner.metadata_client.lock().await;
+        if let Some(ref mut client) = *guard {
+            let request = Request::GetMetadata {
+                topic: topic.to_string(),
+            };
+            match client.send_request(request).await {
+                Ok(Response::Metadata { name, partitions }) => {
+                    inner.metadata_cache.put(name, partitions).await;
+                    return Ok(partitions);
+                }
+                Ok(Response::Error { message }) => return Err(Error::ServerError(message)),
+                Ok(_) => return Err(Error::InvalidResponse),
+                Err(_) => {
+                    // Connection failed — drop it and reconnect below
+                    *guard = None;
+                }
+            }
+        }
+    }
+
+    // Slow path: create a new connection and cache it
+    let mut new_client: Option<crate::Client> = None;
+    let mut last_err = None;
+    for addr in &inner.config.bootstrap_servers {
+        match tokio::time::timeout(
+            inner.config.connection_timeout,
+            crate::Client::connect(addr),
+        )
         .await
-        .map_err(|_| Error::ConnectionError(format!("Metadata request timeout to {}", addr)))?
-        .map_err(|e| Error::ConnectionError(e.to_string()))?;
-
-    stream.set_nodelay(true).ok();
-
-    let (read_half, write_half) = stream.into_split();
-    let mut writer = BufWriter::with_capacity(4096, write_half);
-    let mut reader = BufReader::with_capacity(4096, read_half);
+        {
+            Ok(Ok(mut c)) => {
+                if let Some(auth) = &inner.config.auth {
+                    if let Err(e) = c.authenticate_scram(&auth.username, &auth.password).await {
+                        last_err = Some(format!("Auth failed on {}: {}", addr, e));
+                        continue;
+                    }
+                }
+                new_client = Some(c);
+                break;
+            }
+            Ok(Err(e)) => {
+                last_err = Some(format!("Failed to connect to {}: {}", addr, e));
+            }
+            Err(_) => {
+                last_err = Some(format!("Metadata request timeout to {}", addr));
+            }
+        }
+    }
+    let mut client = new_client.ok_or_else(|| {
+        Error::ConnectionError(format!(
+            "Failed to connect to any bootstrap server for metadata: {}",
+            last_err.unwrap_or_default()
+        ))
+    })?;
 
     let request = Request::GetMetadata {
         topic: topic.to_string(),
     };
 
+    let response = client.send_request(request).await?;
+
+    match response {
+        Response::Metadata { name, partitions } => {
+            inner.metadata_cache.put(name, partitions).await;
+            // Cache the client for future metadata requests
+            *inner.metadata_client.lock().await = Some(client);
+            Ok(partitions)
+        }
+        Response::Error { message } => Err(Error::ServerError(message)),
+        _ => Err(Error::InvalidResponse),
+    }
+}
+
+/// Send `InitProducerId` request to the broker and return
+/// (producer_id, producer_epoch). This must be called once before
+/// producing idempotent records.
+async fn init_producer_id(
+    writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>,
+    reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+    inner: &Arc<ProducerInner>,
+) -> Result<(u64, u16)> {
+    let current_pid = inner.producer_id.load(Ordering::Acquire);
+    let previous = if current_pid == 0 {
+        None
+    } else {
+        Some(current_pid)
+    };
+
+    let request = Request::InitProducerId {
+        producer_id: previous,
+    };
+
     let request_bytes = request.to_wire(rivven_protocol::WireFormat::Postcard, 0u32)?;
-    let len = request_bytes.len() as u32;
+    let len: u32 = request_bytes
+        .len()
+        .try_into()
+        .map_err(|_| Error::RequestTooLarge(request_bytes.len(), u32::MAX as usize))?;
     writer
         .write_all(&len.to_be_bytes())
         .await
@@ -867,12 +1068,19 @@ async fn fetch_topic_metadata(inner: &ProducerInner, topic: &str) -> Result<u32>
         .await
         .map_err(|e| Error::IoError(e.to_string()))?;
 
+    // Read response
     let mut len_buf = [0u8; 4];
     reader
         .read_exact(&mut len_buf)
         .await
         .map_err(|e| Error::IoError(e.to_string()))?;
     let response_len = u32::from_be_bytes(len_buf) as usize;
+
+    // validate response size to prevent OOM from malicious/buggy servers
+    const MAX_RESPONSE_SIZE: usize = 100 * 1024 * 1024; // 100 MB
+    if response_len > MAX_RESPONSE_SIZE {
+        return Err(Error::ResponseTooLarge(response_len, MAX_RESPONSE_SIZE));
+    }
 
     let mut response_buf = vec![0u8; response_len];
     reader
@@ -884,10 +1092,10 @@ async fn fetch_topic_metadata(inner: &ProducerInner, topic: &str) -> Result<u32>
         Response::from_wire(&response_buf).map_err(Error::ProtocolError)?;
 
     match response {
-        Response::Metadata { name, partitions } => {
-            inner.metadata_cache.put(name, partitions).await;
-            Ok(partitions)
-        }
+        Response::ProducerIdInitialized {
+            producer_id,
+            producer_epoch,
+        } => Ok((producer_id, producer_epoch)),
         Response::Error { message } => Err(Error::ServerError(message)),
         _ => Err(Error::InvalidResponse),
     }
@@ -907,6 +1115,38 @@ async fn sender_task(
     let (read_half, write_half) = stream.into_split();
     let mut writer = BufWriter::with_capacity(64 * 1024, write_half);
     let mut reader = BufReader::with_capacity(64 * 1024, read_half);
+
+    // when idempotence is enabled, send InitProducerId to get
+    // a producer_id + epoch from the broker before producing any records.
+    let mut producer_epoch: u16 = 0;
+    if inner.config.enable_idempotence {
+        match init_producer_id(&mut writer, &mut reader, &inner).await {
+            Ok((pid, epoch)) => {
+                inner.producer_id.store(pid, Ordering::Release);
+                inner.idempotence_active.store(true, Ordering::Release);
+                producer_epoch = epoch;
+                debug!(
+                    "Idempotent producer initialized: id={}, epoch={}",
+                    pid, epoch
+                );
+            }
+            Err(e) => {
+                // Log at error level — user explicitly requested
+                // idempotence but we cannot deliver it. Proceed non-idempotent
+                // but make the degradation highly visible for operators.
+                // idempotence_active stays false — callers can
+                // check is_idempotent() to detect the degradation.
+                tracing::error!(
+                    "Failed to init producer ID for idempotent mode: {}. \
+                     Falling back to non-idempotent delivery — duplicates are possible.",
+                    e
+                );
+            }
+        }
+    }
+
+    // Per-partition sequence tracker for idempotent publishing
+    let mut partition_sequences: HashMap<(String, u32), i32> = HashMap::new();
 
     // Batches by topic-partition
     let mut batches: HashMap<(String, u32), RecordBatch> = HashMap::new();
@@ -999,9 +1239,30 @@ async fn sender_task(
                     continue;
                 }
 
-                if let Err(e) = send_batch(&mut writer, &mut reader, &inner, batch).await {
+                // Capture batch size before moving into send_batch,
+                // so we can decrement pending_records on failure.
+                let batch_record_count = batch.len();
+                if let Err(e) = send_batch(
+                    &mut writer,
+                    &mut reader,
+                    &inner,
+                    batch,
+                    producer_epoch,
+                    &mut partition_sequences,
+                )
+                .await
+                {
                     warn!("Failed to send batch to {}/{}: {}", topic, partition, e);
                     inner.stats.errors.fetch_add(1, Ordering::Relaxed);
+                    // Decrement pending_records for all records in the
+                    // failed batch. Without this, pending_records leaks permanently,
+                    // breaking flush() (it never reaches 0).
+                    let prev = inner
+                        .pending_records
+                        .fetch_sub(batch_record_count as u64, Ordering::Release);
+                    if prev <= batch_record_count as u64 {
+                        inner.flush_notify.notify_waiters();
+                    }
                 }
             }
 
@@ -1012,7 +1273,15 @@ async fn sender_task(
     // Flush remaining batches
     for ((_topic, _partition), batch) in batches.drain() {
         if !batch.is_empty() {
-            let _ = send_batch(&mut writer, &mut reader, &inner, batch).await;
+            let _ = send_batch(
+                &mut writer,
+                &mut reader,
+                &inner,
+                batch,
+                producer_epoch,
+                &mut partition_sequences,
+            )
+            .await;
         }
     }
 }
@@ -1027,6 +1296,8 @@ async fn send_batch(
     reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
     inner: &Arc<ProducerInner>,
     batch: RecordBatch,
+    producer_epoch: u16,
+    partition_sequences: &mut HashMap<(String, u32), i32>,
 ) -> Result<()> {
     let topic = batch.topic.clone();
     let partition = batch.partition;
@@ -1043,19 +1314,71 @@ async fn send_batch(
         Vec::with_capacity(num_records);
 
     // Phase 1: Write all records (batched I/O - single flush at end)
+    // apply compression when configured
+    #[cfg(feature = "compression")]
+    let use_compression = inner.config.compression_type != CompressionType::None;
+    #[cfg(not(feature = "compression"))]
+    let use_compression = false;
+    // use IdempotentPublish when idempotence is enabled
+    let use_idempotent =
+        inner.config.enable_idempotence && inner.producer_id.load(Ordering::Acquire) != 0;
+    let pid = inner.producer_id.load(Ordering::Acquire);
+
     for (value, key, response_tx) in batch.records {
         response_channels.push(response_tx);
 
-        let request = Request::Publish {
-            topic: topic.clone(),
-            partition: Some(partition),
-            key,
-            value,
+        let wire_value = if use_compression {
+            #[cfg(feature = "compression")]
+            {
+                match inner.compressor.compress(&value) {
+                    Ok(compressed) => compressed,
+                    Err(e) => {
+                        tracing::warn!("Compression failed, sending uncompressed: {}", e);
+                        value
+                    }
+                }
+            }
+            #[cfg(not(feature = "compression"))]
+            {
+                value
+            }
+        } else {
+            value
+        };
+
+        let request = if use_idempotent {
+            let seq = partition_sequences
+                .entry((topic.clone(), partition))
+                .or_insert(0);
+            let current_seq = *seq;
+            *seq += 1;
+
+            Request::IdempotentPublish {
+                topic: topic.clone(),
+                partition: Some(partition),
+                key,
+                value: wire_value,
+                producer_id: pid,
+                producer_epoch,
+                sequence: current_seq,
+                leader_epoch: None,
+            }
+        } else {
+            Request::Publish {
+                topic: topic.clone(),
+                partition: Some(partition),
+                key,
+                value: wire_value,
+                leader_epoch: None,
+            }
         };
 
         // Serialize and write with wire format (no flush yet - BufWriter coalesces)
         let request_bytes = request.to_wire(rivven_protocol::WireFormat::Postcard, 0u32)?;
-        let len = request_bytes.len() as u32;
+        let len: u32 = request_bytes
+            .len()
+            .try_into()
+            .map_err(|_| Error::RequestTooLarge(request_bytes.len(), u32::MAX as usize))?;
         writer
             .write_all(&len.to_be_bytes())
             .await
@@ -1081,6 +1404,12 @@ async fn send_batch(
             .await
             .map_err(|e| Error::IoError(e.to_string()))?;
         let response_len = u32::from_be_bytes(len_buf) as usize;
+
+        // validate response size to prevent OOM from malicious/buggy servers
+        const MAX_RESPONSE_SIZE: usize = 100 * 1024 * 1024; // 100 MB
+        if response_len > MAX_RESPONSE_SIZE {
+            return Err(Error::ResponseTooLarge(response_len, MAX_RESPONSE_SIZE));
+        }
 
         // Read response body
         let mut response_buf = vec![0u8; response_len];

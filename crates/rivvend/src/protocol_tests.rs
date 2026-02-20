@@ -45,6 +45,7 @@ proptest! {
                 offset,
                 max_messages,
                 isolation_level: None,
+                max_wait_ms: None,
             },
             Request::GetOffset {
                 consumer_group: consumer_group.clone(),
@@ -88,6 +89,7 @@ proptest! {
             partition: Some(0),
             key: Some(Bytes::from(vec![1, 2, 3, 4, 5])),
             value: Bytes::from(vec![6, 7, 8, 9, 10]),
+            leader_epoch: None,
         };
 
         if let Ok(bytes) = request.to_bytes() {

@@ -388,7 +388,7 @@ mod oidc_impl {
     }
 
     impl OidcAuthenticator {
-        /// Create a new authenticator with no providers (F-117 fix: returns Result)
+        /// Create a new authenticator with no providers (returns Result)
         pub fn new() -> OidcResult<Self> {
             let http_client = reqwest::Client::builder()
                 .timeout(Duration::from_secs(10))

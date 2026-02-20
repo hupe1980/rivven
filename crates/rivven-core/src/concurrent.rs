@@ -44,7 +44,6 @@
 use bytes::Bytes;
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender, TryRecvError, TrySendError};
 use parking_lot::RwLock;
-use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
@@ -318,6 +317,11 @@ impl LogSegment {
             return None;
         }
 
+        // reject entries whose length exceeds u32 (length prefix is 4 bytes)
+        if data.len() > u32::MAX as usize {
+            return None;
+        }
+
         let needed = 4 + data.len(); // 4 bytes for length prefix
 
         // CAS loop to reserve space
@@ -419,7 +423,7 @@ pub struct AppendOnlyLog {
     /// Configuration
     config: AppendLogConfig,
     /// Active segments
-    /// F-097: `parking_lot` — O(1) segment list access, never held across `.await`.
+    /// `parking_lot` — O(1) segment list access, never held across `.await`.
     segments: RwLock<Vec<Arc<LogSegment>>>,
     /// Total bytes written
     total_bytes: AtomicU64,
@@ -500,8 +504,9 @@ impl AppendOnlyLog {
         segments.push(new_segment);
 
         // Remove old segments if we have too many
-        while segments.len() > self.config.max_segments {
-            segments.remove(0);
+        if segments.len() > self.config.max_segments {
+            let excess = segments.len() - self.config.max_segments;
+            segments.drain(..excess);
         }
     }
 
@@ -509,14 +514,31 @@ impl AppendOnlyLog {
     pub fn read(&self, start_offset: u64, max_entries: usize) -> Vec<Bytes> {
         let segments = self.segments.read();
         let mut entries = Vec::with_capacity(max_entries);
+        let mut found_start = false;
 
-        // Find the segment containing start_offset
+        // Segments are ordered by base_offset — find the containing segment, then read forward
         for segment in segments.iter() {
-            if segment.base_offset > start_offset {
-                continue;
+            if entries.len() >= max_entries {
+                break;
             }
 
-            let relative_pos = (start_offset - segment.base_offset) as usize;
+            if !found_start {
+                // Skip segments that end before start_offset
+                if segment.base_offset > start_offset {
+                    // start_offset is before this segment — no data
+                    break;
+                }
+                // Check if the next segment would be a better match
+                // (i.e., start_offset is beyond this segment's range)
+                found_start = true;
+            }
+
+            let relative_pos = if segment.base_offset <= start_offset {
+                (start_offset - segment.base_offset) as usize
+            } else {
+                // Subsequent segments after the start: read from beginning
+                0
+            };
             let mut pos = relative_pos;
 
             while entries.len() < max_entries {
@@ -570,7 +592,7 @@ const SHARD_COUNT: usize = 64;
 /// Uses multiple shards to reduce contention. Each shard has its own lock,
 /// so operations on different keys in different shards can proceed in parallel.
 pub struct ConcurrentHashMap<K, V> {
-    /// F-097: `parking_lot` — O(1) sharded HashMap lookup/insert, never held across `.await`.
+    /// `parking_lot` — O(1) sharded HashMap lookup/insert, never held across `.await`.
     shards: [CacheAligned<RwLock<HashMap<K, V>>>; SHARD_COUNT],
     len: AtomicUsize,
 }
@@ -727,9 +749,12 @@ impl<K: Hash + Eq + Clone, V: Clone> Default for ConcurrentHashMap<K, V> {
 const MAX_HEIGHT: usize = 32;
 
 /// A skip list node
+///
+/// Values are immutable after insertion (append-only design), so no
+/// interior mutability wrapper is needed.
 struct SkipNode<K, V> {
     key: K,
-    value: UnsafeCell<V>,
+    value: V,
     /// Forward pointers for each level
     forward: [AtomicPtr<SkipNode<K, V>>; MAX_HEIGHT],
     /// Number of levels this node participates in (used for probabilistic balancing)
@@ -743,7 +768,7 @@ impl<K, V> SkipNode<K, V> {
 
         let node = Box::new(Self {
             key,
-            value: UnsafeCell::new(value),
+            value,
             forward,
             height,
         });
@@ -989,7 +1014,7 @@ impl<K: Ord + Clone + Default, V: Clone + Default> ConcurrentSkipList<K, V> {
                         break;
                     }
                     if (*next).key == *key {
-                        return Some((*(*next).value.get()).clone());
+                        return Some((*next).value.clone());
                     }
                     if (*next).key > *key {
                         break;
@@ -1029,7 +1054,7 @@ impl<K: Ord + Clone + Default, V: Clone + Default> ConcurrentSkipList<K, V> {
         }
 
         // SAFETY: `node` was obtained from traversal and is a valid SkipNode pointer.
-        result.map(|node| unsafe { ((*node).key.clone(), (*(*node).value.get()).clone()) })
+        result.map(|node| unsafe { ((*node).key.clone(), (*node).value.clone()) })
     }
 
     /// Find the smallest key greater than or equal to the given key
@@ -1055,7 +1080,7 @@ impl<K: Ord + Clone + Default, V: Clone + Default> ConcurrentSkipList<K, V> {
         unsafe {
             let next = (*current).forward[0].load(Ordering::Acquire);
             if !next.is_null() {
-                Some(((*next).key.clone(), (*(*next).value.get()).clone()))
+                Some(((*next).key.clone(), (*next).value.clone()))
             } else {
                 None
             }
@@ -1101,7 +1126,7 @@ impl<K: Ord + Clone + Default, V: Clone + Default> ConcurrentSkipList<K, V> {
                 if (*node).key > *end {
                     break;
                 }
-                entries.push(((*node).key.clone(), (*(*node).value.get()).clone()));
+                entries.push(((*node).key.clone(), (*node).value.clone()));
                 node = (*node).forward[0].load(Ordering::Acquire);
             }
         }

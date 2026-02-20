@@ -357,9 +357,9 @@ The `LogSegment` backing `AppendOnlyLog` uses raw pointer access (no `UnsafeCell
 
 The partition append path avoids unnecessary copies:
 
-- **Zero-alloc serialization**: `Segment::append()` uses `postcard::to_extend` with an 8-byte header placeholder, then patches CRC + length in-place — **1 allocation, 0 copies** per message. Batch append reuses a single serialization buffer across all messages.
+- **Zero-alloc serialization**: `Segment::append()` uses `postcard::to_extend` with an 8-byte header placeholder, then patches CRC + length in-place — **1 allocation, 0 copies** per message. Batch append reuses a single serialization buffer across all messages, with `u32::try_from` validation on frame length.
 - **No message clone**: `LogManager::append_batch()` uses `split_off()` ownership transfer to partition batches across segments without cloning `Message` structs (avoids header `String`/`Vec<u8>` allocations). When tiered storage is enabled, the message is serialized once before being consumed by the log manager.
-- **Lock-free offset allocation**: Next offset is allocated via `AtomicU64::fetch_add` (AcqRel ordering).
+- **Lock-safe offset allocation**: `append()` allocates the next offset via `AtomicU64::fetch_add` under the write lock. `append_batch()` also reserves its offset range inside the write lock critical section, preventing out-of-order writes from concurrent callers. On failure, offsets are rolled back via `fetch_sub`.
 - **Single-pass consume**: The consume handler combines isolation-level filtering and protocol conversion into a single iterator pass, avoiding intermediate `Vec` allocations.
 
 #### Buffer Pooling
@@ -380,14 +380,20 @@ Accelerated batch operations (delegates to `crc32fast`/`memchr` for SIMD when av
 
 #### Group Commit WAL
 
+Every produce is WAL-first — the message is written to the Group Commit WAL before appending to the topic partition. This applies to all three publish handlers (`handle_publish`, `handle_idempotent_publish`, `handle_transactional_publish`). WAL failures are hard errors; the publish is rejected with `WAL_ERROR`, not silently dropped. WAL initialisation failure is also a hard error — the server refuses to start rather than risk silent data loss.
+
+Transaction commit and abort decisions are also WAL-protected: a `TxnCommit` or `TxnAbort` record is written to the WAL **before** individual partition markers, ensuring the transaction decision survives a crash during partial marker writes.
+
 Write batching for 10-100x throughput improvement:
 
 - **Batch Window**: Configurable commit interval (default: 200μs)
 - **Batch Size**: Trigger flush at threshold (default: 4 MB)
 - **Pending Writes**: Flush after N writes (default: 1000)
-- **Zero-alloc serialization**: `WalRecord::write_to_buf()` serializes header + CRC + data directly into the shared batch buffer — no per-record `BytesMut` intermediate allocation
+- **Zero-alloc serialization**: `WalRecord::write_to_buf()` serializes header + CRC + data directly into the shared batch buffer — no per-record `BytesMut` intermediate allocation. `TopicManager::build_wal_record()` encodes the full `Message` via postcard, preserving key, headers, and producer metadata.
 - **Buffer shrink**: After burst traffic, batch buffer re-allocates to default capacity when oversized (>2x max)
-- **CRC-validated recovery**: Both `find_actual_end()` and `scan_wal_file()` validate CRC32 for every record
+- **CRC-validated recovery**: Both `find_actual_end()` and `scan_wal_file()` validate CRC32 for every record. Replay uses `Message::from_bytes()` to restore full message fidelity (falls back to `Message::new()` for legacy records).
+- **Lifecycle management**: Both `ClusterServer` and `SecureServer` replay WAL records at startup (after topic recovery), instantiate the WAL, wire it to `RequestHandler` via `set_wal()`, and shut it down before topic flush during graceful shutdown to ensure all pending batches are persisted
+- **Error resilience**: `write_to_buf()` returns `io::Result` rather than panicking on oversized data, propagating errors to individual request completion channels without crashing the background group-commit worker
 
 #### Segment Read Path
 

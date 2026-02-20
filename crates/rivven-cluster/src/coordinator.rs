@@ -51,7 +51,7 @@ pub struct ClusterCoordinator {
     /// Local metadata store — only mutated directly in standalone/test mode
     /// (i.e. when no Raft node is wired).  When Raft is active the Raft state
     /// machine is the single source of truth; followers never apply membership
-    /// commands locally to avoid a dual source-of-truth window (see F-002).
+    /// commands locally to avoid a dual source-of-truth window.
     metadata: Arc<MetadataStore>,
 
     /// Raft consensus node — when available, ALL state mutations go through Raft
@@ -252,7 +252,25 @@ impl ClusterCoordinator {
     /// for replicated consistency. Falls back to local MetadataStore hints when Raft
     /// is not yet available (e.g. during bootstrap before set_raft_node() is called).
     ///
-    /// F-124 fix: On NodeFailed, automatically triggers leader election for all
+    /// # SWIM-Raft Consistency Window (§2.3)
+    ///
+    /// There is an inherent consistency window between SWIM and Raft:
+    /// - **SWIM** (UDP gossip) detects node failure within milliseconds to seconds.
+    /// - **Raft** proposals are asynchronous and may take ~1 heartbeat interval to commit.
+    ///
+    /// During this window, the Raft state machine still considers a suspected/failed node
+    /// as alive. Clients may be routed to it and receive `NOT_LEADER_FOR_PARTITION` errors,
+    /// which they handle via retry with exponential backoff.
+    ///
+    /// The bridging strategy:
+    /// - **NodeSuspected**: Fence partitions (reassign leadership) but do NOT deregister.
+    ///   This allows recovery without re-registration if SWIM refutes the suspicion.
+    /// - **NodeFailed**: Deregister via Raft AND reassign partition leadership.
+    /// - **NodeRecovered**: Node is already registered; SWIM handles re-joining.
+    ///
+    /// The worst-case window duration is `election_timeout_max + network_RTT` (~600ms + RTT).
+    ///
+    /// On NodeFailed, automatically triggers leader election for all
     /// partitions that were led by the dead node, preventing partition unavailability.
     async fn handle_membership_event(
         metadata: &MetadataStore,
@@ -278,13 +296,21 @@ impl ClusterCoordinator {
                 };
                 Self::apply_membership_command(metadata, cmd, raft_node).await;
 
-                // F-124 fix: Automatically reassign partitions led by the dead node.
+                // Automatically reassign partitions led by the dead node.
                 // Only the Raft leader should trigger reassignment to avoid duplicate
                 // proposals from multiple nodes.
                 Self::reassign_dead_node_partitions(&node_id, raft_node).await;
             }
             MembershipEvent::NodeSuspected(node_id) => {
-                debug!(node_id = %node_id, "Node suspected");
+                warn!(node_id = %node_id, "Node suspected — fencing partitions");
+                // Bridge SWIM suspect events into Raft.
+                // When a node is suspected, we don't immediately deregister it (SWIM
+                // may refute the suspicion). Instead, we fence its partitions by
+                // proposing leader election for all partitions it leads, transferring
+                // leadership to healthy ISR members. This prevents writes to a
+                // potentially-dead node while allowing it to recover without full
+                // re-registration.
+                Self::reassign_dead_node_partitions(&node_id, raft_node).await;
             }
             MembershipEvent::NodeRecovered(node_id) => {
                 info!(node_id = %node_id, "Node recovered");
@@ -301,7 +327,7 @@ impl ClusterCoordinator {
     /// - **Follower**: does *nothing* locally.  The leader's Raft proposal will
     ///   replicate through Raft and be applied by the state machine on every node
     ///   (including this follower), keeping the Raft log as the single source of
-    ///   truth (F-002).
+    ///   truth.
     /// - **No Raft node** (standalone / test / bootstrap): applies directly to the
     ///   local `MetadataStore`.
     async fn apply_membership_command(
@@ -319,7 +345,7 @@ impl ClusterCoordinator {
                 }
                 return;
             }
-            // F-002 fix: Followers do NOT apply hints locally.
+            // Followers do NOT apply hints locally.
             // The Raft state machine is the single source of truth.
             // The leader's proposal will replicate through Raft and be applied
             // by the state machine on all nodes (including this follower).
@@ -331,7 +357,7 @@ impl ClusterCoordinator {
         }
     }
 
-    /// F-124 fix: Automatic partition reassignment when a broker fails.
+    /// Automatic partition reassignment when a broker fails.
     ///
     /// For every partition that was led by the dead node, proposes a leader election
     /// via Raft using the deterministic "smallest ISR member" strategy. This ensures
@@ -748,6 +774,17 @@ impl ClusterCoordinator {
     pub async fn partition_leader(&self, topic: &str, partition: u32) -> Option<String> {
         self.with_metadata(|meta| meta.find_leader(topic, partition).cloned())
             .await
+    }
+
+    /// Get the current leader epoch for a partition (§2.4 data-path fencing)
+    pub async fn partition_leader_epoch(&self, topic: &str, partition: u32) -> Option<u64> {
+        self.with_metadata(|meta| {
+            meta.topics
+                .get(topic)
+                .and_then(|t| t.partition(partition))
+                .map(|p| p.leader_epoch)
+        })
+        .await
     }
 
     /// Check if a node is in the ISR for a partition

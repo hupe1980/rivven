@@ -330,8 +330,6 @@ pub enum ValidationRuleType {
     FieldRequired,
     /// Field type constraint
     FieldType,
-    /// Custom CEL expression
-    Cel,
     /// Maximum schema size in bytes
     MaxSize,
     /// Schema naming convention
@@ -347,7 +345,6 @@ impl std::str::FromStr for ValidationRuleType {
             "REGEX" => Ok(ValidationRuleType::Regex),
             "FIELD_REQUIRED" | "FIELDREQUIRED" => Ok(ValidationRuleType::FieldRequired),
             "FIELD_TYPE" | "FIELDTYPE" => Ok(ValidationRuleType::FieldType),
-            "CEL" => Ok(ValidationRuleType::Cel),
             "MAX_SIZE" | "MAXSIZE" => Ok(ValidationRuleType::MaxSize),
             "NAMING_CONVENTION" | "NAMINGCONVENTION" => Ok(ValidationRuleType::NamingConvention),
             _ => Err(format!("Invalid validation rule type: {}", s)),

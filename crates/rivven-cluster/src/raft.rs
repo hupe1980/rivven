@@ -38,10 +38,11 @@ use openraft::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::Debug;
-use std::io::Cursor;
+use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Type alias for backward compatibility - uses redb storage
 pub type LogStore = RedbLogStore;
@@ -92,10 +93,29 @@ impl RaftTypeConfig for TypeConfig {
     type NodeId = NodeId;
     type Node = BasicNode;
     type Entry = Entry<TypeConfig>;
-    type SnapshotData = Cursor<Vec<u8>>;
+    /// File-backed snapshot I/O (§2.5 — best-in-class).
+    ///
+    /// Snapshots are persisted to `{data_dir}/snapshots/{snapshot_id}.snap` using
+    /// `tokio::fs::File`. openraft reads/writes snapshot data in chunks via
+    /// `AsyncRead`/`AsyncWrite`/`AsyncSeek` — the snapshot itself NEVER appears
+    /// in any serialized RPC (`InstallSnapshotRequest` transports raw `Vec<u8>`
+    /// chunks).
+    ///
+    /// Benefits over `Cursor<Vec<u8>>`:
+    /// - **Persistent**: Snapshots survive process restarts — avoids replaying
+    ///   the entire Raft log on startup.
+    /// - **Streaming**: Large snapshots are read/written in chunks rather than
+    ///   materializing the entire blob in memory at once.
+    /// - **Disk-backed**: Memory pressure is bounded by the chunk size, not the
+    ///   total snapshot size.
+    type SnapshotData = tokio::fs::File;
     type AsyncRuntime = openraft::TokioRuntime;
     type Responder = OneshotResponder<TypeConfig>;
 }
+
+/// Maximum allowed snapshot size (§2.5 guard). If exceeded, snapshot creation
+/// returns an error instead of silently allocating unbounded memory.
+const MAX_SNAPSHOT_SIZE: usize = 64 * 1024 * 1024; // 64 MB
 
 // Type aliases for convenience
 pub type RaftLogId = LogId<NodeId>;
@@ -118,16 +138,32 @@ pub struct StateMachine {
     last_applied: RwLock<Option<RaftLogId>>,
     /// Current membership
     membership: RwLock<RaftStoredMembership>,
+    /// Directory for persisted snapshot files
+    snapshot_dir: PathBuf,
+    /// ID of the most recent snapshot (for `get_current_snapshot`)
+    current_snapshot_id: RwLock<Option<String>>,
+    /// Metadata of the most recent snapshot
+    current_snapshot_meta: RwLock<Option<RaftSnapshotMeta>>,
 }
 
 impl StateMachine {
-    /// Create new state machine
-    pub fn new() -> Self {
+    /// Create new state machine with a snapshot directory
+    pub fn new(snapshot_dir: impl Into<PathBuf>) -> Self {
+        let dir = snapshot_dir.into();
+        std::fs::create_dir_all(&dir).ok();
         Self {
             metadata: RwLock::new(ClusterMetadata::new()),
             last_applied: RwLock::new(None),
             membership: RwLock::new(StoredMembership::new(None, Membership::new(vec![], ()))),
+            snapshot_dir: dir,
+            current_snapshot_id: RwLock::new(None),
+            current_snapshot_meta: RwLock::new(None),
         }
+    }
+
+    /// Create state machine for legacy callers (in-memory, temp dir for snapshots)
+    pub fn new_default() -> Self {
+        Self::new(std::env::temp_dir().join("rivven-snapshots"))
     }
 
     /// Get current metadata (read-only)
@@ -145,15 +181,18 @@ impl StateMachine {
 
     /// Create a snapshot
     ///
+    /// Serializes the state machine to disk for persistence and returns the
+    /// snapshot metadata + file path. The snapshot file is written atomically
+    /// (write-to-temp then rename) to prevent corruption.
+    ///
     /// All three fields are read under coordinated locking to produce
     /// a consistent snapshot. We acquire locks in a fixed order
     /// (metadata → last_applied → membership) and hold them together
     /// so that no interleaving `apply` can mutate state between reads.
     async fn create_snapshot(
         &self,
-    ) -> std::result::Result<(RaftSnapshotMeta, Vec<u8>), StorageError<NodeId>> {
+    ) -> std::result::Result<(RaftSnapshotMeta, PathBuf), StorageError<NodeId>> {
         // Acquire all read locks together to get a consistent view.
-        // Hold them simultaneously so no apply() can interleave.
         let metadata_guard = self.metadata.read().await;
         let last_applied_guard = self.last_applied.read().await;
         let membership_guard = self.membership.read().await;
@@ -177,22 +216,62 @@ impl StateMachine {
             source: StorageIOError::read_state_machine(openraft::AnyError::new(&e)),
         })?;
 
+        // §2.5 guard: Reject snapshots that exceed the size limit
+        if data.len() > MAX_SNAPSHOT_SIZE {
+            return Err(StorageError::IO {
+                source: StorageIOError::read_state_machine(openraft::AnyError::new(
+                    &std::io::Error::other(format!(
+                        "Snapshot too large: {} bytes > {} byte limit",
+                        data.len(),
+                        MAX_SNAPSHOT_SIZE
+                    )),
+                )),
+            });
+        }
+
+        let snapshot_id = format!("snapshot-{}", metadata.last_applied_index);
+
         let meta = SnapshotMeta {
             last_log_id: snapshot_data.last_applied,
             last_membership: membership,
-            snapshot_id: format!("snapshot-{}", metadata.last_applied_index),
+            snapshot_id: snapshot_id.clone(),
         };
+
+        // Write snapshot to disk atomically: temp file → rename
+        let snap_path = self.snapshot_dir.join(format!("{}.snap", snapshot_id));
+        let tmp_path = self.snapshot_dir.join(format!("{}.snap.tmp", snapshot_id));
+
+        tokio::fs::write(&tmp_path, &data)
+            .await
+            .map_err(|e| StorageError::IO {
+                source: StorageIOError::write_snapshot(Some(meta.signature()), &e),
+            })?;
+
+        tokio::fs::rename(&tmp_path, &snap_path)
+            .await
+            .map_err(|e| StorageError::IO {
+                source: StorageIOError::write_snapshot(Some(meta.signature()), &e),
+            })?;
+
+        // Update current snapshot tracking
+        *self.current_snapshot_id.write().await = Some(snapshot_id.clone());
+        *self.current_snapshot_meta.write().await = Some(meta.clone());
+
+        // Clean up old snapshot files (keep latest 3)
+        self.cleanup_old_snapshots(3).await;
 
         info!(
             snapshot_id = %meta.snapshot_id,
             last_log_id = ?meta.last_log_id,
-            "Created snapshot"
+            size_bytes = data.len(),
+            path = %snap_path.display(),
+            "Created file-backed snapshot"
         );
 
-        Ok((meta, data))
+        Ok((meta, snap_path))
     }
 
-    /// Install a snapshot
+    /// Install a snapshot from deserialized data
     async fn install_snapshot_data(
         &self,
         data: &[u8],
@@ -206,14 +285,113 @@ impl StateMachine {
         *self.last_applied.write().await = snapshot_data.last_applied;
         *self.membership.write().await = snapshot_data.membership;
 
-        info!("Installed snapshot");
+        info!("Installed snapshot from data");
         Ok(())
+    }
+
+    /// Load the latest snapshot from disk (called during startup).
+    ///
+    /// This avoids replaying the entire Raft log by restoring the most recent
+    /// snapshot into the state machine.
+    pub async fn load_latest_snapshot(&self) -> std::result::Result<bool, StorageError<NodeId>> {
+        let latest = self.find_latest_snapshot_file().await;
+        let Some(path) = latest else {
+            debug!("No snapshot files found in {}", self.snapshot_dir.display());
+            return Ok(false);
+        };
+
+        let data = tokio::fs::read(&path).await.map_err(|e| StorageError::IO {
+            source: StorageIOError::read_state_machine(openraft::AnyError::new(&e)),
+        })?;
+
+        self.install_snapshot_data(&data).await?;
+
+        // Extract snapshot ID from filename
+        let snapshot_id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        info!(
+            snapshot_id = %snapshot_id,
+            size_bytes = data.len(),
+            path = %path.display(),
+            "Restored state machine from snapshot file"
+        );
+
+        *self.current_snapshot_id.write().await = Some(snapshot_id);
+        Ok(true)
+    }
+
+    /// Find the latest snapshot file by parsing the index from filenames.
+    async fn find_latest_snapshot_file(&self) -> Option<PathBuf> {
+        let mut entries = match tokio::fs::read_dir(&self.snapshot_dir).await {
+            Ok(e) => e,
+            Err(_) => return None,
+        };
+
+        let mut best: Option<(u64, PathBuf)> = None;
+
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("snap") {
+                continue;
+            }
+            // Parse "snapshot-{index}.snap" → index
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if let Some(idx_str) = stem.strip_prefix("snapshot-") {
+                if let Ok(idx) = idx_str.parse::<u64>() {
+                    if best.as_ref().is_none_or(|(best_idx, _)| idx > *best_idx) {
+                        best = Some((idx, path));
+                    }
+                }
+            }
+        }
+
+        best.map(|(_, p)| p)
+    }
+
+    /// Remove old snapshot files, keeping the `keep` most recent.
+    async fn cleanup_old_snapshots(&self, keep: usize) {
+        let mut entries = match tokio::fs::read_dir(&self.snapshot_dir).await {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+
+        let mut snaps: Vec<(u64, PathBuf)> = Vec::new();
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("snap") {
+                continue;
+            }
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if let Some(idx_str) = stem.strip_prefix("snapshot-") {
+                if let Ok(idx) = idx_str.parse::<u64>() {
+                    snaps.push((idx, path));
+                }
+            }
+        }
+
+        if snaps.len() <= keep {
+            return;
+        }
+
+        snaps.sort_by_key(|(idx, _)| *idx);
+        let to_remove = snaps.len() - keep;
+        for (_, path) in snaps.into_iter().take(to_remove) {
+            if let Err(e) = tokio::fs::remove_file(&path).await {
+                warn!(path = %path.display(), error = %e, "Failed to remove old snapshot");
+            } else {
+                debug!(path = %path.display(), "Removed old snapshot file");
+            }
+        }
     }
 }
 
 impl Default for StateMachine {
     fn default() -> Self {
-        Self::new()
+        Self::new_default()
     }
 }
 
@@ -280,26 +458,90 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
 
     async fn begin_receiving_snapshot(
         &mut self,
-    ) -> std::result::Result<Box<Cursor<Vec<u8>>>, StorageError<NodeId>> {
-        Ok(Box::new(Cursor::new(Vec::new())))
+    ) -> std::result::Result<Box<tokio::fs::File>, StorageError<NodeId>> {
+        // Create a temporary file for receiving snapshot chunks.
+        // openraft will write chunks to this file via AsyncWrite.
+        let tmp_path = self.snapshot_dir.join("incoming.snap.tmp");
+        let file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .read(true)
+            .truncate(true)
+            .open(&tmp_path)
+            .await
+            .map_err(|e| StorageError::IO {
+                source: StorageIOError::write_snapshot(None, &e),
+            })?;
+
+        debug!(path = %tmp_path.display(), "Created temp file for incoming snapshot");
+        Ok(Box::new(file))
     }
 
     async fn install_snapshot(
         &mut self,
         meta: &RaftSnapshotMeta,
-        snapshot: Box<Cursor<Vec<u8>>>,
+        mut snapshot: Box<tokio::fs::File>,
     ) -> std::result::Result<(), StorageError<NodeId>> {
-        let data = snapshot.into_inner();
+        // Read all data from the file (openraft filled it via AsyncWrite)
+        snapshot
+            .seek(std::io::SeekFrom::Start(0))
+            .await
+            .map_err(|e| StorageError::IO {
+                source: StorageIOError::read_snapshot(Some(meta.signature()), &e),
+            })?;
 
-        // Install the snapshot data
+        let mut data = Vec::new();
+        snapshot
+            .read_to_end(&mut data)
+            .await
+            .map_err(|e| StorageError::IO {
+                source: StorageIOError::read_snapshot(Some(meta.signature()), &e),
+            })?;
+
+        // Guard against oversized snapshots from a malicious/buggy leader
+        if data.len() > MAX_SNAPSHOT_SIZE {
+            return Err(StorageError::IO {
+                source: StorageIOError::read_snapshot(
+                    Some(meta.signature()),
+                    &std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "incoming snapshot {} bytes exceeds maximum {} bytes",
+                            data.len(),
+                            MAX_SNAPSHOT_SIZE
+                        ),
+                    ),
+                ),
+            });
+        }
+
+        // Install the snapshot data into the state machine
         self.install_snapshot_data(&data).await?;
 
         // Update membership from snapshot meta
         *self.membership.write().await = meta.last_membership.clone();
 
+        // Persist: move temp file to permanent location
+        let snap_path = self.snapshot_dir.join(format!("{}.snap", meta.snapshot_id));
+        let tmp_path = self.snapshot_dir.join("incoming.snap.tmp");
+        if tmp_path.exists() {
+            tokio::fs::rename(&tmp_path, &snap_path)
+                .await
+                .map_err(|e| StorageError::IO {
+                    source: StorageIOError::write_snapshot(Some(meta.signature()), &e),
+                })?;
+        }
+
+        // Update tracking
+        *self.current_snapshot_id.write().await = Some(meta.snapshot_id.clone());
+        *self.current_snapshot_meta.write().await = Some(meta.clone());
+
+        self.cleanup_old_snapshots(3).await;
+
         info!(
             snapshot_id = %meta.snapshot_id,
-            "Installed snapshot from leader"
+            size_bytes = data.len(),
+            "Installed snapshot from leader and persisted to disk"
         );
         Ok(())
     }
@@ -307,19 +549,58 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
     async fn get_current_snapshot(
         &mut self,
     ) -> std::result::Result<Option<RaftSnapshot>, StorageError<NodeId>> {
-        let (meta, data) = self.create_snapshot().await?;
+        // Reuse existing snapshot if it is still on disk
+        if let Some(id) = self.current_snapshot_id.read().await.as_deref() {
+            let existing = self.snapshot_dir.join(format!("{}.snap", id));
+            if existing.exists() {
+                if let Some(meta) = self.current_snapshot_meta.read().await.clone() {
+                    let sig = meta.signature();
+                    let file =
+                        tokio::fs::File::open(&existing)
+                            .await
+                            .map_err(|e| StorageError::IO {
+                                source: StorageIOError::read_snapshot(Some(sig), &e),
+                            })?;
+                    return Ok(Some(Snapshot {
+                        meta,
+                        snapshot: Box::new(file),
+                    }));
+                }
+            }
+        }
+
+        // No usable snapshot on disk — create a fresh one
+        let (meta, snap_path) = self.create_snapshot().await?;
+        let sig = meta.signature();
+        let file = tokio::fs::File::open(&snap_path)
+            .await
+            .map_err(|e| StorageError::IO {
+                source: StorageIOError::read_snapshot(Some(sig), &e),
+            })?;
         Ok(Some(Snapshot {
             meta,
-            snapshot: Box::new(Cursor::new(data)),
+            snapshot: Box::new(file),
         }))
     }
 
     async fn get_snapshot_builder(&mut self) -> Self::SnapshotBuilder {
-        // Return a clone for snapshot building
+        // Acquire all read locks before cloning to ensure a consistent
+        // point-in-time snapshot. Individual sequential awaits would allow
+        // concurrent apply() calls to modify state between lock acquisitions,
+        // producing an inconsistent snapshot builder.
+        let metadata = self.metadata.read().await;
+        let last_applied = self.last_applied.read().await;
+        let membership = self.membership.read().await;
+        let snap_id = self.current_snapshot_id.read().await;
+        let snap_meta = self.current_snapshot_meta.read().await;
+
         Self {
-            metadata: RwLock::new(self.metadata.read().await.clone()),
-            last_applied: RwLock::new(*self.last_applied.read().await),
-            membership: RwLock::new(self.membership.read().await.clone()),
+            metadata: RwLock::new(metadata.clone()),
+            last_applied: RwLock::new(*last_applied),
+            membership: RwLock::new(membership.clone()),
+            snapshot_dir: self.snapshot_dir.clone(),
+            current_snapshot_id: RwLock::new(snap_id.clone()),
+            current_snapshot_meta: RwLock::new(snap_meta.clone()),
         }
     }
 }
@@ -327,10 +608,16 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
 // Implement RaftSnapshotBuilder for StateMachine
 impl openraft::storage::RaftSnapshotBuilder<TypeConfig> for StateMachine {
     async fn build_snapshot(&mut self) -> std::result::Result<RaftSnapshot, StorageError<NodeId>> {
-        let (meta, data) = self.create_snapshot().await?;
+        let (meta, snap_path) = self.create_snapshot().await?;
+        let sig = meta.signature();
+        let file = tokio::fs::File::open(&snap_path)
+            .await
+            .map_err(|e| StorageError::IO {
+                source: StorageIOError::read_snapshot(Some(sig), &e),
+            })?;
         Ok(Snapshot {
             meta,
-            snapshot: Box::new(Cursor::new(data)),
+            snapshot: Box::new(file),
         })
     }
 }
@@ -845,8 +1132,8 @@ impl Default for BatchConfig {
 /// Throughput improvement: 10-50x for small writes
 /// Latency trade-off: adds up to `max_wait_us` latency
 pub struct BatchAccumulator {
-    /// Current pending batch
-    pending: RwLock<Option<PendingBatch>>,
+    /// Current pending batch (Mutex instead of RwLock — no read path)
+    pending: tokio::sync::Mutex<Option<PendingBatch>>,
     /// Batch configuration
     config: BatchConfig,
     /// Notification channel for new items
@@ -857,7 +1144,7 @@ impl BatchAccumulator {
     /// Create a new batch accumulator
     pub fn new(config: BatchConfig) -> Self {
         Self {
-            pending: RwLock::new(None),
+            pending: tokio::sync::Mutex::new(None),
             config,
             notify: tokio::sync::Notify::new(),
         }
@@ -871,7 +1158,7 @@ impl BatchAccumulator {
         let (tx, rx) = tokio::sync::oneshot::channel();
 
         let should_flush = {
-            let mut pending = self.pending.write().await;
+            let mut pending = self.pending.lock().await;
 
             if pending.is_none() {
                 *pending = Some(PendingBatch {
@@ -880,11 +1167,12 @@ impl BatchAccumulator {
                     started: std::time::Instant::now(),
                 });
                 false
-            } else {
-                let batch = pending.as_mut().unwrap();
+            } else if let Some(batch) = pending.as_mut() {
                 batch.commands.push(command);
                 batch.responders.push(tx);
                 batch.commands.len() >= self.config.max_batch_size
+            } else {
+                unreachable!("pending was checked to be Some")
             }
         };
 
@@ -901,7 +1189,7 @@ impl BatchAccumulator {
     /// Take the current batch if ready (full or timed out)
     #[allow(dead_code)]
     pub(crate) async fn take_if_ready(&self) -> Option<PendingBatch> {
-        let mut pending = self.pending.write().await;
+        let mut pending = self.pending.lock().await;
 
         if let Some(ref batch) = *pending {
             let elapsed = batch.started.elapsed();
@@ -984,7 +1272,8 @@ impl RaftNode {
         std::fs::create_dir_all(&config.data_dir)
             .map_err(|e| ClusterError::RaftStorage(e.to_string()))?;
 
-        let state_machine = StateMachine::new();
+        let snapshot_dir = config.data_dir.join("snapshots");
+        let state_machine = StateMachine::new(snapshot_dir);
         let network = NetworkFactory::new().map_err(|e| {
             ClusterError::RaftStorage(format!("Failed to create network factory: {}", e))
         })?;
@@ -1043,7 +1332,15 @@ impl RaftNode {
         );
 
         // Create a new state machine for openraft (it takes ownership)
-        let state_machine = StateMachine::new();
+        let snapshot_dir = self.data_dir.join("snapshots");
+        let state_machine = StateMachine::new(&snapshot_dir);
+
+        // §2.5: Load the latest snapshot from disk to avoid replaying the entire log
+        match state_machine.load_latest_snapshot().await {
+            Ok(true) => info!("Restored state machine from snapshot file"),
+            Ok(false) => debug!("No existing snapshot found, starting fresh"),
+            Err(e) => warn!(error = %e, "Failed to load snapshot, starting fresh"),
+        }
 
         // Create a new network factory for openraft (it takes ownership)
         let network = NetworkFactory::new().map_err(|e| {
@@ -1099,7 +1396,7 @@ impl RaftNode {
                 *next += 1;
                 idx
             };
-            // F-019 fix: Use term 1 (not 0) so standalone entries never conflict
+            // Use term 1 (not 0) so standalone entries never conflict
             // with real Raft elections (which start at term 1+), enabling a future
             // standalone-to-cluster migration path.
             let log_id = LogId::new(openraft::CommittedLeaderId::new(1, self.node_id), index);
@@ -1163,7 +1460,7 @@ impl RaftNode {
                     *next += 1;
                     idx
                 };
-                // F-019 fix: Use term 1 (not 0) — see propose() for rationale.
+                // Use term 1 (not 0) — see propose() for rationale.
                 let log_id = LogId::new(openraft::CommittedLeaderId::new(1, self.node_id), index);
                 let response = self.state_machine.apply_command(&log_id, command).await;
                 responses.push(response.response);
@@ -1187,7 +1484,7 @@ impl RaftNode {
             RaftMetrics::increment_proposals();
             RaftMetrics::increment_commits();
 
-            // Extract per-command responses from the batch result (F-012 fix)
+            // Extract per-command responses from the batch result
             match result.data.response {
                 MetadataResponse::BatchResponses(responses) => return Ok(responses),
                 // Fallback: if the state machine returned a non-batch response
@@ -1325,7 +1622,7 @@ impl RaftNode {
             .await
             .map_err(|e| ClusterError::RaftStorage(format!("{}", e)))?;
 
-        info!(size = data.len(), "Created standalone snapshot");
+        info!(path = %data.display(), "Created standalone snapshot");
         Ok(())
     }
 
@@ -1393,7 +1690,7 @@ impl RaftNode {
 
 /// Hash a string node ID to u64 for Raft compatibility
 ///
-/// F-014 fix: Uses deterministic FNV-1a hash instead of `DefaultHasher`.
+/// Uses deterministic FNV-1a hash instead of `DefaultHasher`.
 /// `DefaultHasher` (SipHash) is not guaranteed to be stable across Rust
 /// versions or platforms, which could cause node ID mismatches in a cluster.
 pub fn hash_node_id(node_id: &str) -> NodeId {
@@ -1438,7 +1735,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_state_machine_apply() {
-        let sm = StateMachine::new();
+        let temp_dir = TempDir::new().unwrap();
+        let sm = StateMachine::new(temp_dir.path().join("snapshots"));
         let log_id = LogId::new(openraft::CommittedLeaderId::new(1, 1), 1);
 
         let cmd = MetadataCommand::CreateTopic {

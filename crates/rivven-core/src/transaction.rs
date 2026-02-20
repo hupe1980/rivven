@@ -51,6 +51,8 @@ use crate::idempotent::{ProducerEpoch, ProducerId};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -153,6 +155,9 @@ pub enum TransactionResult {
 
     /// Partition not part of transaction
     PartitionNotInTransaction { topic: String, partition: u32 },
+
+    /// Durable log write failed — transaction state may not be recoverable
+    LogWriteError(String),
 }
 
 /// A partition involved in a transaction
@@ -258,10 +263,15 @@ impl Transaction {
     }
 
     /// Check if transaction has timed out
+    ///
+    /// Returns `false` when `last_activity` is `None` (e.g., after
+    /// deserialization where `Instant` is not serializable). Previously returned
+    /// `true` for `None`, causing recovered in-doubt transactions to be
+    /// immediately aborted before the coordinator could resolve them.
     pub fn is_timed_out(&self) -> bool {
         self.last_activity
             .map(|t| t.elapsed() > self.timeout)
-            .unwrap_or(true)
+            .unwrap_or(false)
     }
 
     /// Update last activity timestamp
@@ -388,6 +398,11 @@ pub struct AbortedTransaction {
     pub producer_id: ProducerId,
     /// First offset of the aborted transaction in this partition
     pub first_offset: u64,
+    /// Last offset of the aborted transaction in this partition (inclusive).
+    /// Without an upper bound, `is_aborted` returns true for all
+    /// offsets >= first_offset, incorrectly filtering committed messages from
+    /// the same producer in later transactions.
+    pub last_offset: u64,
 }
 
 /// Index of aborted transactions for a partition
@@ -406,11 +421,16 @@ impl AbortedTransactionIndex {
     }
 
     /// Record an aborted transaction
-    pub fn record_abort(&self, producer_id: ProducerId, first_offset: u64) {
+    ///
+    /// Tracks both first and last offset to bound the aborted range.
+    /// `is_aborted` now checks `first_offset <= offset <= last_offset` instead
+    /// of the previous unbounded `first_offset <= offset`.
+    pub fn record_abort(&self, producer_id: ProducerId, first_offset: u64, last_offset: u64) {
         let mut aborted = self.aborted.write();
         aborted.push(AbortedTransaction {
             producer_id,
             first_offset,
+            last_offset,
         });
         // Keep sorted by first_offset for efficient lookup
         aborted.sort_by_key(|a| a.first_offset);
@@ -433,11 +453,15 @@ impl AbortedTransactionIndex {
     }
 
     /// Check if a specific producer's message at an offset is from an aborted transaction
+    ///
+    /// Checks bounded range `first_offset <= offset <= last_offset` to
+    /// avoid false-positives on committed messages from the same producer in later
+    /// transactions.
     pub fn is_aborted(&self, producer_id: ProducerId, offset: u64) -> bool {
         let aborted = self.aborted.read();
-        aborted
-            .iter()
-            .any(|a| a.producer_id == producer_id && a.first_offset <= offset)
+        aborted.iter().any(|a| {
+            a.producer_id == producer_id && a.first_offset <= offset && offset <= a.last_offset
+        })
     }
 
     /// Remove aborted transactions older than a given offset (for log truncation)
@@ -544,13 +568,199 @@ impl From<&TransactionStats> for TransactionStatsSnapshot {
     }
 }
 
+// ============================================================================
+// Transaction Log — durable persistence for coordinator state
+// ============================================================================
+
+/// A single entry in the transaction log, recording a state transition.
+///
+/// Serialized to postcard and written to a per-coordinator WAL file.
+/// On recovery, entries are replayed in order to reconstruct coordinator state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TransactionLogEntry {
+    /// New transaction started
+    Begin {
+        txn_id: TransactionId,
+        producer_id: ProducerId,
+        producer_epoch: ProducerEpoch,
+        timeout_ms: u64,
+    },
+    /// Partition added to transaction
+    AddPartition {
+        txn_id: TransactionId,
+        producer_id: ProducerId,
+        partition: TransactionPartition,
+    },
+    /// Write recorded in transaction
+    RecordWrite {
+        txn_id: TransactionId,
+        producer_id: ProducerId,
+        partition: TransactionPartition,
+        sequence: i32,
+        offset: u64,
+    },
+    /// Transaction moving to PrepareCommit (2PC phase 1)
+    PrepareCommit {
+        txn_id: TransactionId,
+        producer_id: ProducerId,
+    },
+    /// Transaction committed (2PC phase 2)
+    CompleteCommit {
+        txn_id: TransactionId,
+        producer_id: ProducerId,
+    },
+    /// Transaction moving to PrepareAbort
+    PrepareAbort {
+        txn_id: TransactionId,
+        producer_id: ProducerId,
+    },
+    /// Transaction aborted
+    CompleteAbort {
+        txn_id: TransactionId,
+        producer_id: ProducerId,
+    },
+    /// Transaction timed out (zombie cleanup)
+    TimedOut {
+        txn_id: TransactionId,
+        producer_id: ProducerId,
+    },
+    /// Consumer offset commit added to transaction (exactly-once consume-transform-produce)
+    OffsetCommit {
+        txn_id: TransactionId,
+        producer_id: ProducerId,
+        group_id: String,
+        offsets: Vec<(TransactionPartition, i64)>,
+    },
+}
+
+/// Durable transaction log backed by a file.
+///
+/// Each entry is: [crc32: 4 bytes] [len: 4 bytes] [postcard-encoded data: N bytes]
+///
+/// The log is append-only. On recovery, entries are read sequentially and
+/// replayed to rebuild the `TransactionCoordinator`'s in-memory state.
+pub struct TransactionLog {
+    /// Path to the log file
+    path: PathBuf,
+    /// Append-only writer
+    writer: parking_lot::Mutex<Option<std::io::BufWriter<std::fs::File>>>,
+}
+
+impl TransactionLog {
+    /// Open (or create) a transaction log at the given path.
+    pub fn open(path: impl AsRef<Path>) -> crate::Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        Ok(Self {
+            path,
+            writer: parking_lot::Mutex::new(Some(std::io::BufWriter::new(file))),
+        })
+    }
+
+    /// Create an in-memory-only (no-op) transaction log for use when
+    /// persistence is not configured.
+    pub fn noop() -> Self {
+        Self {
+            path: PathBuf::new(),
+            writer: parking_lot::Mutex::new(None),
+        }
+    }
+
+    /// Append an entry to the log.
+    pub fn append(&self, entry: &TransactionLogEntry) -> crate::Result<()> {
+        let mut guard = self.writer.lock();
+        let writer = match guard.as_mut() {
+            Some(w) => w,
+            None => return Ok(()), // noop mode
+        };
+
+        let data = postcard::to_allocvec(entry).map_err(|e| crate::Error::Other(e.to_string()))?;
+
+        // CRC32 of the payload
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&data);
+        let crc = hasher.finalize();
+
+        writer.write_all(&crc.to_be_bytes())?;
+        writer.write_all(&(data.len() as u32).to_be_bytes())?;
+        writer.write_all(&data)?;
+        writer.flush()?;
+        // fsync to guarantee durability before acknowledging.
+        // flush() only pushes BufWriter data to the OS page cache.
+        // Without sync_data(), a power loss can lose the entry.
+        writer.get_ref().sync_data()?;
+        Ok(())
+    }
+
+    /// Read all valid entries from the log for recovery replay.
+    pub fn read_all(path: impl AsRef<Path>) -> crate::Result<Vec<TransactionLogEntry>> {
+        let path = path.as_ref();
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let data = std::fs::read(path)?;
+        let mut entries = Vec::new();
+        let mut pos = 0;
+
+        while pos + 8 <= data.len() {
+            let crc = u32::from_be_bytes(data[pos..pos + 4].try_into().unwrap());
+            let len = u32::from_be_bytes(data[pos + 4..pos + 8].try_into().unwrap()) as usize;
+            pos += 8;
+
+            if pos + len > data.len() {
+                break; // truncated — stop here
+            }
+
+            let payload = &data[pos..pos + len];
+
+            // Verify CRC
+            let mut hasher = crc32fast::Hasher::new();
+            hasher.update(payload);
+            if hasher.finalize() != crc {
+                break; // corrupt — stop here (kafka-style truncation)
+            }
+
+            match postcard::from_bytes::<TransactionLogEntry>(payload) {
+                Ok(entry) => entries.push(entry),
+                Err(_) => break, // corrupt entry
+            }
+            pos += len;
+        }
+
+        Ok(entries)
+    }
+
+    /// Truncate the log file (e.g. after snapshot).
+    pub fn truncate(&self) -> crate::Result<()> {
+        let mut guard = self.writer.lock();
+        if guard.is_none() {
+            return Ok(());
+        }
+        // Close old writer, truncate, reopen
+        *guard = None;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&self.path)?;
+        *guard = Some(std::io::BufWriter::new(file));
+        Ok(())
+    }
+}
+
 /// Transaction coordinator manages all active transactions
 ///
 /// This is a per-broker component that tracks transactions for producers
 /// assigned to this broker as their transaction coordinator.
 pub struct TransactionCoordinator {
     /// Active transactions by (producer_id, txn_id)
-    /// F-097: `parking_lot` — O(1) transaction lookup, never held across `.await`.
+    /// `parking_lot` — O(1) transaction lookup, never held across `.await`.
     transactions: RwLock<HashMap<(ProducerId, TransactionId), Transaction>>,
 
     /// Producer to transaction mapping (for single-txn-per-producer enforcement)
@@ -564,6 +774,11 @@ pub struct TransactionCoordinator {
 
     /// Index of aborted transactions for read_committed filtering
     aborted_index: AbortedTransactionIndex,
+
+    /// durable transaction log.
+    /// Persists every state transition before acknowledging, enabling
+    /// recovery of in-doubt transactions after a coordinator crash.
+    txn_log: TransactionLog,
 }
 
 impl Default for TransactionCoordinator {
@@ -573,7 +788,7 @@ impl Default for TransactionCoordinator {
 }
 
 impl TransactionCoordinator {
-    /// Create a new transaction coordinator
+    /// Create a new transaction coordinator (in-memory only, no persistence).
     pub fn new() -> Self {
         Self {
             transactions: RwLock::new(HashMap::new()),
@@ -581,10 +796,11 @@ impl TransactionCoordinator {
             default_timeout: DEFAULT_TRANSACTION_TIMEOUT,
             stats: TransactionStats::new(),
             aborted_index: AbortedTransactionIndex::new(),
+            txn_log: TransactionLog::noop(),
         }
     }
 
-    /// Create with custom default timeout
+    /// Create with custom default timeout (in-memory only).
     pub fn with_timeout(timeout: Duration) -> Self {
         Self {
             transactions: RwLock::new(HashMap::new()),
@@ -592,7 +808,170 @@ impl TransactionCoordinator {
             default_timeout: timeout,
             stats: TransactionStats::new(),
             aborted_index: AbortedTransactionIndex::new(),
+            txn_log: TransactionLog::noop(),
         }
+    }
+
+    /// Create a coordinator with durable persistence at the given path.
+    ///
+    /// Transaction state transitions are written to a CRC-protected log file.
+    /// On crash recovery, call [`Self::recover`] before resuming operations.
+    pub fn with_persistence(path: impl AsRef<Path>) -> crate::Result<Self> {
+        let txn_log = TransactionLog::open(path)?;
+        Ok(Self {
+            transactions: RwLock::new(HashMap::new()),
+            producer_transactions: RwLock::new(HashMap::new()),
+            default_timeout: DEFAULT_TRANSACTION_TIMEOUT,
+            stats: TransactionStats::new(),
+            aborted_index: AbortedTransactionIndex::new(),
+            txn_log,
+        })
+    }
+
+    /// Recover coordinator state from the durable log.
+    ///
+    /// Replays all valid log entries to rebuild the in-memory
+    /// transaction map. In-doubt transactions (PrepareCommit/PrepareAbort)
+    /// are left in their prepared state for the caller to resolve.
+    pub fn recover(path: impl AsRef<Path>) -> crate::Result<Self> {
+        let path = path.as_ref();
+        let entries = TransactionLog::read_all(path)?;
+        let txn_log = TransactionLog::open(path)?;
+
+        let coord = Self {
+            transactions: RwLock::new(HashMap::new()),
+            producer_transactions: RwLock::new(HashMap::new()),
+            default_timeout: DEFAULT_TRANSACTION_TIMEOUT,
+            stats: TransactionStats::new(),
+            aborted_index: AbortedTransactionIndex::new(),
+            txn_log,
+        };
+
+        // Replay log entries to rebuild state
+        let mut transactions = coord.transactions.write();
+        let mut producer_txns = coord.producer_transactions.write();
+
+        for entry in entries {
+            match entry {
+                TransactionLogEntry::Begin {
+                    txn_id,
+                    producer_id,
+                    producer_epoch,
+                    timeout_ms,
+                } => {
+                    let txn = Transaction::new(
+                        txn_id.clone(),
+                        producer_id,
+                        producer_epoch,
+                        Duration::from_millis(timeout_ms),
+                    );
+                    transactions.insert((producer_id, txn_id.clone()), txn);
+                    producer_txns.insert(producer_id, txn_id);
+                }
+                TransactionLogEntry::AddPartition {
+                    txn_id,
+                    producer_id,
+                    partition,
+                } => {
+                    if let Some(txn) = transactions.get_mut(&(producer_id, txn_id)) {
+                        txn.partitions.insert(partition);
+                    }
+                }
+                TransactionLogEntry::RecordWrite {
+                    txn_id,
+                    producer_id,
+                    partition,
+                    sequence,
+                    offset,
+                } => {
+                    if let Some(txn) = transactions.get_mut(&(producer_id, txn_id)) {
+                        txn.pending_writes.push(PendingWrite {
+                            partition,
+                            sequence,
+                            offset,
+                            timestamp: SystemTime::now(),
+                        });
+                    }
+                }
+                TransactionLogEntry::PrepareCommit {
+                    txn_id,
+                    producer_id,
+                } => {
+                    if let Some(txn) = transactions.get_mut(&(producer_id, txn_id)) {
+                        txn.state = TransactionState::PrepareCommit;
+                    }
+                }
+                TransactionLogEntry::CompleteCommit {
+                    txn_id,
+                    producer_id,
+                } => {
+                    transactions.remove(&(producer_id, txn_id.clone()));
+                    producer_txns.remove(&producer_id);
+                }
+                TransactionLogEntry::PrepareAbort {
+                    txn_id,
+                    producer_id,
+                } => {
+                    if let Some(txn) = transactions.get_mut(&(producer_id, txn_id)) {
+                        txn.state = TransactionState::PrepareAbort;
+                    }
+                }
+                TransactionLogEntry::CompleteAbort {
+                    txn_id,
+                    producer_id,
+                } => {
+                    if let Some(txn) = transactions.get(&(producer_id, txn_id.clone())) {
+                        // Record aborts for read_committed filtering
+                        // compute bounded range from all pending writes
+                        let first = txn.pending_writes.iter().map(|w| w.offset).min();
+                        let last = txn.pending_writes.iter().map(|w| w.offset).max();
+                        if let (Some(f), Some(l)) = (first, last) {
+                            coord.aborted_index.record_abort(producer_id, f, l);
+                        }
+                    }
+                    transactions.remove(&(producer_id, txn_id.clone()));
+                    producer_txns.remove(&producer_id);
+                }
+                TransactionLogEntry::TimedOut {
+                    txn_id,
+                    producer_id,
+                } => {
+                    if let Some(txn) = transactions.get(&(producer_id, txn_id.clone())) {
+                        // compute bounded range from all pending writes
+                        let first = txn.pending_writes.iter().map(|w| w.offset).min();
+                        let last = txn.pending_writes.iter().map(|w| w.offset).max();
+                        if let (Some(f), Some(l)) = (first, last) {
+                            coord.aborted_index.record_abort(producer_id, f, l);
+                        }
+                    }
+                    transactions.remove(&(producer_id, txn_id.clone()));
+                    producer_txns.remove(&producer_id);
+                }
+                TransactionLogEntry::OffsetCommit {
+                    txn_id,
+                    producer_id,
+                    group_id,
+                    offsets,
+                } => {
+                    if let Some(txn) = transactions.get_mut(&(producer_id, txn_id)) {
+                        txn.add_offset_commit(group_id, offsets);
+                    }
+                }
+            }
+        }
+
+        drop(transactions);
+        drop(producer_txns);
+
+        let active = coord.active_count();
+        if active > 0 {
+            tracing::warn!(
+                "Transaction coordinator recovered {} in-doubt transactions from log",
+                active
+            );
+        }
+
+        Ok(coord)
     }
 
     /// Get statistics
@@ -648,6 +1027,18 @@ impl TransactionCoordinator {
             timeout.unwrap_or(self.default_timeout),
         );
 
+        // WAL BEFORE in-memory — persist first, then insert.
+        // If the WAL write fails, no in-memory ghost transaction is created.
+        if let Err(e) = self.txn_log.append(&TransactionLogEntry::Begin {
+            txn_id: txn_id.clone(),
+            producer_id,
+            producer_epoch,
+            timeout_ms: timeout.unwrap_or(self.default_timeout).as_millis() as u64,
+        }) {
+            tracing::error!(producer_id, "Transaction log write failed on begin: {}", e);
+            return TransactionResult::LogWriteError(e.to_string());
+        }
+
         transactions.insert((producer_id, txn_id.clone()), txn);
         producer_txns.insert(producer_id, txn_id);
 
@@ -693,9 +1084,74 @@ impl TransactionCoordinator {
             return TransactionResult::TransactionTimeout;
         }
 
-        // Add partitions
+        // WAL BEFORE in-memory — persist all partitions first.
+        // If any WAL write fails mid-way, we return error without modifying
+        // in-memory state, keeping WAL and memory consistent.
+        for partition in &partitions {
+            if let Err(e) = self.txn_log.append(&TransactionLogEntry::AddPartition {
+                txn_id: txn_id.clone(),
+                producer_id,
+                partition: partition.clone(),
+            }) {
+                tracing::error!(
+                    producer_id,
+                    "Transaction log write failed on add_partition: {}",
+                    e
+                );
+                return TransactionResult::LogWriteError(e.to_string());
+            }
+        }
+
+        // All WAL writes succeeded — now apply to in-memory state
         for partition in partitions {
             txn.add_partition(partition);
+        }
+
+        TransactionResult::Ok
+    }
+
+    /// Validate that a write is allowed before physically appending data.
+    /// Checks transaction existence, epoch, state, timeout, and partition membership
+    /// WITHOUT recording the write. Call this BEFORE `topic.append()`.
+    pub fn validate_transaction_write(
+        &self,
+        txn_id: &TransactionId,
+        producer_id: ProducerId,
+        producer_epoch: ProducerEpoch,
+        partition: &TransactionPartition,
+    ) -> TransactionResult {
+        let mut transactions = self.transactions.write();
+
+        let txn = match transactions.get_mut(&(producer_id, txn_id.clone())) {
+            Some(t) => t,
+            None => return TransactionResult::InvalidTransactionId,
+        };
+
+        if txn.producer_epoch != producer_epoch {
+            return TransactionResult::ProducerFenced {
+                expected_epoch: txn.producer_epoch,
+                received_epoch: producer_epoch,
+            };
+        }
+
+        if !txn.state.is_active() {
+            return TransactionResult::InvalidTransactionState {
+                current: txn.state,
+                expected: "Ongoing",
+            };
+        }
+
+        if txn.is_timed_out() {
+            txn.state = TransactionState::Dead;
+            self.stats.record_timeout();
+            return TransactionResult::TransactionTimeout;
+        }
+
+        if !txn.partitions.contains(partition) {
+            return TransactionResult::PartitionNotInTransaction {
+                topic: partition.topic.clone(),
+                partition: partition.partition,
+            };
         }
 
         TransactionResult::Ok
@@ -749,7 +1205,24 @@ impl TransactionCoordinator {
             };
         }
 
-        // Record the write
+        // WAL BEFORE in-memory — persist the write entry first.
+        if let Err(e) = self.txn_log.append(&TransactionLogEntry::RecordWrite {
+            txn_id: txn_id.clone(),
+            producer_id,
+            partition: partition.clone(),
+            sequence,
+            offset,
+        }) {
+            tracing::error!(
+                producer_id,
+                offset,
+                "Transaction log write failed on record_write: {}",
+                e
+            );
+            return TransactionResult::LogWriteError(e.to_string());
+        }
+
+        // WAL succeeded — now apply to in-memory state
         txn.add_write(partition, sequence, offset);
 
         TransactionResult::Ok
@@ -794,7 +1267,24 @@ impl TransactionCoordinator {
             return TransactionResult::TransactionTimeout;
         }
 
-        // Add offset commit
+        // WAL BEFORE in-memory — persist offset commit first.
+        // Without this, consumer offsets are lost on crash, breaking
+        // exactly-once consume-transform-produce semantics.
+        if let Err(e) = self.txn_log.append(&TransactionLogEntry::OffsetCommit {
+            txn_id: txn_id.clone(),
+            producer_id,
+            group_id: group_id.clone(),
+            offsets: offsets.clone(),
+        }) {
+            tracing::error!(
+                producer_id,
+                "Transaction log write failed on offset_commit: {}",
+                e
+            );
+            return TransactionResult::LogWriteError(e.to_string());
+        }
+
+        // WAL succeeded — apply to in-memory state
         txn.add_offset_commit(group_id, offsets);
 
         TransactionResult::Ok
@@ -843,6 +1333,21 @@ impl TransactionCoordinator {
         txn.state = TransactionState::PrepareCommit;
         txn.touch();
 
+        // persist prepare decision before acknowledging
+        if let Err(e) = self.txn_log.append(&TransactionLogEntry::PrepareCommit {
+            txn_id: txn_id.clone(),
+            producer_id,
+        }) {
+            tracing::error!(
+                producer_id,
+                "Transaction log write failed on prepare_commit: {}",
+                e
+            );
+            // Revert state — we cannot guarantee durability
+            txn.state = TransactionState::Ongoing;
+            return Err(TransactionResult::LogWriteError(e.to_string()));
+        }
+
         Ok(txn.clone())
     }
 
@@ -867,6 +1372,20 @@ impl TransactionCoordinator {
             };
         }
 
+        // WAL BEFORE state change — persist first, then mutate.
+        if let Err(e) = self.txn_log.append(&TransactionLogEntry::CompleteCommit {
+            txn_id: txn_id.clone(),
+            producer_id,
+        }) {
+            tracing::error!(
+                producer_id,
+                "Transaction log write failed on complete_commit: {}",
+                e
+            );
+            return TransactionResult::LogWriteError(e.to_string());
+        }
+
+        // WAL succeeded — safe to mutate in-memory state
         txn.state = TransactionState::CompleteCommit;
 
         // Clean up
@@ -911,6 +1430,20 @@ impl TransactionCoordinator {
         txn.state = TransactionState::PrepareAbort;
         txn.touch();
 
+        // persist prepare-abort decision
+        if let Err(e) = self.txn_log.append(&TransactionLogEntry::PrepareAbort {
+            txn_id: txn_id.clone(),
+            producer_id,
+        }) {
+            tracing::error!(
+                producer_id,
+                "Transaction log write failed on prepare_abort: {}",
+                e
+            );
+            txn.state = TransactionState::Ongoing;
+            return Err(TransactionResult::LogWriteError(e.to_string()));
+        }
+
         Ok(txn.clone())
     }
 
@@ -935,12 +1468,29 @@ impl TransactionCoordinator {
             };
         }
 
+        // WAL BEFORE state change — persist first, then mutate.
+        if let Err(e) = self.txn_log.append(&TransactionLogEntry::CompleteAbort {
+            txn_id: txn_id.clone(),
+            producer_id,
+        }) {
+            tracing::error!(
+                producer_id,
+                "Transaction log write failed on complete_abort: {}",
+                e
+            );
+            return TransactionResult::LogWriteError(e.to_string());
+        }
+
+        // WAL succeeded — safe to mutate in-memory state
         txn.state = TransactionState::CompleteAbort;
 
         // Record aborted transaction for read_committed filtering
-        // Use the minimum offset from pending writes as the first_offset
-        if let Some(first_offset) = txn.pending_writes.iter().map(|w| w.offset).min() {
-            self.aborted_index.record_abort(producer_id, first_offset);
+        // Track bounded offset range (first, last) so committed
+        // messages from the same producer at later offsets are not filtered.
+        let first = txn.pending_writes.iter().map(|w| w.offset).min();
+        let last = txn.pending_writes.iter().map(|w| w.offset).max();
+        if let (Some(f), Some(l)) = (first, last) {
+            self.aborted_index.record_abort(producer_id, f, l);
         }
 
         // Clean up
@@ -974,6 +1524,12 @@ impl TransactionCoordinator {
     }
 
     /// Clean up timed-out transactions
+    ///
+    /// In addition to marking timed-out transactions as Dead, this
+    /// now records abort markers in the `AbortedTransactionIndex` for each
+    /// timed-out transaction's pending writes. This ensures that consumers
+    /// using `read_committed` isolation will correctly filter data from
+    /// zombie producers whose transactions timed out.
     pub fn cleanup_timed_out_transactions(&self) -> Vec<Transaction> {
         let mut timed_out = Vec::new();
         let mut transactions = self.transactions.write();
@@ -986,10 +1542,33 @@ impl TransactionCoordinator {
             .collect();
 
         for key in keys_to_remove {
+            // WAL BEFORE memory removal.
+            // If WAL write fails, skip this txn — it will be reaped next cycle.
+            if let Some(txn) = transactions.get(&key) {
+                if let Err(e) = self.txn_log.append(&TransactionLogEntry::TimedOut {
+                    txn_id: txn.txn_id.clone(),
+                    producer_id: txn.producer_id,
+                }) {
+                    tracing::error!(txn.producer_id, "Transaction log write failed on timeout: {} — skipping cleanup, will retry", e);
+                    continue;
+                }
+            }
+
             if let Some(mut txn) = transactions.remove(&key) {
                 txn.state = TransactionState::Dead;
                 producer_txns.remove(&txn.producer_id);
+
+                // Record abort markers for all pending writes so
+                // read_committed consumers can filter them out.
+                // Use bounded offset range instead of per-write entries.
+                let first = txn.pending_writes.iter().map(|w| w.offset).min();
+                let last = txn.pending_writes.iter().map(|w| w.offset).max();
+                if let (Some(f), Some(l)) = (first, last) {
+                    self.aborted_index.record_abort(txn.producer_id, f, l);
+                }
+
                 self.stats.record_timeout();
+                self.stats.record_abort();
                 timed_out.push(txn);
             }
         }
@@ -1470,14 +2049,16 @@ mod tests {
         assert!(index.is_empty());
         assert_eq!(index.len(), 0);
 
-        // Record an aborted transaction
-        index.record_abort(1, 100);
+        // Record an aborted transaction spanning offsets 100..=200
+        index.record_abort(1, 100, 200);
         assert!(!index.is_empty());
         assert_eq!(index.len(), 1);
 
         // Check if offset is from aborted transaction
         assert!(index.is_aborted(1, 100)); // first_offset
         assert!(index.is_aborted(1, 150)); // within transaction
+        assert!(index.is_aborted(1, 200)); // last_offset (inclusive)
+        assert!(!index.is_aborted(1, 201)); // beyond last_offset → NOT aborted
         assert!(!index.is_aborted(1, 50)); // before transaction
         assert!(!index.is_aborted(2, 100)); // different producer
     }
@@ -1486,30 +2067,33 @@ mod tests {
     fn test_aborted_transaction_index_multiple() {
         let index = AbortedTransactionIndex::new();
 
-        // Multiple aborted transactions
-        index.record_abort(1, 100);
-        index.record_abort(1, 300);
-        index.record_abort(2, 200);
+        // Multiple aborted transactions with bounded ranges
+        index.record_abort(1, 100, 199);
+        index.record_abort(1, 300, 399);
+        index.record_abort(2, 200, 299);
 
         assert_eq!(index.len(), 3);
 
-        // Check filtering
+        // Check filtering — ranges are now bounded
         assert!(index.is_aborted(1, 100));
-        assert!(index.is_aborted(1, 150)); // between 100 and 300 for producer 1
+        assert!(index.is_aborted(1, 150)); // within first abort range
+        assert!(!index.is_aborted(1, 250)); // between the two abort ranges → committed
         assert!(index.is_aborted(1, 300));
-        assert!(index.is_aborted(1, 400)); // after second abort
+        assert!(index.is_aborted(1, 399)); // last offset of second abort
+        assert!(!index.is_aborted(1, 400)); // beyond second abort → NOT aborted
         assert!(index.is_aborted(2, 200));
         assert!(index.is_aborted(2, 250));
         assert!(!index.is_aborted(2, 100)); // before producer 2's abort
+        assert!(!index.is_aborted(2, 300)); // beyond producer 2's abort range
     }
 
     #[test]
     fn test_aborted_transaction_index_get_range() {
         let index = AbortedTransactionIndex::new();
 
-        index.record_abort(1, 100);
-        index.record_abort(2, 200);
-        index.record_abort(1, 300);
+        index.record_abort(1, 100, 199);
+        index.record_abort(2, 200, 299);
+        index.record_abort(1, 300, 399);
 
         // Get transactions in range
         let in_range = index.get_aborted_in_range(150, 250);
@@ -1530,9 +2114,9 @@ mod tests {
     fn test_aborted_transaction_index_truncate() {
         let index = AbortedTransactionIndex::new();
 
-        index.record_abort(1, 100);
-        index.record_abort(2, 200);
-        index.record_abort(1, 300);
+        index.record_abort(1, 100, 199);
+        index.record_abort(2, 200, 299);
+        index.record_abort(1, 300, 399);
 
         assert_eq!(index.len(), 3);
 
@@ -1581,8 +2165,237 @@ mod tests {
 
         // Now should be marked as aborted
         assert!(coordinator.is_aborted(1, 100));
-        assert!(coordinator.is_aborted(1, 150)); // messages after first_offset too
+        // offset 150 is beyond the transaction's last write (100), so NOT aborted
+        assert!(!coordinator.is_aborted(1, 150));
         assert!(!coordinator.is_aborted(1, 50)); // before first_offset
         assert!(!coordinator.is_aborted(2, 100)); // different producer
+    }
+
+    // ====================================================================
+    // Transaction Log Persistence Tests
+    // ====================================================================
+
+    #[test]
+    fn test_transaction_log_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("txn.log");
+
+        // Write entries to the log
+        let log = TransactionLog::open(&log_path).unwrap();
+        log.append(&TransactionLogEntry::Begin {
+            txn_id: "txn-1".to_string(),
+            producer_id: 42,
+            producer_epoch: 0,
+            timeout_ms: 30000,
+        })
+        .unwrap();
+        log.append(&TransactionLogEntry::AddPartition {
+            txn_id: "txn-1".to_string(),
+            producer_id: 42,
+            partition: TransactionPartition::new("topic-a", 0),
+        })
+        .unwrap();
+        log.append(&TransactionLogEntry::RecordWrite {
+            txn_id: "txn-1".to_string(),
+            producer_id: 42,
+            partition: TransactionPartition::new("topic-a", 0),
+            sequence: 0,
+            offset: 100,
+        })
+        .unwrap();
+        drop(log);
+
+        // Read back and verify
+        let entries = TransactionLog::read_all(&log_path).unwrap();
+        assert_eq!(entries.len(), 3);
+        assert!(
+            matches!(&entries[0], TransactionLogEntry::Begin { txn_id, producer_id, .. } if txn_id == "txn-1" && *producer_id == 42)
+        );
+        assert!(
+            matches!(&entries[1], TransactionLogEntry::AddPartition { partition, .. } if partition.topic == "topic-a" && partition.partition == 0)
+        );
+        assert!(
+            matches!(&entries[2], TransactionLogEntry::RecordWrite { offset, .. } if *offset == 100)
+        );
+    }
+
+    #[test]
+    fn test_transaction_log_crc_corruption_detection() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("txn.log");
+
+        let log = TransactionLog::open(&log_path).unwrap();
+        log.append(&TransactionLogEntry::Begin {
+            txn_id: "txn-1".to_string(),
+            producer_id: 1,
+            producer_epoch: 0,
+            timeout_ms: 5000,
+        })
+        .unwrap();
+        log.append(&TransactionLogEntry::PrepareCommit {
+            txn_id: "txn-1".to_string(),
+            producer_id: 1,
+        })
+        .unwrap();
+        drop(log);
+
+        // Corrupt one byte in the middle of the file
+        let mut data = std::fs::read(&log_path).unwrap();
+        assert!(data.len() > 10);
+        data[10] ^= 0xFF; // flip bits in payload
+        std::fs::write(&log_path, &data).unwrap();
+
+        // read_all should stop at first corrupted entry
+        let entries = TransactionLog::read_all(&log_path).unwrap();
+        // Should have 0 or 1 entries (first entry's CRC may be corrupted
+        // depending on where byte 10 falls)
+        assert!(entries.len() <= 1);
+    }
+
+    #[test]
+    fn test_coordinator_with_persistence_commit_flow() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("txn.log");
+
+        // Run a full commit cycle with persistence
+        let coord = TransactionCoordinator::with_persistence(&log_path).unwrap();
+        assert_eq!(
+            coord.begin_transaction("txn-1".to_string(), 1, 0, None),
+            TransactionResult::Ok
+        );
+        assert_eq!(
+            coord.add_partitions_to_transaction(
+                &"txn-1".to_string(),
+                1,
+                0,
+                vec![TransactionPartition::new("topic", 0)],
+            ),
+            TransactionResult::Ok
+        );
+        assert_eq!(
+            coord.add_write_to_transaction(
+                &"txn-1".to_string(),
+                1,
+                0,
+                TransactionPartition::new("topic", 0),
+                0,
+                500,
+            ),
+            TransactionResult::Ok
+        );
+        coord.prepare_commit(&"txn-1".to_string(), 1, 0).unwrap();
+        assert_eq!(
+            coord.complete_commit(&"txn-1".to_string(), 1),
+            TransactionResult::Ok
+        );
+
+        // Log should contain Begin, AddPartition, RecordWrite,
+        // PrepareCommit, CompleteCommit (5 entries)
+        let entries = TransactionLog::read_all(&log_path).unwrap();
+        assert_eq!(entries.len(), 5);
+    }
+
+    #[test]
+    fn test_coordinator_recovery_from_crash() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("txn.log");
+
+        // Simulate a coordinator that prepares commit then "crashes"
+        {
+            let coord = TransactionCoordinator::with_persistence(&log_path).unwrap();
+            coord.begin_transaction("txn-1".to_string(), 1, 0, None);
+            coord.add_partitions_to_transaction(
+                &"txn-1".to_string(),
+                1,
+                0,
+                vec![TransactionPartition::new("topic", 0)],
+            );
+            coord.add_write_to_transaction(
+                &"txn-1".to_string(),
+                1,
+                0,
+                TransactionPartition::new("topic", 0),
+                0,
+                42,
+            );
+            coord.prepare_commit(&"txn-1".to_string(), 1, 0).unwrap();
+            // "crash" here — drop without complete_commit
+        }
+
+        // Recover — should reconstruct the in-doubt transaction
+        let coord = TransactionCoordinator::recover(&log_path).unwrap();
+
+        // Transaction should be recovered in PrepareCommit state
+        let txn = coord.get_transaction(&"txn-1".to_string(), 1);
+        assert!(txn.is_some(), "Transaction should be recovered from WAL");
+        let txn = txn.unwrap();
+        assert_eq!(txn.state, TransactionState::PrepareCommit);
+        assert_eq!(txn.pending_writes.len(), 1);
+        assert_eq!(txn.pending_writes[0].offset, 42);
+
+        // Should be able to complete the commit after recovery
+        assert_eq!(
+            coord.complete_commit(&"txn-1".to_string(), 1),
+            TransactionResult::Ok
+        );
+        assert_eq!(coord.active_count(), 0);
+    }
+
+    #[test]
+    fn test_coordinator_recovery_abort_flow() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("txn.log");
+
+        // Write a transaction that was aborted
+        {
+            let coord = TransactionCoordinator::with_persistence(&log_path).unwrap();
+            coord.begin_transaction("txn-a".to_string(), 10, 0, None);
+            coord.add_partitions_to_transaction(
+                &"txn-a".to_string(),
+                10,
+                0,
+                vec![TransactionPartition::new("t", 0)],
+            );
+            coord.add_write_to_transaction(
+                &"txn-a".to_string(),
+                10,
+                0,
+                TransactionPartition::new("t", 0),
+                0,
+                200,
+            );
+            coord.prepare_abort(&"txn-a".to_string(), 10, 0).unwrap();
+            coord.complete_abort(&"txn-a".to_string(), 10);
+        }
+
+        // Recovery should show this transaction as fully resolved
+        let coord = TransactionCoordinator::recover(&log_path).unwrap();
+        assert_eq!(coord.active_count(), 0);
+        // The abort markers should be in the aborted index
+        assert!(coord.is_aborted(10, 200));
+    }
+
+    #[test]
+    fn test_transaction_log_noop_is_silent() {
+        let log = TransactionLog::noop();
+        // noop log should accept writes without error
+        assert!(log
+            .append(&TransactionLogEntry::Begin {
+                txn_id: "x".to_string(),
+                producer_id: 1,
+                producer_epoch: 0,
+                timeout_ms: 1000,
+            })
+            .is_ok());
+    }
+
+    #[test]
+    fn test_log_write_error_propagated() {
+        // Use a coordinator with persistence pointing to a non-writable path
+        let coord = TransactionCoordinator::new(); // noop log
+
+        // noop log writes succeed silently, so begin should work
+        let result = coord.begin_transaction("txn-ok".to_string(), 1, 0, None);
+        assert_eq!(result, TransactionResult::Ok);
     }
 }

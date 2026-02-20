@@ -26,6 +26,10 @@ use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 /// WAL record header size: magic(4) + crc(4) + len(4) + type(1) + flags(1) = 14 bytes
 const RECORD_HEADER_SIZE: usize = 14;
 
+/// Maximum WAL record data size (64 MB). Any record claiming a larger
+/// payload is treated as corruption — prevents OOM on truncated/garbled files.
+const MAX_WAL_RECORD_DATA_SIZE: usize = 64 * 1024 * 1024;
+
 /// Magic number for WAL records
 const WAL_MAGIC: u32 = 0x57414C52; // "WALR"
 
@@ -131,7 +135,9 @@ impl WalRecord {
     /// Serialize to bytes
     pub fn to_bytes(&self) -> Bytes {
         let mut buf = BytesMut::with_capacity(RECORD_HEADER_SIZE + self.data.len());
-        self.write_to_buf(&mut buf);
+        // to_bytes is only used in tests / non-hot-path code so expect is fine.
+        self.write_to_buf(&mut buf)
+            .expect("WAL record data length overflow");
         buf.freeze()
     }
 
@@ -139,22 +145,26 @@ impl WalRecord {
     ///
     /// Use this on the hot path (group commit) to avoid per-record BytesMut
     /// allocation. The caller provides the batch buffer.
+    ///
+    /// Returns `io::Error` instead of panicking when data length
+    /// overflows `u32`, preventing a crash of the background group-commit worker.
     #[inline]
-    pub fn write_to_buf(&self, buf: &mut BytesMut) {
+    pub fn write_to_buf(&self, buf: &mut BytesMut) -> io::Result<()> {
         // Calculate CRC of data
         let mut hasher = Hasher::new();
         hasher.update(&self.data);
         let crc = hasher.finalize();
 
         // Write header
-        let data_len = u32::try_from(self.data.len()).unwrap_or_else(|_| {
-            // WAL records should never exceed 4GB; max_request_size is typically 1-10MB.
-            // If this fires, something is deeply wrong upstream.
-            panic!(
-                "WAL record data length {} exceeds u32::MAX — this indicates a bug in the caller",
-                self.data.len()
+        let data_len = u32::try_from(self.data.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "WAL record data length {} exceeds u32::MAX",
+                    self.data.len()
+                ),
             )
-        });
+        })?;
         buf.put_u32(WAL_MAGIC);
         buf.put_u32(crc);
         buf.put_u32(data_len);
@@ -163,6 +173,7 @@ impl WalRecord {
 
         // Write data
         buf.extend_from_slice(&self.data);
+        Ok(())
     }
 
     /// Parse from bytes
@@ -185,6 +196,18 @@ impl WalRecord {
 
         let stored_crc = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
         let data_len = u32::from_be_bytes([data[8], data[9], data[10], data[11]]) as usize;
+
+        // Guard against corrupted/malicious data_len before allocation
+        if data_len > MAX_WAL_RECORD_DATA_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Record data_len {} exceeds maximum {}",
+                    data_len, MAX_WAL_RECORD_DATA_SIZE
+                ),
+            ));
+        }
+
         let record_type = RecordType::try_from(data[12])?;
         let flags = RecordFlags(data[13]);
 
@@ -376,9 +399,25 @@ impl GroupCommitWal {
 
     /// Recover state from existing WAL files
     ///
-    /// F-025 fix: Scans ALL WAL files to find the true max LSN, not just
+    /// Scans ALL WAL files to find the true max LSN, not just
     /// the latest file. Each file is named with its starting LSN, so the
     /// true max LSN is the file's starting LSN + its valid record count.
+    ///
+    /// # LSN Invariant (§3.5)
+    ///
+    /// This method relies on the invariant that **LSNs increment by exactly 1
+    /// per record** within a WAL file. File names encode the starting LSN
+    /// (e.g. `00000000000000000100.wal` starts at LSN 100). The max LSN in
+    /// a file is therefore `start_lsn + record_count`.
+    ///
+    /// This invariant is maintained by [`flush_batch()`], which assigns LSNs
+    /// via `current_lsn.fetch_add(1, Ordering::AcqRel)`. If the LSN assignment
+    /// scheme ever changes (e.g. gap-tolerant or multi-increment), this
+    /// recovery logic must be updated to scan actual LSN values from records
+    /// instead of relying on the `+1` assumption.
+    ///
+    /// The coupling chain: `flush_batch()` → `fetch_add(1)` → `recover_state()`
+    /// → `start_lsn + record_count` → `scan_wal_file()` → counts valid records.
     async fn recover_state(config: &WalConfig) -> io::Result<(PathBuf, u64)> {
         let mut max_lsn = 0u64;
         let mut latest_file = None;
@@ -419,7 +458,67 @@ impl GroupCommitWal {
         Ok((file, max_lsn))
     }
 
-    /// Scan a WAL file to find the highest LSN (F-023 fix: validates CRC)
+    /// Replay all valid WAL records across all WAL files (§3.3 fix).
+    ///
+    /// Returns records in LSN order. The caller (broker startup) should apply
+    /// each record to the segment log if the record's offset is beyond the
+    /// segment's last recovered offset. Records already reflected in segment
+    /// files are harmless to skip (idempotent).
+    ///
+    /// This method is designed to be called once at startup, before the
+    /// group-commit writer loop begins accepting new writes.
+    pub async fn replay_all(config: &WalConfig) -> io::Result<Vec<WalRecord>> {
+        let mut all_records = Vec::new();
+
+        if let Ok(entries) = std::fs::read_dir(&config.dir) {
+            let mut wal_files: Vec<(u64, PathBuf)> = Vec::new();
+
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "wal") {
+                    if let Some(name) = path.file_stem() {
+                        if let Ok(start_lsn) = name.to_string_lossy().parse::<u64>() {
+                            wal_files.push((start_lsn, path));
+                        }
+                    }
+                }
+            }
+
+            wal_files.sort_by_key(|(lsn, _)| *lsn);
+
+            for (_start_lsn, path) in &wal_files {
+                let mut reader = WalReader::open(path.clone())?;
+                match reader.read_all().await {
+                    Ok(records) => {
+                        tracing::info!(
+                            path = ?path,
+                            count = records.len(),
+                            "WAL replay: read records"
+                        );
+                        all_records.extend(records);
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = ?path,
+                            error = %e,
+                            "WAL replay: skipping file with read error"
+                        );
+                    }
+                }
+            }
+        }
+
+        tracing::info!(total = all_records.len(), "WAL replay complete");
+
+        Ok(all_records)
+    }
+
+    /// Scan a WAL file to count valid records (validates CRC).
+    ///
+    /// Returns the number of valid records in the file. Combined with the
+    /// file's starting LSN (from its filename), this gives the max LSN in
+    /// the file as `start_lsn + count`. See [`recover_state()`] §3.5 docs
+    /// for the invariant this relies on.
     async fn scan_wal_file(path: &Path) -> io::Result<u64> {
         let data = tokio::fs::read(path).await?;
         let mut offset = 0;
@@ -452,12 +551,17 @@ impl GroupCommitWal {
                 data[offset + 11],
             ]) as usize;
 
+            // Guard against corrupted data_len before allocation
+            if data_len > MAX_WAL_RECORD_DATA_SIZE {
+                break;
+            }
+
             let record_size = RECORD_HEADER_SIZE + data_len;
             if offset + record_size > data.len() {
                 break;
             }
 
-            // F-023 fix: validate CRC during recovery to detect corruption
+            // validate CRC during recovery to detect corruption
             let record_data = &data[offset + RECORD_HEADER_SIZE..offset + record_size];
             let mut hasher = Hasher::new();
             hasher.update(record_data);
@@ -591,6 +695,41 @@ impl GroupCommitWal {
         writer.sync()
     }
 
+    /// Checkpoint: remove all WAL files after a successful segment flush.
+    ///
+    /// Called during clean shutdown after topics have been flushed to disk.
+    /// Since all committed writes are now durable in segment files, the WAL
+    /// records are no longer needed for recovery. Clearing them prevents
+    /// duplicate replay on the next startup.
+    ///
+    /// This is a no-op if the WAL directory does not exist.
+    pub fn checkpoint(&self) -> io::Result<()> {
+        let wal_dir = &self.config.dir;
+        if !wal_dir.exists() {
+            return Ok(());
+        }
+
+        let mut removed = 0u64;
+        for entry in std::fs::read_dir(wal_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("wal") {
+                std::fs::remove_file(&path)?;
+                removed += 1;
+            }
+        }
+
+        if removed > 0 {
+            tracing::info!(
+                removed,
+                "WAL checkpoint: removed {} WAL files after successful flush",
+                removed
+            );
+        }
+
+        Ok(())
+    }
+
     /// Start the background group commit worker
     fn start_group_commit_worker(self: Arc<Self>, mut rx: mpsc::Receiver<WriteRequest>) {
         let wal = self.clone();
@@ -659,6 +798,13 @@ impl GroupCommitWal {
     }
 
     /// Flush a batch of pending writes
+    ///
+    /// # LSN Assignment (§3.5)
+    ///
+    /// Each record is assigned a monotonically increasing LSN via
+    /// `current_lsn.fetch_add(1)`. This guarantees the +1-per-record
+    /// invariant that [`recover_state()`] depends on when computing
+    /// `file_max_lsn = start_lsn + record_count`.
     async fn flush_batch(
         &self,
         pending: &mut VecDeque<WriteRequest>,
@@ -673,7 +819,7 @@ impl GroupCommitWal {
         let group_size = pending.len();
 
         // Build batch
-        // F-110 fix: periodically shrink an oversized batch_buffer.
+        // periodically shrink an oversized batch_buffer.
         // After a burst, the buffer retains peak allocation indefinitely.
         // If capacity exceeds 2x max_batch_size, re-allocate to default.
         let max_batch = self.config.max_batch_size;
@@ -684,6 +830,9 @@ impl GroupCommitWal {
         }
         let mut lsns = Vec::with_capacity(group_size);
         let mut sizes = Vec::with_capacity(group_size);
+        // Track per-request serialization failures so we can report
+        // errors to the right callers without panicking.
+        let mut serialize_errors: Vec<Option<String>> = Vec::with_capacity(group_size);
 
         for request in pending.iter() {
             let lsn = self.current_lsn.fetch_add(1, Ordering::AcqRel) + 1;
@@ -725,7 +874,15 @@ impl GroupCommitWal {
 
             // Write directly into batch_buffer — avoids per-record BytesMut allocation
             let pos_before = batch_buffer.len();
-            record.write_to_buf(batch_buffer);
+            if let Err(e) = record.write_to_buf(batch_buffer) {
+                // Record the error for this request; skip serialization
+                tracing::error!(lsn, error = %e, "WAL record serialization failed");
+                batch_buffer.truncate(pos_before);
+                serialize_errors.push(Some(e.to_string()));
+                sizes.push(0);
+                continue;
+            }
+            serialize_errors.push(None);
             sizes.push(batch_buffer.len() - pos_before);
         }
 
@@ -744,20 +901,30 @@ impl GroupCommitWal {
             result
         };
 
-        // Update stats
-        self.stats
-            .writes_total
-            .fetch_add(group_size as u64, Ordering::Relaxed);
-        self.stats
-            .bytes_written
-            .fetch_add(batch_buffer.len() as u64, Ordering::Relaxed);
-        self.stats.group_commits.fetch_add(1, Ordering::Relaxed);
-        self.stats.syncs_total.fetch_add(1, Ordering::Relaxed);
+        // Update stats only on successful writes (don't count failures)
+        if write_result.is_ok() {
+            self.stats
+                .writes_total
+                .fetch_add(group_size as u64, Ordering::Relaxed);
+            self.stats
+                .bytes_written
+                .fetch_add(batch_buffer.len() as u64, Ordering::Relaxed);
+            self.stats.group_commits.fetch_add(1, Ordering::Relaxed);
+            self.stats.syncs_total.fetch_add(1, Ordering::Relaxed);
+        }
 
         // Send results to waiters
         let group_commit = group_size > 1;
 
         for (i, request) in pending.drain(..).enumerate() {
+            // Report per-request serialization errors
+            if let Some(ref err) = serialize_errors[i] {
+                let _ = request
+                    .completion
+                    .send(Err(format!("WAL serialize error: {err}")));
+                continue;
+            }
+
             let result = match &write_result {
                 Ok(()) => Ok(WriteResult {
                     lsn: lsns[i],
@@ -782,7 +949,7 @@ struct WalWriter {
     config: WalConfig,
     /// Pre-allocated next WAL file ready for instant rotation.
     /// Populated in background after each rotation to avoid blocking writes.
-    preallocated_next: Option<(PathBuf, File)>,
+    preallocated_next: Arc<std::sync::Mutex<Option<(PathBuf, File)>>>,
 }
 
 impl WalWriter {
@@ -820,11 +987,11 @@ impl WalWriter {
             path,
             position: actual_position,
             config,
-            preallocated_next: None,
+            preallocated_next: Arc::new(std::sync::Mutex::new(None)),
         })
     }
 
-    /// Find the actual end of valid data in the file (F-104 fix: validates CRC).
+    /// Find the actual end of valid data in the file (validates CRC).
     ///
     /// Scans from the beginning, checking magic + CRC for each record.
     /// Stops at the first invalid or corrupted record, returning the byte
@@ -852,11 +1019,17 @@ impl WalWriter {
                 break;
             }
 
-            // F-104 fix: Read and validate CRC, matching scan_wal_file() logic
+            // Read and validate CRC, matching scan_wal_file() logic
             let stored_crc = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
 
             let data_len =
                 u32::from_be_bytes([header[8], header[9], header[10], header[11]]) as u64;
+
+            // Guard against corrupted data_len before read
+            if data_len > MAX_WAL_RECORD_DATA_SIZE as u64 {
+                break;
+            }
+
             let record_size = RECORD_HEADER_SIZE as u64 + data_len;
 
             if position + record_size > file_len {
@@ -905,7 +1078,7 @@ impl WalWriter {
             }
         }
 
-        // F-026 fix: Advance position only AFTER sync succeeds.
+        // Advance position only AFTER sync succeeds.
         // If write_all, flush, or sync fail, the `?` operator returns
         // early and position remains unchanged, preventing the file
         // position from reflecting unsynced data.
@@ -944,7 +1117,13 @@ impl WalWriter {
         );
 
         // Fast path: use pre-allocated file if path matches or create fresh
-        let file = if let Some((pre_path, pre_file)) = self.preallocated_next.take() {
+        // handle poisoned mutex gracefully instead of panicking
+        let file = if let Some((pre_path, pre_file)) = self
+            .preallocated_next
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+        {
             if pre_path == new_path {
                 pre_file
             } else {
@@ -978,13 +1157,20 @@ impl WalWriter {
         self.path = new_path;
         self.position = 0;
 
-        // F-102 fix: Use tokio::task::spawn_blocking instead of std::thread::spawn
+        // Use tokio::task::spawn_blocking instead of std::thread::spawn
         // to avoid unbounded OS thread creation under rapid WAL rotation.
         // spawn_blocking uses Tokio's bounded blocking thread pool (default: 512).
+        // Store the pre-allocated file in the shared slot so it can
+        // be used by the next rotation. Also fix LSN calculation — use a constant
+        // estimate (1M records per file) instead of bytes-as-LSN.
         if self.config.preallocate_size > 0 {
             let dir = self.config.dir.clone();
             let prealloc_size = self.config.preallocate_size;
-            let estimated_next_lsn = next_lsn + self.config.max_file_size;
+            // Estimate next LSN based on reasonable record density.
+            // Assumes ~128 bytes per record on average for LSN spacing.
+            let records_per_file_estimate = (self.config.max_file_size / 128).max(1024);
+            let estimated_next_lsn = next_lsn + records_per_file_estimate;
+            let slot = Arc::clone(&self.preallocated_next);
             tokio::task::spawn_blocking(move || {
                 let next_path = dir.join(format!("{:020}.wal", estimated_next_lsn));
                 if let Ok(f) = OpenOptions::new()
@@ -995,6 +1181,9 @@ impl WalWriter {
                     .open(&next_path)
                 {
                     let _ = f.set_len(prealloc_size);
+                    if let Ok(mut guard) = slot.lock() {
+                        *guard = Some((next_path, f));
+                    }
                 }
             });
         }

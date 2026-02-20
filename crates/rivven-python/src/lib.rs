@@ -135,7 +135,7 @@ fn version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// F-086 fix: Stub for connect_tls when TLS feature is not compiled in.
+/// Stub for connect_tls when TLS feature is not compiled in.
 /// Gives users a clear error message instead of AttributeError.
 #[cfg(not(feature = "tls"))]
 #[pyfunction]
@@ -173,7 +173,7 @@ fn _rivven(m: &Bound<'_, PyModule>) -> PyResult<()> {
     #[cfg(feature = "tls")]
     m.add_function(wrap_pyfunction!(connect_tls, m)?)?;
 
-    // F-086 fix: When TLS feature is not compiled in, register a stub that
+    // When TLS feature is not compiled in, register a stub that
     // gives users a clear error message instead of a confusing AttributeError.
     #[cfg(not(feature = "tls"))]
     m.add_function(wrap_pyfunction!(connect_tls_stub, m)?)?;

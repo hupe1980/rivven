@@ -284,6 +284,7 @@ async fn test_protobuf_publish() -> Result<()> {
             partition: Some(0),
             key: Some(Bytes::from("key-1")),
             value: Bytes::from("Hello via protobuf!"),
+            leader_epoch: None,
         })
         .await?;
 
@@ -331,6 +332,7 @@ async fn test_protobuf_publish_consume() -> Result<()> {
                 partition: Some(0),
                 key: Some(Bytes::from(*key)),
                 value: Bytes::from(*value),
+                leader_epoch: None,
             })
             .await?;
 
@@ -350,6 +352,7 @@ async fn test_protobuf_publish_consume() -> Result<()> {
             offset: first_offset,
             max_messages: 10,
             isolation_level: None,
+            max_wait_ms: None,
         })
         .await?;
 
@@ -390,13 +393,26 @@ async fn test_protobuf_offset_management() -> Result<()> {
         })
         .await?;
 
+    // Publish messages so that offset 3 is valid (offsets 0..4 → next_offset = 5)
+    for i in 0..5u32 {
+        client
+            .send_request(Request::Publish {
+                topic: topic.clone(),
+                partition: Some(0),
+                key: None,
+                value: Bytes::from(format!("offset-msg-{}", i)),
+                leader_epoch: None,
+            })
+            .await?;
+    }
+
     // Commit offset
     let response = client
         .send_request(Request::CommitOffset {
             consumer_group: group.clone(),
             topic: topic.clone(),
             partition: 0,
-            offset: 42,
+            offset: 3,
         })
         .await?;
 
@@ -405,7 +421,7 @@ async fn test_protobuf_offset_management() -> Result<()> {
         "Expected OffsetCommitted, got {:?}",
         response
     );
-    info!("Committed offset 42 for group '{}' via protobuf", group);
+    info!("Committed offset 3 for group '{}' via protobuf", group);
 
     // Get offset
     let response = client
@@ -417,7 +433,7 @@ async fn test_protobuf_offset_management() -> Result<()> {
         .await?;
 
     if let Response::Offset { offset } = response {
-        assert_eq!(offset, Some(42));
+        assert_eq!(offset, Some(3));
         info!("Retrieved offset {:?} via protobuf", offset);
     } else {
         panic!("Expected Offset response, got {:?}", response);
@@ -488,6 +504,7 @@ async fn test_protobuf_error_topic_not_found() -> Result<()> {
             offset: 0,
             max_messages: 10,
             isolation_level: None,
+            max_wait_ms: None,
         })
         .await?;
 
@@ -534,6 +551,7 @@ async fn test_mixed_format_operations() -> Result<()> {
             partition: Some(0),
             key: None,
             value: Bytes::from("mixed-format-message"),
+            leader_epoch: None,
         })
         .await?;
     assert!(matches!(response, Response::Published { .. }));
@@ -547,6 +565,7 @@ async fn test_mixed_format_operations() -> Result<()> {
             offset: 0,
             max_messages: 10,
             isolation_level: None,
+            max_wait_ms: None,
         })
         .await?;
     assert_eq!(format, WireFormat::Postcard);

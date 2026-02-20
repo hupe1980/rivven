@@ -338,7 +338,10 @@ fn json_to_avro(json: &JsonValue, schema: &AvroSchema) -> AvroResult2<AvroValueI
             let i = n
                 .as_i64()
                 .ok_or_else(|| AvroError::InvalidValue("Expected int".to_string()))?;
-            Ok(AvroValueInner::Int(i as i32))
+            // safe narrowing from i64 to i32
+            let v = i32::try_from(i)
+                .map_err(|_| AvroError::InvalidValue(format!("Value {} out of i32 range", i)))?;
+            Ok(AvroValueInner::Int(v))
         }
 
         (AvroSchemaInner::Long, JsonValue::Number(n)) => {
@@ -412,7 +415,9 @@ fn json_to_avro(json: &JsonValue, schema: &AvroSchema) -> AvroResult2<AvroValueI
                 // For nullable types, check if JSON wraps the value
                 if let JsonValue::Object(obj) = json {
                     if obj.len() == 1 {
-                        let (key, value) = obj.iter().next().unwrap();
+                        let Some((key, value)) = obj.iter().next() else {
+                            continue;
+                        };
                         // Check if the key matches the variant type name
                         let type_name = match variant {
                             AvroSchemaInner::Null => "null",
@@ -471,11 +476,8 @@ fn json_to_avro(json: &JsonValue, schema: &AvroSchema) -> AvroResult2<AvroValueI
         }
 
         (AvroSchemaInner::Enum(enum_schema), JsonValue::String(s)) => {
-            if enum_schema.symbols.contains(s) {
-                Ok(AvroValueInner::Enum(
-                    enum_schema.symbols.iter().position(|sym| sym == s).unwrap() as u32,
-                    s.clone(),
-                ))
+            if let Some(pos) = enum_schema.symbols.iter().position(|sym| sym == s) {
+                Ok(AvroValueInner::Enum(pos as u32, s.clone()))
             } else {
                 Err(AvroError::InvalidValue(format!(
                     "Invalid enum symbol: {}",

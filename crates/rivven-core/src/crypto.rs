@@ -50,11 +50,15 @@ impl KeyMaterial {
     }
 
     /// Generate random key material using a cryptographically secure RNG.
-    pub fn generate() -> Self {
+    ///
+    /// Returns an error if the system RNG is unavailable (e.g., early boot
+    /// with depleted entropy, or sandboxed environment without `/dev/urandom`).
+    pub fn generate() -> crate::Result<Self> {
         let rng = ring::rand::SystemRandom::new();
         let mut bytes = [0u8; KEY_SIZE];
-        rng.fill(&mut bytes).expect("system RNG failed");
-        Self { bytes }
+        rng.fill(&mut bytes)
+            .map_err(|_| crate::Error::Other("system RNG unavailable".into()))?;
+        Ok(Self { bytes })
     }
 
     /// Access the raw key bytes.

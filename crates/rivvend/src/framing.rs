@@ -3,7 +3,7 @@
 //! Both `secure_server` and `cluster_server` use an identical read loop:
 //! 4-byte big-endian length prefix → validate size → read body → parse via
 //! `Request::from_wire()`. This module extracts that pattern into a reusable
-//! codec so bugs are fixed in one place (F-078).
+//! codec so bugs are fixed in one place.
 
 use bytes::BytesMut;
 use rivven_protocol::{Request, Response, WireFormat};
@@ -66,7 +66,7 @@ where
         // We must drain the oversized body from the stream before sending
         // the error response. Otherwise the client may still be blocked in
         // write_all() while the server tries to write back the error, and
-        // neither side reads — causing a TCP-level deadlock (F-078 fix).
+        // neither side reads — causing a TCP-level deadlock.
         //
         // Cap the drain to `max_message_size * 2` (or the declared length,
         // whichever is smaller) to avoid letting a malicious client force us
@@ -142,7 +142,10 @@ where
     S: AsyncWrite + Unpin,
 {
     let response_bytes = response.to_wire(format, correlation_id)?;
-    let len = response_bytes.len() as u32;
+    let len: u32 = response_bytes
+        .len()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("response size {} exceeds u32::MAX", response_bytes.len()))?;
     stream.write_all(&len.to_be_bytes()).await?;
     stream.write_all(&response_bytes).await?;
     stream.flush().await?;

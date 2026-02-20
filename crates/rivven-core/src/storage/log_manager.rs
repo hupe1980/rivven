@@ -5,7 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// Maximum number of messages to return per read operation (F-030)
+/// Maximum number of messages to return per read operation
 const MAX_MESSAGES_PER_READ: usize = 10_000;
 
 #[derive(Debug)]
@@ -14,7 +14,7 @@ pub struct LogManager {
     segments: Vec<Segment>,
     active_segment_index: usize,
     max_segment_size: u64,
-    /// Fsync policy for all segments (F-001 fix)
+    /// Fsync policy for all segments
     sync_policy: SegmentSyncPolicy,
 }
 
@@ -35,7 +35,7 @@ impl LogManager {
         .await
     }
 
-    /// Create a new LogManager with an explicit segment sync policy (F-001 fix).
+    /// Create a new LogManager with an explicit segment sync policy.
     pub async fn with_sync_policy(
         base_dir: PathBuf,
         topic: &str,
@@ -113,7 +113,7 @@ impl LogManager {
         segment.append(offset, message).await
     }
 
-    /// F-136 fix: Take the deferred sync handle from the active segment.
+    /// Take the deferred sync handle from the active segment.
     ///
     /// Call this while still holding the write lock, then release the lock
     /// and run `sync_data()` on the returned file descriptor. This allows
@@ -224,8 +224,8 @@ impl LogManager {
         self.segments.first().map(|s| s.base_offset()).unwrap_or(0)
     }
 
-    pub async fn recover_next_offset(&self) -> Result<u64> {
-        if let Some(last_segment) = self.segments.last() {
+    pub async fn recover_next_offset(&mut self) -> Result<u64> {
+        if let Some(last_segment) = self.segments.last_mut() {
             if let Some(last_offset) = last_segment.recover_last_offset().await? {
                 return Ok(last_offset + 1);
             }
@@ -312,7 +312,7 @@ impl LogManager {
         Ok(None)
     }
 
-    /// F-125 fix: Key-based log compaction for sealed (non-active) segments.
+    /// Key-based log compaction for sealed (non-active) segments.
     ///
     /// Reads all messages from eligible segments, keeps only the latest value
     /// per key (by highest offset), removes tombstones (empty value = deletion
@@ -391,11 +391,21 @@ impl LogManager {
 
             total_removed += removed;
 
-            // Phase 3: Rewrite the segment — delete old files, create new segment,
-            // re-append the compacted messages
-            self.segments[seg_idx].delete_files()?;
-            let mut new_segment =
-                Segment::with_sync_policy(&self.dir, base_offset, self.sync_policy)?;
+            // Write-to-temp-then-rename to prevent data loss on crash.
+            // Previously, delete_files() was called before the new segment was
+            // written — a crash between the two would permanently lose data.
+            //
+            // New approach:
+            // 1. Create a temporary segment in a ".compacting" subdirectory
+            // 2. Write compacted messages + flush/fsync
+            // 3. Delete old segment files
+            // 4. Rename temp files into place
+            // 5. Replace in-memory segment
+            let tmp_dir = self.dir.join(".compacting");
+            std::fs::create_dir_all(&tmp_dir)?;
+
+            let mut tmp_segment =
+                Segment::with_sync_policy(&tmp_dir, base_offset, self.sync_policy)?;
 
             let batch: Vec<(u64, Message)> = compacted
                 .into_iter()
@@ -403,10 +413,48 @@ impl LogManager {
                 .collect();
 
             if !batch.is_empty() {
-                new_segment.append_batch(batch).await?;
-                new_segment.flush().await?;
+                tmp_segment.append_batch(batch).await?;
+                tmp_segment.flush().await?;
+            }
+            // Drop tmp_segment to close file handles before rename
+            let tmp_log = tmp_dir.join(format!("{:020}.log", base_offset));
+            let tmp_idx = tmp_dir.join(format!("{:020}.index", base_offset));
+            drop(tmp_segment);
+
+            // Crash-safe rename: rename temp files into place FIRST (atomic
+            // overwrite on POSIX), THEN delete old backup files. A crash
+            // between rename and delete leaves harmless .old files that are
+            // cleaned up on next startup — no data loss window.
+            let final_log = self.dir.join(format!("{:020}.log", base_offset));
+            let final_idx = self.dir.join(format!("{:020}.index", base_offset));
+            let old_log_backup = self.dir.join(format!("{:020}.log.old", base_offset));
+            let old_idx_backup = self.dir.join(format!("{:020}.index.old", base_offset));
+
+            // 1. Rename old files to .old (preserves data if crash happens next)
+            if final_log.exists() {
+                std::fs::rename(&final_log, &old_log_backup)?;
+            }
+            if final_idx.exists() {
+                std::fs::rename(&final_idx, &old_idx_backup)?;
             }
 
+            // 2. Rename temp files into final position (atomic)
+            if tmp_log.exists() {
+                std::fs::rename(&tmp_log, &final_log)?;
+            }
+            if tmp_idx.exists() {
+                std::fs::rename(&tmp_idx, &final_idx)?;
+            }
+
+            // 3. Delete backups (best-effort — harmless if left behind)
+            let _ = std::fs::remove_file(&old_log_backup);
+            let _ = std::fs::remove_file(&old_idx_backup);
+
+            // Clean up temp directory (best-effort)
+            let _ = std::fs::remove_dir(&tmp_dir);
+
+            // Re-open the final segment at its canonical path
+            let new_segment = Segment::with_sync_policy(&self.dir, base_offset, self.sync_policy)?;
             self.segments[seg_idx] = new_segment;
 
             tracing::debug!(segment_base = base_offset, removed, "Compacted segment");

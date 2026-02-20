@@ -54,7 +54,11 @@ pub mod system_time {
         let duration = time
             .duration_since(UNIX_EPOCH)
             .map_err(serde::ser::Error::custom)?;
-        serializer.serialize_u64(duration.as_millis() as u64)
+        // safe cast — u64 covers ~584 million years of milliseconds
+        let millis = u64::try_from(duration.as_millis()).map_err(|_| {
+            serde::ser::Error::custom("SystemTime too far in the future for u64 millis")
+        })?;
+        serializer.serialize_u64(millis)
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<SystemTime, D::Error>
@@ -75,7 +79,9 @@ pub mod duration {
     where
         S: Serializer,
     {
-        serializer.serialize_u64(duration.as_millis() as u64)
+        // safe u128→u64 (consistent with  SystemTime fix)
+        let millis = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+        serializer.serialize_u64(millis)
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>

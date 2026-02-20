@@ -23,6 +23,7 @@ use crate::connection::{
 use crate::dialect::{PostgresDialect, SqlDialect};
 use crate::error::{Error, Result};
 use crate::schema::{ForeignKeyAction, ForeignKeyMetadata, IndexMetadata, SchemaProvider};
+use crate::security::validate_sql_identifier;
 use crate::types::{ColumnMetadata, Row, TableMetadata, Value};
 
 /// Convert a rivven Value to a tokio-postgres compatible parameter
@@ -47,8 +48,10 @@ fn value_to_sql(value: &Value) -> Box<dyn tokio_postgres::types::ToSql + Sync + 
         Value::Json(j) => Box::new(j.clone()),
         // Complex types - serialize to JSON or handle specially
         Value::Array(arr) => {
-            // For now, serialize as JSON
-            let json = serde_json::to_value(arr).unwrap_or_default();
+            let json = serde_json::to_value(arr).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "Failed to serialize Array to JSON, using null");
+                serde_json::Value::Null
+            });
             Box::new(json)
         }
         Value::Interval(micros) => {
@@ -63,7 +66,10 @@ fn value_to_sql(value: &Value) -> Box<dyn tokio_postgres::types::ToSql + Sync + 
             Box::new(serde_json::json!(null))
         }
         Value::Composite(map) => {
-            let json = serde_json::to_value(map).unwrap_or_default();
+            let json = serde_json::to_value(map).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "Failed to serialize Composite to JSON, using null");
+                serde_json::Value::Null
+            });
             Box::new(json)
         }
         Value::Custom { data, .. } => Box::new(data.clone()),
@@ -96,11 +102,8 @@ fn pg_value_to_value(
 ) -> Value {
     use tokio_postgres::types::Type;
 
-    // Handle NULL
-    if let Ok(None) = row.try_get::<_, Option<bool>>(idx) {
-        // Check if actually NULL by trying a nullable type
-        return Value::Null;
-    }
+    // no early NULL check — each per-type arm handles None correctly
+    // via `try_get::<_, Option<T>>` returning Ok(None) for SQL NULL.
 
     match *pg_type {
         Type::BOOL => row
@@ -353,9 +356,32 @@ impl Connection for PgConnection {
     }
 
     async fn query_stream(&self, sql: &str, params: &[Value]) -> Result<Pin<Box<dyn RowStream>>> {
-        // For now, just fetch all and wrap in a stream adapter
-        let rows = self.query(sql, params).await?;
-        Ok(Box::pin(VecRowStream::new(rows)))
+        if self.closed.load(Ordering::Relaxed) {
+            return Err(Error::connection("connection is closed"));
+        }
+
+        // Use query_raw for true incremental row streaming from PostgreSQL.
+        // Unlike query() which collects all rows into a Vec first, query_raw
+        // returns a tokio_postgres::RowStream that yields rows one-by-one as
+        // they arrive over the wire — bounded memory regardless of result size.
+        let boxed_params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> =
+            params.iter().map(value_to_sql).collect();
+
+        let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = boxed_params
+            .iter()
+            .map(|b| b.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
+            .collect();
+
+        let pg_stream = self
+            .client
+            .query_raw(sql, param_refs)
+            .await
+            .map_err(|e| Error::query_with_sql(e.to_string(), sql))?;
+
+        Ok(Box::pin(PgRowStream {
+            inner: Box::pin(pg_stream),
+            _client: Arc::clone(&self.client),
+        }))
     }
 
     async fn is_valid(&self) -> bool {
@@ -371,22 +397,29 @@ impl Connection for PgConnection {
     }
 }
 
-/// Simple row stream backed by a Vec
-struct VecRowStream {
-    rows: std::vec::IntoIter<Row>,
+/// True incremental row stream backed by tokio_postgres::RowStream.
+///
+/// Rows are pulled one-by-one from the database connection as the caller
+/// advances the stream — no full-result materialization, bounded memory.
+/// Holds an Arc<Client> to guarantee the underlying connection stays alive
+/// for the lifetime of the stream, even if the parent PgConnection is dropped.
+struct PgRowStream {
+    inner: Pin<Box<tokio_postgres::RowStream>>,
+    /// Keep the client alive so the background connection task continues
+    /// processing row data for this stream.
+    _client: Arc<tokio_postgres::Client>,
 }
 
-impl VecRowStream {
-    fn new(rows: Vec<Row>) -> Self {
-        Self {
-            rows: rows.into_iter(),
-        }
-    }
-}
-
-impl RowStream for VecRowStream {
+impl RowStream for PgRowStream {
     fn next(&mut self) -> Pin<Box<dyn Future<Output = Result<Option<Row>>> + Send + '_>> {
-        Box::pin(async move { Ok(self.rows.next()) })
+        Box::pin(async move {
+            use futures_util::TryStreamExt;
+            match self.inner.as_mut().try_next().await {
+                Ok(Some(pg_row)) => Ok(Some(pg_row_to_row(&pg_row))),
+                Ok(None) => Ok(None),
+                Err(e) => Err(Error::query(e.to_string())),
+            }
+        })
     }
 }
 
@@ -510,6 +543,11 @@ impl Transaction for PgTransaction {
     }
 
     async fn set_isolation_level(&self, level: IsolationLevel) -> Result<()> {
+        if matches!(level, IsolationLevel::Snapshot) {
+            return Err(Error::unsupported(
+                "Snapshot isolation is SQL Server specific; PostgreSQL supports SERIALIZABLE instead",
+            ));
+        }
         let sql = format!("SET TRANSACTION ISOLATION LEVEL {}", level.to_sql());
         self.client
             .execute(&sql, &[])
@@ -563,10 +601,22 @@ impl Transaction for PgTransaction {
 
 impl Drop for PgTransaction {
     fn drop(&mut self) {
-        // If transaction wasn't committed or rolled back, attempt rollback
+        // If transaction wasn't committed or rolled back, issue ROLLBACK
+        // to prevent the connection from being returned to the pool in an open
+        // transaction state. Uses block_in_place since Drop can't be async.
         if !self.committed.load(Ordering::Relaxed) && !self.rolled_back.load(Ordering::Relaxed) {
-            // Best effort rollback in drop - can't be async
-            // In production, you'd want to log this
+            let client = self.client.clone();
+            // Best-effort synchronous rollback
+            tokio::task::block_in_place(|| {
+                let rt = tokio::runtime::Handle::current();
+                rt.block_on(async {
+                    if let Err(e) = client.execute("ROLLBACK", &[]).await {
+                        tracing::warn!("Auto-rollback on PgTransaction drop failed: {}", e);
+                    } else {
+                        tracing::debug!("PgTransaction auto-rolled back on drop");
+                    }
+                });
+            });
         }
     }
 }
@@ -585,7 +635,7 @@ impl ConnectionFactory for PgConnectionFactory {
         // Spawn the connection handler
         tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("connection error: {}", e);
+                tracing::warn!("PostgreSQL connection error: {}", e);
             }
         });
 
@@ -658,6 +708,8 @@ impl SchemaProvider for PgSchemaProvider {
 
     async fn get_table(&self, schema: Option<&str>, table: &str) -> Result<Option<TableMetadata>> {
         let schema = schema.unwrap_or("public");
+        validate_sql_identifier(table)?;
+        validate_sql_identifier(schema)?;
         let sql = self.dialect.list_columns_sql(Some(schema), table);
         let rows = self.conn.query(&sql, &[]).await?;
 

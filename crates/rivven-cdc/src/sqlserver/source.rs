@@ -222,10 +222,9 @@ impl SqlServerCdcConfig {
         }
 
         parts.push(format!("Application Name={}", self.application_name));
-        parts.push(format!(
-            "Connect Timeout={}",
-            self.connect_timeout_secs as i32
-        ));
+        // safe cast — clamp to i32::MAX instead of silent truncation
+        let timeout_secs = i32::try_from(self.connect_timeout_secs).unwrap_or(i32::MAX);
+        parts.push(format!("Connect Timeout={}", timeout_secs));
 
         if self.trust_server_certificate {
             parts.push("TrustServerCertificate=true".to_string());
@@ -827,10 +826,11 @@ async fn run_cdc_poll_loop(
                     op: change.operation,
                     before: change.before.map(serde_json::Value::Object),
                     after: change.after.map(serde_json::Value::Object),
+                    // unwrap_or_default instead of unwrap to handle pre-epoch clocks
                     timestamp: change.commit_time.unwrap_or_else(|| {
                         std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
+                            .unwrap_or_default()
                             .as_secs() as i64
                     }),
                     transaction: Some(TransactionMetadata {

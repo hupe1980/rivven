@@ -6,10 +6,11 @@
 //! - Metadata queries
 //!
 //! Features:
-//! - Connection pooling
+//! - Connection pooling with health checks
 //! - Automatic reconnection
 //! - Multiplexing over single connection
-//! - TLS support (optional)
+//! - TLS support (optional, via `rustls`)
+//! - TCP keepalive (§2.6 fix — prevents silent half-open connections)
 
 use crate::error::{ClusterError, Result};
 use crate::node::NodeId;
@@ -45,6 +46,19 @@ pub struct TransportConfig {
     pub recv_buffer_size: usize,
     /// Send buffer size
     pub send_buffer_size: usize,
+    /// TCP keepalive interval (§2.6 fix — detects half-open connections)
+    pub keepalive_time: Duration,
+    /// TCP keepalive probe interval
+    pub keepalive_interval: Duration,
+    /// TLS configuration for inter-node encryption (§1.2)
+    ///
+    /// When set, all cluster connections use TLS. Both sides must present valid
+    /// certificates signed by the same CA.
+    #[cfg(feature = "quic")]
+    pub tls_config: Option<Arc<rustls::ClientConfig>>,
+    /// TLS server config for accepting incoming TLS connections
+    #[cfg(feature = "quic")]
+    pub tls_server_config: Option<Arc<rustls::ServerConfig>>,
 }
 
 impl Default for TransportConfig {
@@ -57,7 +71,27 @@ impl Default for TransportConfig {
             tcp_nodelay: true,
             recv_buffer_size: 256 * 1024, // 256 KB
             send_buffer_size: 256 * 1024,
+            keepalive_time: Duration::from_secs(60),
+            keepalive_interval: Duration::from_secs(10),
+            #[cfg(feature = "quic")]
+            tls_config: None,
+            #[cfg(feature = "quic")]
+            tls_server_config: None,
         }
+    }
+}
+
+/// Apply TCP keepalive settings to a `TcpStream` (§2.6 fix).
+///
+/// Uses `socket2` for portable keepalive configuration. Silently logs failures
+/// at debug level — keepalive is best-effort.
+fn apply_keepalive(stream: &TcpStream, config: &TransportConfig) {
+    let sock_ref = socket2::SockRef::from(stream);
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(config.keepalive_time)
+        .with_interval(config.keepalive_interval);
+    if let Err(e) = sock_ref.set_tcp_keepalive(&keepalive) {
+        debug!("TCP keepalive setup failed: {}", e);
     }
 }
 
@@ -81,7 +115,8 @@ pub struct Transport {
     /// Peer addresses
     peer_addrs: Arc<DashMap<NodeId, SocketAddr>>,
 
-    /// Correlation ID generator
+    /// Correlation ID generator (reserved for future multiplexed transport)
+    #[allow(dead_code)]
     correlation_id: AtomicU64,
 
     /// Pending requests waiting for response
@@ -188,6 +223,7 @@ impl Transport {
         if config.tcp_nodelay {
             let _ = stream.set_nodelay(true);
         }
+        apply_keepalive(&stream, &config);
 
         let mut length_buf = [0u8; 4];
 
@@ -259,8 +295,6 @@ impl Transport {
             .get(node_id)
             .ok_or_else(|| ClusterError::NodeNotFound(node_id.clone()))?;
 
-        let correlation_id = self.next_correlation_id();
-
         // Get or create connection
         let mut stream = self.get_connection(node_id, addr).await?;
 
@@ -273,10 +307,6 @@ impl Transport {
             .map_err(|_| ClusterError::Timeout)?
             .map_err(ClusterError::Io)?;
 
-        // Create response channel
-        let (tx, _rx) = oneshot::channel();
-        self.pending.insert(correlation_id, tx);
-
         // Read response
         let mut length_buf = [0u8; 4];
         timeout(self.config.read_timeout, stream.read_exact(&mut length_buf))
@@ -285,6 +315,15 @@ impl Transport {
             .map_err(ClusterError::Io)?;
 
         let length = frame_length(&length_buf);
+
+        // Guard against oversized response frames (mirrors handle_connection check)
+        if length > crate::protocol::MAX_MESSAGE_SIZE {
+            return Err(ClusterError::MessageTooLarge {
+                size: length,
+                max: crate::protocol::MAX_MESSAGE_SIZE,
+            });
+        }
+
         let mut body = vec![0u8; length];
         timeout(self.config.read_timeout, stream.read_exact(&mut body))
             .await
@@ -296,9 +335,6 @@ impl Transport {
 
         // Decode response
         let response = decode_response(&body)?;
-
-        // Remove pending entry
-        self.pending.remove(&correlation_id);
 
         Ok(response)
     }
@@ -360,6 +396,7 @@ impl Transport {
         if self.config.tcp_nodelay {
             let _ = stream.set_nodelay(true);
         }
+        apply_keepalive(&stream, &self.config);
 
         Ok(stream)
     }
@@ -373,7 +410,8 @@ impl Transport {
             .await;
     }
 
-    /// Get next correlation ID
+    /// Get next correlation ID (reserved for future multiplexed transport)
+    #[allow(dead_code)]
     fn next_correlation_id(&self) -> u64 {
         self.correlation_id.fetch_add(1, Ordering::SeqCst)
     }

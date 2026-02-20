@@ -114,6 +114,11 @@ pub enum Request {
         key: Option<Bytes>,
         #[serde(with = "crate::serde_utils::bytes_serde")]
         value: Bytes,
+        /// Leader epoch for data-path fencing (§2.4).
+        /// When set, the broker rejects the write if its current leader epoch
+        /// for this partition is higher, preventing stale-leader writes.
+        #[serde(default)]
+        leader_epoch: Option<u64>,
     },
 
     /// Consume messages from a topic
@@ -128,6 +133,10 @@ pub enum Request {
         /// Some(1) = read_committed (filters aborted transaction messages)
         #[serde(default)]
         isolation_level: Option<u8>,
+        /// Long-polling: maximum time (ms) to wait for new data before returning
+        /// an empty response. None or 0 = immediate (no waiting). Capped at 30 000 ms.
+        #[serde(default)]
+        max_wait_ms: Option<u64>,
     },
 
     /// Create a new topic
@@ -217,6 +226,9 @@ pub enum Request {
         producer_epoch: u16,
         /// Sequence number (starts at 0, increments per partition)
         sequence: i32,
+        /// Leader epoch for fencing stale writes (§2.4)
+        #[serde(default)]
+        leader_epoch: Option<u64>,
     },
 
     // =========================================================================
@@ -262,6 +274,9 @@ pub enum Request {
         producer_epoch: u16,
         /// Sequence number
         sequence: i32,
+        /// Leader epoch for fencing stale writes (§2.4)
+        #[serde(default)]
+        leader_epoch: Option<u64>,
     },
 
     /// Add consumer offsets to transaction (for exactly-once consume-transform-produce)
@@ -355,7 +370,7 @@ pub enum Request {
         topics: Vec<String>,
     },
 
-    /// Protocol version handshake (F-094)
+    /// Protocol version handshake
     ///
     /// Sent by the client as the first message after connecting.
     /// The server validates the protocol version and returns compatibility info.
@@ -367,7 +382,7 @@ pub enum Request {
     },
 }
 
-// F-074 fix: Manual Debug impl to redact credentials from log output.
+// Manual Debug impl to redact credentials from log output.
 // `Request::Authenticate { password }` and SASL/SCRAM variants contain
 // secrets that must never appear in debug logs.
 impl std::fmt::Debug for Request {
@@ -396,12 +411,14 @@ impl std::fmt::Debug for Request {
                 partition,
                 key,
                 value,
+                leader_epoch,
             } => f
                 .debug_struct("Publish")
                 .field("topic", topic)
                 .field("partition", partition)
                 .field("key", key)
                 .field("value_len", &value.len())
+                .field("leader_epoch", leader_epoch)
                 .finish(),
             Self::Consume {
                 topic,
@@ -409,6 +426,7 @@ impl std::fmt::Debug for Request {
                 offset,
                 max_messages,
                 isolation_level,
+                max_wait_ms,
             } => f
                 .debug_struct("Consume")
                 .field("topic", topic)
@@ -416,6 +434,7 @@ impl std::fmt::Debug for Request {
                 .field("offset", offset)
                 .field("max_messages", max_messages)
                 .field("isolation_level", isolation_level)
+                .field("max_wait_ms", max_wait_ms)
                 .finish(),
             Self::CreateTopic { name, partitions } => f
                 .debug_struct("CreateTopic")
@@ -845,7 +864,7 @@ pub enum Response {
         configs: Vec<TopicConfigDescription>,
     },
 
-    /// Protocol version handshake response (F-094)
+    /// Protocol version handshake response
     HandshakeResult {
         /// Server's protocol version
         server_version: u32,
@@ -887,7 +906,7 @@ impl Request {
     pub fn to_wire(&self, format: crate::WireFormat, correlation_id: u32) -> Result<Vec<u8>> {
         match format {
             crate::WireFormat::Postcard => {
-                // F-037 fix: Single allocation — serialize directly into the output
+                // Single allocation — serialize directly into the output
                 // Vec via `postcard::to_extend` instead of double-allocating
                 // (to_allocvec → intermediate Vec → copy into result Vec).
                 let mut result = Vec::with_capacity(crate::WIRE_HEADER_SIZE + 128);
@@ -980,7 +999,7 @@ impl Response {
     pub fn to_wire(&self, format: crate::WireFormat, correlation_id: u32) -> Result<Vec<u8>> {
         match format {
             crate::WireFormat::Postcard => {
-                // F-037 fix: Single allocation — serialize directly into the output
+                // Single allocation — serialize directly into the output
                 // Vec via `postcard::to_extend` instead of double-allocating.
                 let mut result = Vec::with_capacity(crate::WIRE_HEADER_SIZE + 128);
                 result.push(format.as_byte());
@@ -1148,6 +1167,7 @@ mod tests {
             partition: Some(3),
             key: Some(Bytes::from("my-key")),
             value: Bytes::from("hello world"),
+            leader_epoch: None,
         };
 
         let wire_bytes = request.to_wire(crate::WireFormat::Postcard, 1).unwrap();
@@ -1217,6 +1237,7 @@ mod tests {
                     partition: None,
                     key: None,
                     value: Bytes::from("v"),
+                    leader_epoch: None,
                 },
                 4,
             ),

@@ -288,6 +288,28 @@ permit(
 
 Deploy the Schema Registry on Kubernetes using the **RivvenSchemaRegistry CRD**:
 
+### Install the CRD
+
+The CRD definition is available at `deploy/crds/rivvenschemaregistry-crd.yaml`:
+
+```bash
+kubectl apply -f crates/rivven-operator/deploy/crds/rivvenschemaregistry-crd.yaml
+```
+
+Or generate it from the operator binary:
+
+```bash
+rivven-operator --print-crd | kubectl apply -f -
+```
+
+The CRD provides the short name `rsr` for quick lookups:
+
+```bash
+kubectl get rsr
+# NAME              CLUSTER      REPLICAS   READY   SCHEMAS   PHASE     AGE
+# schema-registry   production   2          2       42        Running   3d
+```
+
 ### Using the Operator
 
 ```yaml

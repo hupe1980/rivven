@@ -97,6 +97,66 @@ pub fn escape_string_literal(value: &str) -> String {
     value.replace('\'', "''")
 }
 
+/// Validate a SQL type name for safe interpolation into DDL statements.
+///
+/// Prevents SQL injection via `ColumnMetadata::type_name` by allowing only
+/// characters that appear in legitimate SQL type specifications:
+/// - ASCII letters, digits, underscores: `VARCHAR`, `INT`, `BIGINT`
+/// - Parentheses and commas: `DECIMAL(10,2)`, `ENUM('a','b')`
+/// - Spaces: `INT UNSIGNED`, `DOUBLE PRECISION`
+/// - Single quotes: `ENUM('x','y')` (MySQL set/enum value lists)
+/// - Periods: `NUMERIC(10.2)` (some dialects)
+///
+/// Rejects semicolons, double-dashes, newlines, backticks, and other
+/// metacharacters that could escape the DDL context.
+///
+/// # Examples
+///
+/// ```
+/// use rivven_rdbc::security::validate_sql_type_name;
+///
+/// assert!(validate_sql_type_name("INT").is_ok());
+/// assert!(validate_sql_type_name("VARCHAR(255)").is_ok());
+/// assert!(validate_sql_type_name("DECIMAL(10,2)").is_ok());
+/// assert!(validate_sql_type_name("INT UNSIGNED").is_ok());
+/// assert!(validate_sql_type_name("ENUM('a','b')").is_ok());
+///
+/// // Rejects injection attempts
+/// assert!(validate_sql_type_name("INT; DROP TABLE users--").is_err());
+/// assert!(validate_sql_type_name("").is_err());
+/// ```
+pub fn validate_sql_type_name(type_name: &str) -> crate::Result<()> {
+    if type_name.is_empty() {
+        return Err(Error::config("SQL type name cannot be empty"));
+    }
+
+    if type_name.len() > 255 {
+        return Err(Error::config(format!(
+            "SQL type name too long: {} chars (max 255)",
+            type_name.len()
+        )));
+    }
+
+    for c in type_name.chars() {
+        if !(c.is_ascii_alphanumeric()
+            || c == '_'
+            || c == '('
+            || c == ')'
+            || c == ','
+            || c == ' '
+            || c == '\''
+            || c == '.')
+        {
+            return Err(Error::config(format!(
+                "Invalid SQL type name '{}': contains invalid character '{}'",
+                type_name, c
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +259,44 @@ mod tests {
     #[test]
     fn test_escape_empty_string() {
         assert_eq!(escape_string_literal(""), "");
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_sql_type_name
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_valid_type_names() {
+        assert!(validate_sql_type_name("INT").is_ok());
+        assert!(validate_sql_type_name("BIGINT").is_ok());
+        assert!(validate_sql_type_name("VARCHAR(255)").is_ok());
+        assert!(validate_sql_type_name("DECIMAL(10,2)").is_ok());
+        assert!(validate_sql_type_name("INT UNSIGNED").is_ok());
+        assert!(validate_sql_type_name("DOUBLE PRECISION").is_ok());
+        assert!(validate_sql_type_name("ENUM('a','b','c')").is_ok());
+        assert!(validate_sql_type_name("SET('x','y')").is_ok());
+        assert!(validate_sql_type_name("NUMERIC(10.2)").is_ok());
+        assert!(validate_sql_type_name("timestamp").is_ok());
+        assert!(validate_sql_type_name("TINYINT(1)").is_ok());
+    }
+
+    #[test]
+    fn test_empty_type_name() {
+        assert!(validate_sql_type_name("").is_err());
+    }
+
+    #[test]
+    fn test_type_name_injection_attempts() {
+        assert!(validate_sql_type_name("INT; DROP TABLE users--").is_err());
+        assert!(validate_sql_type_name("INT`; DROP TABLE").is_err());
+        assert!(validate_sql_type_name("INT\nDROP TABLE").is_err());
+        assert!(validate_sql_type_name("INT\0").is_err());
+        assert!(validate_sql_type_name("INT--comment").is_err());
+    }
+
+    #[test]
+    fn test_type_name_too_long() {
+        let long = "A".repeat(256);
+        assert!(validate_sql_type_name(&long).is_err());
     }
 }

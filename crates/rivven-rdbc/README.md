@@ -12,15 +12,16 @@ rivven-rdbc provides a unified abstraction over multiple SQL database backends w
 - **Transaction support** including isolation levels and savepoints
 - **Schema introspection** and evolution capabilities
 - **Prepared statement caching**
+- **SQL injection prevention** — identifier, type name, and string literal validation on all DDL/introspection paths
 
 ## Supported Databases
 
 | Backend | Driver | Dialect | Features |
 |---------|--------|---------|----------|
-| PostgreSQL | `tokio-postgres` | `PostgresDialect` | RETURNING, ON CONFLICT, streaming |
-| MySQL | `mysql_async` | `MySqlDialect` | ON DUPLICATE KEY UPDATE |
-| MariaDB | `mysql_async` | `MariaDbDialect` | RETURNING (10.5+), native UUID (10.7+) |
-| SQL Server | `tiberius` | `SqlServerDialect` | MERGE, OUTPUT clause |
+| PostgreSQL | `tokio-postgres` | `PostgresDialect` | RETURNING, ON CONFLICT, streaming, prepared statements |
+| MySQL | `mysql_async` | `MySqlDialect` | ON DUPLICATE KEY UPDATE, streaming, prepared statements |
+| MariaDB | `mysql_async` | `MariaDbDialect` | RETURNING (10.5+), native UUID (10.7+), streaming, prepared statements |
+| SQL Server | `tiberius` | `SqlServerDialect` | MERGE, OUTPUT clause, streaming, prepared statements |
 
 ## Quick Start
 
@@ -125,6 +126,7 @@ println!("Reuse rate: {:.1}%", stats.reuse_rate() * 100.0);
 println!("Total recycled: {}", stats.recycled_total());
 println!("Avg wait time: {:.2}ms", stats.avg_wait_time_ms());
 println!("Health failure rate: {:.1}%", stats.health_failure_rate() * 100.0);
+println!("Health checks performed: {}", stats.health_checks_performed);
 println!("Active connections: {}", stats.active_connections());
 ```
 
@@ -241,7 +243,7 @@ match result {
 
 - **Statement Caching**: Prepared statements are cached to avoid repeated parsing
 - **Connection Pooling**: Reuse connections to avoid connection overhead
-- **Async Streaming**: Large result sets can be streamed to reduce memory
+- **Async Streaming**: All backends support `query_stream` for memory-efficient result processing. PostgreSQL uses true incremental streaming via `query_raw`, while MySQL and SQL Server fetch results then stream them through an async iterator.
 - **Batch Operations**: Use transactions for bulk inserts/updates
 - **Metrics**: Built-in metrics for monitoring pool health and query performance
 

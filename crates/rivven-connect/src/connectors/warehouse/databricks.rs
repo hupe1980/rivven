@@ -446,13 +446,17 @@ impl AckCallback for MetricsAckCallback {
 
 /// Generate a unique stream identifier for structured tracing.
 fn generate_stream_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
     format!(
-        "rivven-dbx-{}-{}",
+        "rivven-dbx-{}-{}-{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_micros())
-            .unwrap_or(0)
+            .unwrap_or(0),
+        seq
     )
 }
 

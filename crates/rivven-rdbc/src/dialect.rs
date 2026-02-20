@@ -73,6 +73,11 @@ pub trait SqlDialect: Send + Sync {
     /// Get the boolean literal
     fn boolean_literal(&self, value: bool) -> &'static str;
 
+    /// Dialect-specific timestamp subtraction expression
+    /// Returns an expression like `NOW() - INTERVAL '5' SECOND` (Postgres),
+    /// `NOW() - INTERVAL 5 SECOND` (MySQL), or `DATEADD(SECOND, -5, GETDATE())` (SQL Server)
+    fn timestamp_subtract_seconds(&self, column_expr: &str, seconds: u64) -> String;
+
     /// Build a SELECT statement
     #[allow(clippy::too_many_arguments)]
     fn build_select(
@@ -259,6 +264,16 @@ impl SqlDialect for PostgresDialect {
         } else {
             "FALSE"
         }
+    }
+
+    fn timestamp_subtract_seconds(&self, column_expr: &str, seconds: u64) -> String {
+        // PostgreSQL: column < NOW() - INTERVAL '5' SECOND
+        format!(
+            "{} < {} - INTERVAL '{}' SECOND",
+            column_expr,
+            self.current_timestamp(),
+            seconds
+        )
     }
 
     fn build_select(
@@ -467,6 +482,16 @@ impl SqlDialect for MySqlDialect {
         } else {
             "0"
         }
+    }
+
+    fn timestamp_subtract_seconds(&self, column_expr: &str, seconds: u64) -> String {
+        // MySQL: column < NOW() - INTERVAL 5 SECOND (no quotes)
+        format!(
+            "{} < {} - INTERVAL {} SECOND",
+            column_expr,
+            self.current_timestamp(),
+            seconds
+        )
     }
 
     fn build_select(
@@ -732,6 +757,16 @@ impl SqlDialect for SqlServerDialect {
         }
     }
 
+    fn timestamp_subtract_seconds(&self, column_expr: &str, seconds: u64) -> String {
+        // SQL Server: column < DATEADD(SECOND, -N, GETDATE())
+        format!(
+            "{} < DATEADD(SECOND, -{}, {})",
+            column_expr,
+            seconds,
+            self.current_timestamp()
+        )
+    }
+
     fn build_select(
         &self,
         schema: Option<&str>,
@@ -869,6 +904,11 @@ impl SqlDialect for MariaDbDialect {
         } else {
             "FALSE"
         }
+    }
+
+    fn timestamp_subtract_seconds(&self, column_expr: &str, seconds: u64) -> String {
+        // MariaDB: same as MySQL
+        MySqlDialect.timestamp_subtract_seconds(column_expr, seconds)
     }
 
     fn build_select(

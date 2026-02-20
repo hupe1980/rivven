@@ -341,8 +341,12 @@ async fn dashboard_data_handler(State(state): State<DashboardState>) -> impl Int
 
         consumer_groups.push(ConsumerGroupInfo {
             group_id,
-            state: "Stable".to_string(),
-            member_count: 0, // Would need member tracking
+            // Show "Unknown" instead of misleading "Stable" — the
+            // dashboard does not have access to the consumer coordinator's
+            // group state or member list. Operators should use the admin API
+            // (DescribeGroup) for accurate group health information.
+            state: "Unknown".to_string(),
+            member_count: 0,
             topics: group_topics,
             total_lag,
         });

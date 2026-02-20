@@ -102,6 +102,9 @@ pub enum CompressionError {
     #[error("Decompression bomb detected: original_size {size} exceeds maximum {max}")]
     DecompressionBomb { size: usize, max: usize },
 
+    #[error("Payload too large: {size} bytes exceeds maximum {max}")]
+    PayloadTooLarge { size: usize, max: usize },
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -437,7 +440,21 @@ fn compress_lz4(data: &[u8], _level: CompressionLevel) -> Result<Vec<u8>> {
 }
 
 /// Decompress LZ4 data
+///
+/// Validates the prepended uncompressed size against `MAX_DECOMPRESSION_SIZE`
+/// before allocating to prevent decompression-bomb DoS attacks.
 fn decompress_lz4(data: &[u8], _original_size: Option<usize>) -> Result<Vec<u8>> {
+    // The first 4 bytes of LZ4 block format contain the uncompressed size
+    // (little-endian u32). Validate before letting lz4_flex allocate.
+    if data.len() >= 4 {
+        let claimed_size = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        if claimed_size > MAX_DECOMPRESSION_SIZE {
+            return Err(CompressionError::DecompressionBomb {
+                size: claimed_size,
+                max: MAX_DECOMPRESSION_SIZE,
+            });
+        }
+    }
     lz4_flex::block::decompress_size_prepended(data)
         .map_err(|e| CompressionError::Lz4Error(e.to_string()))
 }
@@ -460,7 +477,7 @@ const MAX_DECOMPRESSION_SIZE: usize = 256 * 1024 * 1024;
 fn decompress_zstd(data: &[u8], original_size: Option<usize>) -> Result<Vec<u8>> {
     let capacity = match original_size {
         Some(size) => {
-            // F-048: Validate original_size against maximum to prevent decompression bombs
+            // Validate original_size against maximum to prevent decompression bombs
             if size > MAX_DECOMPRESSION_SIZE {
                 return Err(CompressionError::DecompressionBomb {
                     size,
@@ -483,7 +500,19 @@ fn compress_snappy(data: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Decompress Snappy data
+///
+/// Validates decompressed length against `MAX_DECOMPRESSION_SIZE` before
+/// allocating to prevent decompression-bomb DoS attacks.
 fn decompress_snappy(data: &[u8]) -> Result<Vec<u8>> {
+    // snap::raw::decompress_len reads the varint header without allocating.
+    let decompressed_len = snap::raw::decompress_len(data)
+        .map_err(|e| CompressionError::SnappyError(e.to_string()))?;
+    if decompressed_len > MAX_DECOMPRESSION_SIZE {
+        return Err(CompressionError::DecompressionBomb {
+            size: decompressed_len,
+            max: MAX_DECOMPRESSION_SIZE,
+        });
+    }
     let mut decoder = snap::raw::Decoder::new();
     decoder
         .decompress_vec(data)
@@ -658,6 +687,20 @@ impl Compressor {
         Ok(Bytes::from(decompressed))
     }
 
+    /// Try to decompress data, returning the original bytes unchanged if
+    /// decompression fails (e.g. for pre-existing uncompressed messages).
+    ///
+    /// backward-compatible decompression for consumer side.
+    /// Messages produced with compression have a self-describing flags byte.
+    /// Messages produced before compression was enabled lack this header and
+    /// will fail decompression — `try_decompress` returns them as-is.
+    pub fn try_decompress(&self, data: &[u8]) -> Bytes {
+        match self.decompress(data) {
+            Ok(decompressed) => decompressed,
+            Err(_) => Bytes::copy_from_slice(data),
+        }
+    }
+
     /// Get compression analysis for data (without actually storing)
     pub fn analyze(&self, data: &[u8]) -> CompressionAnalysis {
         let lz4_result = compress_lz4(data, self.config.level);
@@ -736,6 +779,15 @@ impl Compressor {
         original_data: &[u8],
     ) -> Result<Bytes> {
         let has_checksum = self.config.checksum;
+
+        // reject payloads > u32::MAX before truncating to 4-byte size header
+        if original_size > u32::MAX as usize {
+            return Err(CompressionError::PayloadTooLarge {
+                size: original_size,
+                max: u32::MAX as usize,
+            });
+        }
+
         // Header: flags (1) + size (4) + optional checksum (4)
         let header_size = 5 + if has_checksum { 4 } else { 0 };
 
@@ -1138,11 +1190,28 @@ impl BatchCompressor {
     }
 
     /// Add message to batch
-    pub fn add(&mut self, data: &[u8]) {
+    pub fn add(&mut self, data: &[u8]) -> Result<()> {
+        // guard against accumulated batch exceeding u32::MAX
+        let new_len = self
+            .buffer
+            .len()
+            .checked_add(data.len())
+            .and_then(|l| l.checked_add(4)) // length prefix
+            .ok_or(CompressionError::PayloadTooLarge {
+                size: self.buffer.len() + data.len() + 4,
+                max: u32::MAX as usize,
+            })?;
+        if new_len > u32::MAX as usize {
+            return Err(CompressionError::PayloadTooLarge {
+                size: new_len,
+                max: u32::MAX as usize,
+            });
+        }
         self.message_offsets.push(self.buffer.len() as u32);
         // Write length-prefixed message
         self.buffer.put_u32_le(data.len() as u32);
         self.buffer.put_slice(data);
+        Ok(())
     }
 
     /// Compress the batch and return compressed data with metadata
@@ -1297,7 +1366,7 @@ mod tests {
 
         for i in 0..100 {
             let msg = format!("Message {} with some content to compress", i);
-            batch.add(msg.as_bytes());
+            batch.add(msg.as_bytes()).unwrap();
         }
 
         let compressed = batch.finish().unwrap();

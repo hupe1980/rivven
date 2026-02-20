@@ -4,6 +4,7 @@
 
 use super::error::SqlServerError;
 use super::source::{CaptureInstance, Lsn, SqlServerCdcConfig};
+use crate::common::Validator;
 use crate::common::{CdcError, CdcOp, Result};
 use serde_json::{Map, Value};
 use tiberius::{AuthMethod, Client, Config, EncryptionLevel, Row};
@@ -264,6 +265,11 @@ impl SqlServerClient {
 
     /// Get the minimum LSN for a capture instance
     pub async fn get_min_lsn(&mut self, capture_instance: &str) -> Result<Lsn> {
+        // Validate capture_instance to prevent SQL injection — the value is
+        // interpolated as an unquoted identifier in the function argument.
+        Validator::validate_identifier(capture_instance)
+            .map_err(|e| CdcError::Config(e.to_string()))?;
+
         let query = format!(
             "SELECT sys.fn_cdc_get_min_lsn('{}')",
             capture_instance.replace('\'', "''")
@@ -309,6 +315,12 @@ impl SqlServerClient {
         to_lsn: &Lsn,
         batch_size: u32,
     ) -> Result<Vec<CdcChangeRecord>> {
+        // Validate capture_instance to prevent SQL injection — the value is
+        // interpolated directly into the CDC function name, which cannot be
+        // parameterized in T-SQL.
+        Validator::validate_identifier(capture_instance)
+            .map_err(|e| CdcError::Config(e.to_string()))?;
+
         // Use fn_cdc_get_all_changes_ for full change data
         // 'all update old' returns both before and after images for updates
         let query = format!(
@@ -591,8 +603,10 @@ fn merge_update_pairs(changes: Vec<CdcChangeRecord>) -> Vec<CdcChangeRecord> {
                     && next.after.is_some()
                     && next.commit_lsn == current.commit_lsn
                 {
-                    // Take the next item and merge
-                    let next = iter.next().unwrap();
+                    // Take the next item and merge (safe: peek() confirmed it exists)
+                    let Some(next) = iter.next() else {
+                        unreachable!("peek() succeeded but next() returned None");
+                    };
                     merged.push(CdcChangeRecord {
                         commit_lsn: current.commit_lsn,
                         change_lsn: next.change_lsn,

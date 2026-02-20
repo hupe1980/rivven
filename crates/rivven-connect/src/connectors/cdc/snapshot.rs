@@ -413,7 +413,7 @@ impl<S: SnapshotSource + 'static, P: ProgressStore + 'static> SnapshotManager<S,
         table: &str,
         key_column: &str,
     ) -> Result<Vec<CdcEvent>> {
-        let spec = TableSpec::new(schema, table, key_column);
+        let spec = TableSpec::new(schema, table, key_column)?;
 
         info!(
             "Starting snapshot for {}.{} (key: {})",
@@ -443,7 +443,7 @@ impl<S: SnapshotSource + 'static, P: ProgressStore + 'static> SnapshotManager<S,
         let specs: Vec<TableSpec> = tables
             .into_iter()
             .map(|(schema, table, key)| TableSpec::new(schema, table, key))
-            .collect();
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         info!("Starting snapshot for {} tables", specs.len());
 

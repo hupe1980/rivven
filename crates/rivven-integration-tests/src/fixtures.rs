@@ -26,7 +26,7 @@ use tracing::info;
 pub struct TestBroker {
     pub addr: SocketAddr,
     pub config: Config,
-    shutdown_tx: Option<oneshot::Sender<()>>,
+    shutdown_handle: Option<rivvend::ShutdownHandle>,
     handle: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -48,7 +48,8 @@ impl TestBroker {
         config.bind_address = "127.0.0.1".to_string();
         config.port = port;
 
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        // Channel to receive the server's shutdown handle from the spawned task
+        let (handle_tx, handle_rx) = oneshot::channel::<rivvend::ShutdownHandle>();
 
         // If config has a custom data_dir (e.g., for persistence tests), use it.
         // Otherwise use a unique temp dir to avoid Raft conflicts between tests.
@@ -88,15 +89,12 @@ impl TestBroker {
                     return;
                 }
             };
-            tokio::select! {
-                result = server.start() => {
-                    if let Err(e) = result {
-                        tracing::error!("Server error: {}", e);
-                    }
-                }
-                _ = shutdown_rx => {
-                    info!("Test broker shutting down");
-                }
+            // Send the server's shutdown handle back so the test can trigger
+            // graceful shutdown (WAL checkpoint, topic flush) instead of
+            // dropping the server future.
+            let _ = handle_tx.send(server.get_shutdown_handle());
+            if let Err(e) = server.start().await {
+                tracing::error!("Server error: {}", e);
             }
         });
 
@@ -108,10 +106,13 @@ impl TestBroker {
             sleep(Duration::from_millis(50)).await;
         }
 
+        // Receive the server's shutdown handle (sent from inside the spawn)
+        let shutdown_handle = handle_rx.await.ok();
+
         Ok(Self {
             addr,
             config,
-            shutdown_tx: Some(shutdown_tx),
+            shutdown_handle,
             handle: Some(handle),
         })
     }
@@ -126,13 +127,19 @@ impl TestBroker {
         self.addr.port()
     }
 
-    /// Gracefully shutdown the broker
+    /// Gracefully shutdown the broker.
+    ///
+    /// Triggers the server's internal shutdown path which includes:
+    /// WAL shutdown → topic flush → WAL checkpoint (clearing WAL files).
     pub async fn shutdown(mut self) -> Result<()> {
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
+        if let Some(handle) = self.shutdown_handle.take() {
+            handle.shutdown();
         }
         if let Some(handle) = self.handle.take() {
-            let _ = tokio::time::timeout(Duration::from_secs(5), handle).await;
+            // The server's internal shutdown drains connections (10s) and infra
+            // tasks (5s), then flushes WAL + topics + checkpoint. Allow enough
+            // time for the full graceful shutdown sequence.
+            let _ = tokio::time::timeout(Duration::from_secs(30), handle).await;
         }
         Ok(())
     }
@@ -140,8 +147,8 @@ impl TestBroker {
 
 impl Drop for TestBroker {
     fn drop(&mut self) {
-        if let Some(tx) = self.shutdown_tx.take() {
-            let _ = tx.send(());
+        if let Some(handle) = self.shutdown_handle.take() {
+            handle.shutdown();
         }
     }
 }

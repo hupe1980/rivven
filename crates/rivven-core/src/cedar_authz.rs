@@ -131,7 +131,7 @@ mod cedar_impl {
     pub type CedarResult<T> = Result<T, CedarError>;
 
     // ============================================================================
-    // Helper: safe EntityUid construction (F-119 fix)
+    // Helper: safe EntityUid construction
     // ============================================================================
 
     /// Create an `EntityUid` from type name and ID strings, mapping parse errors
@@ -636,7 +636,7 @@ mod cedar_impl {
             Ok(())
         }
 
-        /// F-041 fix: Upsert a single entity incrementally without cloning all existing entities.
+        /// Upsert a single entity incrementally without cloning all existing entities.
         /// Uses Cedar's `upsert_entities` API which re-computes TC but avoids O(n) clone.
         fn upsert_entity(&self, entity: Entity) -> CedarResult<()> {
             let mut guard = self.entities.write();
@@ -945,7 +945,7 @@ permit(
     }
 
     impl Default for CedarAuthorizer {
-        /// F-117 fix: logs error and returns a deny-all authorizer instead of panicking.
+        /// logs error and returns a deny-all authorizer instead of panicking.
         ///
         /// On schema-parse failure, falls back to a schema-less authorizer with
         /// empty policies (deny-all). This avoids re-calling the same failing

@@ -428,6 +428,19 @@ If `poll()` not called within this interval, consumer is considered failed.
 
 ---
 
+## Durability & Crash Recovery
+
+Consumer group state is persisted after every state change to ensure crash recovery:
+
+- **Join**: Group membership, generation IDs, and partition assignments are persisted whenever a member joins (not just when the group is first created).
+- **Leave**: When a member leaves gracefully, the updated membership is persisted immediately.
+- **Timeout**: When a member is removed due to heartbeat timeout, the updated group state is persisted before the rebalance protocol completes.
+- **Offsets**: Committed offsets are persisted to the backend storage on every `CommitOffset` call.
+
+On coordinator restart, the last persisted group state is restored. Members that were removed (via leave or timeout) do not reappear, and the most recent generation ID is preserved.
+
+---
+
 ## Monitoring
 
 ### Key Metrics

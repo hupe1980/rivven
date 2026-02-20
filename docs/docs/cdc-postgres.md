@@ -461,6 +461,22 @@ Import the Rivven CDC dashboard (ID: TBD) or use these panels:
 
 ---
 
+## Security Considerations
+
+### Identifier Validation
+
+All connection-level identifiers (user, database, slot_name, publication_name) and snapshot identifiers (table, schema, key column) are validated via `Validator::validate_identifier()`, enforcing `^[a-zA-Z_][a-zA-Z0-9_]{0,254}$`. Invalid identifiers are rejected before any SQL or replication protocol command is constructed.
+
+### SQL Injection Prevention
+
+Snapshot `SELECT` queries apply defense-in-depth double-quote-doubling (`"` → `""`) on all identifiers, preventing injection even if validation is bypassed. Keyset pagination values are always passed as parameterized query parameters (`$1`).
+
+### Authentication
+
+SCRAM-SHA-256 is fully supported and recommended. Cleartext password warnings are logged when authentication occurs over unencrypted connections.
+
+---
+
 ## Troubleshooting
 
 ### Common Issues

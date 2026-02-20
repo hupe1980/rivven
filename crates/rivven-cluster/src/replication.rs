@@ -29,7 +29,7 @@ use crate::partition::PartitionId;
 use crate::protocol::Acks;
 use dashmap::DashMap;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{oneshot, Mutex, RwLock};
@@ -44,8 +44,8 @@ pub struct PartitionReplication {
     /// Our node ID
     local_node: NodeId,
 
-    /// Whether we are the leader
-    is_leader: bool,
+    /// Whether we are the leader (AtomicBool for safe concurrent access through Arc)
+    is_leader: AtomicBool,
 
     /// Current leader epoch
     leader_epoch: AtomicU64,
@@ -118,7 +118,7 @@ impl PartitionReplication {
         Self {
             partition_id,
             local_node,
-            is_leader,
+            is_leader: AtomicBool::new(is_leader),
             leader_epoch: AtomicU64::new(0),
             log_end_offset: AtomicU64::new(0),
             high_watermark: AtomicU64::new(0),
@@ -130,8 +130,8 @@ impl PartitionReplication {
     }
 
     /// Become leader for this partition
-    pub async fn become_leader(&mut self, epoch: u64, replicas: Vec<NodeId>) {
-        self.is_leader = true;
+    pub async fn become_leader(&self, epoch: u64, replicas: Vec<NodeId>) {
+        self.is_leader.store(true, Ordering::SeqCst);
         self.leader_epoch.store(epoch, Ordering::SeqCst);
 
         // Initialize replica tracking
@@ -167,8 +167,8 @@ impl PartitionReplication {
     }
 
     /// Become follower for this partition
-    pub fn become_follower(&mut self, epoch: u64) {
-        self.is_leader = false;
+    pub fn become_follower(&self, epoch: u64) {
+        self.is_leader.store(false, Ordering::SeqCst);
         self.leader_epoch.store(epoch, Ordering::SeqCst);
 
         info!(
@@ -180,21 +180,22 @@ impl PartitionReplication {
 
     /// Record appended locally (called by storage layer)
     pub async fn record_appended(&self, offset: u64) -> Result<()> {
-        // F-015 fix: Enforce min-ISR before accepting writes.
+        // Enforce min-ISR before accepting writes.
         // If the ISR has fallen below the configured minimum, reject the write
         // to prevent data loss from under-replicated partitions.
-        if self.is_leader && !self.has_min_isr().await {
+        let is_leader = self.is_leader.load(Ordering::SeqCst);
+        if is_leader && !self.has_min_isr().await {
             return Err(ClusterError::NotEnoughIsr {
                 required: self.config.min_isr,
                 current: self.isr.read().await.len() as u16,
             });
         }
 
-        // Update our log end offset
-        self.log_end_offset.store(offset + 1, Ordering::SeqCst);
+        // Update our log end offset (fetch_max prevents regression under concurrent appends)
+        self.log_end_offset.fetch_max(offset + 1, Ordering::SeqCst);
 
         // If we're the leader, check if we can advance HWM
-        if self.is_leader {
+        if is_leader {
             self.maybe_advance_hwm().await;
         }
 
@@ -208,7 +209,7 @@ impl PartitionReplication {
         replica_id: &NodeId,
         fetch_offset: u64,
     ) -> Result<bool> {
-        if !self.is_leader {
+        if !self.is_leader.load(Ordering::SeqCst) {
             return Err(ClusterError::NotLeader { leader: None });
         }
 
@@ -260,7 +261,7 @@ impl PartitionReplication {
 
     /// Check for lagging replicas and remove from ISR
     pub async fn check_replica_health(&self) -> Vec<NodeId> {
-        if !self.is_leader {
+        if !self.is_leader.load(Ordering::SeqCst) {
             return vec![];
         }
 
@@ -316,7 +317,7 @@ impl PartitionReplication {
         drop(isr);
         drop(replicas);
 
-        // F-010 fix: Use fetch_max to atomically advance HWM without regression.
+        // Use fetch_max to atomically advance HWM without regression.
         // load+store was racy — two concurrent callers could regress HWM.
         let prev_hwm = self.high_watermark.fetch_max(min_leo, Ordering::SeqCst);
         if min_leo > prev_hwm {
@@ -433,6 +434,8 @@ impl PartitionReplication {
 
     /// Clean up stale pending acks that have exceeded the timeout
     ///
+    /// Sends `Err(Timeout)` to waiters before removing stale entries, so callers
+    /// get a clear timeout error instead of a misleading `ChannelClosed`.
     /// This should be called periodically to prevent memory leaks from
     /// pending acks that were never completed (e.g., due to network partitions).
     /// Returns the number of cleaned up entries.
@@ -440,13 +443,26 @@ impl PartitionReplication {
         let now = Instant::now();
         let mut cleaned = 0;
 
-        self.pending_acks.retain(|_, pending| {
-            let is_stale = now.duration_since(pending.created) >= timeout;
-            if is_stale {
+        // Phase 1: Collect stale keys
+        let stale_keys: Vec<u64> = self
+            .pending_acks
+            .iter()
+            .filter_map(|e| {
+                if now.duration_since(e.value().created) >= timeout {
+                    Some(*e.key())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Phase 2: Remove and signal timeout (no shard locks held during send)
+        for key in stale_keys {
+            if let Some((_, pending)) = self.pending_acks.remove(&key) {
+                let _ = pending.completion.send(Err(ClusterError::Timeout));
                 cleaned += 1;
             }
-            !is_stale
-        });
+        }
 
         if cleaned > 0 {
             debug!(
@@ -524,7 +540,7 @@ impl ReplicationManager {
     pub fn leading_partitions(&self) -> Vec<PartitionId> {
         self.partitions
             .iter()
-            .filter(|e| e.value().is_leader)
+            .filter(|e| e.value().is_leader.load(Ordering::Relaxed))
             .map(|e| e.key().clone())
             .collect()
     }
@@ -565,7 +581,7 @@ impl ReplicationManager {
     pub async fn run_health_checks(&self) {
         for entry in self.partitions.iter() {
             let partition = entry.value();
-            if partition.is_leader {
+            if partition.is_leader.load(Ordering::Relaxed) {
                 let removed = partition.check_replica_health().await;
                 if !removed.is_empty() {
                     warn!(
@@ -606,7 +622,7 @@ impl ReplicationManager {
             let cmd = crate::metadata::MetadataCommand::UpdatePartitionIsr {
                 partition: partition_id.clone(),
                 isr: isr_vec.clone(),
-                // F-011 fix: attach current leader epoch for fencing
+                // attach current leader epoch for fencing
                 leader_epoch: partition.leader_epoch(),
             };
 
@@ -664,7 +680,7 @@ pub struct FollowerFetcher {
     /// Transport for network communication
     transport: Arc<Mutex<crate::Transport>>,
 
-    /// Local partition storage for persisting replicated data (F-101 fix).
+    /// Local partition storage for persisting replicated data.
     /// Without this, followers would track offsets without actually writing
     /// data — causing complete data loss on leader failover.
     local_partition: Arc<rivven_core::Partition>,
@@ -678,7 +694,7 @@ pub struct FollowerFetcher {
     /// Last successful fetch timestamp
     last_fetch: std::time::Instant,
 
-    /// Consecutive report failures (F-107 fix: retry with backoff)
+    /// Consecutive report failures (retry with backoff)
     report_failures: u32,
 }
 
@@ -808,7 +824,7 @@ impl FollowerFetcher {
         }
     }
 
-    /// Apply fetched records to local storage (F-101 fix).
+    /// Apply fetched records to local storage.
     ///
     /// Deserializes each record from the leader's response and persists it
     /// to the local `Partition` via `append_replicated_batch`, which writes
@@ -878,7 +894,7 @@ impl FollowerFetcher {
         Ok(())
     }
 
-    /// Report replica state to leader (F-107 fix: retry with backoff + logging)
+    /// Report replica state to leader (retry with backoff + logging)
     async fn report_replica_state(&mut self) -> Result<()> {
         use crate::protocol::{ClusterRequest, RequestHeader};
 
@@ -942,7 +958,7 @@ mod tests {
     async fn test_partition_replication_leader() {
         let config = ReplicationConfig::default();
         let partition_id = PartitionId::new("test", 0);
-        let mut replication =
+        let replication =
             PartitionReplication::new(partition_id.clone(), "node-1".to_string(), false, config);
 
         // Become leader
@@ -950,7 +966,7 @@ mod tests {
             .become_leader(1, vec!["node-1".to_string(), "node-2".to_string()])
             .await;
 
-        assert!(replication.is_leader);
+        assert!(replication.is_leader.load(Ordering::Relaxed));
         assert_eq!(replication.leader_epoch(), 1);
     }
 
@@ -964,7 +980,7 @@ mod tests {
             ..ReplicationConfig::default()
         };
         let partition_id = PartitionId::new("test", 0);
-        let mut replication = PartitionReplication::new(
+        let replication = PartitionReplication::new(
             partition_id.clone(),
             "node-1".to_string(),
             false,

@@ -143,19 +143,28 @@
 //! ```
 
 pub mod client;
+pub mod consumer;
 pub mod error;
 pub mod pipeline;
 pub mod producer;
 pub mod resilient;
 
 pub use client::{AlterTopicConfigResult, AuthSession, Client, DeleteRecordsResult, ProducerState};
-pub use error::{Error, Result};
-pub use pipeline::{PipelineConfig, PipelineConfigBuilder, PipelineStatsSnapshot, PipelinedClient};
-pub use producer::{
-    CompressionType, Producer, ProducerConfig, ProducerConfigBuilder, ProducerStatsSnapshot,
-    RecordMetadata,
+pub use consumer::{
+    Consumer, ConsumerAuthConfig, ConsumerConfig, ConsumerConfigBuilder, ConsumerRecord,
 };
-pub use resilient::{ResilientClient, ResilientClientConfig, ResilientClientConfigBuilder};
+pub use error::{Error, Result};
+pub use pipeline::{
+    PipelineAuthConfig, PipelineConfig, PipelineConfigBuilder, PipelineStatsSnapshot,
+    PipelinedClient,
+};
+pub use producer::{
+    CompressionType, Producer, ProducerAuthConfig, ProducerConfig, ProducerConfigBuilder,
+    ProducerStatsSnapshot, RecordMetadata,
+};
+pub use resilient::{
+    ResilientAuthConfig, ResilientClient, ResilientClientConfig, ResilientClientConfigBuilder,
+};
 
 // Re-export TLS configuration when available
 #[cfg(feature = "tls")]

@@ -441,13 +441,16 @@ impl SourceRunner {
             .map_err(|e| ConnectError::config(format!("Config validation failed: {}", e)))?;
 
         // Build connection string - password is explicitly exposed here for connection
+        // quote password to handle spaces and = characters
+        let password_raw = sdk_config.password.expose();
+        let escaped_password = password_raw.replace('\\', "\\\\").replace('\'', "\\'");
         let connection_string = format!(
-            "host={} port={} dbname={} user={} password={}",
+            "host={} port={} dbname={} user={} password='{}'",
             sdk_config.host,
             sdk_config.port,
             sdk_config.database,
             sdk_config.user,
-            sdk_config.password.expose() // Explicit password exposure for DB connection
+            escaped_password // Explicit password exposure for DB connection
         );
 
         let cdc_config = PostgresCdcConfig::builder()
@@ -482,7 +485,9 @@ impl SourceRunner {
                         self.name,
                         self.events_published()
                     );
-                    cdc.stop().await.ok();
+                    if let Err(e) = cdc.stop().await {
+                        warn!(source = %self.name, error = %e, "CDC stop returned error during shutdown");
+                    }
                     return Ok(());
                 }
                 event = event_rx.recv() => {
@@ -590,6 +595,20 @@ impl SourceRunner {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ConnectError::config("HTTP source requires 'url' in connector config"))?
             .to_string();
+
+        // validate URL scheme to prevent SSRF to internal endpoints
+        let parsed_url = url::Url::parse(&url).map_err(|e| {
+            ConnectError::config(format!("Invalid HTTP source URL '{}': {}", url, e))
+        })?;
+        match parsed_url.scheme() {
+            "http" | "https" => {}
+            scheme => {
+                return Err(ConnectError::config(format!(
+                    "HTTP source URL must use http or https scheme, got '{}'",
+                    scheme
+                )));
+            }
+        }
 
         let poll_interval_ms: u64 = self
             .config

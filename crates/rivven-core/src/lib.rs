@@ -1,6 +1,6 @@
 //! Core storage, concurrency, and data-plane primitives for Rivven.
 //!
-//! # Synchronization: `parking_lot` vs `tokio::sync` (F-097)
+//! # Synchronization: `parking_lot` vs `tokio::sync`
 //!
 //! This crate deliberately uses `parking_lot::{Mutex, RwLock}` for in-memory
 //! data structures that are guarded by **O(1) critical sections**: HashMap

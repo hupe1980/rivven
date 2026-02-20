@@ -157,7 +157,11 @@ impl ReplicationClient {
 
         // Expect CopyBothResponse ('W')
         let type_code = self.stream.read_u8().await?;
-        let len = self.stream.read_i32().await? as usize;
+        let raw_len = self.stream.read_i32().await?;
+        if raw_len < 4 {
+            return Err(anyhow!("Invalid frame length: {}", raw_len));
+        }
+        let len = raw_len as usize;
         let mut body = vec![0u8; len - 4];
         self.stream.read_exact(&mut body).await?;
 
@@ -194,7 +198,11 @@ impl ReplicationClient {
 
         loop {
             let type_code = self.stream.read_u8().await?;
-            let len = self.stream.read_i32().await? as usize;
+            let raw_len = self.stream.read_i32().await?;
+            if raw_len < 4 {
+                return Err(anyhow!("Invalid frame length: {}", raw_len));
+            }
+            let len = raw_len as usize;
             let mut body = vec![0u8; len - 4];
             self.stream.read_exact(&mut body).await?;
 
@@ -222,11 +230,12 @@ impl ReplicationStream {
     /// - `Err`: Error
     pub async fn next_message(&mut self) -> Result<Option<Bytes>> {
         let type_code = self.stream.read_u8().await.context("Failed to read type")?;
-        let len = self.stream.read_i32().await.context("Failed to read len")? as usize;
+        let raw_len = self.stream.read_i32().await.context("Failed to read len")?;
 
-        if len < 4 {
-            return Err(anyhow!("Invalid frame length"));
+        if raw_len < 4 {
+            return Err(anyhow!("Invalid frame length: {}", raw_len));
         }
+        let len = raw_len as usize;
 
         let mut body = vec![0u8; len - 4];
         self.stream

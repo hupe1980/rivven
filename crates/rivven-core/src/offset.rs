@@ -77,15 +77,18 @@ impl OffsetManager {
 
     /// Atomically checkpoint offsets to disk (if persistence is enabled).
     ///
-    /// Filesystem I/O is performed via `spawn_blocking` so that
-    /// the tokio runtime thread is never blocked on synchronous `write`/`rename`.
+    /// Clone the data and drop the read lock before disk I/O.
+    /// Previously the read lock was held through the entire `spawn_blocking`
+    /// fsync, serializing all concurrent `commit_offset` writes behind the
+    /// slow I/O latency.
     async fn checkpoint(&self) {
         if let Some(ref dir) = self.data_dir {
-            let offsets = self.offsets.read().await;
+            // Clone snapshot and release lock before any I/O
+            let snapshot = { self.offsets.read().await.clone() };
             let path = dir.join("offsets.json");
             let tmp_path = dir.join("offsets.json.tmp");
 
-            match serde_json::to_string(&*offsets) {
+            match serde_json::to_string(&snapshot) {
                 Ok(json) => {
                     let tmp = tmp_path.clone();
                     let dst = path.clone();
@@ -93,14 +96,14 @@ impl OffsetManager {
                     if let Err(e) = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
                         // Write temp file
                         std::fs::write(&tmp, json_clone.as_bytes())?;
-                        // F-029: fsync temp file before rename to ensure data is durable
+                        // fsync temp file before rename to ensure data is durable
                         {
                             let f = std::fs::File::open(&tmp)?;
                             f.sync_all()?;
                         }
                         // Atomic rename
                         std::fs::rename(&tmp, &dst)?;
-                        // F-029: fsync parent directory to ensure rename is durable
+                        // fsync parent directory to ensure rename is durable
                         if let Some(parent) = dst.parent() {
                             if let Ok(dir) = std::fs::File::open(parent) {
                                 let _ = dir.sync_all();

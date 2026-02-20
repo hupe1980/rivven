@@ -6,6 +6,7 @@ use pyo3::prelude::*;
 use rivven_client::Client;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 /// A consumer for reading messages from a Rivven topic
@@ -37,7 +38,10 @@ pub struct Consumer {
     offset: Arc<Mutex<u64>>,
     batch_size: usize,
     auto_commit: bool,
-    /// F-044 fix: Prefetch buffer to avoid one-message-per-RPC overhead.
+    /// Poll interval for empty fetch retries in `__anext__`.
+    /// Prevents StopAsyncIteration on momentarily empty topics.
+    poll_interval: Duration,
+    /// Prefetch buffer to avoid one-message-per-RPC overhead.
     /// `__anext__` fetches `batch_size` messages at once, then drains
     /// the buffer one-by-one for each Python iteration step.
     prefetch: Arc<Mutex<VecDeque<rivven_client::MessageData>>>,
@@ -62,6 +66,7 @@ impl Consumer {
             offset: Arc::new(Mutex::new(start_offset)),
             batch_size,
             auto_commit,
+            poll_interval: Duration::from_millis(100),
             prefetch: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
@@ -283,9 +288,18 @@ impl Consumer {
 
     /// Get next message for async iteration
     ///
-    /// F-044 fix: Fetches `batch_size` messages at once into a prefetch buffer,
+    /// Fetches `batch_size` messages at once into a prefetch buffer,
     /// then serves them one at a time. This amortizes the RPC overhead across
     /// many Python iteration steps instead of doing one RPC per message.
+    ///
+    /// When the broker returns zero messages, sleeps for a short
+    /// poll interval and retries instead of raising StopAsyncIteration. This
+    /// keeps `async for` loops alive for long-lived event processing, matching
+    /// expected Kafka-style consumer behavior.
+    ///
+    /// Auto-commit fires once per batch refill (not per message),
+    /// committing the highest consumed offset when the prefetch buffer is
+    /// drained. This reduces commit RPCs from N to 1 per batch.
     fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
         let client = Arc::clone(&self.client);
         let topic = self.topic.clone();
@@ -295,9 +309,10 @@ impl Consumer {
         let auto_commit = self.auto_commit;
         let prefetch = Arc::clone(&self.prefetch);
         let batch_size = self.batch_size;
+        let poll_interval = self.poll_interval;
 
         let fut = pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            // Fast path: serve from prefetch buffer
+            // Fast path: serve from prefetch buffer (no commit — deferred to refill)
             {
                 let mut buf = prefetch.lock().await;
                 if let Some(msg_data) = buf.pop_front() {
@@ -306,65 +321,67 @@ impl Consumer {
                         let mut offset_guard = offset.lock().await;
                         *offset_guard = new_offset;
                     }
-                    if auto_commit {
-                        if let Some(ref group) = group {
-                            let mut guard = client.lock().await;
-                            guard
-                                .commit_offset(group, &topic, partition, new_offset)
-                                .await
-                                .into_py_err()?;
-                        }
-                    }
                     let msg = Message::from_client_data(msg_data, partition, topic);
                     return Ok(Some(msg));
                 }
             }
 
-            // Buffer empty — fetch a batch
-            let current_offset = {
-                let guard = offset.lock().await;
-                *guard
-            };
-
-            let messages = {
-                let mut guard = client.lock().await;
-                guard
-                    .consume(&topic, partition, current_offset, batch_size)
-                    .await
-                    .into_py_err()?
-            };
-
-            if messages.is_empty() {
-                // No more messages — signal StopAsyncIteration
-                return Ok(None);
-            }
-
-            // Fill the prefetch buffer with all but the first message
-            let mut iter = messages.into_iter();
-            let first = iter.next().unwrap();
-
-            {
-                let mut buf = prefetch.lock().await;
-                buf.extend(iter);
-            }
-
-            // Return the first message
-            let new_offset = first.offset + 1;
-            {
-                let mut offset_guard = offset.lock().await;
-                *offset_guard = new_offset;
-            }
+            // Buffer drained — commit the highest consumed offset before refilling
             if auto_commit {
                 if let Some(ref group) = group {
-                    let mut guard = client.lock().await;
-                    guard
-                        .commit_offset(group, &topic, partition, new_offset)
-                        .await
-                        .into_py_err()?;
+                    let current_offset = {
+                        let guard = offset.lock().await;
+                        *guard
+                    };
+                    if current_offset > 0 {
+                        let mut guard = client.lock().await;
+                        guard
+                            .commit_offset(group, &topic, partition, current_offset)
+                            .await
+                            .into_py_err()?;
+                    }
                 }
             }
-            let msg = Message::from_client_data(first, partition, topic);
-            Ok(Some(msg))
+
+            // Poll with backoff until data arrives
+            loop {
+                let current_offset = {
+                    let guard = offset.lock().await;
+                    *guard
+                };
+
+                let messages = {
+                    let mut guard = client.lock().await;
+                    guard
+                        .consume(&topic, partition, current_offset, batch_size)
+                        .await
+                        .into_py_err()?
+                };
+
+                if messages.is_empty() {
+                    // No data yet — sleep and retry (keeps async for loop alive)
+                    tokio::time::sleep(poll_interval).await;
+                    continue;
+                }
+
+                // Fill the prefetch buffer with all but the first message
+                let mut iter = messages.into_iter();
+                let first = iter.next().unwrap();
+
+                {
+                    let mut buf = prefetch.lock().await;
+                    buf.extend(iter);
+                }
+
+                // Return the first message
+                let new_offset = first.offset + 1;
+                {
+                    let mut offset_guard = offset.lock().await;
+                    *offset_guard = new_offset;
+                }
+                let msg = Message::from_client_data(first, partition, topic);
+                return Ok(Some(msg));
+            }
         })?;
 
         Ok(Some(fut))

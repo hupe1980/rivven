@@ -87,6 +87,10 @@ pub enum SequenceResult {
     UnknownProducer,
 }
 
+/// Number of recent (sequence, offset) pairs to cache for accurate
+/// duplicate detection. Kafka uses 5 entries per partition; we match that.
+const SEQUENCE_CACHE_SIZE: usize = 5;
+
 /// Producer state for a single partition
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PartitionProducerState {
@@ -95,6 +99,12 @@ pub struct PartitionProducerState {
 
     /// Offset of the last accepted message (for duplicate detection)
     pub last_offset: u64,
+
+    /// Ring buffer of recent (sequence, offset) pairs for accurate
+    /// duplicate offset reporting. Without this, retrying an older sequence
+    /// returns the wrong cached_offset (always the latest).
+    #[serde(default)]
+    pub recent_offsets: Vec<(SequenceNumber, u64)>,
 
     /// Timestamp of last activity
     #[serde(with = "crate::serde_utils::system_time")]
@@ -107,6 +117,7 @@ impl PartitionProducerState {
         Self {
             last_sequence: sequence,
             last_offset: offset,
+            recent_offsets: vec![(sequence, offset)],
             last_activity: SystemTime::now(),
         }
     }
@@ -115,7 +126,24 @@ impl PartitionProducerState {
     pub fn update(&mut self, sequence: SequenceNumber, offset: u64) {
         self.last_sequence = sequence;
         self.last_offset = offset;
+        // Maintain ring buffer of recent (seq, offset) pairs
+        self.recent_offsets.push((sequence, offset));
+        if self.recent_offsets.len() > SEQUENCE_CACHE_SIZE {
+            self.recent_offsets.remove(0);
+        }
         self.last_activity = SystemTime::now();
+    }
+
+    /// Look up the cached offset for a given sequence number.
+    /// Returns the exact offset that was assigned when this sequence was
+    /// first accepted, or falls back to `last_offset` if the sequence
+    /// has aged out of the ring buffer.
+    pub fn cached_offset_for_sequence(&self, sequence: SequenceNumber) -> u64 {
+        self.recent_offsets
+            .iter()
+            .find(|(seq, _)| *seq == sequence)
+            .map(|(_, offset)| *offset)
+            .unwrap_or(self.last_offset)
     }
 }
 
@@ -163,7 +191,7 @@ impl ProducerMetadata {
         self.epoch
     }
 
-    /// Validate sequence for a partition WITHOUT mutating state (F-073 fix).
+    /// Validate sequence for a partition WITHOUT mutating state.
     ///
     /// This only checks whether the sequence is valid, duplicate, or out-of-order.
     /// Call [`Self::commit_sequence`] after a successful append to persist the state change.
@@ -198,9 +226,9 @@ impl ProducerMetadata {
                 // Valid sequence — state will be committed later via commit_sequence
                 SequenceResult::Valid
             } else if sequence <= state.last_sequence {
-                // Duplicate
+                // Duplicate — look up exact offset for this sequence
                 SequenceResult::Duplicate {
-                    cached_offset: state.last_offset,
+                    cached_offset: state.cached_offset_for_sequence(sequence),
                 }
             } else {
                 // Out of order (gap)
@@ -224,7 +252,7 @@ impl ProducerMetadata {
         }
     }
 
-    /// Commit sequence state after a successful append (F-073 fix).
+    /// Commit sequence state after a successful append.
     ///
     /// This should be called only after the message has been durably appended.
     /// Separating validation from mutation prevents state corruption when
@@ -508,9 +536,9 @@ mod tests {
         assert_eq!(result, SequenceResult::Duplicate { cached_offset: 101 });
 
         // Retry of seq=0 is now also a duplicate (older than last sequence)
-        // Kafka treats any sequence <= last_sequence as duplicate
+        // Returns the correct offset for seq=0 (100), not the latest offset (101)
         let result = manager.validate_produce(pid, epoch, 0, 0, 999);
-        assert_eq!(result, SequenceResult::Duplicate { cached_offset: 101 });
+        assert_eq!(result, SequenceResult::Duplicate { cached_offset: 100 });
     }
 
     #[test]

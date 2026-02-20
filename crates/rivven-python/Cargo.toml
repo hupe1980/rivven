@@ -23,6 +23,9 @@ pyo3-async-runtimes = { version = "0.27", features = ["tokio-runtime"] }
 # Async runtime
 tokio = { workspace = true }
 
+# Logging
+tracing = { workspace = true }
+
 # Internal crates
 rivven-client = { workspace = true }
 rivven-core = { workspace = true }

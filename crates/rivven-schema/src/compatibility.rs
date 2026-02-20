@@ -626,12 +626,21 @@ fn check_schema_resolution(
             }
         }
 
-        // Union writer with non-union reader: all writer variants must be compatible
+        // Union writer with non-union reader: at least one writer variant
+        // must be compatible (Avro spec says reader resolves the first matching variant)
         (Schema::Union(w), r) => {
-            for w_variant in w.variants() {
-                check_schema_resolution(w_variant, r)?;
+            let compatible = w
+                .variants()
+                .iter()
+                .any(|wv| check_schema_resolution(wv, r).is_ok());
+            if compatible {
+                Ok(())
+            } else {
+                Err(format!(
+                    "No writer union variant compatible with reader {:?}",
+                    r
+                ))
             }
-            Ok(())
         }
 
         // Incompatible types

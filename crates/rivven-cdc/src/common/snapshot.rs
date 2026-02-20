@@ -666,17 +666,34 @@ pub struct TableSpec {
 }
 
 impl TableSpec {
+    /// Create a new table specification.
+    ///
+    /// Validates that `schema`, `table`, and `key_column` are safe SQL
+    /// identifiers (alphanumeric + underscores, max 128 chars) to prevent
+    /// SQL injection in snapshot queries that interpolate these values.
     pub fn new(
         schema: impl Into<String>,
         table: impl Into<String>,
         key_column: impl Into<String>,
-    ) -> Self {
-        Self {
-            schema: schema.into(),
-            table: table.into(),
-            key_column: key_column.into(),
+    ) -> Result<Self> {
+        let schema = schema.into();
+        let table = table.into();
+        let key_column = key_column.into();
+
+        use crate::common::validation::Validator;
+        Validator::validate_identifier(&schema)
+            .map_err(|e| CdcError::config(format!("Invalid schema name: {}", e)))?;
+        Validator::validate_identifier(&table)
+            .map_err(|e| CdcError::config(format!("Invalid table name: {}", e)))?;
+        Validator::validate_identifier(&key_column)
+            .map_err(|e| CdcError::config(format!("Invalid key column name: {}", e)))?;
+
+        Ok(Self {
+            schema,
+            table,
+            key_column,
             filter: None,
-        }
+        })
     }
 
     pub fn with_filter(mut self, filter: impl Into<String>) -> Self {
@@ -1092,12 +1109,28 @@ mod tests {
 
     #[test]
     fn test_table_spec() {
-        let spec = TableSpec::new("public", "users", "id").with_filter("active = true");
+        let spec = TableSpec::new("public", "users", "id")
+            .unwrap()
+            .with_filter("active = true");
 
         assert_eq!(spec.schema, "public");
         assert_eq!(spec.table, "users");
         assert_eq!(spec.key_column, "id");
         assert_eq!(spec.filter, Some("active = true".to_string()));
+    }
+
+    #[test]
+    fn test_table_spec_rejects_sql_injection() {
+        // Schema injection
+        assert!(TableSpec::new("public; DROP TABLE users", "t", "id").is_err());
+        // Table injection
+        assert!(TableSpec::new("public", "users`; DROP TABLE x; --", "id").is_err());
+        // Key column injection
+        assert!(TableSpec::new("public", "users", "id OR 1=1").is_err());
+        // Empty identifiers
+        assert!(TableSpec::new("", "users", "id").is_err());
+        assert!(TableSpec::new("public", "", "id").is_err());
+        assert!(TableSpec::new("public", "users", "").is_err());
     }
 
     #[tokio::test]
@@ -1176,7 +1209,7 @@ mod tests {
         let config = SnapshotConfig::builder().batch_size(10).build();
 
         let coordinator = SnapshotCoordinator::new(config, source, progress_store);
-        let spec = TableSpec::new("public", "users", "id");
+        let spec = TableSpec::new("public", "users", "id").unwrap();
 
         let batches = coordinator.snapshot_table(&spec).await.unwrap();
 
@@ -1195,7 +1228,7 @@ mod tests {
         let config = SnapshotConfig::default();
 
         let coordinator = SnapshotCoordinator::new(config, source, progress_store);
-        let spec = TableSpec::new("public", "users", "id");
+        let spec = TableSpec::new("public", "users", "id").unwrap();
 
         coordinator.snapshot_table(&spec).await.unwrap();
 
@@ -1217,7 +1250,7 @@ mod tests {
         let coordinator = SnapshotCoordinator::new(config, source, progress_store);
         coordinator.cancel();
 
-        let spec = TableSpec::new("public", "users", "id");
+        let spec = TableSpec::new("public", "users", "id").unwrap();
         let result = coordinator.snapshot_table(&spec).await;
 
         assert!(result.is_err());
@@ -1233,7 +1266,7 @@ mod tests {
         let config = SnapshotConfig::default();
 
         let coordinator = SnapshotCoordinator::new(config, source, progress_store);
-        let spec = TableSpec::new("public", "users", "id");
+        let spec = TableSpec::new("public", "users", "id").unwrap();
 
         coordinator.snapshot_table(&spec).await.unwrap();
 
@@ -1275,8 +1308,8 @@ mod tests {
         let coordinator = SnapshotCoordinator::new(config, source, progress_store);
 
         let specs = vec![
-            TableSpec::new("public", "users", "id"),
-            TableSpec::new("public", "orders", "id"),
+            TableSpec::new("public", "users", "id").unwrap(),
+            TableSpec::new("public", "orders", "id").unwrap(),
         ];
 
         let results = coordinator.snapshot_tables(specs).await.unwrap();

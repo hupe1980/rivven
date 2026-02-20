@@ -388,7 +388,7 @@ impl SegmentMetadata {
     }
 }
 
-/// F-039 fix: Segment key type uses `Arc<str>` to avoid per-access String allocation.
+/// Segment key type uses `Arc<str>` to avoid per-access String allocation.
 /// Topic names are interned — the same `Arc<str>` is reused across all tiered storage operations.
 pub type SegmentKey = (Arc<str>, u32, u64);
 
@@ -434,7 +434,7 @@ impl HotTier {
         let mut entries = self.entries.lock().await;
 
         // Remove existing entry first (if any) to reclaim its space.
-        // F-032: Use shift_remove instead of swap_remove to preserve LRU ordering.
+        // Use shift_remove instead of swap_remove to preserve LRU ordering.
         if let Some(old) = entries.shift_remove(&key) {
             self.current_size
                 .fetch_sub(old.len() as u64, Ordering::Relaxed);
@@ -479,7 +479,7 @@ impl HotTier {
         let key = Self::make_key(topic, partition, base_offset);
         let mut entries = self.entries.lock().await;
 
-        // F-032: Use shift_remove instead of swap_remove to preserve LRU ordering.
+        // Use shift_remove instead of swap_remove to preserve LRU ordering.
         if let Some(data) = entries.shift_remove(&key) {
             self.current_size
                 .fetch_sub(data.len() as u64, Ordering::Relaxed);
@@ -549,7 +549,7 @@ impl WarmTier {
         let size = data.len() as u64;
 
         // Enforce max_size: evict oldest segments until we have space.
-        // F-034: evict_oldest now returns evicted data for cold storage migration.
+        // evict_oldest now returns evicted data for cold storage migration.
         // At the WarmTier level we don't have access to cold storage, so the
         // data is logged and dropped. For full cold migration, use
         // TieredStorageManager which orchestrates warm → cold demotion.
@@ -583,7 +583,7 @@ impl WarmTier {
         // Write segment file
         tokio::fs::write(&path, data).await?;
 
-        // F-027 fix: fsync the warm tier file to ensure durability.
+        // fsync the warm tier file to ensure durability.
         // tokio::fs::write does not guarantee data reaches stable storage.
         {
             let file = tokio::fs::File::open(&path).await?;
@@ -610,7 +610,7 @@ impl WarmTier {
         Ok(())
     }
 
-    /// Read segment data using mmap — M-7 fix: uses spawn_blocking to avoid
+    /// Read segment data using mmap — uses spawn_blocking to avoid
     /// blocking the Tokio runtime with mmap/file syscalls.
     pub async fn read(
         &self,
@@ -821,7 +821,7 @@ impl ColdStorageBackend for LocalFsColdStorage {
             tokio::fs::create_dir_all(parent).await?;
         }
         tokio::fs::write(&path, data).await?;
-        // F-027 fix: fsync cold storage file to ensure durability
+        // fsync cold storage file to ensure durability
         {
             let file = tokio::fs::File::open(&path).await?;
             file.sync_all().await?;
@@ -1160,7 +1160,7 @@ enum MigrationTask {
 }
 
 // ============================================================================
-// Migration Journal (F-103 fix)
+// Migration Journal
 // ============================================================================
 
 /// Crash-recovery journal for tier migrations.
@@ -1421,7 +1421,7 @@ pub struct TieredStorage {
     segment_index: RwLock<BTreeMap<SegmentKey, Arc<SegmentMetadata>>>,
     /// Migration task queue
     migration_tx: mpsc::Sender<MigrationTask>,
-    /// Crash-recovery journal for in-flight migrations (F-103 fix)
+    /// Crash-recovery journal for in-flight migrations
     journal: Arc<MigrationJournal>,
     /// Statistics
     stats: Arc<TieredStorageStats>,
@@ -1531,7 +1531,7 @@ impl TieredStorage {
         let (migration_tx, migration_rx) = mpsc::channel(1024);
         let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
 
-        // F-103 fix: Create crash-recovery journal for tier migrations.
+        // Create crash-recovery journal for tier migrations.
         // On startup, any incomplete migrations (started but not completed/failed)
         // are replayed through the migration channel.
         let journal_path = config.warm_tier_path_buf().join("migrations.journal");
@@ -1806,7 +1806,7 @@ impl TieredStorage {
                         };
                         let storage = self.clone();
 
-                        // F-103 fix: Journal the migration before execution
+                        // Journal the migration before execution
                         let task_clone = MigrationJournal::clone_task(&task);
                         let journal_id = match storage.journal.record_start(&task).await {
                             Ok(id) => Some(id),
@@ -1826,7 +1826,7 @@ impl TieredStorage {
                                 storage.stats.migrations_failed.fetch_add(1, Ordering::Relaxed);
                             }
 
-                            // F-103 fix: Record completion in journal
+                            // Record completion in journal
                             if let Some(id) = journal_id {
                                 if let Err(e) = storage.journal.record_finish(id, &task_clone, success).await {
                                     tracing::warn!(id, error = %e, "Failed to journal migration finish");
@@ -1983,9 +1983,12 @@ impl TieredStorage {
             None => return Ok(()), // Already at coldest tier
         };
 
-        // Get segment data from current tier
+        // Read data from the source tier WITHOUT removing it first.
+        // The old code called hot_tier.remove() before writing to warm, creating
+        // a data-loss window if the warm-tier write failed. Now we read first,
+        // write to the destination, and only then remove from the source.
         let data = match from_tier {
-            StorageTier::Hot => self.hot_tier.remove(topic, partition, base_offset).await,
+            StorageTier::Hot => self.hot_tier.get(topic, partition, base_offset).await,
             StorageTier::Warm => self.warm_tier.read(topic, partition, base_offset).await?,
             StorageTier::Cold => None,
         };
@@ -2010,6 +2013,12 @@ impl TieredStorage {
                 self.warm_tier
                     .store(topic, partition, base_offset, end_offset, &data)
                     .await?;
+
+                // Remove from hot tier AFTER successful warm-tier write.
+                // If the write above fails, the data remains safely in the hot tier.
+                if from_tier == StorageTier::Hot {
+                    self.hot_tier.remove(topic, partition, base_offset).await;
+                }
             }
             StorageTier::Cold => {
                 let key = format!("{}/{}/{:020}", topic, partition, base_offset);
@@ -2132,6 +2141,22 @@ impl TieredStorage {
             from_tier,
             to_tier
         );
+
+        // Remove source tier data after successful write to destination
+        match from_tier {
+            StorageTier::Cold => {
+                let key = metadata.segment_key();
+                if let Err(e) = self.cold_storage.delete(&key).await {
+                    tracing::warn!("Failed to clean up cold storage after promotion: {}", e);
+                }
+            }
+            StorageTier::Warm => {
+                if let Err(e) = self.warm_tier.remove(topic, partition, base_offset).await {
+                    tracing::warn!("Failed to clean up warm tier after promotion: {}", e);
+                }
+            }
+            StorageTier::Hot => {} // unreachable — can't promote from hot
+        }
 
         Ok(())
     }
@@ -2317,18 +2342,16 @@ impl TieredStorage {
             reduction_ratio * 100.0
         );
 
-        // Write compacted segment to current tier
+        // Write compacted segment to current tier (write-then-remove to prevent data loss)
         match metadata.tier {
             StorageTier::Hot => {
-                // Remove old and insert new
-                self.hot_tier.remove(topic, partition, base_offset).await;
+                // Insert new compacted data first, then remove old
                 self.hot_tier
                     .insert(topic, partition, base_offset, compacted_bytes)
                     .await;
             }
             StorageTier::Warm => {
-                // Remove and re-store
-                self.warm_tier.remove(topic, partition, base_offset).await?;
+                // Store new data first, then remove old
                 self.warm_tier
                     .store(
                         topic,

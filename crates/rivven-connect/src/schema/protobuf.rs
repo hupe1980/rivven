@@ -678,13 +678,19 @@ fn json_to_proto_value(json: &JsonValue, field: &FieldDescriptor) -> ProtobufRes
             let v = json
                 .as_i64()
                 .ok_or_else(|| ProtobufError::FieldError("Expected int32".to_string()))?;
-            Ok(ProtoValue::I32(v as i32))
+            // safe narrowing from i64 to i32
+            let v32 = i32::try_from(v)
+                .map_err(|_| ProtobufError::FieldError(format!("Value {} out of i32 range", v)))?;
+            Ok(ProtoValue::I32(v32))
         }
         Kind::Uint32 | Kind::Fixed32 => {
             let v = json
                 .as_u64()
                 .ok_or_else(|| ProtobufError::FieldError("Expected uint32".to_string()))?;
-            Ok(ProtoValue::U32(v as u32))
+            // safe narrowing from u64 to u32
+            let v32 = u32::try_from(v)
+                .map_err(|_| ProtobufError::FieldError(format!("Value {} out of u32 range", v)))?;
+            Ok(ProtoValue::U32(v32))
         }
         Kind::Bool => {
             let v = json
@@ -714,7 +720,10 @@ fn json_to_proto_value(json: &JsonValue, field: &FieldDescriptor) -> ProtobufRes
                 })?;
                 Ok(ProtoValue::EnumNumber(ev.number()))
             } else if let Some(n) = json.as_i64() {
-                Ok(ProtoValue::EnumNumber(n as i32))
+                let value = i32::try_from(n).map_err(|_| {
+                    ProtobufError::FieldError(format!("enum value {} out of i32 range", n))
+                })?;
+                Ok(ProtoValue::EnumNumber(value))
             } else {
                 Err(ProtobufError::FieldError(
                     "Expected enum string or number".to_string(),

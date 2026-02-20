@@ -248,7 +248,7 @@ struct SlidingWindow {
     /// Accumulated value in current window
     current_value: AtomicU64,
     /// Window start time
-    /// F-097: `parking_lot` — O(1) instant swap, never held across `.await`.
+    /// `parking_lot` — O(1) instant swap, never held across `.await`.
     window_start: RwLock<Instant>,
     /// Total violations
     violations: AtomicU64,
@@ -266,7 +266,9 @@ impl SlidingWindow {
 
     /// Record usage and return if quota is exceeded
     fn record(&self, amount: u64, limit: u64) -> Option<Duration> {
-        // Hold write lock through the entire check-and-add to prevent TOCTOU races
+        // Hold write lock through the entire check-reset-add to prevent
+        // a TOCTOU race where a concurrent thread resets current_value between
+        // our window check and our fetch_add.
         let mut start = self.window_start.write();
         let elapsed = start.elapsed();
         if elapsed >= self.window {
@@ -274,10 +276,10 @@ impl SlidingWindow {
             self.current_value.store(0, Ordering::Relaxed);
             *start = Instant::now();
         }
-        drop(start);
 
-        // Add to current value
+        // Add to current value while still holding the lock
         let new_value = self.current_value.fetch_add(amount, Ordering::Relaxed) + amount;
+        drop(start);
 
         // Check against limit
         if limit != UNLIMITED && new_value > limit {
@@ -609,15 +611,13 @@ impl QuotaManager {
         amount: u64,
         limit: u64,
     ) -> QuotaResult {
-        // Get or create state
+        // Get or create state with a single read-lock scope.
+        // Previously acquired the read lock twice (check + touch) — eliminated
+        // the redundant round-trip.
         {
             let states = self.states.read();
-            if states.contains_key(entity_key) {
-                drop(states);
-                let states = self.states.read();
-                if let Some(s) = states.get(entity_key) {
-                    s.touch();
-                }
+            if let Some(s) = states.get(entity_key) {
+                s.touch();
             } else {
                 drop(states);
                 self.states

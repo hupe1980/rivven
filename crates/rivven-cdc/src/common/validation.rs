@@ -12,8 +12,12 @@ use std::sync::LazyLock;
 /// Maximum allowed identifier length (255 for flexibility)
 const MAX_IDENTIFIER_LENGTH: usize = 255;
 
-/// Maximum message size (64 MB)
-pub const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+/// Maximum message size (10 MB)
+///
+/// Aligned with `rivven_protocol::MAX_MESSAGE_SIZE` and the broker framing
+/// layer (`SecureServerConfig::max_message_size`) to prevent CDC-produced
+/// messages from being silently rejected at the broker transport layer.
+pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 
 /// Maximum connection timeout (30 seconds)
 pub const CONNECTION_TIMEOUT_SECS: u64 = 30;
@@ -187,8 +191,8 @@ mod tests {
     #[test]
     fn test_message_size_validation() {
         assert!(Validator::validate_message_size(1024).is_ok());
-        assert!(Validator::validate_message_size(64 * 1024 * 1024).is_ok());
-        assert!(Validator::validate_message_size(64 * 1024 * 1024 + 1).is_err());
+        assert!(Validator::validate_message_size(10 * 1024 * 1024).is_ok());
+        assert!(Validator::validate_message_size(10 * 1024 * 1024 + 1).is_err());
     }
 
     #[test]
@@ -382,9 +386,9 @@ mod tests {
     fn test_message_size_limits() {
         assert!(Validator::validate_message_size(0).is_ok());
         assert!(Validator::validate_message_size(1).is_ok());
-        assert!(Validator::validate_message_size(64 * 1024 * 1024 - 1).is_ok());
-        assert!(Validator::validate_message_size(64 * 1024 * 1024).is_ok());
-        assert!(Validator::validate_message_size(64 * 1024 * 1024 + 1).is_err());
+        assert!(Validator::validate_message_size(10 * 1024 * 1024 - 1).is_ok());
+        assert!(Validator::validate_message_size(10 * 1024 * 1024).is_ok());
+        assert!(Validator::validate_message_size(10 * 1024 * 1024 + 1).is_err());
         assert!(Validator::validate_message_size(usize::MAX).is_err());
     }
 }

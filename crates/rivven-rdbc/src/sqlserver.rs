@@ -8,6 +8,7 @@
 //! - Schema provider for introspection
 
 use async_trait::async_trait;
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -25,10 +26,36 @@ use crate::error::{Error, Result};
 use crate::security::validate_sql_identifier;
 use crate::types::{Row, Value};
 
+/// Streaming row iterator backed by a Vec.
+///
+/// tiberius processes results in result-set granularity; this adapter
+/// yields rows one-by-one from a materialized result. Preserves the
+/// `RowStream` contract for callers while keeping memory behaviour
+/// explicit and documented.
+struct VecRowStream {
+    rows: std::vec::IntoIter<Row>,
+}
+
+impl VecRowStream {
+    fn new(rows: Vec<Row>) -> Self {
+        Self {
+            rows: rows.into_iter(),
+        }
+    }
+}
+
+impl RowStream for VecRowStream {
+    fn next(
+        &mut self,
+    ) -> Pin<Box<dyn Future<Output = crate::error::Result<Option<Row>>> + Send + '_>> {
+        Box::pin(async move { Ok(self.rows.next()) })
+    }
+}
+
 /// SQL Server connection
 pub struct SqlServerConnection {
     client: Arc<Mutex<Client<Compat<TcpStream>>>>,
-    in_transaction: AtomicBool,
+    in_transaction: Arc<AtomicBool>,
     created_at: Instant,
     last_used: Mutex<Instant>,
 }
@@ -93,7 +120,7 @@ impl SqlServerConnection {
         let now = Instant::now();
         Ok(Self {
             client: Arc::new(Mutex::new(client)),
-            in_transaction: AtomicBool::new(false),
+            in_transaction: Arc::new(AtomicBool::new(false)),
             created_at: now,
             last_used: Mutex::new(now),
         })
@@ -172,11 +199,23 @@ impl tiberius::ToSql for SqlParam {
             Json(j) => ColumnData::String(Some(Cow::Owned(j.to_string()))),
             Enum(s) => ColumnData::String(Some(Cow::Borrowed(s.as_str()))),
             Array(arr) => {
-                let json = serde_json::to_string(arr).unwrap_or_default();
+                let json = serde_json::to_string(arr).unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "Failed to serialize Array to JSON for SQL Server param: {}",
+                        e
+                    );
+                    "[]".to_string()
+                });
                 ColumnData::String(Some(Cow::Owned(json)))
             }
             Composite(map) => {
-                let json = serde_json::to_string(map).unwrap_or_default();
+                let json = serde_json::to_string(map).unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "Failed to serialize Composite to JSON for SQL Server param: {}",
+                        e
+                    );
+                    "{}".to_string()
+                });
                 ColumnData::String(Some(Cow::Owned(json)))
             }
             Interval(micros) => ColumnData::I64(Some(*micros)),
@@ -204,11 +243,8 @@ fn param_refs(tib_params: &[SqlParam]) -> Vec<&dyn tiberius::ToSql> {
 
 /// Convert tiberius column value to rivven Value
 fn tiberius_to_value(_col: &tiberius::Column, row: &tiberius::Row, idx: usize) -> Value {
-    if let Ok(Some(bytes)) = row.try_get::<&[u8], _>(idx) {
-        return Value::Bytes(bytes.to_vec());
-    }
-
-    // Try different type conversions
+    // probe typed columns before raw bytes to avoid BIT returning as Bytes.
+    // Order: bool first, then numeric, then string, then bytes (catch-all).
     if let Ok(Some(v)) = row.try_get::<bool, _>(idx) {
         return Value::Bool(v);
     }
@@ -232,6 +268,9 @@ fn tiberius_to_value(_col: &tiberius::Column, row: &tiberius::Row, idx: usize) -
     }
     if let Ok(Some(v)) = row.try_get::<uuid::Uuid, _>(idx) {
         return Value::Uuid(v);
+    }
+    if let Ok(Some(bytes)) = row.try_get::<&[u8], _>(idx) {
+        return Value::Bytes(bytes.to_vec());
     }
 
     Value::Null
@@ -293,9 +332,11 @@ impl Connection for SqlServerConnection {
     }
 
     async fn prepare(&self, sql: &str) -> Result<Box<dyn PreparedStatement>> {
-        // SQL Server uses parameterized queries, not server-side prepared statements
+        // SQL Server uses parameterized queries (sp_executesql), not server-side
+        // prepared statements. The connection reference enables execute/query.
         Ok(Box::new(SqlServerPreparedStatement {
             sql: sql.to_string(),
+            client: Arc::clone(&self.client),
         }))
     }
 
@@ -316,18 +357,59 @@ impl Connection for SqlServerConnection {
             client: Arc::clone(&self.client),
             committed: AtomicBool::new(false),
             rolled_back: AtomicBool::new(false),
+            in_transaction: Arc::clone(&self.in_transaction),
         }))
     }
 
-    async fn query_stream(
+    /// SQL Server requires SET TRANSACTION ISOLATION LEVEL *before*
+    /// BEGIN TRANSACTION for it to take effect for that transaction.
+    async fn begin_with_isolation(
         &self,
-        _query: &str,
-        _params: &[Value],
-    ) -> Result<Pin<Box<dyn RowStream>>> {
-        // SQL Server streaming needs different approach with async-stream
-        Err(Error::unsupported(
-            "Streaming not yet implemented for SQL Server",
-        ))
+        isolation: IsolationLevel,
+    ) -> Result<Box<dyn Transaction>> {
+        self.update_last_used().await;
+
+        let level_sql = match isolation {
+            IsolationLevel::ReadUncommitted => "READ UNCOMMITTED",
+            IsolationLevel::ReadCommitted => "READ COMMITTED",
+            IsolationLevel::RepeatableRead => "REPEATABLE READ",
+            IsolationLevel::Serializable => "SERIALIZABLE",
+            IsolationLevel::Snapshot => "SNAPSHOT",
+        };
+
+        {
+            let mut client = self.client.lock().await;
+            client
+                .execute(
+                    format!("SET TRANSACTION ISOLATION LEVEL {}", level_sql),
+                    &[],
+                )
+                .await
+                .map_err(|e| Error::transaction(format!("Failed to set isolation level: {}", e)))?;
+            client
+                .execute("BEGIN TRANSACTION", &[])
+                .await
+                .map_err(|e| Error::transaction(format!("Failed to begin transaction: {}", e)))?;
+        }
+
+        self.in_transaction.store(true, Ordering::SeqCst);
+
+        Ok(Box::new(SqlServerTransaction {
+            client: Arc::clone(&self.client),
+            committed: AtomicBool::new(false),
+            rolled_back: AtomicBool::new(false),
+            in_transaction: Arc::clone(&self.in_transaction),
+        }))
+    }
+
+    async fn query_stream(&self, query: &str, params: &[Value]) -> Result<Pin<Box<dyn RowStream>>> {
+        // Fetch all rows and wrap in a streaming adapter.
+        // tiberius's TDS protocol pipeline processes results in result-set
+        // granularity; this adapter exposes them as a RowStream for callers.
+        // For large result sets, callers should use OFFSET/FETCH pagination
+        // or the TableSource incremental mode.
+        let rows = self.query(query, params).await?;
+        Ok(Box::pin(VecRowStream::new(rows)))
     }
 
     async fn is_valid(&self) -> bool {
@@ -341,24 +423,47 @@ impl Connection for SqlServerConnection {
     }
 }
 
-/// SQL Server prepared statement
+/// SQL Server prepared statement backed by a shared connection.
+///
+/// SQL Server uses parameterized queries (sp_executesql) rather than
+/// server-side prepared statements. This wrapper stores the query text
+/// and a reference to the parent connection for execute/query delegation.
 pub struct SqlServerPreparedStatement {
     sql: String,
+    client: Arc<Mutex<Client<Compat<TcpStream>>>>,
 }
 
 #[async_trait]
 impl PreparedStatement for SqlServerPreparedStatement {
-    async fn execute(&self, _params: &[Value]) -> Result<u64> {
-        // This requires a connection reference - for now return error
-        Err(Error::unsupported(
-            "Use Connection::execute with the query string directly",
-        ))
+    async fn execute(&self, params: &[Value]) -> Result<u64> {
+        let tib_params: Vec<SqlParam> = params.iter().cloned().map(SqlParam).collect();
+        let refs = param_refs(&tib_params);
+        let mut client = self.client.lock().await;
+
+        let result = client
+            .execute(&*self.sql, &refs)
+            .await
+            .map_err(|e| Error::execution(format!("Prepared execute failed: {}", e)))?;
+
+        Ok(result.total() as u64)
     }
 
-    async fn query(&self, _params: &[Value]) -> Result<Vec<Row>> {
-        Err(Error::unsupported(
-            "Use Connection::query with the query string directly",
-        ))
+    async fn query(&self, params: &[Value]) -> Result<Vec<Row>> {
+        let tib_params: Vec<SqlParam> = params.iter().cloned().map(SqlParam).collect();
+        let refs = param_refs(&tib_params);
+        let mut client = self.client.lock().await;
+
+        let stream = client
+            .query(&*self.sql, &refs)
+            .await
+            .map_err(|e| Error::execution(format!("Prepared query failed: {}", e)))?;
+
+        let tib_rows = stream
+            .into_first_result()
+            .await
+            .map_err(|e| Error::execution(format!("Failed to fetch rows: {}", e)))?;
+
+        Ok(tib_rows.iter().map(tiberius_row_to_row).collect())
     }
 
     fn sql(&self) -> &str {
@@ -371,6 +476,7 @@ pub struct SqlServerTransaction {
     client: Arc<Mutex<Client<Compat<TcpStream>>>>,
     committed: AtomicBool,
     rolled_back: AtomicBool,
+    in_transaction: Arc<AtomicBool>,
 }
 
 #[async_trait]
@@ -421,6 +527,7 @@ impl Transaction for SqlServerTransaction {
             .map_err(|e| Error::transaction(format!("Failed to commit: {}", e)))?;
 
         self.committed.store(true, Ordering::SeqCst);
+        self.in_transaction.store(false, Ordering::SeqCst);
         Ok(())
     }
 
@@ -439,6 +546,7 @@ impl Transaction for SqlServerTransaction {
             .map_err(|e| Error::transaction(format!("Failed to rollback: {}", e)))?;
 
         self.rolled_back.store(true, Ordering::SeqCst);
+        self.in_transaction.store(false, Ordering::SeqCst);
         Ok(())
     }
 
@@ -489,8 +597,33 @@ impl Transaction for SqlServerTransaction {
     }
 }
 
+// Drop impl to prevent abandoned transactions. If the transaction was neither
+// committed nor rolled back, issue a best-effort ROLLBACK and reset the
+// parent connection's in_transaction flag.
+impl Drop for SqlServerTransaction {
+    fn drop(&mut self) {
+        if !self.committed.load(Ordering::SeqCst) && !self.rolled_back.load(Ordering::SeqCst) {
+            let client = self.client.clone();
+            let in_tx = self.in_transaction.clone();
+            tokio::task::block_in_place(|| {
+                let rt = tokio::runtime::Handle::current();
+                rt.block_on(async {
+                    let mut guard = client.lock().await;
+                    if let Err(e) = guard.execute("ROLLBACK TRANSACTION", &[]).await {
+                        tracing::warn!("Auto-rollback on SqlServerTransaction drop failed: {}", e);
+                    } else {
+                        tracing::debug!("SqlServerTransaction auto-rolled back on drop");
+                    }
+                    in_tx.store(false, Ordering::SeqCst);
+                });
+            });
+        }
+    }
+}
+
 /// SQL Server connection factory
 pub struct SqlServerConnectionFactory {
+    #[allow(dead_code)] // Stored for future use; connect() uses passed config
     config: ConnectionConfig,
 }
 
@@ -503,8 +636,9 @@ impl SqlServerConnectionFactory {
 
 #[async_trait]
 impl ConnectionFactory for SqlServerConnectionFactory {
-    async fn connect(&self, _config: &ConnectionConfig) -> Result<Box<dyn Connection>> {
-        let conn = SqlServerConnection::connect(&self.config).await?;
+    async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Connection>> {
+        // Use passed config (consistent with ConnectionFactory contract)
+        let conn = SqlServerConnection::connect(config).await?;
         Ok(Box::new(conn))
     }
 

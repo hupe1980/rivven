@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
-use std::sync::RwLock;
+
+use parking_lot::RwLock;
 
 use super::traits::StorageBackend;
 
@@ -8,9 +9,9 @@ use super::traits::StorageBackend;
 /// Uses a `BTreeMap<u64, Vec<u8>>` per (topic, partition) so offset-ordered
 /// retrieval is fast and `trim()` can efficiently remove ranges.
 ///
-/// F-093 fix: replaced the previous no-op implementation with a functional
-/// in-memory store so code paths that depend on `StorageBackend::retrieve`
-/// returning data work correctly in non-persistent mode.
+/// Uses `parking_lot::RwLock` instead of `std::sync::RwLock` for consistency
+/// with the rest of the crate and to avoid lock poisoning — a panic in one
+/// reader/writer does not permanently disable the entire storage backend.
 pub struct MemoryStorage {
     data: RwLock<BTreeMap<(String, u32), BTreeMap<u64, Vec<u8>>>>,
 }
@@ -37,7 +38,7 @@ impl StorageBackend for MemoryStorage {
         offset: u64,
         data: &[u8],
     ) -> crate::Result<()> {
-        // F-119 fix: recover from poisoned lock instead of panicking
+        // recover from poisoned lock instead of panicking
         let mut guard = self.data.write().unwrap_or_else(|e| e.into_inner());
         guard
             .entry((topic.to_string(), partition))
@@ -53,8 +54,8 @@ impl StorageBackend for MemoryStorage {
         start_offset: u64,
         max_messages: usize,
     ) -> crate::Result<Vec<(u64, Vec<u8>)>> {
-        // F-119 fix: recover from poisoned lock instead of panicking
-        let guard = self.data.read().unwrap_or_else(|e| e.into_inner());
+        // parking_lot::RwLock is non-poisoning — no recovery needed
+        let guard = self.data.read();
         let key = (topic.to_string(), partition);
         match guard.get(&key) {
             Some(offsets) => Ok(offsets
@@ -67,8 +68,8 @@ impl StorageBackend for MemoryStorage {
     }
 
     fn trim(&self, topic: &str, partition: u32, before_offset: u64) -> crate::Result<()> {
-        // F-119 fix: recover from poisoned lock instead of panicking
-        let mut guard = self.data.write().unwrap_or_else(|e| e.into_inner());
+        // parking_lot::RwLock is non-poisoning — no recovery needed
+        let mut guard = self.data.write();
         let key = (topic.to_string(), partition);
         if let Some(offsets) = guard.get_mut(&key) {
             let to_remove: Vec<u64> = offsets

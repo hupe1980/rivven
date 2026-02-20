@@ -69,6 +69,22 @@ pub struct ResilientClientConfig {
     pub health_check_interval: Duration,
     /// Enable automatic health checking
     pub health_check_enabled: bool,
+    /// Maximum connection lifetime before recycling (default: 300s)
+    pub max_connection_lifetime: Duration,
+    /// Optional authentication credentials
+    ///
+    /// When set, every new connection created by the pool will automatically
+    /// authenticate using SCRAM-SHA-256 before being returned to the caller.
+    pub auth: Option<ResilientAuthConfig>,
+}
+
+/// Authentication configuration for resilient client
+#[derive(Debug, Clone)]
+pub struct ResilientAuthConfig {
+    /// Username
+    pub username: String,
+    /// Password
+    pub password: String,
 }
 
 impl Default for ResilientClientConfig {
@@ -87,6 +103,8 @@ impl Default for ResilientClientConfig {
             request_timeout: Duration::from_secs(30),
             health_check_interval: Duration::from_secs(30),
             health_check_enabled: true,
+            max_connection_lifetime: Duration::from_secs(300),
+            auth: None,
         }
     }
 }
@@ -174,6 +192,24 @@ impl ResilientClientConfigBuilder {
     /// Set health check interval
     pub fn health_check_interval(mut self, interval: Duration) -> Self {
         self.config.health_check_interval = interval;
+        self
+    }
+
+    /// Set maximum connection lifetime before recycling
+    pub fn max_connection_lifetime(mut self, lifetime: Duration) -> Self {
+        self.config.max_connection_lifetime = lifetime;
+        self
+    }
+
+    /// Set authentication credentials
+    ///
+    /// When set, every new connection created by the pool will authenticate
+    /// using SCRAM-SHA-256 before being returned to the caller.
+    pub fn auth(mut self, username: impl Into<String>, password: impl Into<String>) -> Self {
+        self.config.auth = Some(ResilientAuthConfig {
+            username: username.into(),
+            password: password.into(),
+        });
         self
     }
 
@@ -315,7 +351,7 @@ impl ConnectionPool {
             .await
             .map_err(|_| Error::ConnectionError("Pool exhausted".to_string()))?;
 
-        // Try to get existing connection — M-11 fix: also check idle staleness
+        // Try to get existing connection — also check idle staleness
         // to avoid reusing connections the server may have already closed.
         {
             let mut connections = self.connections.lock().await;
@@ -332,12 +368,26 @@ impl ConnectionPool {
         }
 
         // Create new connection with timeout
-        let client = timeout(self.config.connection_timeout, Client::connect(&self.addr))
+        let mut client = timeout(self.config.connection_timeout, Client::connect(&self.addr))
             .await
             .map_err(|_| Error::ConnectionError(format!("Connection timeout to {}", self.addr)))?
             .map_err(|e| {
                 Error::ConnectionError(format!("Failed to connect to {}: {}", self.addr, e))
             })?;
+
+        // Auto-authenticate new connections when credentials are configured.
+        // Uses SCRAM-SHA-256 for secure challenge-response authentication.
+        if let Some(auth) = &self.config.auth {
+            client
+                .authenticate_scram(&auth.username, &auth.password)
+                .await
+                .map_err(|e| {
+                    Error::ConnectionError(format!(
+                        "Authentication failed for {}: {}",
+                        self.addr, e
+                    ))
+                })?;
+        }
 
         Ok(PooledConnection {
             client,
@@ -348,8 +398,8 @@ impl ConnectionPool {
     }
 
     async fn put(&self, conn: PooledConnection) {
-        // Only return if connection is healthy
-        if conn.created_at.elapsed() < Duration::from_secs(300) {
+        // Use configured max_connection_lifetime instead of hardcoded 300s
+        if conn.created_at.elapsed() < self.config.max_connection_lifetime {
             let mut connections = self.connections.lock().await;
             if connections.len() < self.config.pool_size {
                 connections.push(conn);
@@ -548,6 +598,11 @@ impl ResilientClient {
     }
 
     /// Publish a message to a topic with automatic retries
+    ///
+    /// **WARNING: At-least-once semantics.** If the server commits the write
+    /// but the response is lost (timeout/network partition), the retry produces
+    /// a duplicate. For exactly-once, use [`Self::idempotent_publish`] or
+    /// `IdempotentPublish` requests instead.
     pub async fn publish(&self, topic: impl Into<String>, value: impl Into<Bytes>) -> Result<u64> {
         let topic = topic.into();
         let value = value.into();
@@ -564,6 +619,8 @@ impl ResilientClient {
     }
 
     /// Publish a message with a key
+    ///
+    /// **WARNING: At-least-once semantics.** See [`Self::publish`] for details.
     pub async fn publish_with_key(
         &self,
         topic: impl Into<String>,

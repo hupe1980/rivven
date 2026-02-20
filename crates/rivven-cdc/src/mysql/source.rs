@@ -380,7 +380,7 @@ async fn run_mysql_cdc_loop(
     let encoded_password =
         url::form_urlencoded::byte_serialize(config.password.as_deref().unwrap_or("").as_bytes())
             .collect::<String>();
-    // F-070 fix: build the metadata URL in a limited scope and drop it immediately
+    // build the metadata URL in a limited scope and drop it immediately
     // after pool creation, preventing accidental logging of embedded credentials.
     let metadata_pool = {
         let metadata_url = format!(
@@ -494,7 +494,15 @@ async fn run_mysql_cdc_loop(
 
     // Get binlog position if not specified
     let (binlog_file, binlog_pos) = if config.binlog_filename.is_empty() {
-        get_current_binlog_position(&config).await?
+        let (file, pos) = get_current_binlog_position(&config).await?;
+        // COM_BINLOG_DUMP uses u32 position; validate the returned u64 fits
+        let pos32 = u32::try_from(pos).map_err(|_| {
+            anyhow::anyhow!(
+                "Binlog position {} exceeds u32::MAX — COM_BINLOG_DUMP cannot address it",
+                pos
+            )
+        })?;
+        (file, pos32)
     } else {
         (config.binlog_filename.clone(), config.binlog_position)
     };
@@ -523,19 +531,29 @@ async fn run_mysql_cdc_loop(
     let mut current_gtid: Option<String> = None;
     let mut current_binlog_file = binlog_file;
     let mut current_binlog_pos = binlog_pos;
+    let mut consecutive_errors: u32 = 0;
 
     while running.load(Ordering::SeqCst) {
         let event_data = match stream.next_event().await {
-            Ok(Some(data)) => data,
+            Ok(Some(data)) => {
+                consecutive_errors = 0;
+                data
+            }
             Ok(None) => {
                 // Connection closed
                 warn!("Binlog stream closed");
                 break;
             }
             Err(e) => {
-                error!("Error reading binlog event: {:?}", e);
-                // Try to reconnect
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                consecutive_errors = consecutive_errors.saturating_add(1);
+                let backoff_secs = (1u64 << consecutive_errors.min(6)).min(60);
+                error!(
+                    error = ?e,
+                    backoff_secs,
+                    consecutive_errors,
+                    "Error reading binlog event — retrying with backoff"
+                );
+                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
                 continue;
             }
         };
@@ -747,16 +765,21 @@ async fn run_mysql_cdc_loop(
 /// Uses a separate `mysql_async` connection (not the binlog protocol client) because
 /// `SHOW MASTER STATUS` returns a result set that the binlog protocol client doesn't
 /// support reading. Falls back to `SHOW BINARY LOG STATUS` for MySQL 8.2+.
-async fn get_current_binlog_position(config: &MySqlCdcConfig) -> anyhow::Result<(String, u32)> {
+async fn get_current_binlog_position(config: &MySqlCdcConfig) -> anyhow::Result<(String, u64)> {
     use mysql_async::{Conn, Opts, Row};
 
+    // URL-encode credentials (matching run_mysql_cdc_loop pattern)
+    let encoded_user =
+        url::form_urlencoded::byte_serialize(config.user.as_bytes()).collect::<String>();
     let url = if let Some(ref password) = config.password {
+        let encoded_password =
+            url::form_urlencoded::byte_serialize(password.as_bytes()).collect::<String>();
         format!(
             "mysql://{}:{}@{}:{}/",
-            config.user, password, config.host, config.port
+            encoded_user, encoded_password, config.host, config.port
         )
     } else {
-        format!("mysql://{}@{}:{}/", config.user, config.host, config.port)
+        format!("mysql://{}@{}:{}/", encoded_user, config.host, config.port)
     };
 
     let opts = Opts::from_url(&url)
@@ -778,7 +801,8 @@ async fn get_current_binlog_position(config: &MySqlCdcConfig) -> anyhow::Result<
 
     if let Some(row) = rows.into_iter().next() {
         let file: String = row.get(0).unwrap_or_default();
-        let pos: u32 = row.get::<u64, _>(1).map(|p| p as u32).unwrap_or(4);
+        // preserve full u64 binlog position instead of truncating to u32
+        let pos: u64 = row.get::<u64, _>(1).unwrap_or(4);
 
         if file.is_empty() {
             anyhow::bail!(

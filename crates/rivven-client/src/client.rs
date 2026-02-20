@@ -97,16 +97,25 @@ pub struct Client {
 
 impl Client {
     /// Connect to a Rivven server (plaintext)
+    ///
+    /// Automatically sends a protocol handshake after connecting.
+    /// The handshake validates protocol version compatibility before any
+    /// application requests are sent.
     pub async fn connect(addr: &str) -> Result<Self> {
         info!("Connecting to Rivven server at {}", addr);
         let stream = TcpStream::connect(addr)
             .await
             .map_err(|e| Error::ConnectionError(e.to_string()))?;
 
-        Ok(Self {
+        let mut client = Self {
             stream: ClientStream::Plaintext(stream),
             next_correlation_id: 0,
-        })
+        };
+
+        // auto-handshake on connect
+        client.handshake("rivven-client").await?;
+
+        Ok(client)
     }
 
     /// Connect to a Rivven server with TLS
@@ -135,10 +144,15 @@ impl Client {
 
         info!("TLS connection established to {} ({})", addr, server_name);
 
-        Ok(Self {
+        let mut client = Self {
             stream: ClientStream::Tls(tls_stream),
             next_correlation_id: 0,
-        })
+        };
+
+        // auto-handshake on TLS connect
+        client.handshake("rivven-client").await?;
+
+        Ok(client)
     }
 
     /// Connect with mTLS (mutual TLS) using client certificate
@@ -152,6 +166,79 @@ impl Client {
     ) -> Result<Self> {
         let tls_config = TlsConfig::mtls_from_pem_files(cert_path, key_path, ca_path);
         Self::connect_tls(addr, &tls_config, server_name).await
+    }
+
+    // ========================================================================
+    // Handshake
+    // ========================================================================
+
+    /// Send a protocol version handshake to the server.
+    ///
+    /// Validates that the server speaks a compatible protocol version.
+    /// Called automatically by `connect()` and `connect_tls()`.
+    pub async fn handshake(&mut self, client_id: &str) -> Result<()> {
+        let request = Request::Handshake {
+            protocol_version: rivven_protocol::PROTOCOL_VERSION,
+            client_id: client_id.to_string(),
+        };
+
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::HandshakeResult {
+                compatible,
+                message: _,
+                server_version,
+            } => {
+                if compatible {
+                    info!(
+                        "Handshake OK (client v{}, server v{})",
+                        rivven_protocol::PROTOCOL_VERSION,
+                        server_version
+                    );
+                    Ok(())
+                } else {
+                    Err(Error::ProtocolError(
+                        rivven_protocol::ProtocolError::VersionMismatch {
+                            expected: rivven_protocol::PROTOCOL_VERSION,
+                            actual: server_version,
+                        },
+                    ))
+                }
+            }
+            Response::Error { message } => {
+                // Server doesn't support handshake — log warning but proceed
+                // for backward compatibility with older servers
+                tracing::warn!(
+                    "Server returned error on handshake: {}, proceeding anyway",
+                    message
+                );
+                Ok(())
+            }
+            _ => {
+                // Unknown response — old server, proceed anyway
+                tracing::warn!(
+                    "Server did not return HandshakeResult, proceeding without version check"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// Consume the client and return the underlying TCP stream.
+    ///
+    /// This is used by the producer to hand off the authenticated +
+    /// handshaked connection to its background sender task.
+    /// Only works for plaintext connections; TLS connections return an error.
+    pub fn into_stream(self) -> Result<TcpStream> {
+        match self.stream {
+            ClientStream::Plaintext(s) => Ok(s),
+            #[cfg(feature = "tls")]
+            ClientStream::Tls(_) => Err(Error::ConnectionError(
+                "Cannot extract TcpStream from TLS connection. Producer requires plaintext."
+                    .to_string(),
+            )),
+        }
     }
 
     // ========================================================================
@@ -319,7 +406,7 @@ impl Client {
     // ========================================================================
 
     /// Send a request and receive a response
-    async fn send_request(&mut self, request: Request) -> Result<Response> {
+    pub(crate) async fn send_request(&mut self, request: Request) -> Result<Response> {
         // Generate sequential correlation ID
         let correlation_id = self.next_correlation_id;
         self.next_correlation_id = self.next_correlation_id.wrapping_add(1);
@@ -339,7 +426,10 @@ impl Client {
         }
 
         // Write length prefix + request
-        let len = request_bytes.len() as u32;
+        let len: u32 = request_bytes
+            .len()
+            .try_into()
+            .map_err(|_| Error::RequestTooLarge(request_bytes.len(), u32::MAX as usize))?;
         self.stream.write_all(&len.to_be_bytes()).await?;
         self.stream.write_all(&request_bytes).await?;
         self.stream.flush().await?;
@@ -385,6 +475,7 @@ impl Client {
             partition: None,
             key: key.map(|k| k.into()),
             value: value.into(),
+            leader_epoch: None,
         };
 
         let response = self.send_request(request).await?;
@@ -409,6 +500,7 @@ impl Client {
             partition: Some(partition),
             key: key.map(|k| k.into()),
             value: value.into(),
+            leader_epoch: None,
         };
 
         let response = self.send_request(request).await?;
@@ -469,6 +561,41 @@ impl Client {
             offset,
             max_messages,
             isolation_level,
+            max_wait_ms: None,
+        };
+
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::Messages { messages } => Ok(messages),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
+    /// Consume messages with long-polling support
+    ///
+    /// If no data is available immediately, the server will hold the request
+    /// for up to `max_wait_ms` milliseconds before returning an empty response.
+    /// This avoids tight polling loops and reduces network overhead.
+    ///
+    /// Capped server-side at 30 000 ms. `0` or `None` = immediate (no waiting).
+    pub async fn consume_long_poll(
+        &mut self,
+        topic: impl Into<String>,
+        partition: u32,
+        offset: u64,
+        max_messages: usize,
+        isolation_level: Option<u8>,
+        max_wait_ms: u64,
+    ) -> Result<Vec<MessageData>> {
+        let request = Request::Consume {
+            topic: topic.into(),
+            partition,
+            offset,
+            max_messages,
+            isolation_level,
+            max_wait_ms: Some(max_wait_ms),
         };
 
         let response = self.send_request(request).await?;
@@ -720,7 +847,11 @@ impl Client {
         Ok(result.id)
     }
 
-    /// Minimal inline HTTP/1.1 client for schema registration (HTTP only, no external deps)
+    /// Minimal inline HTTP/1.1 client for schema registration (HTTP only, no external deps).
+    ///
+    /// Handles both `Content-Length` and `Transfer-Encoding: chunked` responses.
+    /// For production deployments behind proxies or with HTTPS requirements,
+    /// enable the `schema-registry` feature to use `reqwest` instead.
     #[cfg(not(feature = "schema-registry"))]
     async fn register_schema_inline(
         &self,
@@ -728,6 +859,8 @@ impl Client {
         _endpoint: &str,
         body: &serde_json::Value,
     ) -> Result<u32> {
+        use tokio::io::AsyncBufReadExt;
+        use tokio::io::BufReader;
         use tokio::net::TcpStream as TokioTcpStream;
 
         let stripped = base_url.strip_prefix("http://").ok_or_else(|| {
@@ -748,9 +881,14 @@ impl Client {
             path, host_port, body_bytes.len()
         );
 
-        let mut stream = TokioTcpStream::connect(host_port).await.map_err(|e| {
-            Error::ConnectionError(format!("failed to connect to schema registry: {e}"))
-        })?;
+        let timeout = tokio::time::Duration::from_secs(30);
+
+        let mut stream = tokio::time::timeout(timeout, TokioTcpStream::connect(host_port))
+            .await
+            .map_err(|_| Error::ConnectionError("schema registry connect timed out".into()))?
+            .map_err(|e| {
+                Error::ConnectionError(format!("failed to connect to schema registry: {e}"))
+            })?;
 
         stream
             .write_all(request.as_bytes())
@@ -761,38 +899,126 @@ impl Client {
             .await
             .map_err(|e| Error::ConnectionError(format!("failed to send body: {e}")))?;
 
-        let mut response_buf = Vec::with_capacity(4096);
-        stream
-            .read_to_end(&mut response_buf)
+        // Read response with timeout
+        let response_body =
+            tokio::time::timeout(timeout, async {
+                let mut reader = BufReader::new(stream);
+
+                // --- Parse status line ---
+                let mut status_line = String::new();
+                reader.read_line(&mut status_line).await.map_err(|e| {
+                    Error::ConnectionError(format!("failed to read status line: {e}"))
+                })?;
+
+                let status_code: u16 = status_line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+
+                if !(200..300).contains(&status_code) {
+                    return Err(Error::ServerError(format!(
+                        "schema registry returned HTTP {status_code}"
+                    )));
+                }
+
+                // --- Parse headers ---
+                let mut content_length: Option<usize> = None;
+                let mut is_chunked = false;
+                loop {
+                    let mut header_line = String::new();
+                    reader.read_line(&mut header_line).await.map_err(|e| {
+                        Error::ConnectionError(format!("failed to read header: {e}"))
+                    })?;
+
+                    let trimmed = header_line.trim();
+                    if trimmed.is_empty() {
+                        break; // End of headers
+                    }
+
+                    let lower = trimmed.to_ascii_lowercase();
+                    if let Some(val) = lower.strip_prefix("content-length:") {
+                        content_length = val.trim().parse().ok();
+                    } else if lower.starts_with("transfer-encoding:") && lower.contains("chunked") {
+                        is_chunked = true;
+                    }
+                }
+
+                // --- Read body ---
+                let body_bytes = if is_chunked {
+                    // Chunked transfer-encoding: read chunk-size\r\n, chunk-data\r\n, repeat until 0\r\n
+                    let mut body = Vec::new();
+                    loop {
+                        let mut size_line = String::new();
+                        reader.read_line(&mut size_line).await.map_err(|e| {
+                            Error::ConnectionError(format!("failed to read chunk size: {e}"))
+                        })?;
+
+                        let chunk_size =
+                            usize::from_str_radix(size_line.trim(), 16).map_err(|_| {
+                                Error::ConnectionError(format!(
+                                    "invalid chunk size: {:?}",
+                                    size_line.trim()
+                                ))
+                            })?;
+                        if chunk_size == 0 {
+                            break; // Terminal chunk
+                        }
+
+                        // Guard against malicious chunk sizes (max 16 MB per chunk)
+                        const MAX_CHUNK_SIZE: usize = 16 * 1024 * 1024;
+                        if chunk_size > MAX_CHUNK_SIZE {
+                            return Err(Error::ConnectionError(format!(
+                                "chunk size {} exceeds maximum {}",
+                                chunk_size, MAX_CHUNK_SIZE
+                            )));
+                        }
+
+                        let mut chunk = vec![0u8; chunk_size];
+                        reader.read_exact(&mut chunk).await.map_err(|e| {
+                            Error::ConnectionError(format!("failed to read chunk data: {e}"))
+                        })?;
+                        body.extend_from_slice(&chunk);
+
+                        // Consume trailing \r\n after chunk data
+                        let mut crlf = String::new();
+                        reader.read_line(&mut crlf).await.ok();
+                    }
+                    body
+                } else if let Some(len) = content_length {
+                    let mut body = vec![0u8; len];
+                    reader.read_exact(&mut body).await.map_err(|e| {
+                        Error::ConnectionError(format!("failed to read response body: {e}"))
+                    })?;
+                    body
+                } else {
+                    // Fallback: Connection: close — read until EOF (capped at 16 MB)
+                    const MAX_RESPONSE_SIZE: usize = 16 * 1024 * 1024;
+                    let mut body = Vec::with_capacity(4096);
+                    reader.read_to_end(&mut body).await.map_err(|e| {
+                        Error::ConnectionError(format!("failed to read response: {e}"))
+                    })?;
+                    if body.len() > MAX_RESPONSE_SIZE {
+                        return Err(Error::ConnectionError(format!(
+                            "response body {} bytes exceeds maximum {}",
+                            body.len(),
+                            MAX_RESPONSE_SIZE
+                        )));
+                    }
+                    body
+                };
+
+                Ok(body_bytes)
+            })
             .await
-            .map_err(|e| Error::ConnectionError(format!("failed to read response: {e}")))?;
-
-        let response_str = String::from_utf8_lossy(&response_buf);
-
-        let status_line = response_str.lines().next().unwrap_or("");
-        let status_code: u16 = status_line
-            .split_whitespace()
-            .nth(1)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-
-        if !(200..300).contains(&status_code) {
-            return Err(Error::ServerError(format!(
-                "schema registry returned HTTP {status_code}"
-            )));
-        }
-
-        let json_body = response_str
-            .find("\r\n\r\n")
-            .map(|i| &response_str[i + 4..])
-            .unwrap_or("");
+            .map_err(|_| Error::ConnectionError("schema registry response timed out".into()))??;
 
         #[derive(serde::Deserialize)]
         struct RegisterResponse {
             id: u32,
         }
 
-        let result: RegisterResponse = serde_json::from_str(json_body.trim()).map_err(|e| {
+        let result: RegisterResponse = serde_json::from_slice(&response_body).map_err(|e| {
             Error::ConnectionError(format!("failed to parse schema registry response: {e}"))
         })?;
 
@@ -1179,6 +1405,7 @@ impl Client {
             producer_id: producer.producer_id,
             producer_epoch: producer.producer_epoch,
             sequence,
+            leader_epoch: None,
         };
 
         let response = self.send_request(request).await?;
@@ -1319,6 +1546,7 @@ impl Client {
             producer_id: producer.producer_id,
             producer_epoch: producer.producer_epoch,
             sequence,
+            leader_epoch: None,
         };
 
         let response = self.send_request(request).await?;
@@ -1469,7 +1697,7 @@ pub struct AuthSession {
 // ============================================================================
 
 /// Generate a random nonce for SCRAM authentication
-fn generate_nonce() -> String {
+pub(crate) fn generate_nonce() -> String {
     use rand::Rng;
     let mut rng = rand::thread_rng();
     let nonce_bytes: Vec<u8> = (0..24).map(|_| rng.gen()).collect();
@@ -1477,12 +1705,12 @@ fn generate_nonce() -> String {
 }
 
 /// Escape username for SCRAM (RFC 5802)
-fn escape_username(username: &str) -> String {
+pub(crate) fn escape_username(username: &str) -> String {
     username.replace('=', "=3D").replace(',', "=2C")
 }
 
 /// Parse server-first message
-fn parse_server_first(server_first: &str) -> Result<(String, String, u32)> {
+pub(crate) fn parse_server_first(server_first: &str) -> Result<(String, String, u32)> {
     let mut nonce = None;
     let mut salt = None;
     let mut iterations = None;
@@ -1510,7 +1738,7 @@ fn parse_server_first(server_first: &str) -> Result<(String, String, u32)> {
 }
 
 /// PBKDF2-HMAC-SHA256 key derivation
-fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32) -> Vec<u8> {
+pub(crate) fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32) -> Vec<u8> {
     let mut result = vec![0u8; 32];
 
     // U1 = PRF(Password, Salt || INT(1))
@@ -1529,25 +1757,25 @@ fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32) -> Vec<u8> {
 }
 
 /// SHA-256 hash
-fn sha256(data: &[u8]) -> Vec<u8> {
+pub(crate) fn sha256(data: &[u8]) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(data);
     hasher.finalize().to_vec()
 }
 
 /// XOR two byte arrays
-fn xor_bytes(a: &[u8], b: &[u8]) -> Vec<u8> {
+pub(crate) fn xor_bytes(a: &[u8], b: &[u8]) -> Vec<u8> {
     a.iter().zip(b.iter()).map(|(x, y)| x ^ y).collect()
 }
 
 /// Base64 encode
-fn base64_encode(data: &[u8]) -> String {
+pub(crate) fn base64_encode(data: &[u8]) -> String {
     use base64::{engine::general_purpose::STANDARD, Engine};
     STANDARD.encode(data)
 }
 
 /// Base64 decode
-fn base64_decode(data: &str) -> std::result::Result<Vec<u8>, base64::DecodeError> {
+pub(crate) fn base64_decode(data: &str) -> std::result::Result<Vec<u8>, base64::DecodeError> {
     use base64::{engine::general_purpose::STANDARD, Engine};
     STANDARD.decode(data)
 }

@@ -619,6 +619,33 @@ impl ServiceAuthManager {
         }
     }
 
+    /// Create a ServiceAuthManager from config, applying session
+    /// duration, rate limit settings, and pre-registering service accounts.
+    pub fn with_config(config: &ServiceAuthConfig) -> Self {
+        let manager = Self {
+            api_keys: RwLock::new(HashMap::new()),
+            service_accounts: RwLock::new(HashMap::new()),
+            sessions: RwLock::new(HashMap::new()),
+            rate_limiter: RwLock::new(AuthRateLimiter::new(
+                config.max_auth_attempts,
+                Duration::from_secs(60),
+            )),
+            session_duration: Duration::from_secs(config.session_duration_secs),
+        };
+
+        // Pre-register configured service accounts
+        for account_config in &config.service_accounts {
+            let mut account = ServiceAccount::new(&account_config.name);
+            account.description = account_config.description.clone();
+            account.roles = account_config.roles.clone();
+            account.certificate_subject = account_config.certificate_subject.clone();
+            account.oidc_client_id = account_config.oidc_client_id.clone();
+            let _ = manager.create_service_account(account);
+        }
+
+        manager
+    }
+
     pub fn with_session_duration(mut self, duration: Duration) -> Self {
         self.session_duration = duration;
         self

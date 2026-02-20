@@ -201,7 +201,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 For maximum throughput with all best practices, use `Producer`:
 
 ```rust
-use rivven_client::{Producer, ProducerConfig};
+use rivven_client::{Producer, ProducerConfig, CompressionType};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -212,10 +212,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .batch_size(16384)          // Batch up to 16KB
         .linger_ms(5)               // Wait 5ms for batch
         .buffer_memory(32 * 1024 * 1024)  // 32MB buffer
+        .compression_type(CompressionType::Lz4)  // LZ4 batch compression
         .enable_idempotence(true)   // Exactly-once semantics
+        .auth("producer-app", "password")  // SCRAM-SHA-256 auth
         .build();
 
-    // Arc-based for thread-safe concurrent access
+    // Producer::new() connects with auto-handshake and authentication
     let producer = Arc::new(Producer::new(config).await?);
 
     // Share across tasks (sticky partitioning for keyless messages)
@@ -245,12 +247,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Feature | Description |
 |---------|-------------|
-| **Metadata Cache** | TTL-based caching reduces metadata requests |
+| **Authentication** | SCRAM-SHA-256 auto-auth via `ProducerAuthConfig` |
+| **Auto-Handshake** | Protocol version negotiated on connect |
+| **Compression** | LZ4/Snappy/Zstd batch compression (feature-gated) |
+| **Idempotency** | Sequence tracking + `IdempotentPublish` wire type; `is_idempotent()` detects silent degradation |
+| **Metadata Cache** | TTL-based caching with persistent metadata client (avoids per-topic connection churn) |
 | **Sticky Partitioning** | Batches keyless messages to same partition |
-| **Backpressure** | Memory-bounded buffers prevent OOM |
+| **Backpressure** | Memory-bounded buffers prevent OOM; applies to standard, idempotent, and transactional publish paths |
 | **Murmur2 Hashing** | Kafka-compatible key partitioning (optimized) |
 | **Batched I/O** | Single flush per batch minimizes syscalls |
 | **Pipelined Responses** | Write-all, then read-all for throughput |
+| **Multi-Server Failover** | Tries all bootstrap servers on connect |
+| **Flush Safety** | `pending_records` correctly decremented on batch failure; `flush()` always terminates |
 | **Completion Tracking** | `flush()` waits for all pending records |
 | **Metadata Refresh** | `refresh_metadata()` fetches partition info |
 
@@ -260,9 +268,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 |--------|---------|-----------------|-------------|--------------|
 | `batch_size` | 16KB | 64KB | 1 | 16KB |
 | `linger_ms` | 0 | 10 | 0 | 0 |
+| `compression_type` | None | Lz4 | None | None |
 | `max_in_flight_requests` | 5 | 10 | 1 | 5 |
 | `enable_idempotence` | false | false | false | true |
 | `acks` | 1 | 1 | 1 | -1 (all) |
+| `auth` | None | — | — | — |
 
 ### Health Monitoring
 
@@ -403,6 +413,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 > **Note:** For advanced schema registry operations (compatibility checks, Glue integration, codec management), use `rivven-connect`'s `SchemaRegistryClient`. The `Client::register_schema()` method is designed for quick schema bootstrapping without additional dependencies.
+
+> **Security:** HTTP responses from the registry are bounded by `MAX_CHUNK_SIZE` (16 MB per chunk) and `MAX_RESPONSE_SIZE` (16 MB total) to prevent memory exhaustion from malicious or misconfigured registries.
 
 ### Transactions & Idempotent Producer
 
@@ -552,6 +564,7 @@ match client.commit_transaction(txn_id, &producer).await {
 | `retry_multiplier` | 2.0 | Delay multiplier between retries |
 | `circuit_breaker_failure_threshold` | 5 | Failures before circuit opens |
 | `circuit_breaker_recovery_timeout` | 30s | Time before attempting recovery |
+| `max_connection_lifetime` | 300s | Maximum time a pooled connection can be reused before recycling |
 
 ## Error Handling
 

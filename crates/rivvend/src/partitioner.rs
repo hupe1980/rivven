@@ -92,7 +92,7 @@ impl TopicStickyState {
 /// - Messages with keys use hash-based partitioning
 /// - Messages without keys stick to one partition until batch/time threshold
 ///
-/// F-045 fix: Uses `DashMap` instead of `RwLock<HashMap>` for per-shard locking.
+/// Uses `DashMap` instead of `RwLock<HashMap>` for per-shard locking.
 /// Multi-topic workloads no longer contend on a single global lock.
 pub struct StickyPartitioner {
     config: StickyPartitionerConfig,

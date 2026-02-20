@@ -212,7 +212,10 @@ impl MySqlSnapshotSource {
             }
             Some(Ok(Value::Time(neg, days, hours, mins, secs, micro))) => {
                 let sign = if neg { "-" } else { "" };
-                let total_hours = days * 24 + hours as u32;
+                let total_hours = days
+                    .checked_mul(24)
+                    .and_then(|h| h.checked_add(hours as u32))
+                    .unwrap_or(u32::MAX);
                 let time = format!(
                     "{}{:02}:{:02}:{:02}.{:06}",
                     sign, total_hours, mins, secs, micro
@@ -346,17 +349,24 @@ impl SnapshotSource for MySqlSnapshotSource {
         let columns = self.get_columns(schema, table).await?;
         let key_idx = columns.iter().position(|c| c == key_column).unwrap_or(0);
 
+        // Defense-in-depth: escape backticks in identifiers even though
+        // TableSpec::new validates them upstream. A backtick in an identifier
+        // is escaped by doubling it (MySQL convention).
+        let esc_schema = schema.replace('`', "``");
+        let esc_table = table.replace('`', "``");
+        let esc_key = key_column.replace('`', "``");
+
         // Build SELECT query with keyset pagination (efficient, no OFFSET)
         let rows: Vec<Row> = if let Some(last) = last_key {
             let query = format!(
                 "SELECT * FROM `{}`.`{}` WHERE `{}` > ? ORDER BY `{}` LIMIT {}",
-                schema, table, key_column, key_column, batch_size
+                esc_schema, esc_table, esc_key, esc_key, batch_size
             );
             conn.exec(&query, (last,)).await
         } else {
             let query = format!(
                 "SELECT * FROM `{}`.`{}` ORDER BY `{}` LIMIT {}",
-                schema, table, key_column, batch_size
+                esc_schema, esc_table, esc_key, batch_size
             );
             conn.query(&query).await
         }

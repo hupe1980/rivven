@@ -527,7 +527,8 @@ async fn test_no_data_loss_on_restart_with_persistence() -> Result<()> {
             pre_shutdown_count
         );
 
-        // Graceful shutdown
+        // Graceful shutdown — drop client first to avoid connection drain delay
+        drop(client);
         broker.shutdown().await?;
         info!("Phase 1: Broker shutdown complete");
 
@@ -611,6 +612,8 @@ async fn test_no_data_loss_on_restart_with_persistence() -> Result<()> {
         client.publish(topic, new_msg.as_bytes().to_vec()).await?;
         info!("Phase 2: Successfully wrote new message after restart");
 
+        // Drop client before shutdown to avoid connection drain delay
+        drop(client);
         broker.shutdown().await?;
     }
 
@@ -676,6 +679,8 @@ async fn test_multi_topic_durability() -> Result<()> {
             );
         }
 
+        // Drop client before shutdown to avoid connection drain delay
+        drop(client);
         broker.shutdown().await?;
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
@@ -729,6 +734,8 @@ async fn test_multi_topic_durability() -> Result<()> {
             );
         }
 
+        // Drop client before shutdown to avoid connection drain delay
+        drop(client);
         broker.shutdown().await?;
     }
 
@@ -779,6 +786,8 @@ async fn test_offset_preservation_across_restart() -> Result<()> {
         info!("Phase 1: Highest offset = {}", highest_offset);
         assert_eq!(highest_offset, initial_count as u64 - 1);
 
+        // Drop client before shutdown to avoid connection drain delay
+        drop(client);
         broker.shutdown().await?;
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
@@ -847,6 +856,8 @@ async fn test_offset_preservation_across_restart() -> Result<()> {
             initial_count + additional_count - 1
         );
 
+        // Drop client before shutdown to avoid connection drain delay
+        drop(client);
         broker.shutdown().await?;
     }
 

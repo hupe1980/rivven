@@ -323,7 +323,7 @@ impl PasswordHash {
     }
 
     /// Async version of `new` — runs PBKDF2 (600k iterations) in a blocking
-    /// thread pool so the tokio runtime is not blocked (F-043 fix).
+    /// thread pool so the tokio runtime is not blocked.
     pub async fn new_async(password: &str) -> Self {
         let password = password.to_string();
         tokio::task::spawn_blocking(move || Self::new(&password))
@@ -332,7 +332,7 @@ impl PasswordHash {
     }
 
     /// Async version of `verify` — runs PBKDF2 (600k iterations) in a blocking
-    /// thread pool so the tokio runtime is not blocked (F-043 fix).
+    /// thread pool so the tokio runtime is not blocked.
     pub async fn verify_async(&self, password: &str) -> bool {
         let hash = self.clone();
         let password = password.to_string();
@@ -580,7 +580,7 @@ impl AclIndex {
 // ============================================================================
 
 // ============================================================================
-// Unified Session Trait (F-006)
+// Unified Session Trait
 // ============================================================================
 
 /// Unified session trait for all authentication mechanisms.
@@ -716,7 +716,7 @@ pub struct AuthConfig {
 
 impl Default for AuthConfig {
     fn default() -> Self {
-        // F-069: Authentication is enabled by default for security.
+        // Authentication is enabled by default for security.
         // Disable explicitly in development/testing via AuthConfig { require_authentication: false, .. }.
         #[cfg(not(test))]
         tracing::info!("AuthConfig::default() — authentication and ACLs ENABLED by default.");
@@ -725,8 +725,8 @@ impl Default for AuthConfig {
             session_timeout: Duration::from_secs(3600), // 1 hour
             max_failed_attempts: 5,
             lockout_duration: Duration::from_secs(300), // 5 minutes
-            require_authentication: true,               // F-069: Secure by default
-            enable_acls: true,                          // F-069: ACLs on by default
+            require_authentication: true,               // Secure by default
+            enable_acls: true,                          // ACLs on by default
             default_deny: true,
         }
     }
@@ -738,7 +738,7 @@ struct FailedAttemptTracker {
     lockouts: HashMap<String, Instant>,
 }
 
-/// F-076 fix: Maximum number of tracked IP/principal entries to prevent
+/// Maximum number of tracked IP/principal entries to prevent
 /// unbounded memory growth from distributed brute-force attacks.
 const MAX_TRACKED_IDENTIFIERS: usize = 10_000;
 
@@ -772,7 +772,7 @@ impl FailedAttemptTracker {
         // Clean up old lockouts
         self.lockouts.retain(|_, t| t.elapsed() < lockout_duration);
 
-        // F-076 fix: enforce hard cap on tracked identifiers.
+        // enforce hard cap on tracked identifiers.
         // When the limit is reached, evict the oldest entries (by last
         // attempt time) to make room. This bounds memory usage under
         // distributed brute-force attacks targeting many IPs.
@@ -874,7 +874,7 @@ pub struct AuthManager {
     config: AuthConfig,
 
     /// Principals (users/service accounts)
-    /// F-097: `parking_lot` — O(1) principal lookup, never held across `.await`.
+    /// `parking_lot` — O(1) principal lookup, never held across `.await`.
     principals: RwLock<HashMap<String, Principal>>,
 
     /// Roles
@@ -940,6 +940,10 @@ impl AuthManager {
     // ========================================================================
 
     /// Create a new principal (user or service account)
+    ///
+    /// Note: `PasswordHash::new()` runs 600K PBKDF2 iterations (~100-500ms).
+    /// Callers on async contexts should use `create_principal_async()` instead to
+    /// avoid blocking the tokio runtime.
     pub fn create_principal(
         &self,
         name: &str,
@@ -1017,6 +1021,9 @@ impl AuthManager {
     }
 
     /// Update principal password
+    ///
+    /// Note: `PasswordHash::new()` runs 600K PBKDF2 iterations.
+    /// Callers on async contexts should use `update_password_async()` instead.
     pub fn update_password(&self, name: &str, new_password: &str) -> AuthResult<()> {
         // Validate password strength (minimum requirements + complexity)
         validate_password_strength(new_password)?;
@@ -1030,6 +1037,86 @@ impl AuthManager {
         principal.password_hash = PasswordHash::new(new_password);
 
         // Invalidate sessions
+        let mut sessions = self.sessions.write();
+        sessions.retain(|_, s| s.principal_name != name);
+
+        debug!("Updated password for principal: {}", name);
+        Ok(())
+    }
+
+    /// Async variant of `create_principal` that runs PBKDF2 hashing
+    /// in a blocking thread pool to avoid blocking the tokio runtime.
+    pub async fn create_principal_async(
+        &self,
+        name: &str,
+        password: &str,
+        principal_type: PrincipalType,
+        roles: HashSet<String>,
+    ) -> AuthResult<()> {
+        // Validate inputs before spawning blocking work
+        if name.is_empty() || name.len() > 255 {
+            return Err(AuthError::Internal("Invalid principal name".to_string()));
+        }
+        validate_password_strength(password)?;
+        {
+            let role_map = self.roles.read();
+            for role in &roles {
+                if !role_map.contains_key(role) {
+                    return Err(AuthError::RoleNotFound(role.clone()));
+                }
+            }
+        }
+        if self.principals.read().contains_key(name) {
+            return Err(AuthError::PrincipalAlreadyExists(name.to_string()));
+        }
+
+        // Run expensive PBKDF2 off the tokio thread
+        let password_hash = PasswordHash::new_async(password).await;
+
+        let mut principals = self.principals.write();
+        // Re-check after async gap
+        if principals.contains_key(name) {
+            return Err(AuthError::PrincipalAlreadyExists(name.to_string()));
+        }
+
+        let principal = Principal {
+            name: name.to_string(),
+            principal_type,
+            password_hash,
+            roles,
+            enabled: true,
+            metadata: HashMap::new(),
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+
+        principals.insert(name.to_string(), principal);
+        debug!("Created principal: {}", name);
+        Ok(())
+    }
+
+    /// Async variant of `update_password` that runs PBKDF2 hashing
+    /// in a blocking thread pool to avoid blocking the tokio runtime.
+    pub async fn update_password_async(&self, name: &str, new_password: &str) -> AuthResult<()> {
+        validate_password_strength(new_password)?;
+
+        // Verify principal exists before expensive hash
+        if !self.principals.read().contains_key(name) {
+            return Err(AuthError::PrincipalNotFound(name.to_string()));
+        }
+
+        // Run expensive PBKDF2 off the tokio thread
+        let password_hash = PasswordHash::new_async(new_password).await;
+
+        let mut principals = self.principals.write();
+        let principal = principals
+            .get_mut(name)
+            .ok_or_else(|| AuthError::PrincipalNotFound(name.to_string()))?;
+
+        principal.password_hash = password_hash;
+
         let mut sessions = self.sessions.write();
         sessions.retain(|_, s| s.principal_name != name);
 
@@ -1655,7 +1742,7 @@ impl SaslScramAuth {
                 let rng = SystemRandom::new();
                 let mut fake_salt = vec![0u8; 32];
                 rng.fill(&mut fake_salt).expect("Failed to generate salt");
-                // F-060 fix: Use the same iteration count as real users (600000)
+                // Use the same iteration count as real users (600000)
                 // to prevent leaking user existence via timing differences.
                 (fake_salt, 600_000)
             }

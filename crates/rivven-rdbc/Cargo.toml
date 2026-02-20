@@ -27,8 +27,8 @@ postgres-tls = ["postgres", "dep:tokio-postgres-rustls", "dep:rustls", "dep:rust
 mysql-tls = ["mysql", "mysql_async?/rustls-tls"]
 sqlserver-tls = ["sqlserver", "tiberius?/rustls"]
 
-# Diagnostics and tracing
-pool-trace = ["dep:tracing"]
+# Diagnostics and verbose pool tracing
+pool-trace = []
 
 # Full feature set
 full = ["postgres", "mysql", "sqlserver", "tls"]
@@ -55,7 +55,10 @@ rust_decimal = { version = "1.36", features = ["serde", "db-tokio-postgres"] }
 uuid = { workspace = true }
 
 # Logging
-tracing = { workspace = true, optional = true }
+tracing = { workspace = true }
+
+# Stream utilities (for RowStream implementations)
+futures-util = "0.3"
 
 # Type-safe SQL query builder (Postgres + MySQL dialects)
 sea-query = { version = "0.32", features = ["backend-postgres", "backend-mysql", "thread-safe"] }

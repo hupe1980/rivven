@@ -457,11 +457,10 @@ impl<'a> SourceQueryBuilder<'a> {
                 }
                 // Add delay condition if specified
                 if let Some(_delay) = delay {
-                    conditions.push(format!(
-                        "{} < {} - INTERVAL '{}' SECOND",
-                        self.dialect.quote_identifier(column),
-                        self.dialect.current_timestamp(),
-                        _delay.as_secs()
+                    // use dialect-specific timestamp subtraction
+                    conditions.push(self.dialect.timestamp_subtract_seconds(
+                        &self.dialect.quote_identifier(column),
+                        _delay.as_secs(),
                     ));
                 }
             }

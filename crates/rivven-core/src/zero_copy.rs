@@ -70,7 +70,25 @@ pub struct ZeroCopyBuffer {
     layout: Layout,
 }
 
-// Safety: ZeroCopyBuffer uses atomic operations for thread safety
+// SAFETY :
+// `ZeroCopyBuffer` owns a raw `NonNull<u8>` heap allocation.
+// Thread-safety is guaranteed by the following invariants:
+//
+// 1. **Non-overlapping regions**: `reserve()` and `try_allocate()` use a CAS
+//    loop on `write_pos` (AtomicUsize with AcqRel ordering) to hand out
+//    disjoint `[offset..offset+len)` ranges. Two threads can never receive
+//    overlapping slices.
+//
+// 2. **No mutable aliasing**: `get_mut_slice()` is `pub(crate) unsafe` and
+//    may only be called by `BufferSlice::write()`, which holds the only
+//    reference to its reserved range. External callers cannot invoke it.
+//
+// 3. **Lifetime management**: Buffers are always wrapped in `Arc` (see
+//    `BufferPool`). `BufferSlice` stores an `Arc<ZeroCopyBuffer>`, keeping
+//    the allocation alive for the duration of any outstanding slice.
+//
+// 4. **Reset guard**: `reset()` is `pub(crate)` and must only be called when
+//    `Arc::strong_count() == 1` (enforced by `BufferPool::recycle`).
 unsafe impl Send for ZeroCopyBuffer {}
 unsafe impl Sync for ZeroCopyBuffer {}
 
@@ -82,10 +100,12 @@ impl ZeroCopyBuffer {
 
     /// Create a new zero-copy buffer with custom ID
     pub fn with_id(capacity: usize, id: u64) -> Self {
+        // Ensure capacity is at least one cache line to avoid zero-size layout
+        let capacity = capacity.max(CACHE_LINE_SIZE);
         // Align to cache line for optimal performance
         let aligned_capacity = (capacity + CACHE_LINE_SIZE - 1) & !(CACHE_LINE_SIZE - 1);
-        let layout =
-            Layout::from_size_align(aligned_capacity, CACHE_LINE_SIZE).expect("Invalid layout");
+        let layout = Layout::from_size_align(aligned_capacity, CACHE_LINE_SIZE)
+            .expect("BUG: aligned_capacity is always >= CACHE_LINE_SIZE and a multiple of it");
 
         // Safety: We're allocating with a valid layout
         let data = unsafe {
@@ -135,7 +155,7 @@ impl ZeroCopyBuffer {
     /// - No other `get_mut_slice` or `get_slice` call may alias this range
     ///   concurrently.
     ///
-    /// F-116 fix: restricted to `pub(crate)` to limit the blast radius of
+    /// restricted to `pub(crate)` to limit the blast radius of
     /// unsound usage. External users should go through `BufferSlice::write()`.
     #[allow(clippy::mut_from_ref)]
     pub(crate) unsafe fn get_mut_slice(&self, offset: usize, len: usize) -> &mut [u8] {
@@ -191,7 +211,11 @@ impl ZeroCopyBuffer {
     ///
     /// Resets the write position to 0. The caller must ensure exclusive ownership
     /// (e.g. `Arc::strong_count() == 1`) before calling.
-    pub fn reset(&self) -> bool {
+    ///
+    /// restricted to `pub(crate)` — callers outside the crate should
+    /// go through the `BufferPool` recycling path which enforces the
+    /// single-owner invariant.
+    pub(crate) fn reset(&self) -> bool {
         self.write_pos.store(0, Ordering::Release);
         true
     }
@@ -219,7 +243,7 @@ impl ZeroCopyBuffer {
         }
     }
 
-    /// Convert entire written portion to `Bytes` (F-113 fix: true zero-copy).
+    /// Convert entire written portion to `Bytes` (true zero-copy).
     ///
     /// Uses `Bytes::from_owner()` to wrap the `Arc<ZeroCopyBuffer>` without
     /// copying. The `Arc` keeps the buffer alive as long as the `Bytes`
@@ -229,7 +253,7 @@ impl ZeroCopyBuffer {
         if len == 0 {
             return Bytes::new();
         }
-        // F-113 fix: true zero-copy conversion.
+        // true zero-copy conversion.
         // We create a temporary struct that owns an Arc clone and implements
         // AsRef<[u8]> for interop with Bytes::from_owner (available since bytes 1.9+).
         // This avoids the Bytes::copy_from_slice that doubled memory usage.
@@ -241,7 +265,7 @@ impl ZeroCopyBuffer {
     }
 }
 
-/// F-113: Owned wrapper for true zero-copy `Bytes` conversion.
+/// Owned wrapper for true zero-copy `Bytes` conversion.
 ///
 /// Holds an `Arc<ZeroCopyBuffer>` and its length, implementing the traits
 /// needed for `Bytes::from_owner()`. The `Arc` keeps the underlying buffer
@@ -274,7 +298,7 @@ impl Drop for ZeroCopyBuffer {
 /// A slice view into a ZeroCopyBuffer
 /// Holds an `Arc` to the underlying buffer for safe, reference-counted access.
 ///
-/// F-046 fix: `Clone` intentionally NOT derived — cloning would enable aliased
+/// `Clone` intentionally NOT derived — cloning would enable aliased
 /// mutable references via `write()` / `as_mut_bytes()`, which is undefined behavior.
 /// Use `BufferSlice::share()` for a read-only shared view if needed.
 #[derive(Debug)]
@@ -325,7 +349,7 @@ impl BufferSlice {
         self.len
     }
 
-    /// Create a read-only shared view of this buffer region (F-046).
+    /// Create a read-only shared view of this buffer region.
     ///
     /// Unlike `Clone`, this returns a `BufferRef` that only supports
     /// immutable access, preventing aliased mutable references.
@@ -369,7 +393,7 @@ impl AsRef<[u8]> for BufferSlice {
 
 /// Pool of zero-copy buffers for efficient allocation.
 ///
-/// F-114 fix: enforces a maximum total buffer count to prevent unbounded
+/// enforces a maximum total buffer count to prevent unbounded
 /// memory growth under sustained high concurrency.
 pub struct ZeroCopyBufferPool {
     /// Free buffers available for use
@@ -384,7 +408,7 @@ pub struct ZeroCopyBufferPool {
     total_created: AtomicU64,
     /// Buffers currently in use
     in_use: AtomicU64,
-    /// Maximum total buffers allowed (F-114 fix)
+    /// Maximum total buffers allowed
     max_buffers: u64,
 }
 
@@ -392,7 +416,7 @@ impl ZeroCopyBufferPool {
     /// Create a new buffer pool.
     ///
     /// `initial_count` buffers are pre-allocated. Up to `initial_count * 4`
-    /// total buffers may be created under load (F-114 fix). Use
+    /// total buffers may be created under load . Use
     /// `with_max_buffers` for explicit control.
     pub fn new(buffer_size: usize, initial_count: usize) -> Self {
         Self::with_max_buffers(buffer_size, initial_count, (initial_count * 4) as u64)
@@ -426,7 +450,7 @@ impl ZeroCopyBufferPool {
     /// Get a buffer from the pool (or create a new one if under `max_buffers`).
     ///
     /// Returns `None` if the pool is exhausted and `max_buffers` has been
-    /// reached (F-114 fix). The caller should apply back-pressure.
+    /// reached . The caller should apply back-pressure.
     pub fn acquire(&self) -> Option<Arc<ZeroCopyBuffer>> {
         match self.buffer_receiver.try_recv() {
             Ok(buffer) => {
@@ -438,11 +462,14 @@ impl ZeroCopyBufferPool {
                 Some(buffer)
             }
             Err(_) => {
-                // F-114 fix: enforce max_buffers limit
-                let created = self.total_created.load(Ordering::Relaxed);
-                if created >= self.max_buffers {
+                // Use fetch_add-then-check to prevent TOCTOU race
+                // where multiple threads pass the limit check simultaneously.
+                let prev = self.total_created.fetch_add(1, Ordering::Relaxed);
+                if prev >= self.max_buffers {
+                    // Roll back — we exceeded the limit
+                    self.total_created.fetch_sub(1, Ordering::Relaxed);
                     tracing::warn!(
-                        total_created = created,
+                        total_created = prev,
                         max_buffers = self.max_buffers,
                         in_use = self.in_use.load(Ordering::Relaxed),
                         "Buffer pool exhausted — apply back-pressure"
@@ -453,25 +480,24 @@ impl ZeroCopyBufferPool {
                 // Create new buffer
                 let id = self.next_id.fetch_add(1, Ordering::Relaxed);
                 let buffer = Arc::new(ZeroCopyBuffer::with_id(self.buffer_size, id));
-                self.total_created.fetch_add(1, Ordering::Relaxed);
                 self.in_use.fetch_add(1, Ordering::Relaxed);
                 Some(buffer)
             }
         }
     }
 
-    /// Convenience wrapper that panics on pool exhaustion (for non-critical paths).
+    /// Return a buffer to the pool.
     ///
-    /// Prefer `acquire()` with proper back-pressure handling on the hot path.
-    pub fn acquire_or_panic(&self) -> Arc<ZeroCopyBuffer> {
-        self.acquire().expect("ZeroCopyBufferPool exhausted")
-    }
-
-    /// Return a buffer to the pool
+    /// # Safety note
+    /// The `Arc::strong_count == 1` check is inherently racy per the Arc docs,
+    /// but here it is acceptable: if another thread cloned the Arc between the
+    /// check and the `try_send`, the buffer simply won't be recycled (it will
+    /// be dropped when the last Arc ref goes away). The pool creates a fresh
+    /// buffer on the next `acquire()` instead. No data corruption is possible.
     pub fn release(&self, buffer: Arc<ZeroCopyBuffer>) {
         self.in_use.fetch_sub(1, Ordering::Relaxed);
 
-        // Only return to pool if we're the only holder
+        // Only return to pool if we're the sole holder
         if Arc::strong_count(&buffer) == 1 {
             buffer.reset();
             let _ = self.free_buffers.try_send(buffer);
@@ -657,7 +683,7 @@ pub struct ZeroCopyProducer {
     /// Buffer pool for allocating message buffers
     buffer_pool: Arc<ZeroCopyBufferPool>,
     /// Current write buffer
-    /// F-097: `parking_lot` — O(1) buffer swap, never held across `.await`.
+    /// `parking_lot` — O(1) buffer swap, never held across `.await`.
     current_buffer: parking_lot::Mutex<Option<Arc<ZeroCopyBuffer>>>,
     /// Interned topic names
     topic_cache: dashmap::DashMap<String, Arc<str>>,
@@ -810,7 +836,7 @@ pub struct ProducerStatsSnapshot {
 /// Zero-copy consumer for high-throughput message consumption
 pub struct ZeroCopyConsumer {
     /// Read buffer for batch reads
-    /// F-097: `parking_lot` — O(1) buffer access, never held across `.await`.
+    /// `parking_lot` — O(1) buffer access, never held across `.await`.
     read_buffer: parking_lot::Mutex<BytesMut>,
     /// Statistics
     stats: ConsumerStats,

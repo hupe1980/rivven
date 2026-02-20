@@ -122,10 +122,12 @@ async def stream():
     consumer = client.consumer("my-topic", group_id="my-group")
     
     # Process messages as an async stream
+    # The async iterator poll-retries on empty fetch (never raises StopAsyncIteration)
     async for message in consumer:
         print(f"Received: {message.value_str()}")
         
-        # Process and commit
+        # With auto_commit=True (default), offsets are committed per batch.
+        # Explicit commit is only needed with auto_commit=False:
         await consumer.commit()
 
 asyncio.run(stream())
@@ -292,6 +294,7 @@ Main client class for interacting with Rivven.
 
 - `producer(topic)` - Get a producer for the topic
 - `consumer(topic, group_id=None, auto_commit=True, isolation_level=None)` - Get a consumer
+- Async iteration: `async for msg in consumer` — poll-retries transparently on empty fetch; auto-commit fires per batch (not per message)
 
 #### Consumer Groups
 

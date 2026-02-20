@@ -295,7 +295,7 @@ impl CountingBloomFilter {
             self.decrement_counter(counter_index);
         }
 
-        // F-050: Prevent underflow — only decrement if count > 0
+        // Prevent underflow — only decrement if count > 0
         let _ = self
             .count
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |c| {

@@ -10,6 +10,20 @@ use crate::{Request, Response};
 use bytes::Bytes;
 use prost::Message;
 
+/// Safely convert a proto `u32` producer_epoch to the internal `u16`.
+///
+/// Returns an error if the value exceeds `u16::MAX`, preventing silent
+/// truncation of wire data from untrusted clients.
+fn safe_producer_epoch(epoch: u32) -> Result<u16, crate::ProtocolError> {
+    u16::try_from(epoch).map_err(|_| {
+        crate::ProtocolError::InvalidFormat(format!(
+            "producer_epoch {} exceeds u16::MAX ({})",
+            epoch,
+            u16::MAX
+        ))
+    })
+}
+
 // ============================================================================
 // Request Conversions
 // ============================================================================
@@ -60,6 +74,7 @@ impl Request {
                 partition,
                 key,
                 value,
+                leader_epoch,
             } => Some(RequestType::Publish(proto::PublishRequest {
                 topic: topic.clone(),
                 partition: *partition,
@@ -68,7 +83,9 @@ impl Request {
                     value: value.to_vec(),
                     headers: vec![],
                     timestamp: 0,
+                    has_key: key.is_some(),
                 }),
+                leader_epoch: *leader_epoch,
             })),
 
             Request::Consume {
@@ -77,13 +94,15 @@ impl Request {
                 offset,
                 max_messages,
                 isolation_level,
+                max_wait_ms,
             } => Some(RequestType::Consume(proto::ConsumeRequest {
                 topic: topic.clone(),
                 partition: *partition,
                 offset: *offset,
-                max_messages: *max_messages as u32,
+                max_messages: u32::try_from(*max_messages).unwrap_or(u32::MAX),
                 max_bytes: 0,
                 isolation_level: isolation_level.unwrap_or(0) as u32,
+                max_wait_ms: *max_wait_ms,
             })),
 
             Request::GetMetadata { topic } => {
@@ -179,6 +198,7 @@ impl Request {
                 producer_id,
                 producer_epoch,
                 sequence,
+                leader_epoch,
             } => Some(RequestType::IdempotentPublish(
                 proto::IdempotentPublishRequest {
                     topic: topic.clone(),
@@ -188,10 +208,12 @@ impl Request {
                         value: value.to_vec(),
                         headers: vec![],
                         timestamp: 0,
+                        has_key: key.is_some(),
                     }),
                     producer_id: *producer_id,
                     producer_epoch: *producer_epoch as u32,
                     sequence: *sequence,
+                    leader_epoch: *leader_epoch,
                 },
             )),
 
@@ -311,6 +333,7 @@ impl Request {
                 producer_id,
                 producer_epoch,
                 sequence,
+                leader_epoch,
             } => Some(RequestType::TransactionalPublish(
                 proto::TransactionalPublishRequest {
                     txn_id: txn_id.clone(),
@@ -321,10 +344,12 @@ impl Request {
                         value: value.to_vec(),
                         headers: vec![],
                         timestamp: 0,
+                        has_key: key.is_some(),
                     }),
                     producer_id: *producer_id,
                     producer_epoch: *producer_epoch as u32,
                     sequence: *sequence,
+                    leader_epoch: *leader_epoch,
                 },
             )),
 
@@ -451,12 +476,13 @@ impl Request {
                 Ok(Request::Publish {
                     topic: req.topic.clone(),
                     partition: req.partition,
-                    key: if record.key.is_empty() {
-                        None
-                    } else {
+                    key: if record.has_key {
                         Some(Bytes::from(record.key.clone()))
+                    } else {
+                        None
                     },
                     value: Bytes::from(record.value.clone()),
+                    leader_epoch: req.leader_epoch,
                 })
             }
 
@@ -466,10 +492,17 @@ impl Request {
                 offset: req.offset,
                 max_messages: req.max_messages as usize,
                 isolation_level: if req.isolation_level > 0 {
-                    Some(req.isolation_level as u8)
+                    Some(u8::try_from(req.isolation_level).map_err(|_| {
+                        crate::ProtocolError::InvalidFormat(format!(
+                            "isolation_level {} exceeds u8::MAX ({})",
+                            req.isolation_level,
+                            u8::MAX
+                        ))
+                    })?)
                 } else {
                     None
                 },
+                max_wait_ms: req.max_wait_ms,
             }),
 
             RequestType::GetMetadata(req) => Ok(Request::GetMetadata {
@@ -544,35 +577,36 @@ impl Request {
                 Ok(Request::IdempotentPublish {
                     topic: req.topic.clone(),
                     partition: req.partition,
-                    key: if record.key.is_empty() {
-                        None
-                    } else {
+                    key: if record.has_key {
                         Some(Bytes::from(record.key.clone()))
+                    } else {
+                        None
                     },
                     value: Bytes::from(record.value.clone()),
                     producer_id: req.producer_id,
-                    producer_epoch: req.producer_epoch as u16,
+                    producer_epoch: safe_producer_epoch(req.producer_epoch)?,
                     sequence: req.sequence,
+                    leader_epoch: req.leader_epoch,
                 })
             }
 
             RequestType::BeginTransaction(req) => Ok(Request::BeginTransaction {
                 txn_id: req.txn_id.clone(),
                 producer_id: req.producer_id,
-                producer_epoch: req.producer_epoch as u16,
+                producer_epoch: safe_producer_epoch(req.producer_epoch)?,
                 timeout_ms: req.timeout_ms,
             }),
 
             RequestType::CommitTransaction(req) => Ok(Request::CommitTransaction {
                 txn_id: req.txn_id.clone(),
                 producer_id: req.producer_id,
-                producer_epoch: req.producer_epoch as u16,
+                producer_epoch: safe_producer_epoch(req.producer_epoch)?,
             }),
 
             RequestType::AbortTransaction(req) => Ok(Request::AbortTransaction {
                 txn_id: req.txn_id.clone(),
                 producer_id: req.producer_id,
-                producer_epoch: req.producer_epoch as u16,
+                producer_epoch: safe_producer_epoch(req.producer_epoch)?,
             }),
 
             RequestType::AlterTopicConfig(req) => Ok(Request::AlterTopicConfig {
@@ -623,22 +657,23 @@ impl Request {
                     txn_id: req.txn_id.clone(),
                     topic: req.topic.clone(),
                     partition: req.partition,
-                    key: if record.key.is_empty() {
-                        None
-                    } else {
+                    key: if record.has_key {
                         Some(Bytes::from(record.key.clone()))
+                    } else {
+                        None
                     },
                     value: Bytes::from(record.value.clone()),
                     producer_id: req.producer_id,
-                    producer_epoch: req.producer_epoch as u16,
+                    producer_epoch: safe_producer_epoch(req.producer_epoch)?,
                     sequence: req.sequence,
+                    leader_epoch: req.leader_epoch,
                 })
             }
 
             RequestType::AddPartitionsToTxn(req) => Ok(Request::AddPartitionsToTxn {
                 txn_id: req.txn_id.clone(),
                 producer_id: req.producer_id,
-                producer_epoch: req.producer_epoch as u16,
+                producer_epoch: safe_producer_epoch(req.producer_epoch)?,
                 partitions: req
                     .partitions
                     .iter()
@@ -649,7 +684,7 @@ impl Request {
             RequestType::AddOffsetsToTxn(req) => Ok(Request::AddOffsetsToTxn {
                 txn_id: req.txn_id.clone(),
                 producer_id: req.producer_id,
-                producer_epoch: req.producer_epoch as u16,
+                producer_epoch: safe_producer_epoch(req.producer_epoch)?,
                 group_id: req.group_id.clone(),
                 offsets: req
                     .offsets
@@ -757,12 +792,17 @@ impl Response {
                                     value: v.clone(),
                                 })
                                 .collect(),
+                            has_key: m.key.is_some(),
                         })
                         .collect(),
                     high_watermark: 0,
                 }))
             }
 
+            //  note: Response::Metadata only carries topic name + partition count,
+            // not actual leader/replica/ISR placement. The proto conversion synthesizes
+            // placeholder values. gRPC clients that need leader-aware routing should
+            // use GetClusterMetadata instead, which returns real placement info.
             Response::Metadata { name, partitions } => {
                 Some(ResponseType::GetMetadata(proto::GetMetadataResponse {
                     topics: vec![proto::TopicMetadata {
@@ -787,7 +827,9 @@ impl Response {
 
             Response::Offset { offset } => {
                 Some(ResponseType::GetOffset(proto::GetOffsetResponse {
-                    offset: offset.map(|o| o as i64).unwrap_or(-1),
+                    offset: offset
+                        .map(|o| i64::try_from(o).unwrap_or(i64::MAX))
+                        .unwrap_or(-1),
                     metadata: String::new(),
                 }))
             }
@@ -797,7 +839,7 @@ impl Response {
                 expires_in,
             } => Some(ResponseType::Authenticate(proto::AuthenticateResponse {
                 session_id: session_id.clone(),
-                expires_in: *expires_in as u32,
+                expires_in: u32::try_from(*expires_in).unwrap_or(u32::MAX),
                 server_response: vec![],
             })),
 
@@ -820,11 +862,11 @@ impl Response {
                         .iter()
                         .map(|b| proto::BrokerInfo {
                             id: b.node_id.parse().unwrap_or_else(|_| {
-                                eprintln!(
-                                    "[WARN] BrokerInfo.id: failed to parse node_id '{}' as u32, defaulting to 0",
-                                    b.node_id
+                                tracing::warn!(
+                                    node_id = %b.node_id,
+                                    "BrokerInfo.id: failed to parse node_id as u32, using sentinel u32::MAX",
                                 );
-                                0
+                                u32::MAX
                             }),
                             host: b.host.clone(),
                             port: b.port as u32,
@@ -946,7 +988,7 @@ impl Response {
             } => Some(ResponseType::AlterTopicConfig(
                 proto::AlterTopicConfigResponse {
                     topic: topic.clone(),
-                    changed_count: *changed_count as u32,
+                    changed_count: u32::try_from(*changed_count).unwrap_or(u32::MAX),
                 },
             )),
 
@@ -1020,7 +1062,7 @@ impl Response {
             } => Some(ResponseType::PartitionsAddedToTxn(
                 proto::PartitionsAddedToTxnResponse {
                     txn_id: txn_id.clone(),
-                    partition_count: *partition_count as u32,
+                    partition_count: u32::try_from(*partition_count).unwrap_or(u32::MAX),
                 },
             )),
 
@@ -1057,7 +1099,7 @@ impl Response {
 
             Response::QuotasAltered { altered_count } => Some(ResponseType::QuotasAltered(
                 proto::QuotasAlteredResponse {
-                    altered_count: *altered_count as u32,
+                    altered_count: u32::try_from(*altered_count).unwrap_or(u32::MAX),
                 },
             )),
 
@@ -1131,10 +1173,10 @@ impl Response {
                         offset: r.offset,
                         partition: r.partition,
                         timestamp: r.timestamp,
-                        key: if r.key.is_empty() {
-                            None
-                        } else {
+                        key: if r.has_key {
                             Some(Bytes::from(r.key.clone()))
+                        } else {
+                            None
                         },
                         value: Bytes::from(r.value.clone()),
                         headers: r
@@ -1183,7 +1225,13 @@ impl Response {
                     .map(|b| crate::BrokerInfo {
                         node_id: b.id.to_string(),
                         host: b.host.clone(),
-                        port: b.port as u16,
+                        port: u16::try_from(b.port).unwrap_or_else(|_| {
+                            tracing::warn!(
+                                port = b.port,
+                                "BrokerInfo.port exceeds u16 range, clamping to u16::MAX"
+                            );
+                            u16::MAX
+                        }),
                         rack: if b.rack.is_empty() {
                             None
                         } else {
@@ -1248,7 +1296,7 @@ impl Response {
 
             ResponseType::InitProducerId(resp) => Ok(Response::ProducerIdInitialized {
                 producer_id: resp.producer_id,
-                producer_epoch: resp.producer_epoch as u16,
+                producer_epoch: safe_producer_epoch(resp.producer_epoch)?,
             }),
 
             ResponseType::IdempotentPublish(resp) => Ok(Response::IdempotentPublished {
@@ -1421,6 +1469,7 @@ mod tests {
             partition: Some(0),
             key: Some(Bytes::from("key-1")),
             value: Bytes::from("Hello, protobuf!"),
+            leader_epoch: Some(42),
         };
         let bytes = request.to_proto_bytes().unwrap();
         let decoded = Request::from_proto_bytes(&bytes).unwrap();
@@ -1430,12 +1479,14 @@ mod tests {
             partition,
             key,
             value,
+            leader_epoch,
         } = decoded
         {
             assert_eq!(topic, "my-topic");
             assert_eq!(partition, Some(0));
             assert_eq!(key, Some(Bytes::from("key-1")));
             assert_eq!(value, Bytes::from("Hello, protobuf!"));
+            assert_eq!(leader_epoch, Some(42));
         } else {
             panic!("Expected Publish");
         }

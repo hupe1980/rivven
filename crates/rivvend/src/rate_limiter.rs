@@ -44,38 +44,75 @@ impl Default for RateLimitConfig {
 }
 
 /// Token bucket for per-IP rate limiting
+///
+/// Fully lock-free implementation. The previous design used
+/// `RwLock<Instant>` for `last_refill`, causing nested lock acquisition
+/// when called from within `ip_states.read()`. Now uses `AtomicU64`
+/// storing microseconds since process start for lock-free refill timing.
 struct TokenBucket {
     tokens: AtomicU64,
-    last_refill: RwLock<Instant>,
+    /// Microseconds since `EPOCH` of the last refill (lock-free)
+    last_refill_us: AtomicU64,
     capacity: u64,
     refill_rate: u64, // tokens per second
+}
+
+/// Process-wide epoch for lock-free Instant→u64 conversion.
+/// Using `LazyLock` ensures a single initialization.
+static RATE_LIMITER_EPOCH: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
+
+fn instant_to_us(t: Instant) -> u64 {
+    t.duration_since(*RATE_LIMITER_EPOCH).as_micros() as u64
+}
+
+fn now_us() -> u64 {
+    instant_to_us(Instant::now())
 }
 
 impl TokenBucket {
     fn new(capacity: u64, refill_rate: u64) -> Self {
         Self {
             tokens: AtomicU64::new(capacity),
-            last_refill: RwLock::new(Instant::now()),
+            last_refill_us: AtomicU64::new(now_us()),
             capacity,
             refill_rate,
         }
     }
 
-    async fn try_acquire(&self) -> bool {
-        // Refill tokens based on elapsed time
-        let mut last = self.last_refill.write().await;
-        let elapsed = last.elapsed();
-        let refill_amount = (elapsed.as_secs_f64() * self.refill_rate as f64) as u64;
+    /// Try to acquire a token (lock-free).
+    ///
+    /// Refills tokens based on elapsed time since the last refill using
+    /// CAS on the `last_refill_us` atomic. Only one thread wins the refill
+    /// race; others proceed directly to token consumption.
+    fn try_acquire(&self) -> bool {
+        // Attempt refill via CAS on last_refill_us
+        let now = now_us();
+        let last = self.last_refill_us.load(Ordering::Acquire);
+        let elapsed_us = now.saturating_sub(last);
 
-        if refill_amount > 0 {
-            let current = self.tokens.load(Ordering::Acquire);
-            let new_tokens = (current + refill_amount).min(self.capacity);
-            self.tokens.store(new_tokens, Ordering::Release);
-            *last = Instant::now();
+        if elapsed_us > 0 {
+            let refill_amount = (elapsed_us as f64 / 1_000_000.0 * self.refill_rate as f64) as u64;
+            if refill_amount > 0 {
+                // CAS: only one thread wins the refill
+                if self
+                    .last_refill_us
+                    .compare_exchange_weak(last, now, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    // We won the refill race — add tokens atomically.
+                    // Must use fetch_update (CAS loop) to avoid overwriting
+                    // concurrent token consumption between our load and store.
+                    let cap = self.capacity;
+                    let _ =
+                        self.tokens
+                            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                                Some((current + refill_amount).min(cap))
+                            });
+                }
+            }
         }
-        drop(last);
 
-        // Try to consume a token
+        // Try to consume a token (CAS loop)
         loop {
             let current = self.tokens.load(Ordering::Acquire);
             if current == 0 {
@@ -98,8 +135,8 @@ struct IpState {
     connections: AtomicU32,
     /// Token bucket for rate limiting
     rate_bucket: TokenBucket,
-    /// Last activity time for cleanup
-    last_activity: RwLock<Instant>,
+    /// Last activity time (microseconds since RATE_LIMITER_EPOCH, lock-free)
+    last_activity_us: AtomicU64,
 }
 
 impl IpState {
@@ -108,7 +145,7 @@ impl IpState {
         Self {
             connections: AtomicU32::new(0),
             rate_bucket: TokenBucket::new(capacity, capacity), // refill fully per second
-            last_activity: RwLock::new(Instant::now()),
+            last_activity_us: AtomicU64::new(now_us()),
         }
     }
 
@@ -120,17 +157,19 @@ impl IpState {
         self.connections.load(Ordering::Relaxed)
     }
 
-    async fn try_rate_limit(&self) -> bool {
-        let result = self.rate_bucket.try_acquire().await;
+    /// Lock-free rate check — no nested locks required.
+    fn try_rate_limit(&self) -> bool {
+        let result = self.rate_bucket.try_acquire();
         if result {
-            *self.last_activity.write().await = Instant::now();
+            self.last_activity_us.store(now_us(), Ordering::Release);
         }
         result
     }
 
-    async fn is_stale(&self, timeout: Duration) -> bool {
-        let last = self.last_activity.read().await;
-        last.elapsed() > timeout && self.connections.load(Ordering::Relaxed) == 0
+    fn is_stale(&self, timeout: Duration) -> bool {
+        let last = self.last_activity_us.load(Ordering::Acquire);
+        let elapsed_us = now_us().saturating_sub(last);
+        elapsed_us > timeout.as_micros() as u64 && self.connections.load(Ordering::Relaxed) == 0
     }
 }
 
@@ -289,6 +328,11 @@ impl RateLimiter {
     }
 
     /// Check if a request should be allowed (rate limiting)
+    ///
+    /// If an IP has no `IpState` entry (e.g., requests forwarded via
+    /// a reverse proxy using X-Forwarded-For that never went through
+    /// `try_connection`), we now create the state on demand instead of
+    /// unconditionally allowing the request.
     pub async fn check_request(&self, ip: &IpAddr, request_size: usize) -> RequestResult {
         // Check request size
         if request_size > self.config.max_request_size {
@@ -305,10 +349,26 @@ impl RateLimiter {
             return RequestResult::Allowed;
         }
 
-        // Get IP state
-        let states = self.ip_states.read().await;
-        if let Some(state) = states.get(ip) {
-            if !state.try_rate_limit().await {
+        // Try read lock first (fast path)
+        {
+            let states = self.ip_states.read().await;
+            if let Some(state) = states.get(ip) {
+                if !state.try_rate_limit() {
+                    debug!("Rate limited request from {}", ip);
+                    CoreMetrics::increment_rate_limit_rejections();
+                    return RequestResult::RateLimited;
+                }
+                return RequestResult::Allowed;
+            }
+        }
+
+        // No entry — create on demand under write lock (double-check pattern)
+        {
+            let mut states = self.ip_states.write().await;
+            let state = states
+                .entry(*ip)
+                .or_insert_with(|| Arc::new(IpState::new(self.config.rate_limit_per_ip)));
+            if !state.try_rate_limit() {
                 debug!("Rate limited request from {}", ip);
                 CoreMetrics::increment_rate_limit_rejections();
                 return RequestResult::RateLimited;
@@ -339,7 +399,7 @@ impl RateLimiter {
 
         let mut to_remove = Vec::new();
         for (ip, state) in states.iter() {
-            if state.is_stale(stale_timeout).await {
+            if state.is_stale(stale_timeout) {
                 to_remove.push(*ip);
             }
         }

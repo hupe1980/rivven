@@ -260,21 +260,23 @@ async fn main() -> anyhow::Result<()> {
 ### High-Performance Producer
 
 ```rust
-use rivven_client::{Producer, ProducerConfig};
+use rivven_client::{Producer, ProducerConfig, CompressionType};
 use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Create producer with batching and sticky partitioning
+    // Create producer with batching, compression, and auth
     let config = ProducerConfig::builder()
         .bootstrap_servers(vec!["localhost:9092".to_string()])
         .batch_size(16384)           // 16 KB batches
         .linger_ms(5)                // 5ms linger for batching
+        .compression_type(CompressionType::Lz4)  // LZ4 batch compression
+        .auth("producer-app", "secure-password")  // SCRAM-SHA-256 auth
         .metadata_max_age(std::time::Duration::from_secs(300)) // 5 min metadata cache
         .max_in_flight_requests(5)   // Memory-bounded backpressure
         .build();
     
-    // Arc-based for thread-safe concurrent access
+    // Producer::new() connects with auto-handshake and auto-authentication
     let producer = Arc::new(Producer::new(config).await?);
     
     // Simple send (uses murmur2 partitioning like Kafka)

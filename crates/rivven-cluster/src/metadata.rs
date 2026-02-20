@@ -52,7 +52,7 @@ pub enum MetadataCommand {
         epoch: u64,
     },
 
-    /// Update partition ISR (F-011 fix: includes leader epoch for fencing)
+    /// Update partition ISR (includes leader epoch for fencing)
     UpdatePartitionIsr {
         partition: PartitionId,
         isr: Vec<NodeId>,
@@ -132,7 +132,7 @@ pub enum MetadataResponse {
     ConsumerGroupDeleted {
         group_id: GroupId,
     },
-    /// Per-command responses from a Batch command (F-012 fix)
+    /// Per-command responses from a Batch command
     BatchResponses(Vec<MetadataResponse>),
     Error {
         message: String,
@@ -212,13 +212,13 @@ impl ClusterMetadata {
                 // Best-effort: each command is applied independently — some may
                 // succeed while others fail. The entire batch is a single Raft
                 // log entry (atomic at the consensus level), but individual
-                // command failures do NOT roll back prior successes. (F-013 fix)
+                // command failures do NOT roll back prior successes.
                 let mut responses = Vec::with_capacity(commands.len());
                 for cmd in commands {
                     let resp = self.apply(index, cmd);
                     responses.push(resp);
                 }
-                // Return per-command responses so callers can inspect each result (F-012 fix)
+                // Return per-command responses so callers can inspect each result
                 MetadataResponse::BatchResponses(responses)
             }
         }
@@ -230,6 +230,10 @@ impl ClusterMetadata {
         config: TopicConfig,
         partition_assignments: Vec<Vec<NodeId>>,
     ) -> MetadataResponse {
+        // Validate topic name
+        if let Err(msg) = Self::validate_topic_name(&config.name) {
+            return MetadataResponse::Error { message: msg };
+        }
         if self.topics.contains_key(&config.name) {
             return MetadataResponse::Error {
                 message: format!("Topic {} already exists", config.name),
@@ -244,6 +248,26 @@ impl ClusterMetadata {
         self.epoch += 1;
 
         MetadataResponse::TopicCreated { name, partitions }
+    }
+
+    /// Validate a topic name for safety and compatibility.
+    fn validate_topic_name(name: &str) -> std::result::Result<(), String> {
+        if name.is_empty() {
+            return Err("Topic name cannot be empty".into());
+        }
+        if name.len() > 249 {
+            return Err(format!(
+                "Topic name too long: {} chars (max 249)",
+                name.len()
+            ));
+        }
+        if name == "." || name == ".." {
+            return Err("Topic name cannot be '.' or '..'".into());
+        }
+        if name.contains(|c: char| c == '/' || c == '\\' || c == '\0' || c.is_control()) {
+            return Err("Topic name contains invalid characters".into());
+        }
+        Ok(())
     }
 
     /// Delete a topic
@@ -330,7 +354,7 @@ impl ClusterMetadata {
         }
     }
 
-    /// Update partition ISR (F-011 fix: epoch-fenced)
+    /// Update partition ISR (epoch-fenced)
     fn update_partition_isr(
         &mut self,
         partition: &PartitionId,
@@ -339,7 +363,7 @@ impl ClusterMetadata {
     ) -> MetadataResponse {
         if let Some(topic) = self.topics.get_mut(&partition.topic) {
             if let Some(p) = topic.partition_mut(partition.partition) {
-                // F-011 fix: reject stale-epoch ISR updates to prevent split-brain
+                // reject stale-epoch ISR updates to prevent split-brain
                 if leader_epoch < p.leader_epoch {
                     return MetadataResponse::Error {
                         message: format!(

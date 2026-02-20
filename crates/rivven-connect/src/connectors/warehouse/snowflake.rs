@@ -471,7 +471,7 @@ pub struct SnowflakeSink {
 
 #[cfg(feature = "snowflake")]
 impl SnowflakeSink {
-    /// Create a new Snowflake sink with custom timeout (F-117 fix: returns Result)
+    /// Create a new Snowflake sink with custom timeout (returns Result)
     pub fn try_with_timeout(timeout: Duration) -> std::result::Result<Self, reqwest::Error> {
         let client = reqwest::Client::builder()
             .timeout(timeout)
@@ -492,7 +492,7 @@ impl SnowflakeSink {
         Self::try_with_timeout(timeout)
     }
 
-    /// Create a new Snowflake sink with full configuration (F-117 fix: returns Result)
+    /// Create a new Snowflake sink with full configuration (returns Result)
     pub fn try_with_config(
         config: &SnowflakeSinkConfig,
     ) -> std::result::Result<Self, reqwest::Error> {

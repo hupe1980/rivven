@@ -393,7 +393,7 @@ pub fn derive_transform_config(input: TokenStream) -> TokenStream {
     });
     let version = attrs.version.unwrap_or_else(|| "0.0.1".to_string());
 
-    // F-079 fix: Use `.description()` consistent with SourceConfig/SinkConfig
+    // Use `.description()` consistent with SourceConfig/SinkConfig
     let description_code = match attrs.description {
         Some(desc) => quote! { .description(#desc) },
         None => quote! {},
@@ -477,7 +477,7 @@ pub fn connector_spec(attr: TokenStream, item: TokenStream) -> TokenStream {
     let name = attrs.name.unwrap_or_else(|| "unknown".to_string());
     let version = attrs.version.unwrap_or_else(|| "0.0.1".to_string());
 
-    // F-079 fix: Use `.description()` and `.documentation_url()` consistent with builder API
+    // Use `.description()` and `.documentation_url()` consistent with builder API
     let description_code = match attrs.description {
         Some(desc) => quote! { .description(#desc) },
         None => quote! {},

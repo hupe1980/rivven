@@ -298,6 +298,14 @@ storage:
 
 Compaction runs during tier migration to minimize I/O impact.
 
+### Safety Guarantees
+
+All tier operations follow **write-then-remove** ordering to prevent data loss:
+
+- **Compaction**: New compacted data is written BEFORE old data is removed. If the write fails, the original data remains intact.
+- **Demotion** (hot→warm, warm→cold): Data is written to the destination tier and confirmed before removal from the source tier.
+- **Promotion** (cold→warm, warm→hot): Data is copied to the destination tier, then the source copy is cleaned up. Promotion failures leave data safely in the original tier.
+
 ### Crash-Recovery Journal
 
 Tier migrations are protected by an append-only journal (`migrations.journal`) stored in the warm tier directory:

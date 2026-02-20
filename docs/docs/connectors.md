@@ -871,6 +871,7 @@ The connector records the following metrics (via the `metrics` crate):
 - **Retryable errors**: Network failures, connection timeouts, temporary server errors, stream closed by server. Automatically recovered when `recovery: true`.
 - **Non-retryable errors**: Invalid OAuth credentials, table not found, permission denied, schema mismatch. These abort the connector immediately.
 - **Unacknowledged records**: On stream failure, the connector logs the count of unacked records and adjusts metrics accordingly.
+- **Stream ID uniqueness**: Stream IDs include an atomic counter (`AtomicU64`) to guarantee uniqueness across rapid successive calls, preventing stream collisions during recovery scenarios.
 
 ### ClickHouse
 

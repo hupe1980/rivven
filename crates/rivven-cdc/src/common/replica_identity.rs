@@ -122,17 +122,29 @@ impl ReplicaIdentity {
     }
 
     /// Get the SQL command to change a table's replica identity.
+    ///
+    /// For `ReplicaIdentity::Index`, pass the index name via
+    /// `alter_table_sql_with_index` instead.
     pub fn alter_table_sql(schema: &str, table: &str, identity: ReplicaIdentity) -> String {
-        let identity_str = match identity {
-            ReplicaIdentity::Default => "DEFAULT",
-            ReplicaIdentity::Nothing => "NOTHING",
-            ReplicaIdentity::Full => "FULL",
-            ReplicaIdentity::Index => "USING INDEX index_name", // placeholder
-            ReplicaIdentity::Unknown(_) => "DEFAULT",
+        let identity_clause = match identity {
+            ReplicaIdentity::Default => "DEFAULT".to_string(),
+            ReplicaIdentity::Nothing => "NOTHING".to_string(),
+            ReplicaIdentity::Full => "FULL".to_string(),
+            // Index without a name falls back to FULL
+            ReplicaIdentity::Index => "FULL".to_string(),
+            ReplicaIdentity::Unknown(_) => "DEFAULT".to_string(),
         };
         format!(
             "ALTER TABLE \"{}\".\"{}\" REPLICA IDENTITY {}",
-            schema, table, identity_str
+            schema, table, identity_clause
+        )
+    }
+
+    /// Get the SQL command to set REPLICA IDENTITY to a specific index.
+    pub fn alter_table_sql_with_index(schema: &str, table: &str, index_name: &str) -> String {
+        format!(
+            "ALTER TABLE \"{}\".\"{}\" REPLICA IDENTITY USING INDEX \"{}\"",
+            schema, table, index_name
         )
     }
 }

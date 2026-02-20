@@ -217,13 +217,6 @@ impl ValidationEngine {
             ValidationRuleType::FieldType => self.validate_field_type(rule, schema_type, schema),
             ValidationRuleType::Regex => self.validate_regex(rule, schema),
             ValidationRuleType::JsonSchema => self.validate_json_schema(rule, schema),
-            ValidationRuleType::Cel => {
-                // CEL expressions require a CEL evaluator which is not yet available
-                Err(crate::error::SchemaError::Validation(format!(
-                    "CEL validation rule '{}' is not supported; remove it or use a supported rule type",
-                    rule.name
-                )))
-            }
         }
     }
 
@@ -278,7 +271,10 @@ impl ValidationEngine {
             SchemaError::Validation(format!("Invalid naming_convention config: {}", e))
         })?;
 
-        let regex = regex::Regex::new(&config.pattern)
+        // size-limited regex to prevent ReDoS from adversarial patterns
+        let regex = regex::RegexBuilder::new(&config.pattern)
+            .size_limit(1_000_000)
+            .build()
             .map_err(|e| SchemaError::Validation(format!("Invalid regex pattern: {}", e)))?;
 
         // Extract name based on schema type
@@ -344,10 +340,12 @@ impl ValidationEngine {
                 }
             }
             SchemaType::Protobuf => {
-                // Simplified protobuf field check
-                if schema.contains(&format!("{} ", config.field))
-                    || schema.contains(&format!("{};", config.field))
-                {
+                // use word-boundary regex to avoid partial field name matches
+                let field_pattern = format!(r"\b{}\b", regex::escape(&config.field));
+                let field_regex = regex::Regex::new(&field_pattern).map_err(|e| {
+                    SchemaError::Validation(format!("Invalid field pattern: {}", e))
+                })?;
+                if field_regex.is_match(schema) {
                     Ok(ValidationResult::pass(&rule.name))
                 } else {
                     Ok(ValidationResult::fail(
@@ -426,7 +424,10 @@ impl ValidationEngine {
         let config: Config = serde_json::from_str(&rule.config)
             .map_err(|e| SchemaError::Validation(format!("Invalid regex config: {}", e)))?;
 
-        let regex = regex::Regex::new(&config.pattern)
+        // size-limited regex to prevent ReDoS from adversarial patterns
+        let regex = regex::RegexBuilder::new(&config.pattern)
+            .size_limit(1_000_000)
+            .build()
             .map_err(|e| SchemaError::Validation(format!("Invalid regex pattern: {}", e)))?;
 
         let matches = regex.is_match(schema);
@@ -502,7 +503,11 @@ impl ValidationEngine {
         {
             let _ = (rule, schema); // Suppress unused warnings
             tracing::warn!("JSON Schema validation requires the 'json-schema' feature");
-            Ok(ValidationResult::pass(&rule.name))
+            Ok(ValidationResult::fail(
+                &rule.name,
+                ValidationLevel::Warning,
+                "JSON Schema validation skipped: 'json-schema' feature not enabled",
+            ))
         }
     }
 }

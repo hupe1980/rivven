@@ -261,7 +261,7 @@ fn glob_to_regex(pattern: &str) -> String {
 // ============================================================================
 
 /// Global pattern cache for frequently used patterns
-/// F-097: `parking_lot` — O(1) pattern cache lookup, never held across `.await`.
+/// `parking_lot` — O(1) pattern cache lookup, never held across `.await`.
 static PATTERN_CACHE: LazyLock<
     parking_lot::RwLock<std::collections::HashMap<String, PatternMatcher>>,
 > = LazyLock::new(|| parking_lot::RwLock::new(std::collections::HashMap::new()));

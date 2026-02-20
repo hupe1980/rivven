@@ -4,6 +4,25 @@
 //! in-flight requests over a single connection, dramatically improving throughput
 //! for batch operations.
 //!
+//! # Wire Format Divergence (§10.3)
+//!
+//! The pipeline framing is **intentionally different** from the standard protocol:
+//!
+//! | Aspect       | Standard                          | Pipeline                                   |
+//! |-------------|-----------------------------------|-------------------------------------------|
+//! | Length       | 4 bytes (u32 BE)                  | 4 bytes (u32 BE)                          |
+//! | Request ID   | 4-byte correlation_id (in header) | **8-byte u64 request_id** (prepended)     |
+//! | Payload      | `[fmt:1][corr_id:4][body]`        | `[req_id:8][fmt:1][corr_id=0:4][body]`    |
+//!
+//! This design is deliberate: the pipeline uses 8-byte request IDs for a larger
+//! ID space (2^64 vs 2^32), while the correlation_id inside the standard wire
+//! bytes is hardcoded to 0. The server-side pipeline handler [`crate::pipeline`]
+//! strips the 8-byte prefix and dispatches accordingly.
+//!
+//! The two framing modes are **not interchangeable** — a pipeline client cannot
+//! connect to a standard protocol endpoint and vice versa. They use separate
+//! TCP listeners.
+//!
 //! # Features
 //!
 //! - **Request multiplexing**: Multiple requests share one TCP connection
@@ -287,7 +306,11 @@ impl Clone for PipelinedClient {
 
 impl PipelinedClient {
     /// Connect to a Rivven server with request pipelining
+    ///
+    /// When `config.auth` is set, authenticates using SCRAM-SHA-256
+    /// immediately after establishing the pipeline, before returning the client.
     pub async fn connect(addr: &str, config: PipelineConfig) -> Result<Self> {
+        let auth_config = config.auth.clone();
         let stream = TcpStream::connect(addr)
             .await
             .map_err(|e| Error::ConnectionError(e.to_string()))?;
@@ -307,11 +330,21 @@ impl PipelinedClient {
                 .await
                 .map_err(|e| Error::ConnectionError(format!("TLS handshake error: {e}")))?;
             let (read_half, write_half) = tokio::io::split(tls_stream);
-            return Self::setup_pipeline(addr, config, read_half, write_half).await;
+            let client = Self::setup_pipeline(addr, config, read_half, write_half).await?;
+            // authenticate after pipeline setup
+            if let Some(auth) = &auth_config {
+                Self::pipeline_authenticate(&client, &auth.username, &auth.password).await?;
+            }
+            return Ok(client);
         }
 
         let (read_half, write_half) = stream.into_split();
-        Self::setup_pipeline(addr, config, read_half, write_half).await
+        let client = Self::setup_pipeline(addr, config, read_half, write_half).await?;
+        // authenticate after pipeline setup
+        if let Some(auth) = &auth_config {
+            Self::pipeline_authenticate(&client, &auth.username, &auth.password).await?;
+        }
+        Ok(client)
     }
 
     /// Internal method to set up the pipeline tasks from a split stream
@@ -383,6 +416,100 @@ impl PipelinedClient {
     pub async fn close(&self) {
         // Signal shutdown to background tasks
         let _ = self.inner.shutdown.send(true);
+    }
+
+    /// Perform SCRAM-SHA-256 authentication over the pipeline.
+    ///
+    /// Reuses the crate-level SCRAM helpers from `client.rs` but sends
+    /// requests/responses through the pipeline's `send_request()` path.
+    async fn pipeline_authenticate(
+        client: &PipelinedClient,
+        username: &str,
+        password: &str,
+    ) -> Result<()> {
+        use crate::client::{
+            base64_decode, base64_encode, escape_username, generate_nonce, parse_server_first,
+            pbkdf2_sha256, sha256, xor_bytes,
+        };
+        use rivven_core::PasswordHash;
+
+        // Step 1: Send client-first
+        let client_nonce = generate_nonce();
+        let client_first_bare = format!("n={},r={}", escape_username(username), client_nonce);
+        let client_first = format!("n,,{}", client_first_bare);
+
+        let response = client
+            .send_request(Request::ScramClientFirst {
+                message: Bytes::from(client_first.clone()),
+            })
+            .await?;
+
+        // Step 2: Parse server-first
+        let server_first = match response {
+            Response::ScramServerFirst { message } => String::from_utf8(message.to_vec())
+                .map_err(|_| Error::AuthenticationFailed("Invalid server-first encoding".into()))?,
+            Response::Error { message } => return Err(Error::AuthenticationFailed(message)),
+            _ => return Err(Error::InvalidResponse),
+        };
+
+        let (combined_nonce, salt_b64, iterations) = parse_server_first(&server_first)?;
+
+        if !combined_nonce.starts_with(&client_nonce) {
+            return Err(Error::AuthenticationFailed("Server nonce mismatch".into()));
+        }
+
+        let salt = base64_decode(&salt_b64)
+            .map_err(|_| Error::AuthenticationFailed("Invalid salt encoding".into()))?;
+
+        // Step 3: Compute proof and send client-final
+        let salted_password = pbkdf2_sha256(password.as_bytes(), &salt, iterations);
+        let client_key = PasswordHash::hmac_sha256(&salted_password, b"Client Key");
+        let stored_key = sha256(&client_key);
+
+        let client_final_without_proof = format!("c=biws,r={}", combined_nonce);
+        let auth_message = format!(
+            "{},{},{}",
+            client_first_bare, server_first, client_final_without_proof
+        );
+
+        let client_signature = PasswordHash::hmac_sha256(&stored_key, auth_message.as_bytes());
+        let client_proof = xor_bytes(&client_key, &client_signature);
+
+        let client_final = format!(
+            "{},p={}",
+            client_final_without_proof,
+            base64_encode(&client_proof)
+        );
+
+        let response = client
+            .send_request(Request::ScramClientFinal {
+                message: Bytes::from(client_final),
+            })
+            .await?;
+
+        // Step 4: Verify server-final
+        match response {
+            Response::ScramServerFinal { message, .. } => {
+                let verifier = String::from_utf8(message.to_vec())
+                    .map_err(|_| Error::AuthenticationFailed("Invalid server-final".into()))?;
+
+                // Verify server signature
+                let server_key = PasswordHash::hmac_sha256(&salted_password, b"Server Key");
+                let expected_sig = PasswordHash::hmac_sha256(&server_key, auth_message.as_bytes());
+                let expected_verifier = format!("v={}", base64_encode(&expected_sig));
+
+                if verifier != expected_verifier {
+                    return Err(Error::AuthenticationFailed(
+                        "Server signature mismatch".into(),
+                    ));
+                }
+
+                tracing::info!("Pipeline SCRAM auth successful for '{}'", username);
+                Ok(())
+            }
+            Response::Error { message } => Err(Error::AuthenticationFailed(message)),
+            _ => Err(Error::InvalidResponse),
+        }
     }
 
     /// Send a request and wait for the response
@@ -460,6 +587,7 @@ impl PipelinedClient {
             partition: None,
             key: None,
             value: value.into(),
+            leader_epoch: None,
         };
 
         match self.send_request(request).await? {
@@ -481,6 +609,7 @@ impl PipelinedClient {
             partition: None,
             key: Some(key.into()),
             value: value.into(),
+            leader_epoch: None,
         };
 
         match self.send_request(request).await? {
@@ -608,9 +737,12 @@ async fn flush_batch<W: tokio::io::AsyncWrite + Unpin>(
 ) -> std::io::Result<()> {
     let mut pending_guard = pending.lock().await;
 
+    // capture count before drain() empties the vec
+    let batch_count = batch.len();
+
     for req in batch.drain(..) {
         // Write length-prefixed request
-        let len = req.data.len() as u32;
+        let len: u32 = req.data.len().try_into().unwrap_or(u32::MAX);
         writer.write_all(&len.to_be_bytes()).await?;
         writer.write_all(&req.data).await?;
 
@@ -619,7 +751,7 @@ async fn flush_batch<W: tokio::io::AsyncWrite + Unpin>(
     }
 
     writer.flush().await?;
-    trace!("Flushed batch of {} requests", batch.len());
+    trace!("Flushed batch of {} requests", batch_count);
     stats.batches_flushed.fetch_add(1, Ordering::Relaxed);
 
     Ok(())
@@ -661,6 +793,16 @@ async fn reader_task<R: tokio::io::AsyncRead + Unpin>(
             break; // Connection closed
         }
         let msg_len = u32::from_be_bytes(len_buf) as usize;
+
+        // Validate response size to prevent OOM from malicious/buggy servers
+        const MAX_PIPELINE_RESPONSE_SIZE: usize = 100 * 1024 * 1024; // 100 MB
+        if msg_len > MAX_PIPELINE_RESPONSE_SIZE {
+            warn!(
+                "Pipeline response too large: {} bytes (max {})",
+                msg_len, MAX_PIPELINE_RESPONSE_SIZE
+            );
+            break;
+        }
 
         if msg_len < 8 {
             warn!("Invalid response length: {}", msg_len);

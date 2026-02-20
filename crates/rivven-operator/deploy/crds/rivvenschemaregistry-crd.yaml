@@ -1,0 +1,617 @@
+# RivvenSchemaRegistry Custom Resource Definition
+# Provides declarative schema registry management for GitOps workflows
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: rivvenschemaregistries.rivven.hupe1980.github.io
+  labels:
+    app.kubernetes.io/name: rivven-operator
+    app.kubernetes.io/component: crd
+spec:
+  group: rivven.hupe1980.github.io
+  names:
+    kind: RivvenSchemaRegistry
+    listKind: RivvenSchemaRegistryList
+    plural: rivvenschemaregistries
+    singular: rivvenschemaregistry
+    shortNames:
+      - rsr
+    categories:
+      - rivven
+      - streaming
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Cluster
+          type: string
+          jsonPath: .spec.clusterRef.name
+        - name: Replicas
+          type: integer
+          jsonPath: .spec.replicas
+        - name: Ready
+          type: integer
+          jsonPath: .status.readyReplicas
+        - name: Schemas
+          type: integer
+          jsonPath: .status.schemasRegistered
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          required:
+            - spec
+          properties:
+            spec:
+              type: object
+              required:
+                - clusterRef
+              properties:
+                clusterRef:
+                  type: object
+                  description: Reference to the RivvenCluster this registry connects to
+                  required:
+                    - name
+                  properties:
+                    name:
+                      type: string
+                      description: Name of the RivvenCluster resource
+                    namespace:
+                      type: string
+                      description: Namespace of the RivvenCluster (defaults to same namespace)
+                replicas:
+                  type: integer
+                  minimum: 1
+                  maximum: 10
+                  default: 1
+                  description: Number of schema registry replicas
+                version:
+                  type: string
+                  default: latest
+                  description: Schema Registry version
+                image:
+                  type: string
+                  description: Custom container image (overrides version-based default)
+                imagePullPolicy:
+                  type: string
+                  enum: [Always, IfNotPresent, Never]
+                  default: IfNotPresent
+                  description: Image pull policy
+                imagePullSecrets:
+                  type: array
+                  items:
+                    type: string
+                  description: Image pull secrets
+                resources:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  description: Resource requests/limits
+                server:
+                  type: object
+                  description: HTTP server configuration
+                  properties:
+                    port:
+                      type: integer
+                      minimum: 1024
+                      maximum: 65535
+                      default: 8081
+                      description: HTTP server port
+                    bindAddress:
+                      type: string
+                      default: "0.0.0.0"
+                      description: Bind address
+                    timeoutSeconds:
+                      type: integer
+                      minimum: 1
+                      maximum: 300
+                      default: 30
+                      description: Request timeout in seconds
+                    maxRequestSize:
+                      type: integer
+                      minimum: 1024
+                      maximum: 104857600
+                      default: 10485760
+                      description: Maximum request body size in bytes
+                    corsEnabled:
+                      type: boolean
+                      default: false
+                      description: Enable CORS for web clients
+                    corsAllowedOrigins:
+                      type: array
+                      items:
+                        type: string
+                      description: CORS allowed origins (empty = all)
+                storage:
+                  type: object
+                  description: Storage backend configuration
+                  properties:
+                    mode:
+                      type: string
+                      enum: [memory, broker]
+                      default: broker
+                      description: "Storage mode: memory or broker"
+                    topic:
+                      type: string
+                      default: _schemas
+                      description: Rivven topic for broker-backed storage
+                    replicationFactor:
+                      type: integer
+                      minimum: 1
+                      maximum: 10
+                      default: 3
+                      description: Topic replication factor
+                    partitions:
+                      type: integer
+                      minimum: 1
+                      maximum: 100
+                      default: 1
+                      description: Topic partitions (usually 1 for ordered processing)
+                    normalize:
+                      type: boolean
+                      default: true
+                      description: Enable schema normalization
+                compatibility:
+                  type: object
+                  description: Compatibility configuration
+                  properties:
+                    defaultLevel:
+                      type: string
+                      enum:
+                        - BACKWARD
+                        - BACKWARD_TRANSITIVE
+                        - FORWARD
+                        - FORWARD_TRANSITIVE
+                        - FULL
+                        - FULL_TRANSITIVE
+                        - NONE
+                      default: BACKWARD
+                      description: Default compatibility level for new subjects
+                    allowOverrides:
+                      type: boolean
+                      default: true
+                      description: Allow per-subject compatibility overrides
+                    subjects:
+                      type: object
+                      additionalProperties:
+                        type: string
+                      description: Per-subject compatibility levels
+                schemas:
+                  type: object
+                  description: Schema format support configuration
+                  properties:
+                    avro:
+                      type: boolean
+                      default: true
+                      description: Enable Avro schema support
+                    jsonSchema:
+                      type: boolean
+                      default: true
+                      description: Enable JSON Schema support
+                    protobuf:
+                      type: boolean
+                      default: true
+                      description: Enable Protobuf schema support
+                    strictValidation:
+                      type: boolean
+                      default: true
+                      description: Strict schema validation
+                contexts:
+                  type: object
+                  description: Schema contexts (multi-tenant) configuration
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                      description: Enable schema contexts for multi-tenant isolation
+                    maxContexts:
+                      type: integer
+                      minimum: 0
+                      maximum: 10000
+                      default: 0
+                      description: Maximum number of contexts (0 = unlimited)
+                    predefined:
+                      type: array
+                      maxItems: 100
+                      items:
+                        type: object
+                        required:
+                          - name
+                        properties:
+                          name:
+                            type: string
+                            maxLength: 128
+                            description: Context name
+                          description:
+                            type: string
+                            maxLength: 512
+                            description: Context description
+                          active:
+                            type: boolean
+                            default: true
+                            description: Whether this context is active
+                      description: Pre-defined contexts to create on startup
+                validation:
+                  type: object
+                  description: Validation rules configuration
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                      description: Enable content validation rules
+                    maxSchemaSize:
+                      type: integer
+                      minimum: 1024
+                      maximum: 10485760
+                      default: 1048576
+                      description: Maximum schema size in bytes
+                    rules:
+                      type: array
+                      maxItems: 100
+                      items:
+                        type: object
+                        required:
+                          - name
+                          - ruleType
+                          - pattern
+                        properties:
+                          name:
+                            type: string
+                            maxLength: 128
+                            description: Rule name
+                          ruleType:
+                            type: string
+                            enum:
+                              - regex
+                              - field_exists
+                              - field_type
+                              - naming_convention
+                              - documentation
+                            description: Rule type
+                          pattern:
+                            type: string
+                            maxLength: 4096
+                            description: Rule configuration/pattern
+                          subjects:
+                            type: array
+                            items:
+                              type: string
+                            description: Subjects to apply this rule to (empty = all)
+                          schemaTypes:
+                            type: array
+                            items:
+                              type: string
+                            description: Schema types to apply this rule to
+                          level:
+                            type: string
+                            enum: [error, warning, info]
+                            default: error
+                            description: Validation level
+                          description:
+                            type: string
+                            maxLength: 512
+                            description: Rule description
+                      description: Pre-defined validation rules
+                auth:
+                  type: object
+                  description: Authentication configuration
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                      description: Enable authentication
+                    method:
+                      type: string
+                      enum: ["", basic, jwt, cedar]
+                      description: "Authentication method: basic, jwt, cedar"
+                    credentialsSecretRef:
+                      type: string
+                      description: Secret containing authentication credentials
+                    jwt:
+                      type: object
+                      description: JWT/OIDC configuration
+                      properties:
+                        issuerUrl:
+                          type: string
+                          description: OIDC issuer URL
+                        jwksUrl:
+                          type: string
+                          description: JWKS URL for key validation
+                        audience:
+                          type: string
+                          description: Required audience claim
+                        usernameClaim:
+                          type: string
+                          default: sub
+                          description: Claim to use for username
+                        rolesClaim:
+                          type: string
+                          default: roles
+                          description: Claim to use for roles
+                    users:
+                      type: array
+                      maxItems: 100
+                      items:
+                        type: object
+                        required:
+                          - username
+                        properties:
+                          username:
+                            type: string
+                            maxLength: 128
+                            description: Username
+                          passwordSecretKey:
+                            type: string
+                            description: Secret key containing password
+                          role:
+                            type: string
+                            enum: [admin, writer, reader]
+                            default: reader
+                            description: User role
+                          allowedSubjects:
+                            type: array
+                            items:
+                              type: string
+                            description: Allowed subjects (empty = all)
+                      description: Basic auth users
+                tls:
+                  type: object
+                  description: TLS configuration
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                      description: Enable TLS for HTTP server
+                    certSecretName:
+                      type: string
+                      description: Secret containing TLS certificates
+                    mtlsEnabled:
+                      type: boolean
+                      default: false
+                      description: Enable mTLS (mutual TLS)
+                    caSecretName:
+                      type: string
+                      description: CA secret name for mTLS
+                    brokerTlsEnabled:
+                      type: boolean
+                      default: false
+                      description: Enable TLS for broker connection
+                    brokerCertSecretName:
+                      type: string
+                      description: Secret for broker TLS certificates
+                metrics:
+                  type: object
+                  description: Metrics configuration
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: true
+                      description: Enable Prometheus metrics endpoint
+                    port:
+                      type: integer
+                      minimum: 1024
+                      maximum: 65535
+                      default: 9090
+                      description: Metrics endpoint port
+                    path:
+                      type: string
+                      default: /metrics
+                      description: Metrics endpoint path
+                    serviceMonitorEnabled:
+                      type: boolean
+                      default: false
+                      description: Create ServiceMonitor for Prometheus Operator
+                    scrapeInterval:
+                      type: string
+                      default: 30s
+                      description: ServiceMonitor scrape interval
+                external:
+                  type: object
+                  description: External registry configuration for mirroring/sync
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                      description: Enable external registry integration
+                    registryType:
+                      type: string
+                      enum: ["", confluent, glue]
+                      description: "External registry type: confluent or glue"
+                    confluentUrl:
+                      type: string
+                      description: Confluent Schema Registry URL
+                    glueRegistryArn:
+                      type: string
+                      description: AWS Glue registry ARN
+                    awsRegion:
+                      type: string
+                      description: AWS region for Glue
+                    syncMode:
+                      type: string
+                      enum: ["", mirror, push, bidirectional]
+                      description: "Sync mode: mirror, push, or bidirectional"
+                    syncSubjects:
+                      type: array
+                      items:
+                        type: string
+                      description: Subjects to sync (empty = all)
+                    syncIntervalSeconds:
+                      type: integer
+                      minimum: 10
+                      maximum: 86400
+                      default: 300
+                      description: Sync interval in seconds
+                    credentialsSecretRef:
+                      type: string
+                      description: Credentials secret reference
+                podAnnotations:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: Pod annotations
+                podLabels:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: Pod labels
+                env:
+                  type: array
+                  maxItems: 100
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                  description: Environment variables
+                nodeSelector:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: Node selector for pod scheduling
+                tolerations:
+                  type: array
+                  maxItems: 20
+                  items:
+                    type: object
+                    x-kubernetes-preserve-unknown-fields: true
+                  description: Pod tolerations
+                affinity:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  description: Pod affinity rules
+                serviceAccount:
+                  type: string
+                  description: Service account name
+                securityContext:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  description: Pod security context
+                containerSecurityContext:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  description: Container security context
+                livenessProbe:
+                  type: object
+                  description: Liveness probe configuration
+                  properties:
+                    initialDelaySeconds:
+                      type: integer
+                      default: 15
+                    periodSeconds:
+                      type: integer
+                      default: 10
+                    timeoutSeconds:
+                      type: integer
+                      default: 5
+                    failureThreshold:
+                      type: integer
+                      default: 3
+                readinessProbe:
+                  type: object
+                  description: Readiness probe configuration
+                  properties:
+                    initialDelaySeconds:
+                      type: integer
+                      default: 5
+                    periodSeconds:
+                      type: integer
+                      default: 5
+                    timeoutSeconds:
+                      type: integer
+                      default: 3
+                    failureThreshold:
+                      type: integer
+                      default: 3
+                podDisruptionBudget:
+                  type: object
+                  description: Pod disruption budget configuration
+                  properties:
+                    enabled:
+                      type: boolean
+                      default: false
+                    minAvailable:
+                      x-kubernetes-int-or-string: true
+                    maxUnavailable:
+                      x-kubernetes-int-or-string: true
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                  enum:
+                    - Pending
+                    - Provisioning
+                    - Running
+                    - Updating
+                    - Degraded
+                    - Failed
+                    - Deleting
+                  description: Current phase of the registry
+                replicas:
+                  type: integer
+                  description: Total number of replicas
+                readyReplicas:
+                  type: integer
+                  description: Number of ready replicas
+                schemasRegistered:
+                  type: integer
+                  description: Number of schemas registered
+                subjectsCount:
+                  type: integer
+                  description: Number of subjects
+                contextsCount:
+                  type: integer
+                  description: Number of active contexts
+                observedGeneration:
+                  type: integer
+                  format: int64
+                  description: Current observed generation
+                conditions:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - type
+                      - status
+                    properties:
+                      type:
+                        type: string
+                      status:
+                        type: string
+                        enum: ["True", "False", Unknown]
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      reason:
+                        type: string
+                      message:
+                        type: string
+                  description: Conditions describing registry state
+                endpoints:
+                  type: array
+                  items:
+                    type: string
+                  description: Registry endpoints (URLs)
+                storageStatus:
+                  type: string
+                  description: Storage backend status
+                externalSyncStatus:
+                  type: string
+                  description: External registry sync status
+                lastSyncTime:
+                  type: string
+                  format: date-time
+                  description: Last successful external sync time
+                lastUpdated:
+                  type: string
+                  format: date-time
+                  description: Last time the status was updated
+                message:
+                  type: string
+                  description: Error message if any

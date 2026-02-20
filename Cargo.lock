@@ -7400,6 +7400,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "socket2 0.5.10",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -7652,6 +7653,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -7664,6 +7666,7 @@ dependencies = [
  "rivven-client",
  "rivven-core",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -7674,6 +7677,7 @@ dependencies = [
  "chrono",
  "criterion",
  "flate2",
+ "futures-util",
  "hex",
  "mysql_async",
  "postgres-types",

@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-// F-108 fix: Use parking_lot::Mutex for non-async synchronization.
+// Use parking_lot::Mutex for non-async synchronization.
 // Unlike std::sync::Mutex, parking_lot::Mutex is non-poisoning (a panic
 // in one thread does not permanently break the mutex) and has better
 // contention behavior (adaptive spinning before syscall).
@@ -37,6 +37,23 @@ const LOG_SUFFIX: &str = "log";
 const INDEX_SUFFIX: &str = "index";
 /// Index every 4KB of data (sparse indexing for performance)
 const INDEX_INTERVAL_BYTES: u64 = 4096;
+
+/// Frame header size: 4 bytes CRC + 4 bytes length.
+const FRAME_HEADER_SIZE: usize = 8;
+
+/// Read a fixed-size byte array from a slice at a given offset, returning a
+/// corruption error instead of panicking if the slice is too small.
+#[inline]
+fn read_bytes<const N: usize>(data: &[u8], offset: usize) -> Result<[u8; N]> {
+    data.get(offset..offset + N)
+        .and_then(|s| s.try_into().ok())
+        .ok_or_else(|| {
+            Error::Other(format!(
+                "truncated frame: need {} bytes at offset {}",
+                N, offset
+            ))
+        })
+}
 
 /// Represents a segment of the log on disk
 /// A segment consists of a .log file (data) and a .index file (sparse index)
@@ -50,7 +67,7 @@ pub struct Segment {
     index_buffer: Vec<(u32, u64)>, // Relative offset -> Position
     /// Position of last index entry (for sparse indexing)
     last_index_position: u64,
-    /// Pending index entries to batch write (F-108 fix: parking_lot::Mutex — non-poisoning).
+    /// Pending index entries to batch write (parking_lot::Mutex — non-poisoning).
     pending_index_entries: SyncMutex<Vec<(u32, u64)>>,
     /// Fsync policy for segment writes (H-1 fix).
     /// Controls durability guarantees: None for OS page cache only,
@@ -63,7 +80,7 @@ pub struct Segment {
     /// Avoids creating a new mmap per read and moves the blocking
     /// mmap syscall off the hot path for repeat reads.
     cached_mmap: tokio::sync::RwLock<Option<Arc<Mmap>>>,
-    /// F-111 fix: Cached (min_ts, max_ts) for sealed segments.
+    /// Cached (min_ts, max_ts) for sealed segments.
     /// Once a segment is sealed, timestamps never change, so we cache
     /// the result of `timestamp_bounds()` to avoid repeated O(n) scans.
     cached_timestamp_bounds: SyncMutex<Option<Option<(i64, i64)>>>,
@@ -71,13 +88,15 @@ pub struct Segment {
     /// Allows the read path to skip acquiring the write mutex when
     /// no data is buffered, eliminating head-of-line blocking.
     write_dirty: AtomicBool,
-    /// F-136 fix: Duplicate file descriptor for deferred fsync.
+    /// Duplicate file descriptor for deferred fsync.
     /// Allows `sync_data()` to run AFTER releasing the LogManager write lock,
     /// unblocking readers during the slow fdatasync syscall.
     sync_file: Arc<File>,
-    /// F-136 fix: Flag indicating a deferred fsync is needed.
+    /// Flag indicating a deferred fsync is needed.
     /// Set by `maybe_flush_and_flag_sync()`, consumed by `take_pending_sync()`.
     pending_sync: AtomicBool,
+    /// Reusable frame buffer to avoid per-append Vec allocation (L-3 fix).
+    frame_buf: Vec<u8>,
 }
 
 /// Fsync policy for segment writes (H-1 fix).
@@ -102,7 +121,7 @@ pub enum SegmentSyncPolicy {
 impl Segment {
     /// Create a new segment with the production-safe default sync policy.
     ///
-    /// F-112 fix: defaults to `EveryNWrites(1)` (fsync every write) instead
+    /// defaults to `EveryNWrites(1)` (fsync every write) instead
     /// of `None`, matching `LogManager`'s default. This prevents data loss
     /// for callers using `Segment::new()` directly.
     pub fn new(dir: &Path, base_offset: u64) -> Result<Self> {
@@ -126,7 +145,7 @@ impl Segment {
             .open(&log_path)?;
 
         let current_size = log_file.seek(SeekFrom::End(0))?;
-        // F-136 fix: dup the fd BEFORE wrapping in BufWriter — used for
+        // dup the fd BEFORE wrapping in BufWriter — used for
         // deferred fsync outside the LogManager write lock.
         let sync_file = Arc::new(log_file.try_clone()?);
         let log_writer = BufWriter::with_capacity(8192, log_file);
@@ -155,6 +174,7 @@ impl Segment {
             write_dirty: AtomicBool::new(false),
             sync_file,
             pending_sync: AtomicBool::new(false),
+            frame_buf: Vec::with_capacity(8 + 256),
         };
 
         // Load index if exists
@@ -182,8 +202,8 @@ impl Segment {
                 break;
             }
 
-            let rel_offset_bytes: [u8; 4] = mmap[cursor..cursor + 4].try_into().unwrap();
-            let pos_bytes: [u8; 8] = mmap[cursor + 4..cursor + 12].try_into().unwrap();
+            let rel_offset_bytes: [u8; 4] = read_bytes(&mmap, cursor)?;
+            let pos_bytes: [u8; 8] = read_bytes(&mmap, cursor + 4)?;
 
             self.index_buffer.push((
                 u32::from_be_bytes(rel_offset_bytes),
@@ -206,31 +226,35 @@ impl Segment {
             )));
         }
 
-        // F-038 fix: Single allocation, zero copies.
-        // Serialize directly into the frame buffer after an 8-byte header placeholder
-        // (CRC + len), then patch the header in place. This avoids the prior approach
-        // of allocating a Vec<u8> via to_bytes(), then copying into a BytesMut frame.
+        // Single allocation, zero copies.
+        // Serialize directly into the reusable frame buffer after an 8-byte header
+        // placeholder (CRC + len), then patch the header in place.
         message.offset = offset;
-        let mut frame = Vec::with_capacity(8 + 256);
-        frame.extend_from_slice(&[0u8; 8]); // placeholder for [CRC: 4][Len: 4]
-        frame = postcard::to_extend(&message, frame)?;
+        self.frame_buf.clear();
+        self.frame_buf.extend_from_slice(&[0u8; 8]); // placeholder for [CRC: 4][Len: 4]
+        self.frame_buf = postcard::to_extend(&message, std::mem::take(&mut self.frame_buf))?;
 
         // Patch CRC + length into the reserved header
-        let payload = &frame[8..];
-        let len = payload.len() as u32;
+        let payload = &self.frame_buf[8..];
+        let len = u32::try_from(payload.len()).map_err(|_| {
+            Error::Other(format!(
+                "Message payload too large: {} bytes exceeds u32::MAX",
+                payload.len()
+            ))
+        })?;
         let mut hasher = Hasher::new();
         hasher.update(payload);
         let crc = hasher.finalize();
-        frame[0..4].copy_from_slice(&crc.to_be_bytes());
-        frame[4..8].copy_from_slice(&len.to_be_bytes());
+        self.frame_buf[0..4].copy_from_slice(&crc.to_be_bytes());
+        self.frame_buf[4..8].copy_from_slice(&len.to_be_bytes());
 
         let position = self.current_size;
-        let frame_len = frame.len() as u64;
+        let frame_len = self.frame_buf.len() as u64;
 
         // 4. Write to disk using buffered writer (fast path - no syscall per write)
         {
             let mut writer = self.log_file.lock().await;
-            writer.write_all(&frame)?;
+            writer.write_all(&self.frame_buf)?;
 
             // configurable fsync after write for durability
             self.maybe_flush_and_flag_sync(&mut writer)?;
@@ -272,7 +296,7 @@ impl Segment {
         let mut positions = Vec::with_capacity(messages.len());
         let mut total_frame = BytesMut::with_capacity(messages.len() * 256); // Estimate
 
-        // F-038 fix: Reuse a single serialization buffer across all messages.
+        // Reuse a single serialization buffer across all messages.
         // `postcard::to_extend` serializes into the Vec, then `clear()` resets
         // length to 0 without deallocating. This reduces N allocations to 1.
         let mut msg_buf = Vec::with_capacity(1024);
@@ -289,7 +313,15 @@ impl Segment {
             message.offset = offset;
             msg_buf.clear();
             msg_buf = postcard::to_extend(&message, msg_buf)?;
-            let len = msg_buf.len() as u32;
+            // Validate size fits in u32 frame header, matching append().
+            // The prior `as u32` silently truncated payloads > 4GB, corrupting
+            // all subsequent frames in the batch.
+            let len = u32::try_from(msg_buf.len()).map_err(|_| {
+                Error::Other(format!(
+                    "Message payload too large: {} bytes exceeds u32::MAX",
+                    msg_buf.len()
+                ))
+            })?;
 
             // CRC
             let mut hasher = Hasher::new();
@@ -377,7 +409,7 @@ impl Segment {
 
     /// Apply fsync policy after a write (H-1 fix).
     ///
-    /// F-136 fix: This method now only flushes the BufWriter to the OS page cache
+    /// This method now only flushes the BufWriter to the OS page cache
     /// and syncs index entries. The expensive `sync_data()` (fdatasync) is deferred
     /// — the caller retrieves the dup'd fd via `take_pending_sync()` and runs
     /// the fsync AFTER releasing the LogManager write lock, unblocking readers.
@@ -387,39 +419,41 @@ impl Segment {
     /// - `EveryWrite`: flush + flag sync on every write (maximum durability)
     /// - `EveryNWrites(n)`: flush + flag sync every N writes (balanced)
     fn maybe_flush_and_flag_sync(&self, writer: &mut BufWriter<File>) -> Result<()> {
-        use std::sync::atomic::Ordering::Relaxed;
-
         match self.sync_policy {
             SegmentSyncPolicy::None => {}
             SegmentSyncPolicy::EveryWrite => {
                 writer.flush()?;
-                // F-028 fix: also flush and fsync pending index entries so
+                // also flush and fsync pending index entries so
                 // the index stays consistent with the log after a crash.
                 self.sync_pending_index_entries()?;
-                // F-136 fix: flag for deferred sync instead of blocking here
+                // flag for deferred sync instead of blocking here
                 self.pending_sync.store(true, AtomicOrdering::Release);
             }
             SegmentSyncPolicy::EveryNWrites(n) => {
-                // F-054: Use compare_exchange loop to atomically reset the counter.
-                // The previous fetch_add + store(0) was racy: two threads could both
-                // see count >= n, both sync, and both reset — or worse, a concurrent
-                // fetch_add between the check and store could be lost.
-                let count = self.writes_since_sync.fetch_add(1, Relaxed) + 1;
+                // Use AcqRel ordering on the counter to ensure correct visibility
+                // on weakly-ordered architectures (ARM/AArch64). The cost is
+                // negligible — this path already performs I/O (flush + fsync).
+                let count = self.writes_since_sync.fetch_add(1, AtomicOrdering::AcqRel) + 1;
                 if count >= n {
                     writer.flush()?;
-                    // F-028 fix: also flush and fsync pending index entries
+                    // also flush and fsync pending index entries
                     self.sync_pending_index_entries()?;
-                    // F-136 fix: flag for deferred sync instead of blocking here
+                    // flag for deferred sync instead of blocking here
                     self.pending_sync.store(true, AtomicOrdering::Release);
                     // Atomically reset: CAS from current value to 0.
                     // If another thread incremented in the meantime, retry.
                     let mut current = count;
                     while self
                         .writes_since_sync
-                        .compare_exchange_weak(current, 0, Relaxed, Relaxed)
+                        .compare_exchange_weak(
+                            current,
+                            0,
+                            AtomicOrdering::AcqRel,
+                            AtomicOrdering::Acquire,
+                        )
                         .is_err()
                     {
-                        current = self.writes_since_sync.load(Relaxed);
+                        current = self.writes_since_sync.load(AtomicOrdering::Acquire);
                     }
                 }
             }
@@ -427,7 +461,7 @@ impl Segment {
         Ok(())
     }
 
-    /// Take the pending sync handle if a deferred fsync is needed (F-136 fix).
+    /// Take the pending sync handle if a deferred fsync is needed.
     ///
     /// Returns a clone of the dup'd file descriptor if `sync_data()` should be
     /// called. The caller should run this AFTER releasing the LogManager write
@@ -443,7 +477,7 @@ impl Segment {
         }
     }
 
-    /// Synchronously flush and fsync pending index entries (F-028 fix).
+    /// Synchronously flush and fsync pending index entries.
     ///
     /// Called from `maybe_flush_and_flag_sync` (which is non-async) to ensure the index
     /// file is durable whenever the log file is fsynced. Without this,
@@ -516,10 +550,17 @@ impl Segment {
         // Flush buffered writes before reading to ensure data visibility.
         // Fast path: skip the lock entirely when nothing was written since
         // the last flush (avoids head-of-line blocking behind concurrent appends).
+        //
+        // Uses swap(false, AcqRel) inside the lock to atomically clear the flag
+        // and flush only if dirty — eliminates the TOCTOU race where a concurrent
+        // append could set the flag between our check and lock acquisition.
         if self.write_dirty.load(AtomicOrdering::Acquire) {
             let mut writer = self.log_file.lock().await;
-            writer.flush()?;
-            self.write_dirty.store(false, AtomicOrdering::Release);
+            // Re-check atomically: if still dirty, flush and clear in one step.
+            // A concurrent append may have already flushed, making this a no-op.
+            if self.write_dirty.swap(false, AtomicOrdering::AcqRel) {
+                writer.flush()?;
+            }
         }
 
         // 1. Find position from index
@@ -589,24 +630,24 @@ impl Segment {
 
         while current_pos < mmap.len() && bytes_read < max_bytes {
             // Check headers
-            if current_pos + 8 > mmap.len() {
+            if current_pos + FRAME_HEADER_SIZE > mmap.len() {
                 break;
             }
 
             let slice = &mmap[current_pos..];
 
             // Read CRC and Len
-            let crc_bytes: [u8; 4] = slice[0..4].try_into().unwrap();
-            let len_bytes: [u8; 4] = slice[4..8].try_into().unwrap();
+            let crc_bytes: [u8; 4] = read_bytes(slice, 0)?;
+            let len_bytes: [u8; 4] = read_bytes(slice, 4)?;
             let stored_crc = u32::from_be_bytes(crc_bytes);
             let msg_len = u32::from_be_bytes(len_bytes) as usize;
 
-            if current_pos + 8 + msg_len > mmap.len() {
+            if current_pos + FRAME_HEADER_SIZE + msg_len > mmap.len() {
                 break; // Incomplete message
             }
 
             // Verify CRC
-            let payload = &slice[8..8 + msg_len];
+            let payload = &slice[FRAME_HEADER_SIZE..FRAME_HEADER_SIZE + msg_len];
             let mut hasher = Hasher::new();
             hasher.update(payload);
             let computed_crc = hasher.finalize();
@@ -618,7 +659,7 @@ impl Segment {
                 )));
             }
 
-            // F-137 fix: Extract offset varint (first field in postcard encoding)
+            // Extract offset varint (first field in postcard encoding)
             // without deserializing the full message. This avoids allocating/copying
             // key, value, and headers for messages below the target offset — a
             // significant win when seeking into large segments.
@@ -629,10 +670,10 @@ impl Segment {
             if msg_offset >= offset {
                 let msg = Message::from_bytes(payload)?;
                 messages.push(msg);
-                bytes_read += 8 + msg_len;
+                bytes_read += FRAME_HEADER_SIZE + msg_len;
             }
 
-            current_pos += 8 + msg_len;
+            current_pos += FRAME_HEADER_SIZE + msg_len;
         }
 
         Ok(messages)
@@ -659,7 +700,7 @@ impl Segment {
         Ok(())
     }
 
-    pub async fn recover_last_offset(&self) -> Result<Option<u64>> {
+    pub async fn recover_last_offset(&mut self) -> Result<Option<u64>> {
         // Flush buffered writes before recovery scan
         {
             let mut writer = self.log_file.lock().await;
@@ -674,13 +715,14 @@ impl Segment {
         let log_path = self.log_path.clone();
         let base_offset = self.base_offset;
 
-        // F-109 fix: run mmap creation and CRC scan on spawn_blocking to avoid
+        // run mmap creation and CRC scan on spawn_blocking to avoid
         // blocking the Tokio runtime during recovery of many segments.
-        tokio::task::spawn_blocking(move || {
+        // Returns (last_offset, valid_file_length) so we can update current_size.
+        let (last_offset, valid_len) = tokio::task::spawn_blocking(move || -> crate::Result<_> {
             let file = File::open(&log_path)?;
             let len = file.metadata()?.len();
             if len == 0 {
-                return Ok(None);
+                return Ok((None, len));
             }
 
             // SAFETY: File is opened read-only, checked non-empty, and remains valid.
@@ -688,28 +730,28 @@ impl Segment {
             let mmap = unsafe { Mmap::map(&file)? };
 
             if start_pos >= mmap.len() as u64 {
-                return Ok(None);
+                return Ok((None, len));
             }
 
             let mut current_pos = start_pos as usize;
             let mut last_offset = None;
 
             while current_pos < mmap.len() {
-                if current_pos + 8 > mmap.len() {
+                if current_pos + FRAME_HEADER_SIZE > mmap.len() {
                     break;
                 }
 
                 let slice = &mmap[current_pos..];
-                let stored_crc_bytes: [u8; 4] = slice[0..4].try_into().unwrap();
+                let stored_crc_bytes: [u8; 4] = read_bytes(slice, 0)?;
                 let stored_crc = u32::from_be_bytes(stored_crc_bytes);
-                let len_bytes: [u8; 4] = slice[4..8].try_into().unwrap();
+                let len_bytes: [u8; 4] = read_bytes(slice, 4)?;
                 let msg_len = u32::from_be_bytes(len_bytes) as usize;
 
-                if current_pos + 8 + msg_len > mmap.len() {
+                if current_pos + FRAME_HEADER_SIZE + msg_len > mmap.len() {
                     break;
                 }
 
-                let payload = &slice[8..8 + msg_len];
+                let payload = &slice[FRAME_HEADER_SIZE..FRAME_HEADER_SIZE + msg_len];
 
                 // Validate CRC before accepting this frame
                 let mut hasher = Hasher::new();
@@ -720,7 +762,7 @@ impl Segment {
                     break;
                 }
 
-                // F-137 fix: Extract just the offset varint from the payload
+                // Extract just the offset varint from the payload
                 // without deserializing the full message. Recovery only needs
                 // the offset, not key/value/headers.
                 match postcard::take_from_bytes::<u64>(payload) {
@@ -728,7 +770,7 @@ impl Segment {
                     Err(_) => break, // Corrupt payload — stop recovery
                 }
 
-                current_pos += 8 + msg_len;
+                current_pos += FRAME_HEADER_SIZE + msg_len;
             }
 
             // Truncate the segment at the first invalid/incomplete frame.
@@ -753,15 +795,25 @@ impl Segment {
                 );
             }
 
-            Ok(last_offset)
+            Ok((last_offset, valid_len))
         })
         .await
-        .map_err(|e| Error::Other(format!("recover_last_offset task panicked: {}", e)))?
+        .map_err(|e| Error::Other(format!("recover_last_offset task panicked: {}", e)))??;
+
+        // Sync in-memory current_size with the (possibly truncated)
+        // file length. Without this, the segment's size() would still reflect
+        // the pre-truncation value, causing premature segment rolling.
+        self.current_size = valid_len;
+
+        Ok(last_offset)
     }
 
     /// Find the first offset with timestamp >= target_timestamp
     /// Uses linear scan through the segment (timestamps may not be monotonic due to clock skew)
     /// Returns None if no matching offset is found
+    ///
+    /// The mmap creation and scan are offloaded to `spawn_blocking`
+    /// to avoid blocking the tokio runtime on slow/contended file systems.
     pub async fn find_offset_for_timestamp(&self, target_timestamp: i64) -> Result<Option<u64>> {
         // Flush buffered writes before timestamp scan
         {
@@ -769,75 +821,77 @@ impl Segment {
             writer.flush()?;
         }
 
-        let file = File::open(&self.log_path)?;
-        let len = file.metadata()?.len();
-        if len == 0 {
-            return Ok(None);
-        }
+        let log_path = self.log_path.clone();
+        let base_offset = self.base_offset;
 
-        // SAFETY: File is opened read-only, checked non-empty, and remains valid.
-        // We check bounds before all slice accesses.
-        let mmap = unsafe { Mmap::map(&file)? };
-        let mut current_pos = 0usize;
-
-        while current_pos < mmap.len() {
-            if current_pos + 8 > mmap.len() {
-                break;
+        tokio::task::spawn_blocking(move || -> Result<Option<u64>> {
+            let file = File::open(&log_path)?;
+            let len = file.metadata()?.len();
+            if len == 0 {
+                return Ok(None);
             }
 
-            let slice = &mmap[current_pos..];
+            // SAFETY: File is opened read-only, checked non-empty, and remains valid.
+            // We check bounds before all slice accesses.
+            let mmap = unsafe { Mmap::map(&file)? };
+            let mut current_pos = 0usize;
 
-            // F-033: Read and validate CRC before processing the record
-            let crc_bytes: [u8; 4] = slice[0..4].try_into().unwrap();
-            let stored_crc = u32::from_be_bytes(crc_bytes);
-            let len_bytes: [u8; 4] = slice[4..8].try_into().unwrap();
-            let msg_len = u32::from_be_bytes(len_bytes) as usize;
-
-            if current_pos + 8 + msg_len > mmap.len() {
-                break;
-            }
-
-            let payload = &slice[8..8 + msg_len];
-
-            // Verify CRC — skip corrupted records
-            let mut hasher = Hasher::new();
-            hasher.update(payload);
-            let computed_crc = hasher.finalize();
-            if computed_crc != stored_crc {
-                tracing::warn!(
-                    base_offset = self.base_offset,
-                    position = current_pos,
-                    "CRC mismatch in find_offset_for_timestamp — skipping corrupted record"
-                );
-                current_pos += 8 + msg_len;
-                continue;
-            }
-
-            // Note: Unlike read() and recover_last_offset(), we cannot skip
-            // deserialization here because we need the timestamp field which is
-            // positioned after variable-length key/value fields in the postcard
-            // encoding. Full deserialization is required.
-            if let Ok(msg) = Message::from_bytes(payload) {
-                let msg_timestamp = msg.timestamp.timestamp_millis();
-                if msg_timestamp >= target_timestamp {
-                    return Ok(Some(msg.offset));
+            while current_pos < mmap.len() {
+                if current_pos + FRAME_HEADER_SIZE > mmap.len() {
+                    break;
                 }
+
+                let slice = &mmap[current_pos..];
+
+                // Read and validate CRC before processing the record
+                let crc_bytes: [u8; 4] = read_bytes(slice, 0)?;
+                let stored_crc = u32::from_be_bytes(crc_bytes);
+                let len_bytes: [u8; 4] = read_bytes(slice, 4)?;
+                let msg_len = u32::from_be_bytes(len_bytes) as usize;
+
+                if current_pos + FRAME_HEADER_SIZE + msg_len > mmap.len() {
+                    break;
+                }
+
+                let payload = &slice[FRAME_HEADER_SIZE..FRAME_HEADER_SIZE + msg_len];
+
+                let mut hasher = Hasher::new();
+                hasher.update(payload);
+                let computed_crc = hasher.finalize();
+                if computed_crc != stored_crc {
+                    return Err(Error::Other(format!(
+                        "CRC mismatch in find_offset_for_timestamp at position {} (base_offset {})",
+                        current_pos, base_offset
+                    )));
+                }
+
+                if let Ok(msg) = Message::from_bytes(payload) {
+                    let msg_timestamp = msg.timestamp.timestamp_millis();
+                    if msg_timestamp >= target_timestamp {
+                        return Ok(Some(msg.offset));
+                    }
+                }
+
+                current_pos += FRAME_HEADER_SIZE + msg_len;
             }
 
-            current_pos += 8 + msg_len;
-        }
-
-        Ok(None)
+            Ok(None)
+        })
+        .await
+        .map_err(|e| Error::Other(format!("find_offset_for_timestamp join: {}", e)))?
     }
 
     /// Get the timestamp range of messages in this segment
     /// Returns (min_timestamp, max_timestamp) in milliseconds since epoch
     /// Useful for quickly determining if a segment might contain a target timestamp.
     ///
-    /// F-111 fix: Results are cached in `cached_timestamp_bounds`. For sealed segments
+    /// Results are cached in `cached_timestamp_bounds`. For sealed segments
     /// (where timestamps never change), subsequent calls return the cached value in O(1)
     /// instead of performing a full O(n) scan. Call `invalidate_timestamp_cache()` when
     /// the segment is mutated (e.g., during append).
+    ///
+    /// The mmap creation and scan are offloaded to `spawn_blocking`
+    /// to avoid blocking the tokio runtime.
     pub async fn timestamp_bounds(&self) -> Result<Option<(i64, i64)>> {
         // Fast path: return cached result if available
         {
@@ -853,70 +907,66 @@ impl Segment {
             writer.flush()?;
         }
 
-        let file = File::open(&self.log_path)?;
-        let len = file.metadata()?.len();
-        if len == 0 {
-            let mut cached = self.cached_timestamp_bounds.lock();
-            *cached = Some(None);
-            return Ok(None);
-        }
+        let log_path = self.log_path.clone();
+        let base_offset = self.base_offset;
 
-        // SAFETY: File is opened read-only, checked non-empty, and remains valid.
-        // We check bounds before all slice accesses.
-        let mmap = unsafe { Mmap::map(&file)? };
-        let mut current_pos = 0usize;
-        let mut min_ts: Option<i64> = None;
-        let mut max_ts: Option<i64> = None;
-
-        while current_pos < mmap.len() {
-            if current_pos + 8 > mmap.len() {
-                break;
+        let result = tokio::task::spawn_blocking(move || -> Result<Option<(i64, i64)>> {
+            let file = File::open(&log_path)?;
+            let len = file.metadata()?.len();
+            if len == 0 {
+                return Ok(None);
             }
 
-            let slice = &mmap[current_pos..];
+            // SAFETY: File is opened read-only, checked non-empty, and remains valid.
+            let mmap = unsafe { Mmap::map(&file)? };
+            let mut current_pos = 0usize;
+            let mut min_ts: Option<i64> = None;
+            let mut max_ts: Option<i64> = None;
 
-            // F-105 fix: validate CRC before trusting the record, consistent with
-            // find_offset_for_timestamp() which also validates CRC (F-033 fix).
-            let crc_bytes: [u8; 4] = slice[0..4].try_into().unwrap();
-            let stored_crc = u32::from_be_bytes(crc_bytes);
-            let len_bytes: [u8; 4] = slice[4..8].try_into().unwrap();
-            let msg_len = u32::from_be_bytes(len_bytes) as usize;
+            while current_pos < mmap.len() {
+                if current_pos + FRAME_HEADER_SIZE > mmap.len() {
+                    break;
+                }
 
-            if current_pos + 8 + msg_len > mmap.len() {
-                break;
+                let slice = &mmap[current_pos..];
+
+                let crc_bytes: [u8; 4] = read_bytes(slice, 0)?;
+                let stored_crc = u32::from_be_bytes(crc_bytes);
+                let len_bytes: [u8; 4] = read_bytes(slice, 4)?;
+                let msg_len = u32::from_be_bytes(len_bytes) as usize;
+
+                if current_pos + FRAME_HEADER_SIZE + msg_len > mmap.len() {
+                    break;
+                }
+
+                let payload = &slice[FRAME_HEADER_SIZE..FRAME_HEADER_SIZE + msg_len];
+
+                let mut hasher = Hasher::new();
+                hasher.update(payload);
+                let computed_crc = hasher.finalize();
+                if computed_crc != stored_crc {
+                    return Err(Error::Other(format!(
+                        "CRC mismatch in timestamp_bounds at position {} (base_offset {})",
+                        current_pos, base_offset
+                    )));
+                }
+
+                if let Ok(msg) = Message::from_bytes(payload) {
+                    let ts = msg.timestamp.timestamp_millis();
+                    min_ts = Some(min_ts.map_or(ts, |m| m.min(ts)));
+                    max_ts = Some(max_ts.map_or(ts, |m| m.max(ts)));
+                }
+
+                current_pos += FRAME_HEADER_SIZE + msg_len;
             }
 
-            let payload = &slice[8..8 + msg_len];
-
-            // Verify CRC — skip corrupted records
-            let mut hasher = Hasher::new();
-            hasher.update(payload);
-            let computed_crc = hasher.finalize();
-            if computed_crc != stored_crc {
-                tracing::warn!(
-                    base_offset = self.base_offset,
-                    position = current_pos,
-                    "CRC mismatch in timestamp_bounds — skipping corrupted record"
-                );
-                current_pos += 8 + msg_len;
-                continue;
-            }
-
-            // Note: Full deserialization required — timestamp is positioned after
-            // variable-length key/value fields in the postcard encoding.
-            if let Ok(msg) = Message::from_bytes(payload) {
-                let ts = msg.timestamp.timestamp_millis();
-                min_ts = Some(min_ts.map_or(ts, |m| m.min(ts)));
-                max_ts = Some(max_ts.map_or(ts, |m| m.max(ts)));
-            }
-
-            current_pos += 8 + msg_len;
-        }
-
-        let result = match (min_ts, max_ts) {
-            (Some(min), Some(max)) => Some((min, max)),
-            _ => None,
-        };
+            Ok(match (min_ts, max_ts) {
+                (Some(min), Some(max)) => Some((min, max)),
+                _ => None,
+            })
+        })
+        .await
+        .map_err(|e| Error::Other(format!("timestamp_bounds join: {}", e)))??;
 
         // Cache the result for subsequent calls
         let mut cached = self.cached_timestamp_bounds.lock();

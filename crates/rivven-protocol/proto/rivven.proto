@@ -31,6 +31,8 @@ message Record {
   repeated RecordHeader headers = 3;
   // Timestamp (milliseconds since epoch, 0 = server-assigned)
   int64 timestamp = 4;
+  // Whether the key field was explicitly set (distinguishes empty key from null key)
+  bool has_key = 5;
 }
 
 // Record header (key-value metadata)
@@ -96,6 +98,8 @@ message PublishRequest {
   optional uint32 partition = 2;
   // Record to publish
   Record record = 3;
+  // Leader epoch for fencing stale-leader writes
+  optional uint64 leader_epoch = 4;
 }
 
 // Batch publish multiple messages
@@ -130,6 +134,8 @@ message ConsumeRequest {
   uint64 max_bytes = 5;
   // Isolation level: 0 = read_uncommitted, 1 = read_committed
   uint32 isolation_level = 6;
+  // Long-polling: max time (ms) to wait for new data (0 = immediate)
+  optional uint64 max_wait_ms = 7;
 }
 
 // Create a new topic
@@ -293,6 +299,8 @@ message ConsumedRecord {
   bytes key = 4;
   bytes value = 5;
   repeated RecordHeader headers = 6;
+  // Whether the key field was explicitly set
+  bool has_key = 7;
 }
 
 // Create topic response
@@ -421,6 +429,8 @@ message IdempotentPublishRequest {
   uint64 producer_id = 4;
   uint32 producer_epoch = 5;
   int32 sequence = 6;
+  // Leader epoch for fencing stale-leader writes
+  optional uint64 leader_epoch = 7;
 }
 
 // Begin transaction
@@ -633,6 +643,8 @@ message TransactionalPublishRequest {
   uint64 producer_id = 5;
   uint32 producer_epoch = 6;
   int32 sequence = 7;
+  // Leader epoch for fencing stale-leader writes
+  optional uint64 leader_epoch = 8;
 }
 
 // Add partitions to transaction

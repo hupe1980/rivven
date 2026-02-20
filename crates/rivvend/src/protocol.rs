@@ -32,6 +32,7 @@ mod protocol_tests {
                 partition: Some(0),
                 key: Some(Bytes::from(vec![1, 2, 3])),
                 value: Bytes::from(b"hello world".to_vec()),
+                leader_epoch: None,
             },
             Request::Consume {
                 topic: "test-topic".to_string(),
@@ -39,6 +40,7 @@ mod protocol_tests {
                 offset: 100,
                 max_messages: 10,
                 isolation_level: None,
+                max_wait_ms: None,
             },
             Request::CreateTopic {
                 name: "new-topic".to_string(),

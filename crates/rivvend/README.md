@@ -15,6 +15,7 @@
 | **Storage** | Append-only log, tiered storage, log compaction |
 | **Clustering** | Raft consensus, multi-node replication |
 | **Security** | SCRAM-SHA-256 (600K PBKDF2), mTLS, API keys, Cedar RBAC, password complexity enforcement |
+| **Transactions** | Validate-before-write, atomic COMMIT/ABORT markers, WAL-first state transitions, epoch-fenced publish, pending-bytes backpressure on all publish paths |
 | **Observability** | Prometheus metrics, web dashboard |
 
 ## Quick Start

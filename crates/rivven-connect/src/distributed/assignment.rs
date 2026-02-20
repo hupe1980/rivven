@@ -214,7 +214,7 @@ impl TaskAssigner {
         let task_assigned_node = task.assigned_node.clone();
         let task_id = task.id.clone();
 
-        // F-119 fix: Replace all `.get().unwrap()` with `get/get_mut` and defensive
+        // Replace all `.get().unwrap()` with `get/get_mut` and defensive
         // early-return. The entry is guaranteed by the `entry().or_insert_with()` above,
         // but we avoid `.unwrap()` to prevent cascading panics if invariants break.
 

@@ -80,7 +80,9 @@ async def consume():
     # Commit offsets
     await consumer.commit()
     
-    # Or use async iterator
+    # Or use async iterator (poll-retries on empty fetch, never stops)
+    # With auto_commit=True (default), offsets are committed per batch.
+    # Explicit commit is only needed with auto_commit=False:
     async for msg in consumer:
         print(f"Received: {msg.value_str()}")
         await consumer.commit()

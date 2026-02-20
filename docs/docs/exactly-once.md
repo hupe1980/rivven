@@ -54,6 +54,10 @@ Producer                           Broker
 - **Producer ID (PID)**: Unique 64-bit identifier for each producer instance
 - **Epoch**: Increments on producer restart, fencing old instances
 - **Sequence Number**: Per-partition counter starting at 0
+- **Offset Cache**: The broker maintains a ring buffer of the 5 most recent
+  `(sequence, offset)` pairs per producer per partition. When a duplicate is
+  detected, the cached offset is returned to the client so it knows the exact
+  position of the original write — no second lookup required.
 
 ### Protocol
 
@@ -71,6 +75,7 @@ Request::IdempotentPublish {
     producer_id: 123,
     producer_epoch: 0,
     sequence: 0,
+    leader_epoch: None,
 }
 Response::IdempotentPublished { offset: 42, partition: 0, duplicate: false }
 ```
@@ -100,6 +105,28 @@ New instance (Epoch=1) → Produce → Success
 ## Native Transactions
 
 Transactions provide atomicity across multiple topics and partitions, enabling exactly-once semantics for consume-transform-produce patterns.
+
+### Durability & Crash Recovery
+
+All transaction state transitions are persisted to a **CRC32-protected write-ahead log** (WAL) **before** modifying in-memory state. This strict WAL-before-memory ordering ensures that every acknowledged state transition is recoverable after a crash. The WAL captures:
+
+- `Begin`, `AddPartition`, `RecordWrite` — written before the coordinator updates in-memory maps
+- `OffsetCommit` — consumer offset commits for exactly-once consume-transform-produce
+- `PrepareCommit` / `PrepareAbort` — the 2PC decision is durable before Phase 2
+- `CompleteCommit` / `CompleteAbort` — final resolution logged before cleanup
+- `TimedOut` — zombie cleanup recorded before removing the transaction from memory
+
+**On WAL write failure**, in-memory state is never modified — the coordinator returns `TransactionResult::LogWriteError` to the caller, keeping WAL and in-memory state consistent. For multi-partition `AddPartition` writes, if any partition's WAL entry fails, none are added to in-memory state (all-or-nothing).
+
+**On startup**, `TransactionCoordinator::recover(path)` replays the WAL sequentially. Entries after the first CRC mismatch are truncated (Kafka-style). In-doubt transactions (state = `PrepareCommit` or `PrepareAbort`) are left for the operator to resolve, with a warning logged. Completed or aborted transactions are replayed into the `AbortedTransactionIndex` for correct `read_committed` filtering.
+
+### Data Integrity Guarantees
+
+1. **Validate-before-write**: `TransactionalPublish` validates partition membership in the transaction BEFORE appending data to the partition log. This prevents orphaned records if the partition wasn't added via `AddPartitionsToTxn`.
+
+2. **Atomic COMMIT markers**: If any COMMIT marker write fails, compensating ABORT markers are written to all partitions that already received COMMIT markers, then the transaction is aborted. This prevents `read_committed` consumers from seeing partial commits.
+
+3. **ABORT marker failure returns error**: When any ABORT marker write fails, the broker returns an `ABORT_PARTIAL_FAILURE` error to the client instead of a success response. The error includes the affected partition list so clients know which partitions may expose uncommitted data under `read_committed` isolation.
 
 ### Transaction Protocol
 
@@ -183,6 +210,7 @@ Request::TransactionalPublish {
     producer_id: 123,
     producer_epoch: 0,
     sequence: 0,
+    leader_epoch: None,
 }
 Response::TransactionalPublished { offset: 100, partition: 0, sequence: 0 }
 ```
@@ -286,6 +314,12 @@ The broker maintains an `AbortedTransactionIndex` per partition that tracks:
 
 - **Producer ID** that aborted
 - **First offset** of the aborted transaction
+- **Last offset** of the aborted transaction
+
+The index uses **bounded offset ranges** (`first_offset..=last_offset`) so that only
+messages actually written by the aborted transaction are filtered. This prevents
+false positives where later messages from the same producer would have been
+incorrectly hidden under the previous unbounded scheme.
 
 When a consumer requests `read_committed`, the broker cross-references transactional
 messages against this index to filter out aborted transaction data.
@@ -308,6 +342,7 @@ Transactions have a configurable timeout (default 60 seconds). If not committed 
 | `PARTITION_NOT_IN_TXN` | Partition not registered | Call AddPartitionsToTxn |
 | `TRANSACTION_TIMED_OUT` | Timeout exceeded | Begin new transaction |
 | `PRODUCER_FENCED` | Epoch too old | Re-initialize producer |
+| `ABORT_PARTIAL_FAILURE` | ABORT markers failed on some partitions | Retry abort or check affected partitions |
 
 ---
 
@@ -335,6 +370,7 @@ client.request(Request::IdempotentPublish {
     producer_id: pid,
     producer_epoch: epoch,
     sequence: get_next_sequence(),
+    leader_epoch: None,
 }).await?;
 ```
 

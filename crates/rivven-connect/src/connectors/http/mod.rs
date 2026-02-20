@@ -483,7 +483,8 @@ impl HttpWebhookSink {
 
     /// Calculate backoff with optional jitter
     fn calculate_backoff(&self, config: &HttpWebhookConfig, attempt: u32) -> Duration {
-        let base_ms = (config.retry_backoff_ms as u64) * 2u64.pow(attempt);
+        // saturating_pow prevents overflow panic in debug builds
+        let base_ms = (config.retry_backoff_ms as u64).saturating_mul(2u64.saturating_pow(attempt));
         let backoff_ms = if config.retry_jitter {
             let mut rng = rand::thread_rng();
             let jitter = rng.gen_range(0..=(base_ms / 4).max(1));

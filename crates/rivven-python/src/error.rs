@@ -186,9 +186,9 @@ impl From<rivven_client::Error> for RivvenError {
             rivven_client::Error::AllServersUnavailable => {
                 Self::connection("All servers unavailable")
             }
-            rivven_client::Error::Timeout => Self::connection("Request timeout".to_string()),
+            rivven_client::Error::Timeout => Self::timeout("Request timeout".to_string()),
             rivven_client::Error::TimeoutWithMessage(msg) => {
-                Self::connection(format!("Timeout: {}", msg))
+                Self::timeout(format!("Timeout: {}", msg))
             }
             rivven_client::Error::AuthenticationFailed(msg) => {
                 Self::server(format!("Authentication failed: {}", msg))

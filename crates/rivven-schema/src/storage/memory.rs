@@ -227,7 +227,14 @@ impl StorageBackend for MemoryStorage {
     }
 
     async fn next_schema_id(&self) -> SchemaResult<SchemaId> {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        // Use fetch_update with checked_add to detect overflow at u32::MAX
+        // instead of silently wrapping to 0 (which would produce duplicate IDs).
+        let id = self
+            .next_id
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_add(1))
+            .map_err(|_| {
+                SchemaError::Internal("Schema ID space exhausted (u32::MAX reached)".into())
+            })?;
         Ok(SchemaId::new(id))
     }
 

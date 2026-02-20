@@ -213,7 +213,9 @@ where
     D: serde::Deserializer<'de>,
 {
     let millis = u128::deserialize(deserializer)?;
-    Ok(SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(millis as u64))
+    // Validate truncation from u128 to u64 to prevent bogus timestamps.
+    let millis_u64 = u64::try_from(millis).map_err(serde::de::Error::custom)?;
+    Ok(SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(millis_u64))
 }
 
 /// Partition assignment for a member
@@ -835,7 +837,8 @@ impl ConsumerGroup {
         self.awaiting_revocation.clear();
 
         // Increment generation
-        self.generation_id += 1;
+        // Use wrapping_add to prevent panic on u32 overflow
+        self.generation_id = self.generation_id.wrapping_add(1);
         self.state = GroupState::Stable;
     }
 
@@ -890,7 +893,8 @@ impl ConsumerGroup {
         }
 
         // Increment generation
-        self.generation_id += 1;
+        // Use wrapping_add to prevent panic on u32 overflow
+        self.generation_id = self.generation_id.wrapping_add(1);
         self.state = GroupState::Stable;
     }
 

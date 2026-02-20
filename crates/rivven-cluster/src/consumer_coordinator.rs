@@ -409,7 +409,7 @@ impl GroupPersistence for RaftPersistence {
 
 /// Consumer group coordinator - manages multiple consumer groups
 ///
-/// F-052 fix: Uses `tokio::sync::RwLock` instead of `std::sync::RwLock`
+/// Uses `tokio::sync::RwLock` instead of `std::sync::RwLock`
 /// to avoid blocking the async executor during lock contention.
 pub struct ConsumerCoordinator {
     groups: Arc<tokio::sync::RwLock<HashMap<GroupId, ConsumerGroup>>>,
@@ -503,7 +503,7 @@ impl ConsumerCoordinator {
         let mut groups = self.write_groups().await;
 
         // Get or create group
-        let is_new_group = !groups.contains_key(&group_id);
+        let _is_new_group = !groups.contains_key(&group_id);
         let group = groups.entry(group_id.clone()).or_insert_with(|| {
             ConsumerGroup::new(group_id.clone(), session_timeout, rebalance_timeout)
         });
@@ -532,12 +532,13 @@ impl ConsumerCoordinator {
                 .collect(),
         };
 
-        // Persist state if this is a new group
-        if is_new_group {
+        // Persist group state on every join (not just new groups) so that
+        // membership changes, generation bumps, and rebalances survive restart.
+        {
             let state = PersistedGroupState::from_group(group);
             // Best effort persistence - don't fail the join if persistence fails
             if let Err(e) = self.persistence.save_group(&state) {
-                tracing::warn!(group_id = %group_id, error = %e, "Failed to persist new group state");
+                tracing::warn!(group_id = %group_id, error = %e, "Failed to persist group state");
             }
         }
 
@@ -642,6 +643,14 @@ impl ConsumerCoordinator {
 
         group.remove_member(&member_id);
 
+        // Persist updated group state after member removal
+        {
+            let state = PersistedGroupState::from_group(group);
+            if let Err(e) = self.persistence.save_group(&state) {
+                tracing::warn!(group_id = %group_id, error = %e, "Failed to persist group state after leave");
+            }
+        }
+
         Ok(LeaveGroupResponse {})
     }
 
@@ -699,6 +708,15 @@ impl ConsumerCoordinator {
                 // Members timed out - rebalance triggered automatically by remove_member
                 for member_id in timed_out {
                     group.remove_member(&member_id);
+                }
+                // Persist updated group state after timeout-driven member removal
+                let state = PersistedGroupState::from_group(group);
+                if let Err(e) = self.persistence.save_group(&state) {
+                    tracing::warn!(
+                        group_id = %group.group_id,
+                        error = %e,
+                        "Failed to persist group state after timeout cleanup"
+                    );
                 }
             }
         }

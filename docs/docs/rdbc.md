@@ -13,10 +13,13 @@ SQL database connectivity layer for the Rivven event streaming platform.
 | **Multi-Database Support** | PostgreSQL, MySQL, MariaDB, SQL Server |
 | **Connection Pooling** | High-performance pooling with health checks |
 | **SQL Dialect Abstraction** | Vendor-agnostic SQL generation via sea-query |
+| **Streaming** | `query_stream` on all backends (true incremental on PostgreSQL) |
+| **Prepared Statements** | Cached prepared statements on all backends |
 | **Table Source** | Query-based CDC with incrementing/timestamp modes |
 | **Table Sink** | Batch writes with upsert, delete propagation |
 | **Schema Discovery** | Automatic schema introspection and evolution |
 | **Type System** | 25+ value types with Debezium parity |
+| **SQL Injection Prevention** | Identifier validation, type name validation, string literal escaping on all DDL/introspection paths |
 
 ## Quick Start
 
@@ -191,6 +194,7 @@ All connection types (PostgreSQL, MySQL, SQL Server) implement `ConnectionLifecy
 | `lifetime_expired_count` | Recycled due to max lifetime |
 | `idle_expired_count` | Recycled due to idle timeout |
 | `health_check_failures` | Failed health checks |
+| `health_checks_performed` | Total health checks executed |
 | `exhausted_count` | Pool exhaustion timeouts |
 | `total_wait_time_us` | Cumulative acquisition wait time |
 
@@ -199,7 +203,7 @@ All connection types (PostgreSQL, MySQL, SQL Server) implement `ConnectionLifecy
 | `reuse_rate()` | Ratio of reused vs fresh connections (0.0-1.0) |
 | `recycled_total()` | Total connections recycled for any reason |
 | `avg_wait_time_ms()` | Average acquisition wait time in milliseconds |
-| `health_failure_rate()` | Ratio of failed health checks (0.0-1.0) |
+| `health_failure_rate()` | Ratio of `health_check_failures` to `health_checks_performed` (0.0-1.0) |
 | `active_connections()` | Connections currently in use |
 
 ## Transactions
@@ -338,6 +342,8 @@ let sql = dialect.upsert_sql(&table_meta, &["id"], &["id", "name", "email"]);
 | ON DUPLICATE KEY | ❌ | ✅ | ✅ | ❌ |
 | Native UUID | ✅ | ❌ | ✅ (10.7+) | ❌ |
 | TRUE/FALSE | ✅ | ❌ | ✅ | ❌ |
+| Streaming | ✅ (incremental) | ✅ (buffered) | ✅ (buffered) | ✅ (buffered) |
+| Prepared Statements | ✅ | ✅ | ✅ | ✅ |
 
 ## Schema Discovery
 
@@ -453,6 +459,9 @@ match result {
 
 ### Streaming
 - Use `query_stream` for large result sets to reduce memory
+- All backends support `query_stream`
+- **PostgreSQL**: True incremental streaming via `query_raw` — rows arrive one-by-one from the server without buffering the entire result set
+- **MySQL / SQL Server**: Fetch-then-stream — results are fetched in full and exposed through an async row iterator for consistent API usage
 - Process records incrementally instead of loading all into memory
 
 ## Feature Flags

@@ -358,7 +358,7 @@ impl Membership {
     async fn run_receiver(&self) -> Result<()> {
         let mut buf = vec![0u8; 65536];
 
-        // F-072 fix: Maximum expected SWIM message size.
+        // Maximum expected SWIM message size.
         // SWIM messages (Ping, Ack, PingReq, Sync, etc.) are small—typically
         // under 1 KB even with piggybacked gossip. Reject oversized payloads
         // before deserialization to prevent memory exhaustion attacks.
@@ -394,7 +394,7 @@ impl Membership {
 
             msg_count += 1;
 
-            // F-072 fix: reject oversized payloads before any processing
+            // reject oversized payloads before any processing
             if len > MAX_SWIM_PAYLOAD_SIZE {
                 warn!(
                     "Dropping oversized UDP payload ({} bytes, max {}) from {}",
@@ -631,12 +631,15 @@ impl Membership {
             .event_tx
             .send(MembershipEvent::NodeLeft(node_id.clone()));
 
-        // Remove after a delay to allow propagation
+        // Remove after a delay to allow propagation.
+        // The task is bounded (5s) and benign if it runs after shutdown.
         let members = self.members.clone();
         let node_id = node_id.clone();
-        tokio::spawn(async move {
+        let _handle = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(5)).await;
-            members.remove(&node_id);
+            if members.remove(&node_id).is_some() {
+                tracing::debug!(node = %node_id, "Removed leaving node after propagation delay");
+            }
         });
 
         Ok(())

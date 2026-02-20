@@ -370,7 +370,7 @@ impl SinkRunner {
         };
 
         *self.status.write().await = ConnectorStatus::Running;
-        // F-042: Adaptive backoff — start at 1ms, double up to 100ms when idle, reset on data
+        // Adaptive backoff — start at 1ms, double up to 100ms when idle, reset on data
         const BACKOFF_MIN_MS: u64 = 1;
         const BACKOFF_MAX_MS: u64 = 100;
         let mut backoff_ms: u64 = BACKOFF_MIN_MS;
@@ -451,9 +451,9 @@ impl SinkRunner {
                                 }
                             };
 
-                            // Use SDK formatter (no Avro codec for legacy runner)
+                            // use structured logging instead of stdout
                             let output = format_event(&event, &sdk_config, None);
-                            println!("{}", output);
+                            info!(target: "rivven_connect::sink", "{}", output);
 
                             self.events_written.fetch_add(1, Ordering::Relaxed);
                         }
@@ -470,6 +470,16 @@ impl SinkRunner {
                             if let Err(e) = self.commit_offset(topic, *partition, next_offset).await
                             {
                                 warn!("Sink '{}' failed to commit offset: {}", self.name, e);
+                            }
+                        }
+
+                        // recover health status on successful consume
+                        {
+                            let status = self.status.read().await;
+                            if *status == ConnectorStatus::Unhealthy {
+                                drop(status);
+                                *self.status.write().await = ConnectorStatus::Running;
+                                info!("Sink '{}' recovered to Running", self.name);
                             }
                         }
                     }
@@ -520,6 +530,19 @@ impl SinkRunner {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ConnectError::config("HTTP sink requires 'url' in connector config"))?
             .to_string();
+
+        // validate URL scheme to prevent SSRF / data exfiltration
+        let parsed_url = url::Url::parse(&url)
+            .map_err(|e| ConnectError::config(format!("Invalid HTTP sink URL '{}': {}", url, e)))?;
+        match parsed_url.scheme() {
+            "http" | "https" => {}
+            scheme => {
+                return Err(ConnectError::config(format!(
+                    "HTTP sink URL must use http or https scheme, got '{}'",
+                    scheme
+                )));
+            }
+        }
 
         let batch_size: usize = self
             .config
@@ -685,7 +708,7 @@ impl SinkRunner {
             self.name, self.config.connector
         );
 
-        // F-042: Adaptive backoff — start at 1ms, double up to 100ms when idle, reset on data
+        // Adaptive backoff — start at 1ms, double up to 100ms when idle, reset on data
         const BACKOFF_MIN_MS: u64 = 1;
         const BACKOFF_MAX_MS: u64 = 100;
         let mut backoff_ms: u64 = BACKOFF_MIN_MS;
@@ -791,6 +814,16 @@ impl SinkRunner {
                             if let Err(e) = self.commit_offset(topic, *partition, next_offset).await
                             {
                                 warn!("Sink '{}' failed to commit offset: {}", self.name, e);
+                            }
+                        }
+
+                        // recover health status on successful consume
+                        {
+                            let status = self.status.read().await;
+                            if *status == ConnectorStatus::Unhealthy {
+                                drop(status);
+                                *self.status.write().await = ConnectorStatus::Running;
+                                info!("Sink '{}' recovered to Running", self.name);
                             }
                         }
                     }

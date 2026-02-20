@@ -178,6 +178,8 @@ pub struct SecureServer {
 
     /// Connection limiter
     connection_semaphore: Arc<Semaphore>,
+    /// §3.3: Write-ahead log for crash-safe durability on the produce path.
+    wal: Option<Arc<rivven_core::GroupCommitWal>>,
 }
 
 impl SecureServer {
@@ -205,6 +207,46 @@ impl SecureServer {
             tracing::warn!("Failed to recover topics from disk: {}", e);
         }
 
+        // §3.3 Replay WAL records at startup, identical to ClusterServer.
+        // Without this, writes committed to WAL but not flushed to segment
+        // files are silently lost when using SecureServer.
+        {
+            let wal_dir = std::path::PathBuf::from(&core_config.data_dir).join("wal");
+            if wal_dir.exists() {
+                let wal_config = rivven_core::WalConfig {
+                    dir: wal_dir,
+                    ..Default::default()
+                };
+                match rivven_core::GroupCommitWal::replay_all(&wal_config).await {
+                    Ok(records) if !records.is_empty() => {
+                        tracing::info!(
+                            count = records.len(),
+                            "WAL replay: {} records recovered at startup (SecureServer)",
+                            records.len()
+                        );
+                        for record in &records {
+                            if let Err(e) = topic_manager.apply_wal_record(record).await {
+                                tracing::warn!(
+                                    lsn = record.lsn,
+                                    error = %e,
+                                    "WAL replay: failed to apply record"
+                                );
+                            }
+                        }
+                    }
+                    Ok(_) => {
+                        tracing::debug!("WAL replay: no records to replay");
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            error = %e,
+                            "WAL replay: failed to read WAL files — starting with potential data loss!"
+                        );
+                    }
+                }
+            }
+        }
+
         let offset_manager = OffsetManager::with_persistence(
             std::path::PathBuf::from(&core_config.data_dir).join("offsets"),
         )?;
@@ -214,8 +256,15 @@ impl SecureServer {
             auth_manager.unwrap_or_else(|| Arc::new(AuthManager::new(Default::default())));
 
         // Initialize service auth if configured
+        // Pass the stored ServiceAuthConfig to the manager instead
+        // of ignoring it. Previously used ServiceAuthManager::new() (hardcoded
+        // defaults), discarding session_duration, rate limits, and service accounts.
         let service_auth_manager = if server_config.enable_service_auth {
-            Some(Arc::new(ServiceAuthManager::new()))
+            if let Some(ref config) = server_config.service_auth_config {
+                Some(Arc::new(ServiceAuthManager::with_config(config)))
+            } else {
+                Some(Arc::new(ServiceAuthManager::new()))
+            }
         } else {
             None
         };
@@ -234,6 +283,20 @@ impl SecureServer {
 
         let connection_semaphore = Arc::new(Semaphore::new(server_config.max_connections));
 
+        // §3.3 Instantiate WAL for produce-path durability.
+        // WAL init failure is a hard error — running without WAL risks data loss.
+        let wal = {
+            let wal_dir = std::path::PathBuf::from(&core_config.data_dir).join("wal");
+            let wal_config = rivven_core::WalConfig {
+                dir: wal_dir,
+                ..Default::default()
+            };
+            let w = rivven_core::GroupCommitWal::new(wal_config)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to initialise WAL: {}", e))?;
+            Some(w)
+        };
+
         Ok(Self {
             config: server_config,
             topic_manager,
@@ -243,6 +306,7 @@ impl SecureServer {
             #[cfg(feature = "tls")]
             tls_acceptor,
             connection_semaphore,
+            wal,
         })
     }
 
@@ -280,8 +344,13 @@ impl SecureServer {
         );
 
         // Create handler for the AuthenticatedHandler
-        let auth_handler_inner =
+        let mut auth_handler_inner =
             RequestHandler::new(self.topic_manager.clone(), self.offset_manager.clone());
+
+        // §3.3: Wire WAL into the request handler
+        if let Some(ref wal) = self.wal {
+            auth_handler_inner.set_wal(wal.clone());
+        }
 
         let auth_handler = Arc::new(AuthenticatedHandler::new(
             auth_handler_inner,

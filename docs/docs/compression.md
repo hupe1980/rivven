@@ -33,6 +33,18 @@ Rivven supports **four compression algorithms** optimized for different use case
 
 ## Configuration
 
+### Feature Gate
+
+Producer-side compression in `rivven-client` is controlled by the `compression` Cargo feature (enabled by default):
+
+```toml
+[dependencies]
+rivven-client = { version = "0.0.18" }                    # compression included
+rivven-client = { version = "0.0.18", features = [] }     # no compression
+```
+
+When disabled, `CompressionType` config is accepted but ignored — all batches are sent uncompressed.
+
 ### Producer Compression
 
 ```yaml
@@ -84,6 +96,8 @@ defaults:
 ---
 
 ## Algorithm Comparison
+
+> **Note**: Gzip is not natively supported. If configured, it is automatically mapped to Zstd (a superior algorithm) with a warning logged. Use LZ4, Snappy, or Zstd directly.
 
 ### LZ4
 
@@ -333,3 +347,15 @@ producer:
 1. Use LZ4 for latency-sensitive consumers
 2. Enable parallel decompression
 3. Scale out consumers
+
+---
+
+## Security
+
+All decompression algorithms enforce a **256 MiB output size limit** (`MAX_DECOMPRESSION_SIZE`) to prevent decompression-bomb DoS attacks:
+
+- **LZ4**: The 4-byte prepended uncompressed size header is validated before allocation
+- **Snappy**: `decompress_len()` is called to validate the header before decompression
+- **Zstd**: The `original_size` parameter is capped at 256 MiB; unknown-size payloads fall back to a 16 MiB limit
+
+Payloads exceeding the limit are rejected with a `DecompressionBomb` error. This protects against crafted payloads that claim gigabytes of output from a few bytes of input.

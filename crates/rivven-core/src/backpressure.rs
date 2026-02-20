@@ -501,7 +501,7 @@ pub struct CircuitBreaker {
     stats: CircuitBreakerStats,
     /// Start of current failure window
     ///
-    /// F-097: `parking_lot::Mutex` is intentional — only guards an `Instant`
+    /// `parking_lot::Mutex` is intentional — only guards an `Instant`
     /// swap (O(1), sub-microsecond), never held across `.await` points.
     window_start: parking_lot::Mutex<Instant>,
 }
@@ -780,12 +780,15 @@ impl<T> BackpressureChannel<T> {
     pub async fn recv(&self) -> Option<T> {
         // Acquire permit (blocks until item available)
         let permit = self.permits.acquire().await.ok()?;
-        permit.forget(); // Don't release, we're consuming the item
 
         let mut rx = self.rx.lock().await;
         let result = rx.recv().await;
 
         if result.is_some() {
+            // Only consume the permit if we successfully received an item.
+            // If the channel is closed (None), the permit is dropped normally,
+            // which releases it back to the semaphore.
+            permit.forget();
             self.stats.received.fetch_add(1, Ordering::Relaxed);
         }
 

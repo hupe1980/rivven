@@ -95,8 +95,10 @@ impl RetryConfig {
             return Duration::ZERO;
         }
 
+        // cap attempt to prevent i32 overflow and degenerate backoff
+        let capped_attempt = attempt.min(30);
         let base_delay = self.initial_delay.as_millis() as f64
-            * self.backoff_multiplier.powi(attempt as i32 - 1);
+            * self.backoff_multiplier.powi(capped_attempt as i32 - 1);
 
         let capped_delay = base_delay.min(self.max_delay.as_millis() as f64);
 

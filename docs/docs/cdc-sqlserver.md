@@ -302,6 +302,18 @@ let config = SqlServerCdcConfig::builder()
     .await?;
 ```
 
+## Security Considerations
+
+### Identifier Validation
+
+All table, schema, and capture instance identifiers are validated via `Validator::validate_identifier()`, enforcing `^[a-zA-Z_][a-zA-Z0-9_]{0,254}$`. Invalid identifiers are rejected at `TableSpec::new()` before any SQL is constructed.
+
+### SQL Injection Prevention
+
+Snapshot queries use bracket-escaping (`]` → `]]`) for SQL Server identifiers. CDC system function calls (`fn_cdc_get_all_changes_*`, `fn_cdc_get_min_lsn`) validate capture instance names before interpolation.
+
+---
+
 ## Troubleshooting
 
 ### CDC Not Capturing Changes

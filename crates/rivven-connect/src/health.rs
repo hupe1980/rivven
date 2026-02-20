@@ -96,49 +96,60 @@ pub async fn start_health_server(
         let path = config.path.clone();
 
         tokio::spawn(async move {
-            let mut buf = [0u8; 1024];
-
-            match socket.read(&mut buf).await {
-                Ok(n) if n > 0 => {
-                    let request = String::from_utf8_lossy(&buf[..n]);
-
-                    // Parse basic HTTP request
-                    let lines: Vec<&str> = request.lines().collect();
-                    if lines.is_empty() {
+            // Read in a loop until we find the end of the request
+            // line (\n), with a 4 KB cap to prevent unbounded reads.
+            let mut buf = Vec::with_capacity(512);
+            let mut tmp = [0u8; 512];
+            let request_line = loop {
+                match socket.read(&mut tmp).await {
+                    Ok(0) => return,
+                    Ok(n) => {
+                        buf.extend_from_slice(&tmp[..n]);
+                        if buf.len() > 4096 {
+                            return; // Request too large, drop connection
+                        }
+                        if buf.contains(&b'\n') {
+                            break String::from_utf8_lossy(&buf).to_string();
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Health check socket error: {}", e);
                         return;
                     }
-
-                    let parts: Vec<&str> = lines[0].split_whitespace().collect();
-                    if parts.len() < 2 {
-                        return;
-                    }
-
-                    let method = parts[0];
-                    let req_path = parts[1];
-
-                    debug!(
-                        "Health check request: {} {} from {}",
-                        method, req_path, peer
-                    );
-
-                    let response = if method == "GET" && req_path == path {
-                        build_health_response(&state).await
-                    } else if method == "GET" && req_path == "/ready" {
-                        build_ready_response(&state).await
-                    } else if method == "GET" && req_path == "/live" {
-                        build_live_response()
-                    } else {
-                        build_404_response()
-                    };
-
-                    if let Err(e) = socket.write_all(response.as_bytes()).await {
-                        warn!("Failed to send health response: {}", e);
-                    }
                 }
-                Ok(_) => {}
-                Err(e) => {
-                    warn!("Health check socket error: {}", e);
-                }
+            };
+
+            // Parse basic HTTP request line
+            let first_line = match request_line.lines().next() {
+                Some(line) => line,
+                None => return,
+            };
+
+            let parts: Vec<&str> = first_line.split_whitespace().collect();
+            if parts.len() < 2 {
+                return;
+            }
+
+            let method = parts[0];
+            let req_path = parts[1];
+
+            debug!(
+                "Health check request: {} {} from {}",
+                method, req_path, peer
+            );
+
+            let response = if method == "GET" && req_path == path {
+                build_health_response(&state).await
+            } else if method == "GET" && req_path == "/ready" {
+                build_ready_response(&state).await
+            } else if method == "GET" && req_path == "/live" {
+                build_live_response()
+            } else {
+                build_404_response()
+            };
+
+            if let Err(e) = socket.write_all(response.as_bytes()).await {
+                warn!("Failed to send health response: {}", e);
             }
         });
     }

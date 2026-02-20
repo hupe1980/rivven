@@ -480,7 +480,6 @@ async fn run_cdc_loop(
 
     let mut relations: HashMap<u32, RelationBody> = HashMap::new();
     let mut event_buffer: Vec<CdcEvent> = Vec::new();
-    const BATCH_SIZE: usize = 100;
 
     loop {
         // Process any pending signals from the CDC stream
@@ -643,14 +642,9 @@ async fn run_cdc_loop(
             }
         }
 
-        // Flush large buffers
-        if event_buffer.len() >= BATCH_SIZE {
-            for event in event_buffer.drain(..) {
-                if event_tx.send(event).await.is_err() {
-                    return Ok(());
-                }
-            }
-        }
+        // removed batch-size flush outside Commit handler.
+        // Events are only flushed on transaction Commit to preserve
+        // transactional atomicity for read_committed consumers.
     }
 
     Ok(())

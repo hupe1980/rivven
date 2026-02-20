@@ -137,10 +137,15 @@ impl SchemaRegistry {
     /// Create a new schema context
     pub fn create_context(&self, context: SchemaContext) -> SchemaResult<()> {
         let name = context.name().to_string();
-        if self.contexts.contains_key(&name) {
-            return Err(SchemaError::AlreadyExists(format!("Context '{}'", name)));
+        use dashmap::mapref::entry::Entry;
+        match self.contexts.entry(name.clone()) {
+            Entry::Occupied(_) => {
+                return Err(SchemaError::AlreadyExists(format!("Context '{}'", name)));
+            }
+            Entry::Vacant(e) => {
+                e.insert(context);
+            }
         }
-        self.contexts.insert(name.clone(), context);
         self.context_subjects.insert(name.clone(), Vec::new());
         info!("Created schema context: {}", name);
         Ok(())

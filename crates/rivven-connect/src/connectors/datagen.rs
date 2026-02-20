@@ -212,7 +212,8 @@ impl Rng {
         if min >= max {
             return min;
         }
-        min + (self.next_u32() as i32).abs() % (max - min)
+        let range = (max - min) as u32;
+        min.wrapping_add((self.next_u32() % range) as i32)
     }
 
     fn choose<'a, T>(&mut self, items: &'a [T]) -> &'a T {

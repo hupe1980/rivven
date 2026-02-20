@@ -73,9 +73,9 @@ The compaction process for each segment:
 1. **Key scan**: Reads all messages from sealed segments, building a map of key → latest offset
 2. **Dedup**: For each segment, filters to keep only the latest-keyed messages
 3. **Tombstone removal**: Messages with empty values (deletion markers) are removed
-4. **Segment rewrite**: If compaction removed any messages, the old segment is deleted and a new segment with only the surviving messages is created
+4. **Segment rewrite**: If compaction removed any messages, surviving messages are written to a **temporary file** in a `.compacting/` subdirectory, then **atomically renamed** to replace the old segment. A crash during the write phase leaves the original segment intact.
 
-Compaction is safe under concurrent reads — the partition write lock is held only during segment rewriting, and deferred fsync ensures the lock is released before `fdatasync`.
+Compaction is safe under concurrent reads — the partition write lock is held only during the atomic rename, and deferred fsync ensures the lock is released before `fdatasync`.
 
 ---
 
@@ -230,6 +230,7 @@ Timeline:
 2. **Order within key** — Records for same key maintain order
 3. **Tombstone visibility** — Deletes visible for retention period
 4. **Active segment safety** — Active (head) segment never compacted
+5. **Crash safety** — Compacted data is written to a **temporary file** and then **atomically renamed** over the old segment. A crash during the write phase leaves the original segment fully intact; a crash after rename leaves the compacted segment in place.
 
 ### What IS NOT Guaranteed
 
@@ -265,7 +266,7 @@ Compaction process:
 1. Select closed segments with high dirty ratio
 2. Build offset map (latest offset per key)
 3. Copy records, skipping superseded entries
-4. Replace old segments with compacted ones
+4. Atomically replace old segments via temp-file rename
 ```
 
 ---

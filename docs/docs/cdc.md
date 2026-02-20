@@ -252,6 +252,14 @@ If the connector restarts during a snapshot, it resumes from the last checkpoint
 5. **Use `exclude_tables`** to skip audit/log tables
 6. **Monitor `snapshot_duration_ms`** metric for performance
 
+### Snapshot Security
+
+All snapshot table specifications are validated at construction time:
+
+- **Identifier validation**: `TableSpec::new()` returns `Result` and validates schema, table, and key column names via `Validator::validate_identifier()` — rejects SQL injection characters, enforces `^[a-zA-Z_][a-zA-Z0-9_]{0,254}$`
+- **Defense-in-depth escaping**: Snapshot `SELECT` queries additionally escape identifiers at the query site (backtick-doubling for MySQL, double-quote-doubling for PostgreSQL, bracket-escaping for SQL Server)
+- **Parameterized pagination**: Keyset pagination values are always passed as parameterized query parameters, never interpolated into SQL
+
 ---
 
 ## Incremental Snapshots

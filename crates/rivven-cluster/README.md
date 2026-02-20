@@ -129,6 +129,8 @@ manager.handle_replica_fetch(&partition_id, &replica_id, fetch_offset).await?;
 
 **Follower Persistence**: `FollowerFetcher` persists records via `Partition::append_replicated_batch()` before advancing the fetch offset. This ensures ISR followers hold real data — leader failure does not cause data loss. Replica state reporting tracks consecutive failures and logs warnings after 5+ failures for operator visibility.
 
+**Leader Transitions**: `become_leader()` and `become_follower()` use `AtomicBool` for lock-free concurrent access through `Arc<PartitionReplication>`. `log_end_offset` updates use `fetch_max()` to prevent non-monotonic regression under concurrent appends.
+
 ### Partition Placement
 
 Consistent hashing with rack awareness:

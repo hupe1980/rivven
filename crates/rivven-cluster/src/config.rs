@@ -185,10 +185,10 @@ impl ClusterConfigBuilder {
             data_dir: self.data_dir.unwrap_or_else(|| PathBuf::from("./data")),
             client_addr: self
                 .client_addr
-                .unwrap_or_else(|| "0.0.0.0:9092".parse().unwrap()),
+                .unwrap_or(std::net::SocketAddr::from(([0, 0, 0, 0], 9092))),
             cluster_addr: self
                 .cluster_addr
-                .unwrap_or_else(|| "0.0.0.0:9093".parse().unwrap()),
+                .unwrap_or(std::net::SocketAddr::from(([0, 0, 0, 0], 9093))),
             advertise_addr: self.advertise_addr,
             seeds: self.seeds,
             swim: self.swim.unwrap_or_default(),

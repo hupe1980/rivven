@@ -1,6 +1,6 @@
 //! Rivven client for Python
 //!
-//! F-051 fix: Uses separate connections for producers/consumers to avoid
+//! Uses separate connections for producers/consumers to avoid
 //! serializing all operations through a single Mutex. Admin operations
 //! (topic management, group management) still go through the main client,
 //! but producers and consumers each get their own dedicated connection.
@@ -161,7 +161,7 @@ impl RivvenClient {
 
     /// Create a producer for a topic
     ///
-    /// F-051 fix: If the client was created with `connect()`, the producer gets
+    /// If the client was created with `connect()`, the producer gets
     /// its own dedicated connection so it doesn't contend with admin operations
     /// or other producers on the main client Mutex.
     ///
@@ -192,7 +192,7 @@ impl RivvenClient {
 
     /// Create a consumer for a topic partition
     ///
-    /// F-051 fix: If the client was created with `connect()`, the consumer gets
+    /// If the client was created with `connect()`, the consumer gets
     /// its own dedicated connection so it doesn't contend with admin operations
     /// or other consumers on the main client Mutex.
     ///
@@ -228,7 +228,7 @@ impl RivvenClient {
         let group_clone = group.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            // F-051 fix: Create a dedicated connection for the consumer
+            // Create a dedicated connection for the consumer
             let client = match addr {
                 Some(a) => {
                     let dedicated = Client::connect(&a).await.into_py_err()?;
@@ -245,7 +245,14 @@ impl RivvenClient {
                     match guard.get_offset(g, &topic, partition).await {
                         Ok(Some(off)) => off,
                         Ok(None) => 0,
-                        Err(_) => 0,
+                        Err(e) => {
+                            // log warning instead of silently resetting to 0
+                            tracing::warn!(
+                                "Failed to get committed offset for group '{}' topic '{}' partition {}: {}. Defaulting to 0",
+                                g, topic, partition, e
+                            );
+                            0
+                        }
                     }
                 }
                 (None, None) => 0,

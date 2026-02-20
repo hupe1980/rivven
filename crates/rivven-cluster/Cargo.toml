@@ -72,6 +72,9 @@ metrics-exporter-prometheus = { workspace = true, optional = true }
 dashmap = "6.1"
 parking_lot = "0.12"
 
+# TCP keepalive (§2.6)
+socket2 = "0.5"
+
 # UUID generation
 uuid = { workspace = true }
 

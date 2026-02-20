@@ -8,8 +8,9 @@ repository.workspace = true
 description = "High-performance async client for Rivven event streaming platform"
 
 [features]
-default = []
+default = ["compression"]
 tls = ["rivven-core/tls"]
+compression = ["rivven-core/compression"]
 schema-registry = ["dep:reqwest"]
 
 [dependencies]

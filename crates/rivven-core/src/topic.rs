@@ -25,7 +25,7 @@ pub struct Topic {
 
     /// Partitions in this topic (growable via add_partitions)
     ///
-    /// F-097: `parking_lot::RwLock` is intentional here — critical sections are
+    /// `parking_lot::RwLock` is intentional here — critical sections are
     /// O(1) Vec index lookups and never held across `.await` points.
     /// `tokio::sync::RwLock` would add unnecessary overhead for pure-sync access.
     partitions: parking_lot::RwLock<Vec<Arc<Partition>>>,
@@ -597,6 +597,132 @@ impl TopicManager {
         }
 
         Ok(added)
+    }
+
+    /// §3.3: Build a WAL record payload for a topic write.
+    ///
+    /// Encodes the message as:
+    ///   `[topic_name_len:u32 BE][topic_name:bytes][partition_id:u32 BE][serialized_message:remaining]`
+    ///
+    /// The `serialized_message` portion is a postcard-encoded `Message` struct,
+    /// preserving key, headers, producer metadata, and transaction markers
+    /// through WAL replay.
+    pub fn build_wal_record(
+        topic_name: &str,
+        partition_id: u32,
+        message: &Message,
+    ) -> Result<bytes::Bytes> {
+        use bytes::BufMut;
+
+        let msg_bytes = message.to_bytes()?;
+        let name_bytes = topic_name.as_bytes();
+        // Guard against topic names exceeding u32::MAX bytes.
+        let name_len = u32::try_from(name_bytes.len()).map_err(|_| {
+            Error::Other(format!(
+                "Topic name too long for WAL record: {} bytes",
+                name_bytes.len()
+            ))
+        })?;
+        let total = 4 + name_bytes.len() + 4 + msg_bytes.len();
+        let mut buf = bytes::BytesMut::with_capacity(total);
+        buf.put_u32(name_len);
+        buf.put_slice(name_bytes);
+        buf.put_u32(partition_id);
+        buf.put_slice(&msg_bytes);
+        Ok(buf.freeze())
+    }
+
+    /// §3.3: Apply a single WAL record during startup replay.
+    ///
+    /// WAL records encode a topic write as:
+    ///   `[topic_name_len:u32][topic_name:bytes][partition_id:u32][message_data:remaining]`
+    ///
+    /// Records whose topic or partition don't exist are silently skipped (the
+    /// topic was deleted after the WAL entry was written). Records whose offset
+    /// is already present in the partition are idempotent and cause no harm.
+    pub async fn apply_wal_record(&self, record: &crate::WalRecord) -> Result<()> {
+        use bytes::Buf;
+
+        let data = &record.data[..];
+        if data.len() < 8 {
+            return Err(Error::Other(format!(
+                "WAL record too short: {} bytes",
+                data.len()
+            )));
+        }
+
+        let mut cursor = std::io::Cursor::new(data);
+
+        let name_len = cursor.get_u32() as usize;
+        if cursor.remaining() < name_len + 4 {
+            return Err(Error::Other("WAL record truncated".to_string()));
+        }
+
+        let name_bytes = &data[4..4 + name_len];
+        let topic_name = std::str::from_utf8(name_bytes)
+            .map_err(|e| Error::Other(format!("Invalid topic name in WAL: {}", e)))?;
+        cursor.set_position((4 + name_len) as u64);
+
+        let partition_id = cursor.get_u32();
+        let msg_start = 4 + name_len + 4;
+        let msg_data = bytes::Bytes::copy_from_slice(&data[msg_start..]);
+
+        // Look up topic — if deleted, skip silently
+        let topic = match self.get_topic(topic_name).await {
+            Ok(t) => t,
+            Err(_) => {
+                tracing::debug!(
+                    topic = %topic_name,
+                    lsn = record.lsn,
+                    "WAL replay: topic not found, skipping"
+                );
+                return Ok(());
+            }
+        };
+
+        // Deserialise the full Message (key, headers, producer metadata, etc.)
+        // from postcard encoding. Fall back to raw-value Message for legacy WAL
+        // records written before build_wal_record() encoded the full struct.
+        // Log when falling back so operators can detect corrupt records.
+        let message = match Message::from_bytes(&msg_data) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(
+                    topic = %topic_name,
+                    partition = partition_id,
+                    lsn = record.lsn,
+                    error = %e,
+                    "WAL replay: Message::from_bytes failed, using raw value fallback — \
+                     record may be a legacy format or corrupt"
+                );
+                Message::new(msg_data)
+            }
+        };
+        match topic.append(partition_id, message).await {
+            Ok(offset) => {
+                tracing::trace!(
+                    topic = %topic_name,
+                    partition = partition_id,
+                    offset,
+                    lsn = record.lsn,
+                    "WAL replay: applied record"
+                );
+                Ok(())
+            }
+            Err(e) => {
+                tracing::warn!(
+                    topic = %topic_name,
+                    partition = partition_id,
+                    lsn = record.lsn,
+                    error = %e,
+                    "WAL replay: failed to apply record"
+                );
+                Err(Error::Other(format!(
+                    "WAL replay failed for {}/{}: {}",
+                    topic_name, partition_id, e
+                )))
+            }
+        }
     }
 }
 

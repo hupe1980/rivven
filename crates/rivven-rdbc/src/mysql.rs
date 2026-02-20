@@ -12,6 +12,7 @@ use chrono::{Datelike, Timelike};
 use mysql_async::prelude::*;
 use mysql_async::{Conn, OptsBuilder};
 use std::collections::HashMap;
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -27,6 +28,7 @@ use crate::schema::{
     ForeignKeyAction, ForeignKeyMetadata, IndexMetadata, SchemaEvolutionMode,
     SchemaEvolutionResult, SchemaManager, SchemaProvider,
 };
+use crate::security::{escape_string_literal, validate_sql_identifier, validate_sql_type_name};
 use crate::types::{ColumnMetadata, Row, TableMetadata, Value};
 
 /// Convert a rivven Value to a MySQL compatible parameter
@@ -90,7 +92,10 @@ fn value_to_sql(value: &Value) -> mysql_async::Value {
         Value::Json(j) => mysql_async::Value::from(j.to_string()),
         Value::Array(arr) => {
             // Serialize as JSON
-            let json = serde_json::to_string(arr).unwrap_or_default();
+            let json = serde_json::to_string(arr).unwrap_or_else(|e| {
+                tracing::warn!("Failed to serialize Array to JSON for MySQL param: {}", e);
+                "[]".to_string()
+            });
             mysql_async::Value::from(json)
         }
         Value::Interval(micros) => mysql_async::Value::from(*micros),
@@ -99,7 +104,13 @@ fn value_to_sql(value: &Value) -> mysql_async::Value {
         Value::Geometry(wkb) | Value::Geography(wkb) => mysql_async::Value::from(wkb.clone()),
         Value::Range { .. } => mysql_async::Value::NULL,
         Value::Composite(map) => {
-            let json = serde_json::to_string(map).unwrap_or_default();
+            let json = serde_json::to_string(map).unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Failed to serialize Composite to JSON for MySQL param: {}",
+                    e
+                );
+                "{}".to_string()
+            });
             mysql_async::Value::from(json)
         }
         Value::Custom { data, .. } => mysql_async::Value::from(data.clone()),
@@ -118,7 +129,15 @@ fn mysql_value_to_value(val: mysql_async::Value) -> Value {
             }
         }
         mysql_async::Value::Int(n) => Value::Int64(n),
-        mysql_async::Value::UInt(n) => Value::Int64(n as i64),
+        // safe conversion for BIGINT UNSIGNED values > i64::MAX
+        mysql_async::Value::UInt(n) => {
+            if n <= i64::MAX as u64 {
+                Value::Int64(n as i64)
+            } else {
+                // Values exceeding i64::MAX are returned as string to avoid silent wrap
+                Value::String(n.to_string())
+            }
+        }
         mysql_async::Value::Float(f) => Value::Float32(f),
         mysql_async::Value::Double(d) => Value::Float64(d),
         mysql_async::Value::Date(year, month, day, hour, min, sec, micro) => {
@@ -173,6 +192,32 @@ fn mysql_value_to_value(val: mysql_async::Value) -> Value {
                 Value::Null
             }
         }
+    }
+}
+
+/// Streaming row iterator backed by a Vec.
+///
+/// mysql_async's binary protocol doesn't expose a true cursor-based row
+/// stream, so results are fetched first and then yielded incrementally.
+/// This preserves the `RowStream` contract for callers while keeping
+/// memory behaviour explicit and documented.
+struct VecRowStream {
+    rows: std::vec::IntoIter<Row>,
+}
+
+impl VecRowStream {
+    fn new(rows: Vec<Row>) -> Self {
+        Self {
+            rows: rows.into_iter(),
+        }
+    }
+}
+
+impl RowStream for VecRowStream {
+    fn next(
+        &mut self,
+    ) -> Pin<Box<dyn Future<Output = crate::error::Result<Option<Row>>> + Send + '_>> {
+        Box::pin(async move { Ok(self.rows.next()) })
     }
 }
 
@@ -238,17 +283,10 @@ impl MySqlConnection {
         Ok(Self::new(conn, database))
     }
 
-    /// Take the inner connection
+    /// Take the inner connection (used by begin/close which need ownership)
     async fn take_conn(&self) -> Option<Conn> {
         let mut guard = self.conn.lock().await;
         guard.take()
-    }
-
-    /// Put back the connection
-    async fn put_conn(&self, conn: Conn) {
-        let mut guard = self.conn.lock().await;
-        *guard = Some(conn);
-        *self.last_used.lock().await = Instant::now();
     }
 }
 
@@ -270,29 +308,27 @@ impl ConnectionLifecycle for MySqlConnection {
 #[async_trait]
 impl Connection for MySqlConnection {
     async fn execute(&self, query: &str, params: &[Value]) -> Result<u64> {
-        let mut conn = self
-            .take_conn()
-            .await
+        let mut guard = self.conn.lock().await;
+        let conn = guard
+            .as_mut()
             .ok_or_else(|| Error::connection("Connection not available"))?;
 
         let mysql_params: Vec<mysql_async::Value> = params.iter().map(value_to_sql).collect();
 
-        // For mysql_async, we need to convert the query to use ? placeholders
-        // (it already uses ? so we should be fine)
         conn.exec_drop(query, mysql_params)
             .await
             .map_err(|e| Error::execution(format!("Failed to execute query: {}", e)))?;
 
         let affected = conn.affected_rows();
-        self.put_conn(conn).await;
+        *self.last_used.lock().await = Instant::now();
 
         Ok(affected)
     }
 
     async fn query(&self, query: &str, params: &[Value]) -> Result<Vec<Row>> {
-        let mut conn = self
-            .take_conn()
-            .await
+        let mut guard = self.conn.lock().await;
+        let conn = guard
+            .as_mut()
             .ok_or_else(|| Error::connection("Connection not available"))?;
 
         let mysql_params: Vec<mysql_async::Value> = params.iter().map(value_to_sql).collect();
@@ -323,24 +359,25 @@ impl Connection for MySqlConnection {
             })
             .collect();
 
-        self.put_conn(conn).await;
+        drop(guard);
+        *self.last_used.lock().await = Instant::now();
         Ok(rows)
     }
 
-    async fn query_stream(
-        &self,
-        _query: &str,
-        _params: &[Value],
-    ) -> Result<Pin<Box<dyn RowStream>>> {
-        // MySQL streaming is more complex with mysql_async
-        Err(Error::unsupported(
-            "Streaming not yet implemented for MySQL",
-        ))
+    async fn query_stream(&self, query: &str, params: &[Value]) -> Result<Pin<Box<dyn RowStream>>> {
+        // Fetch all rows and wrap in a streaming adapter.
+        // mysql_async's binary protocol doesn't expose a true row-by-row cursor
+        // stream, so we materialize first. For large result sets, callers should
+        // use LIMIT/OFFSET pagination or the TableSource incremental mode.
+        let rows = self.query(query, params).await?;
+        Ok(Box::pin(VecRowStream::new(rows)))
     }
 
     async fn prepare(&self, query: &str) -> Result<Box<dyn PreparedStatement>> {
         Ok(Box::new(MySqlPreparedStatement {
             query: query.to_string(),
+            conn: self.conn.clone(),
+            last_used: Arc::new(Mutex::new(Instant::now())),
         }))
     }
 
@@ -418,26 +455,72 @@ impl Connection for MySqlConnection {
     }
 }
 
-/// MySQL prepared statement (simplified - MySQL driver handles caching)
+/// MySQL prepared statement backed by a shared connection.
+///
+/// mysql_async manages server-side statement caching internally. This wrapper
+/// stores the query text and a reference to the parent connection so that
+/// `execute` and `query` delegate through the same take/put channel.
 pub struct MySqlPreparedStatement {
     query: String,
+    conn: Arc<Mutex<Option<Conn>>>,
+    last_used: Arc<Mutex<Instant>>,
 }
 
 #[async_trait]
 impl PreparedStatement for MySqlPreparedStatement {
-    async fn execute(&self, _params: &[Value]) -> Result<u64> {
-        // MySQL driver manages statement caching internally
-        // For now, return unsupported
-        Err(Error::unsupported(
-            "Use Connection::execute with the query string directly",
-        ))
+    async fn execute(&self, params: &[Value]) -> Result<u64> {
+        let mut guard = self.conn.lock().await;
+        let conn = guard
+            .as_mut()
+            .ok_or_else(|| Error::connection("Connection not available"))?;
+
+        let mysql_params: Vec<mysql_async::Value> = params.iter().map(value_to_sql).collect();
+
+        conn.exec_drop(&self.query, mysql_params)
+            .await
+            .map_err(|e| Error::execution(format!("Prepared execute failed: {}", e)))?;
+
+        let affected = conn.affected_rows();
+        *self.last_used.lock().await = Instant::now();
+        Ok(affected)
     }
 
-    async fn query(&self, _params: &[Value]) -> Result<Vec<Row>> {
-        // MySQL driver manages statement caching internally
-        Err(Error::unsupported(
-            "Use Connection::query with the query string directly",
-        ))
+    async fn query(&self, params: &[Value]) -> Result<Vec<Row>> {
+        let mut guard = self.conn.lock().await;
+        let conn = guard
+            .as_mut()
+            .ok_or_else(|| Error::connection("Connection not available"))?;
+
+        let mysql_params: Vec<mysql_async::Value> = params.iter().map(value_to_sql).collect();
+
+        let result: Vec<mysql_async::Row> = conn
+            .exec(&self.query, mysql_params)
+            .await
+            .map_err(|e| Error::execution(format!("Prepared query failed: {}", e)))?;
+
+        let rows: Vec<Row> = result
+            .into_iter()
+            .map(|row| {
+                let columns: Vec<String> = row
+                    .columns_ref()
+                    .iter()
+                    .map(|c| c.name_str().to_string())
+                    .collect();
+
+                let values: Vec<Value> = (0..row.len())
+                    .map(|i| {
+                        let val: mysql_async::Value =
+                            row.get(i).unwrap_or(mysql_async::Value::NULL);
+                        mysql_value_to_value(val)
+                    })
+                    .collect();
+
+                Row::new(columns, values)
+            })
+            .collect();
+
+        *self.last_used.lock().await = Instant::now();
+        Ok(rows)
     }
 
     fn sql(&self) -> &str {
@@ -590,8 +673,40 @@ impl Transaction for MySqlTransaction {
     }
 }
 
+// Drop impl to prevent connection leak and abandoned transactions
+impl Drop for MySqlTransaction {
+    fn drop(&mut self) {
+        // If the transaction was not committed or rolled back, the connection
+        // is still inside self.conn. Return it to parent and issue ROLLBACK.
+        if self.in_transaction.load(Ordering::SeqCst) {
+            let conn_arc = self.conn.clone();
+            let parent_arc = self.parent_conn.clone();
+            let in_tx = self.in_transaction.clone();
+            tokio::task::block_in_place(|| {
+                let rt = tokio::runtime::Handle::current();
+                rt.block_on(async {
+                    let mut guard = conn_arc.lock().await;
+                    if let Some(conn) = guard.as_mut() {
+                        if let Err(e) = conn.query_drop("ROLLBACK").await {
+                            tracing::warn!("Auto-rollback on MySqlTransaction drop failed: {}", e);
+                        } else {
+                            tracing::debug!("MySqlTransaction auto-rolled back on drop");
+                        }
+                    }
+                    // Return connection to parent regardless
+                    if let Some(c) = guard.take() {
+                        *parent_arc.lock().await = Some(c);
+                    }
+                    in_tx.store(false, Ordering::SeqCst);
+                });
+            });
+        }
+    }
+}
+
 /// MySQL connection factory
 pub struct MySqlConnectionFactory {
+    #[allow(dead_code)] // Stored for future use; connect() uses passed config
     config: ConnectionConfig,
 }
 
@@ -604,9 +719,9 @@ impl MySqlConnectionFactory {
 
 #[async_trait]
 impl ConnectionFactory for MySqlConnectionFactory {
-    async fn connect(&self, _config: &ConnectionConfig) -> Result<Box<dyn Connection>> {
-        // Use stored config
-        let conn = MySqlConnection::connect(&self.config).await?;
+    async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Connection>> {
+        // use passed config instead of ignoring it
+        let conn = MySqlConnection::connect(config).await?;
         Ok(Box::new(conn))
     }
 
@@ -994,6 +1109,10 @@ impl SchemaProvider for MySqlSchemaManager {
 #[async_trait]
 impl SchemaManager for MySqlSchemaManager {
     async fn create_table(&self, table: &TableMetadata) -> Result<()> {
+        validate_sql_identifier(&table.name)?;
+        if let Some(ref s) = table.schema {
+            validate_sql_identifier(s)?;
+        }
         let conn = MySqlConnection::connect(&self.config).await?;
 
         // Build CREATE TABLE statement
@@ -1001,6 +1120,8 @@ impl SchemaManager for MySqlSchemaManager {
             .columns
             .iter()
             .map(|col| {
+                validate_sql_identifier(&col.name)?;
+                validate_sql_type_name(&col.type_name)?;
                 let mut def = format!("`{}` {}", col.name, &col.type_name);
 
                 if !col.nullable {
@@ -1012,12 +1133,12 @@ impl SchemaManager for MySqlSchemaManager {
                 }
 
                 if let Some(ref default) = col.default_value {
-                    def.push_str(&format!(" DEFAULT '{}'", default));
+                    def.push_str(&format!(" DEFAULT '{}'", escape_string_literal(default)));
                 }
 
-                def
+                Ok(def)
             })
-            .collect();
+            .collect::<Result<Vec<String>>>()?;
 
         let mut sql = format!(
             "CREATE TABLE `{}` (\n  {}\n",
@@ -1045,6 +1166,10 @@ impl SchemaManager for MySqlSchemaManager {
     }
 
     async fn drop_table(&self, schema: Option<&str>, table: &str) -> Result<()> {
+        validate_sql_identifier(table)?;
+        if let Some(s) = schema {
+            validate_sql_identifier(s)?;
+        }
         let conn = MySqlConnection::connect(&self.config).await?;
         let table_ref = if let Some(s) = schema {
             format!("`{}`.`{}`", s, table)
@@ -1063,12 +1188,18 @@ impl SchemaManager for MySqlSchemaManager {
         table: &str,
         column: &ColumnMetadata,
     ) -> Result<()> {
+        validate_sql_identifier(table)?;
+        validate_sql_identifier(&column.name)?;
+        if let Some(s) = schema {
+            validate_sql_identifier(s)?;
+        }
         let conn = MySqlConnection::connect(&self.config).await?;
         let table_ref = if let Some(s) = schema {
             format!("`{}`.`{}`", s, table)
         } else {
             format!("`{}`", table)
         };
+        validate_sql_type_name(&column.type_name)?;
         let sql = format!(
             "ALTER TABLE {} ADD COLUMN `{}` {} {}",
             table_ref,
@@ -1082,6 +1213,11 @@ impl SchemaManager for MySqlSchemaManager {
     }
 
     async fn drop_column(&self, schema: Option<&str>, table: &str, column: &str) -> Result<()> {
+        validate_sql_identifier(table)?;
+        validate_sql_identifier(column)?;
+        if let Some(s) = schema {
+            validate_sql_identifier(s)?;
+        }
         let conn = MySqlConnection::connect(&self.config).await?;
         let table_ref = if let Some(s) = schema {
             format!("`{}`.`{}`", s, table)
@@ -1103,12 +1239,18 @@ impl SchemaManager for MySqlSchemaManager {
         table: &str,
         column: &ColumnMetadata,
     ) -> Result<()> {
+        validate_sql_identifier(table)?;
+        validate_sql_identifier(&column.name)?;
+        if let Some(s) = schema {
+            validate_sql_identifier(s)?;
+        }
         let conn = MySqlConnection::connect(&self.config).await?;
         let table_ref = if let Some(s) = schema {
             format!("`{}`.`{}`", s, table)
         } else {
             format!("`{}`", table)
         };
+        validate_sql_type_name(&column.type_name)?;
         let sql = format!(
             "ALTER TABLE {} MODIFY COLUMN `{}` {} {}",
             table_ref,
@@ -1127,6 +1269,11 @@ impl SchemaManager for MySqlSchemaManager {
         old_name: &str,
         new_name: &str,
     ) -> Result<()> {
+        validate_sql_identifier(old_name)?;
+        validate_sql_identifier(new_name)?;
+        if let Some(s) = schema {
+            validate_sql_identifier(s)?;
+        }
         let conn = MySqlConnection::connect(&self.config).await?;
         let old_ref = if let Some(s) = schema {
             format!("`{}`.`{}`", s, old_name)
@@ -1151,6 +1298,12 @@ impl SchemaManager for MySqlSchemaManager {
         old_name: &str,
         new_name: &str,
     ) -> Result<()> {
+        validate_sql_identifier(table)?;
+        validate_sql_identifier(old_name)?;
+        validate_sql_identifier(new_name)?;
+        if let Some(s) = schema {
+            validate_sql_identifier(s)?;
+        }
         let conn = MySqlConnection::connect(&self.config).await?;
         let table_ref = if let Some(s) = schema {
             format!("`{}`.`{}`", s, table)
@@ -1171,6 +1324,14 @@ impl SchemaManager for MySqlSchemaManager {
     }
 
     async fn create_index(&self, index: &IndexMetadata) -> Result<()> {
+        validate_sql_identifier(&index.name)?;
+        validate_sql_identifier(&index.table)?;
+        if let Some(ref s) = index.schema {
+            validate_sql_identifier(s)?;
+        }
+        for col in &index.columns {
+            validate_sql_identifier(col)?;
+        }
         let conn = MySqlConnection::connect(&self.config).await?;
         let table_ref = if let Some(ref s) = index.schema {
             format!("`{}`.`{}`", s, index.table)
@@ -1196,12 +1357,50 @@ impl SchemaManager for MySqlSchemaManager {
         Ok(())
     }
 
-    async fn drop_index(&self, _schema: Option<&str>, _index_name: &str) -> Result<()> {
-        // MySQL requires table name for DROP INDEX - we'll need a workaround
-        // For now, assume index_name is unique enough across the schema
-        Err(Error::unsupported(
-            "MySQL DROP INDEX requires table name - use ALTER TABLE ... DROP INDEX instead",
-        ))
+    async fn drop_index(&self, schema: Option<&str>, index_name: &str) -> Result<()> {
+        validate_sql_identifier(index_name)?;
+        if let Some(s) = schema {
+            validate_sql_identifier(s)?;
+        }
+        let conn = MySqlConnection::connect(&self.config).await?;
+
+        // MySQL requires the table name for DROP INDEX. Look it up from
+        // INFORMATION_SCHEMA.STATISTICS.
+        let schema_filter = if let Some(s) = schema {
+            format!("TABLE_SCHEMA = '{}'", escape_string_literal(s))
+        } else {
+            "TABLE_SCHEMA = DATABASE()".to_string()
+        };
+        let lookup_sql = format!(
+            "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.STATISTICS WHERE INDEX_NAME = '{}' AND {} LIMIT 1",
+            escape_string_literal(index_name),
+            schema_filter
+        );
+        let rows = conn.query(&lookup_sql, &[]).await?;
+        let table_name = rows
+            .first()
+            .and_then(|r| r.get_by_name("TABLE_NAME"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                Error::query(format!(
+                    "Index '{}' not found in INFORMATION_SCHEMA.STATISTICS",
+                    index_name
+                ))
+            })?
+            .to_string();
+
+        let table_ref = if let Some(s) = schema {
+            format!("`{}`.`{}`", s, table_name)
+        } else {
+            format!("`{}`", table_name)
+        };
+        conn.execute(
+            &format!("ALTER TABLE {} DROP INDEX `{}`", table_ref, index_name),
+            &[],
+        )
+        .await?;
+        conn.close().await?;
+        Ok(())
     }
 
     async fn evolve_schema(
@@ -1219,7 +1418,7 @@ impl SchemaManager for MySqlSchemaManager {
                 if current.is_none() {
                     return Ok(SchemaEvolutionResult::default());
                 }
-                let current = current.unwrap();
+                let current = current.expect("checked above");
                 let current_cols: std::collections::HashSet<_> =
                     current.columns.iter().map(|c| &c.name).collect();
 

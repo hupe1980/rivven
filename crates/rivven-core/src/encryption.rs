@@ -443,7 +443,7 @@ pub struct EncryptionManager {
     master_key: MasterKey,
     /// All known keys indexed by version (for encrypting + decrypting)
     ///
-    /// F-097: `parking_lot::RwLock` is intentional — critical sections are O(1)
+    /// `parking_lot::RwLock` is intentional — critical sections are O(1)
     /// HashMap lookups/inserts and never held across `.await` points.
     key_store: parking_lot::RwLock<HashMap<u32, LessSafeKey>>,
     rng: SystemRandom,
@@ -485,7 +485,7 @@ impl EncryptionManager {
     /// Rotate the data encryption key, deriving a new key from a new master key.
     /// Old keys are retained in the key store so existing data can still be decrypted.
     ///
-    /// F-053 fix: The key is inserted into the store BEFORE the version is bumped,
+    /// The key is inserted into the store BEFORE the version is bumped,
     /// ensuring that any concurrent decrypt using the new version can always find
     /// the key. We use Acquire for the read and Release for the write to establish
     /// a happens-before relationship.
@@ -549,7 +549,7 @@ impl EncryptionManager {
     /// realistic WAL lifetime. The LSN parameter is retained for structured logging
     /// on RNG failure but does not constrain the nonce.
     ///
-    /// F-063 fix: propagate RNG failure instead of silently using zero bytes.
+    /// propagate RNG failure instead of silently using zero bytes.
     fn generate_nonce(&self, lsn: u64) -> Result<[u8; NONCE_SIZE]> {
         let mut nonce = [0u8; NONCE_SIZE];
         self.rng.fill(&mut nonce).map_err(|_| {
@@ -563,7 +563,7 @@ impl EncryptionManager {
 
     /// Encrypt data with associated LSN for nonce derivation
     ///
-    /// F-058 fix: uses key_store lookup by current_key_version instead of
+    /// uses key_store lookup by current_key_version instead of
     /// the stale `self.data_key` field, so post-rotation encryptions use the
     /// correct key.
     pub fn encrypt(&self, plaintext: &[u8], lsn: u64) -> Result<Vec<u8>> {
@@ -578,7 +578,7 @@ impl EncryptionManager {
         output.extend_from_slice(&header.to_bytes());
         output.extend_from_slice(plaintext);
 
-        // F-058 fix: look up the current key from key_store (not self.data_key)
+        // look up the current key from key_store (not self.data_key)
         let store = self.key_store.read();
         let key = store
             .get(&version)
@@ -759,7 +759,7 @@ pub fn generate_key_file(path: &std::path::Path) -> Result<()> {
         fs::set_permissions(path, perms)?;
     }
 
-    // F-075: On Windows, restrict the key file as much as possible.
+    // On Windows, restrict the key file as much as possible.
     // Windows does not have Unix-style file modes; set read-only to limit
     // exposure and warn the operator to verify ACLs manually.
     #[cfg(windows)]

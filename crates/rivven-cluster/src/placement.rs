@@ -125,8 +125,12 @@ impl PartitionPlacer {
         // Remove from rack tracking
         if let Some(info) = self.nodes.get(node_id) {
             if let Some(rack) = &info.rack {
-                if let Some(rack_nodes) = self.racks.get_mut(rack) {
+                let rack = rack.clone();
+                if let Some(rack_nodes) = self.racks.get_mut(&rack) {
                     rack_nodes.retain(|n| n != node_id);
+                    if rack_nodes.is_empty() {
+                        self.racks.remove(&rack);
+                    }
                 }
             }
         }

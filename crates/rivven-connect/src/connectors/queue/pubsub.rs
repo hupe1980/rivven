@@ -953,10 +953,15 @@ impl PubSubSource {
                 .publish_time
                 .as_ref()
                 .map(|ts| {
-                    DateTime::from_timestamp(ts.seconds, ts.nanos as u32).unwrap_or_else(Utc::now)
+                    // clamp negative nanos to 0 to prevent u32 wrap
+                    DateTime::from_timestamp(ts.seconds, ts.nanos.max(0) as u32)
+                        .unwrap_or_else(Utc::now)
                 })
                 .unwrap_or_else(Utc::now),
-            delivery_attempt: received.delivery_attempt.map(|d| d as i32),
+            // safe i32 narrowing for delivery_attempt
+            delivery_attempt: received
+                .delivery_attempt
+                .and_then(|d| i32::try_from(d).ok()),
             ack_id: received.ack_id.clone(),
         }
     }
