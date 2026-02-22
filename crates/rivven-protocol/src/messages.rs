@@ -933,7 +933,7 @@ impl Request {
     ///
     /// # Errors
     ///
-    /// Returns [`ProtocolError::MessageTooLarge`] if the serialized message
+    /// Returns [`ProtocolError::MessageTooLarge`](crate::ProtocolError::MessageTooLarge) if the serialized message
     /// exceeds [`MAX_MESSAGE_SIZE`](crate::MAX_MESSAGE_SIZE).
     #[inline]
     pub fn to_wire(&self, format: crate::WireFormat, correlation_id: u32) -> Result<Vec<u8>> {
@@ -1040,7 +1040,7 @@ impl Response {
     ///
     /// # Errors
     ///
-    /// Returns [`ProtocolError::MessageTooLarge`] if the serialized message
+    /// Returns [`ProtocolError::MessageTooLarge`](crate::ProtocolError::MessageTooLarge) if the serialized message
     /// exceeds [`MAX_MESSAGE_SIZE`](crate::MAX_MESSAGE_SIZE).
     #[inline]
     pub fn to_wire(&self, format: crate::WireFormat, correlation_id: u32) -> Result<Vec<u8>> {

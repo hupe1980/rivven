@@ -75,6 +75,7 @@ impl TestBroker {
             "--data-dir".to_string(),
             data_dir,
             "--no-dashboard".to_string(),
+            "--no-require-auth".to_string(),
         ];
 
         let cli = Cli::parse_from(&args);
