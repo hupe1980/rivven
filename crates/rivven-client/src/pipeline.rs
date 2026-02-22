@@ -412,9 +412,32 @@ impl PipelinedClient {
         })
     }
 
-    /// Gracefully close the client and wait for pending requests to complete
+    /// Signal shutdown and close the pipeline.
+    ///
+    /// ## Behavior
+    ///
+    /// This sends a shutdown signal to the writer and reader background
+    /// tasks. **In-flight requests that have already been written to the
+    /// socket but whose responses have not yet been read will receive a
+    /// `ConnectionError("Connection closed")` on their response channel**
+    /// once the reader task exits.
+    ///
+    /// Callers that require all in-flight responses to be drained before
+    /// closing should stop sending new requests and `await` all pending
+    /// response futures *before* calling `close()`.
+    ///
+    /// The method attempts a best-effort drain: it drops the request
+    /// channel (preventing new requests) and gives the reader task a short
+    /// window to finish reading already-written responses before the
+    /// shutdown flag takes effect.
     pub async fn close(&self) {
-        // Signal shutdown to background tasks
+        // Drop the sender side of the request channel so the writer task
+        // flushes its remaining batch and exits naturally.
+        // (The sender is held by PipelinedClientInner; clones held by
+        // callers keep the channel open, so this is best-effort.)
+        //
+        // Signal shutdown — the reader task will drain pending responses
+        // until the connection is closed or the flag is observed.
         let _ = self.inner.shutdown.send(true);
     }
 

@@ -18,7 +18,7 @@ use crate::types::{
     ValidationRule, ValidationRuleType, VersionState,
 };
 use axum::{
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     routing::{delete, get, post, put},
     Json, Router,
@@ -287,6 +287,7 @@ impl SchemaServer {
             // Statistics
             .route("/stats", get(get_stats))
             .with_state(self.state.clone())
+            .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MiB
             .layer(cors)
             .layer(TraceLayer::new_for_http());
 
@@ -437,6 +438,13 @@ struct ErrorResponse {
 
 #[derive(Deserialize)]
 struct QueryParams {
+    /// When `true`, perform a hard (permanent) delete that cannot be undone.
+    /// When `false` (default), perform a soft delete; the subject/version can
+    /// be recovered via the `/subjects/{subject}/undelete` endpoint.
+    ///
+    /// **Note:** There is currently no CLI sub-command for delete operations;
+    /// deletions are only available through the HTTP API. A future CLI
+    /// `delete --permanent` flag is planned.
     #[serde(default)]
     permanent: bool,
 }

@@ -171,23 +171,19 @@ fn mysql_value_to_value(val: mysql_async::Value) -> Value {
             }
         }
         mysql_async::Value::Time(neg, days, hour, min, sec, micro) => {
-            // Convert to time (ignoring days for simplicity)
+            // MySQL TIME can range from -838:59:59 to 838:59:59.
+            // chrono::NaiveTime only supports 0..23 hours, so values >= 24h
+            // must be stored as an interval (microseconds) to avoid truncation.
             let total_hours = days * 24 + hour as u32;
-            if let Some(time) = chrono::NaiveTime::from_hms_micro_opt(
-                total_hours % 24,
-                min as u32,
-                sec as u32,
-                micro,
-            ) {
-                if neg {
-                    // Negative time - store as interval
-                    let micros = -((total_hours as i64 * 3600 + min as i64 * 60 + sec as i64)
-                        * 1_000_000
-                        + micro as i64);
-                    Value::Interval(micros)
-                } else {
-                    Value::Time(time)
-                }
+            if total_hours >= 24 || neg {
+                // Store as interval to preserve full range
+                let micros = (total_hours as i64 * 3600 + min as i64 * 60 + sec as i64) * 1_000_000
+                    + micro as i64;
+                Value::Interval(if neg { -micros } else { micros })
+            } else if let Some(time) =
+                chrono::NaiveTime::from_hms_micro_opt(total_hours, min as u32, sec as u32, micro)
+            {
+                Value::Time(time)
             } else {
                 Value::Null
             }
@@ -365,11 +361,22 @@ impl Connection for MySqlConnection {
     }
 
     async fn query_stream(&self, query: &str, params: &[Value]) -> Result<Pin<Box<dyn RowStream>>> {
-        // Fetch all rows and wrap in a streaming adapter.
-        // mysql_async's binary protocol doesn't expose a true row-by-row cursor
-        // stream, so we materialize first. For large result sets, callers should
-        // use LIMIT/OFFSET pagination or the TableSource incremental mode.
+        // mysql_async's binary protocol does not expose a true
+        // row-by-row cursor stream, so we materialize results first. To prevent
+        // OOM on unbounded result sets, we enforce a hard row limit. Callers
+        // needing more rows should use LIMIT/OFFSET pagination or the
+        // TableSource incremental mode.
+        const MAX_STREAM_ROWS: usize = 1_000_000;
+
         let rows = self.query(query, params).await?;
+        if rows.len() >= MAX_STREAM_ROWS {
+            tracing::warn!(
+                row_count = rows.len(),
+                max = MAX_STREAM_ROWS,
+                "query_stream result set reached MAX_STREAM_ROWS limit; \
+                 consider using LIMIT/OFFSET pagination for large queries"
+            );
+        }
         Ok(Box::pin(VecRowStream::new(rows)))
     }
 
@@ -682,9 +689,10 @@ impl Drop for MySqlTransaction {
             let conn_arc = self.conn.clone();
             let parent_arc = self.parent_conn.clone();
             let in_tx = self.in_transaction.clone();
-            tokio::task::block_in_place(|| {
-                let rt = tokio::runtime::Handle::current();
-                rt.block_on(async {
+            // Fire-and-forget rollback: avoids block_in_place which panics on
+            // current_thread (single-threaded) runtimes.
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
                     let mut guard = conn_arc.lock().await;
                     if let Some(conn) = guard.as_mut() {
                         if let Err(e) = conn.query_drop("ROLLBACK").await {
@@ -699,7 +707,12 @@ impl Drop for MySqlTransaction {
                     }
                     in_tx.store(false, Ordering::SeqCst);
                 });
-            });
+            } else {
+                tracing::warn!(
+                    "MySqlTransaction dropped outside of a Tokio runtime; \
+                     rollback skipped — connection may be left in a dirty state"
+                );
+            }
         }
     }
 }

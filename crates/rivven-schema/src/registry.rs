@@ -20,6 +20,7 @@ use crate::types::{
 use crate::validation::{ValidationEngine, ValidationEngineConfig};
 use dashmap::DashMap;
 use parking_lot::RwLock;
+use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 #[cfg(feature = "metrics")]
@@ -55,6 +56,9 @@ pub struct SchemaRegistry {
     contexts: DashMap<String, SchemaContext>,
     /// Per-context subject mapping (context -> subjects)
     context_subjects: DashMap<String, Vec<String>>,
+    /// Mutex to serialize schema registration (prevents TOCTOU races
+    /// between fingerprint check and ID allocation/store)
+    register_lock: Mutex<()>,
     /// Prometheus metrics (optional)
     #[cfg(feature = "metrics")]
     metrics: Option<std::sync::Arc<RegistryMetrics>>,
@@ -81,6 +85,7 @@ impl SchemaRegistry {
             ),
             contexts,
             context_subjects: DashMap::new(),
+            register_lock: Mutex::new(()),
             #[cfg(feature = "metrics")]
             metrics: None,
         })
@@ -349,6 +354,12 @@ impl SchemaRegistry {
         // Compute fingerprint for deduplication
         let fingerprint = SchemaFingerprint::compute(&normalized_schema);
         let fp_hex = fingerprint.md5_hex();
+
+        // Hold the register lock for the entire read-check-allocate-store
+        // sequence to prevent TOCTOU races where two concurrent registrations
+        // of the same schema both pass the fingerprint check and store with
+        // different IDs.
+        let _guard = self.register_lock.lock().await;
 
         // Check if schema already exists (deduplication)
         if let Some(existing) = self.storage.get_schema_by_fingerprint(&fp_hex).await? {

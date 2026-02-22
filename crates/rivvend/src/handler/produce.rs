@@ -70,6 +70,20 @@ impl RequestHandler {
             )
         });
 
+        // Validate partition ID against topic partition count
+        if let Err(e) = Validator::validate_partition(partition_id, topic.num_partitions() as u32) {
+            self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
+            warn!(
+                "Invalid partition {} for topic '{}': {}",
+                partition_id,
+                topic.name(),
+                e
+            );
+            return Response::Error {
+                message: format!("INVALID_PARTITION: {}", e),
+            };
+        }
+
         // §2.4: Data-path epoch fencing.
         // If the client sends a leader_epoch, validate it against the server's
         // current epoch for this partition. A stale epoch means this broker is
@@ -223,6 +237,20 @@ impl RequestHandler {
                 topic.num_partitions() as u32,
             )
         });
+
+        // Validate partition ID against topic partition count
+        if let Err(e) = Validator::validate_partition(partition_id, topic.num_partitions() as u32) {
+            self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
+            warn!(
+                "Invalid partition {} for topic '{}': {}",
+                partition_id,
+                topic.name(),
+                e
+            );
+            return Response::Error {
+                message: format!("INVALID_PARTITION: {}", e),
+            };
+        }
 
         // Epoch fencing for idempotent publish
         if let Some(client_epoch) = leader_epoch {

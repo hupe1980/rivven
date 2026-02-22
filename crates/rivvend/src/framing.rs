@@ -59,39 +59,31 @@ where
     // Validate message size
     if msg_len > max_message_size {
         warn!(
-            "Message too large from {}: {} bytes (max: {})",
+            "Message too large from {}: {} bytes (max: {}) — closing connection",
             peer_label, msg_len, max_message_size
         );
 
-        // We must drain the oversized body from the stream before sending
-        // the error response. Otherwise the client may still be blocked in
-        // write_all() while the server tries to write back the error, and
-        // neither side reads — causing a TCP-level deadlock.
+        // Close the connection instead of attempting to drain the oversized
+        // body.  The previous drain approach was capped at `max_message_size
+        // * 2` bytes, so any frame larger than the cap left un-consumed
+        // bytes on the wire.  The next loop iteration would then read those
+        // leftover bytes as the length prefix of a new frame, permanently
+        // desyncing the framing protocol.
         //
-        // Cap the drain to `max_message_size * 2` (or the declared length,
-        // whichever is smaller) to avoid letting a malicious client force us
-        // to read an unbounded amount of data.
-        let drain_limit = msg_len.min(max_message_size * 2);
-        let mut remaining = drain_limit;
-        let mut discard_buf = [0u8; 8192];
-        while remaining > 0 {
-            let to_read = remaining.min(discard_buf.len());
-            match tokio::time::timeout(read_timeout, stream.read_exact(&mut discard_buf[..to_read]))
-                .await
-            {
-                Ok(Ok(_)) => remaining -= to_read,
-                Ok(Err(_)) | Err(_) => {
-                    // Connection broken or timed out while draining — just close
-                    return Ok(Some(ReadFrame::Disconnected));
-                }
-            }
-        }
-
+        // Best-effort: try to send an error response before closing so the
+        // client learns *why* it was disconnected.  The send is wrapped in a
+        // timeout because the client may still be writing the oversized body
+        // and both sides could deadlock.
         let response = Response::Error {
             message: format!("MESSAGE_TOO_LARGE: {} bytes exceeds limit", msg_len),
         };
-        send_response(stream, &response, WireFormat::Postcard, 0).await?;
-        return Ok(None); // caller should continue
+        let _ = tokio::time::timeout(
+            read_timeout,
+            send_response(stream, &response, WireFormat::Postcard, 0),
+        )
+        .await;
+
+        return Ok(Some(ReadFrame::Disconnected));
     }
 
     // Read message body with timeout to prevent slow-read DoS
@@ -146,8 +138,13 @@ where
         .len()
         .try_into()
         .map_err(|_| anyhow::anyhow!("response size {} exceeds u32::MAX", response_bytes.len()))?;
-    stream.write_all(&len.to_be_bytes()).await?;
-    stream.write_all(&response_bytes).await?;
+
+    // Combine the 4-byte length prefix and the response body into a single
+    // write to avoid an extra async syscall per response.
+    let mut frame = Vec::with_capacity(4 + response_bytes.len());
+    frame.extend_from_slice(&len.to_be_bytes());
+    frame.extend_from_slice(&response_bytes);
+    stream.write_all(&frame).await?;
     stream.flush().await?;
     Ok(())
 }

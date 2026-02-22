@@ -177,7 +177,7 @@ async fn test_message_size_limits() -> Result<()> {
     );
     let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains("too large"),
+        err_msg.contains("exceeds maximum") || err_msg.contains("too large"),
         "Error should mention size limit: {err_msg}"
     );
 

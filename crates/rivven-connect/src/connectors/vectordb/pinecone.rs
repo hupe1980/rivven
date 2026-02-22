@@ -2823,7 +2823,7 @@ index_host: "https://test.pinecone.io"
 
     #[test]
     fn test_classify_error_message_invalid_narrowed() {
-        // P4-02: "invalid" substring no longer matches broadly.
+        // "invalid" as a substring does not match broadly.
         // "invalidated" should NOT be classified as Schema.
         assert!(
             matches!(

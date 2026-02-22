@@ -549,7 +549,7 @@ impl WarmTier {
         let size = data.len() as u64;
 
         // Enforce max_size: evict oldest segments until we have space.
-        // evict_oldest now returns evicted data for cold storage migration.
+        // evict_oldest returns evicted data for cold storage migration.
         // At the WarmTier level we don't have access to cold storage, so the
         // data is logged and dropped. For full cold migration, use
         // TieredStorageManager which orchestrates warm → cold demotion.

@@ -27,7 +27,7 @@
 //!     .linger_ms(5)
 //!     .buffer_memory(32 * 1024 * 1024)
 //!     .enable_idempotence(true)
-//!     .build();
+//!     .build()?;
 //!
 //! let producer = Arc::new(Producer::new(config).await?);
 //!
@@ -42,18 +42,21 @@
 //! # }
 //! ```
 
+use crate::client::ClientStream;
 use crate::{Error, Request, Response, Result};
 use bytes::Bytes;
+use rand::Rng;
 #[cfg(feature = "compression")]
 use rivven_core::compression::{CompressionAlgorithm, CompressionConfig, Compressor};
+#[cfg(feature = "tls")]
+use rivven_core::tls::TlsConfig;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::{mpsc, oneshot, Notify, RwLock, Semaphore};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 // ============================================================================
 // Constants
@@ -69,6 +72,15 @@ const DEFAULT_BUFFER_MEMORY: usize = 32 * 1024 * 1024;
 const DEFAULT_METADATA_TTL: Duration = Duration::from_secs(300);
 /// Sticky partition switch threshold (when batch is full)
 const STICKY_BATCH_THRESHOLD: usize = 8;
+
+/// Estimated per-record memory overhead in bytes.
+///
+/// Accounts for `ProducerRecord` struct, topic `String` (heap + 24B),
+/// `oneshot` channel (~128B), `RecordBatch` entry, and internal
+/// book-keeping. This is added to the raw value+key size when
+/// acquiring memory-semaphore permits so that backpressure kicks in
+/// before the true memory usage exceeds `buffer_memory`.
+const RECORD_OVERHEAD_BYTES: usize = 256;
 
 // ============================================================================
 // Configuration
@@ -103,12 +115,26 @@ pub struct ProducerConfig {
     pub metadata_max_age: Duration,
     /// Compression type (none, gzip, snappy, lz4, zstd)
     pub compression_type: CompressionType,
-    /// Acks required: 0 = none, 1 = leader, -1 = all
+    /// Acks required: 0 = none, 1 = leader, -1 = all.
+    ///
+    /// **Note:** The current Rivven wire protocol (`Request::Publish`)
+    /// does not carry an acks field, so `acks = -1` (All) is not communicated to
+    /// the broker — the server always applies its own replication policy.
+    /// `acks = 0` (fire-and-forget) is respected client-side: the producer skips
+    /// waiting for per-record responses in `send_batch`.
     pub acks: i8,
     /// Connection timeout
     pub connection_timeout: Duration,
     /// Authentication credentials (optional, for SCRAM-SHA-256)
     pub auth: Option<ProducerAuthConfig>,
+    /// TLS configuration (optional). When set, the producer connects
+    /// over TLS instead of plaintext.
+    #[cfg(feature = "tls")]
+    pub tls_config: Option<TlsConfig>,
+    /// TLS server name for certificate verification.
+    /// Required when `tls_config` is `Some`.
+    #[cfg(feature = "tls")]
+    pub tls_server_name: Option<String>,
 }
 
 /// Authentication configuration for the producer connection
@@ -135,18 +161,15 @@ impl CompressionType {
     /// maps producer config compression setting to the algorithm
     /// used by `rivven_core::compression::Compressor`.
     #[cfg(feature = "compression")]
-    pub fn to_algorithm(self) -> CompressionAlgorithm {
+    pub fn to_algorithm(self) -> Result<CompressionAlgorithm> {
         match self {
-            CompressionType::None => CompressionAlgorithm::None,
-            // Gzip is not natively supported by the compressor — map to Zstd
-            // which provides better compression ratio at comparable speed.
-            CompressionType::Gzip => {
-                tracing::warn!("Gzip compression not natively supported; using Zstd instead");
-                CompressionAlgorithm::Zstd
-            }
-            CompressionType::Snappy => CompressionAlgorithm::Snappy,
-            CompressionType::Lz4 => CompressionAlgorithm::Lz4,
-            CompressionType::Zstd => CompressionAlgorithm::Zstd,
+            CompressionType::None => Ok(CompressionAlgorithm::None),
+            CompressionType::Gzip => Err(Error::ConfigError(
+                "Gzip compression is not supported; use Zstd, Snappy, or Lz4 instead".to_string(),
+            )),
+            CompressionType::Snappy => Ok(CompressionAlgorithm::Snappy),
+            CompressionType::Lz4 => Ok(CompressionAlgorithm::Lz4),
+            CompressionType::Zstd => Ok(CompressionAlgorithm::Zstd),
         }
     }
 }
@@ -170,6 +193,10 @@ impl Default for ProducerConfig {
             acks: 1,
             connection_timeout: Duration::from_secs(10),
             auth: None,
+            #[cfg(feature = "tls")]
+            tls_config: None,
+            #[cfg(feature = "tls")]
+            tls_server_name: None,
         }
     }
 }
@@ -320,9 +347,28 @@ impl ProducerConfigBuilder {
         self
     }
 
-    /// Build the configuration
-    pub fn build(self) -> ProducerConfig {
-        self.config
+    /// Set TLS configuration for encrypted connections
+    #[cfg(feature = "tls")]
+    pub fn tls(mut self, tls_config: TlsConfig, server_name: impl Into<String>) -> Self {
+        self.config.tls_config = Some(tls_config);
+        self.config.tls_server_name = Some(server_name.into());
+        self
+    }
+
+    /// Build the configuration.
+    ///
+    /// Returns an error when `tls_config` is set but `tls_server_name` is
+    /// missing (the server name is required for certificate verification).
+    pub fn build(self) -> Result<ProducerConfig> {
+        #[cfg(feature = "tls")]
+        if self.config.tls_config.is_some() && self.config.tls_server_name.is_none() {
+            return Err(Error::ConfigError(
+                "tls_config is set but tls_server_name is missing; \
+                 a server name is required for TLS certificate verification"
+                    .to_string(),
+            ));
+        }
+        Ok(self.config)
     }
 }
 
@@ -607,6 +653,18 @@ impl Producer {
             ));
         }
 
+        // The wire protocol does not carry an acks field, so
+        // acks=-1 (All) cannot be communicated to the broker — the server
+        // applies its own replication policy.  Warn once so operators are
+        // aware.  acks=0 is handled client-side in send_batch().
+        if config.acks == -1 {
+            warn!(
+                "acks=-1 (All) requested but the Rivven wire protocol does not \
+                 transmit an acks field; the broker will apply its default \
+                 replication policy"
+            );
+        }
+
         // Calculate initial memory permits (based on average record size)
         let memory_permits = config.buffer_memory / 1024; // ~1KB per permit
         let memory_semaphore = Arc::new(Semaphore::new(memory_permits));
@@ -618,7 +676,7 @@ impl Producer {
         // build a Compressor from the configured CompressionType
         #[cfg(feature = "compression")]
         let compressor = {
-            let algorithm = config.compression_type.to_algorithm();
+            let algorithm = config.compression_type.to_algorithm()?;
             Compressor::with_config(CompressionConfig {
                 algorithm,
                 ..CompressionConfig::default()
@@ -650,18 +708,9 @@ impl Producer {
         let mut client: Option<crate::Client> = None;
         let mut last_err = None;
         for addr in &config.bootstrap_servers {
-            match tokio::time::timeout(config.connection_timeout, crate::Client::connect(addr))
-                .await
-            {
-                Ok(Ok(mut c)) => {
-                    // authenticate if credentials are configured
-                    if let Some(auth) = &config.auth {
-                        if let Err(e) = c.authenticate_scram(&auth.username, &auth.password).await {
-                            debug!("Auth failed on {}: {}", addr, e);
-                            last_err = Some(format!("Authentication failed on {}: {}", addr, e));
-                            continue;
-                        }
-                    }
+            let connect_fut = connect_producer_client(addr, &config);
+            match tokio::time::timeout(config.connection_timeout, connect_fut).await {
+                Ok(Ok(c)) => {
                     debug!("Connected to bootstrap server {}", addr);
                     client = Some(c);
                     break;
@@ -682,14 +731,28 @@ impl Producer {
                 last_err.unwrap_or_default()
             ))
         })?;
-        // Extract the underlying TcpStream for the sender task
-        let stream = connected_client.into_stream()?;
+        // Extract the underlying ClientStream (plaintext or TLS) for the sender task
+        let stream = connected_client.into_client_stream();
 
-        // Spawn sender task
+        // Spawn sender task with initialization channel
+        let (init_tx, init_rx) = oneshot::channel();
         let sender_inner = Arc::clone(&inner);
         tokio::spawn(async move {
-            sender_task(sender_inner, stream, record_rx, shutdown_rx).await;
+            sender_task(sender_inner, stream, record_rx, shutdown_rx, init_tx).await;
         });
+
+        // Wait for sender task initialization (including idempotence
+        // handshake). Fail fast when idempotence was requested but could
+        // not be established.
+        match init_rx.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                return Err(Error::ConnectionError(
+                    "Sender task terminated during initialization".into(),
+                ))
+            }
+        }
 
         // Spawn metadata cleanup task
         let cleanup_inner = Arc::clone(&inner);
@@ -737,8 +800,12 @@ impl Producer {
         let value = value.into();
 
         // Backpressure: wait for memory
+        // Include per-record overhead (struct, channel, topic
+        // string, batch bookkeeping) so the semaphore accurately reflects
+        // total memory pressure, not just payload size.
         let value_size = value.len() + key.as_ref().map(|k| k.len()).unwrap_or(0);
-        let permits_needed = (value_size / 1024).max(1);
+        let total_size = value_size + topic.len() + RECORD_OVERHEAD_BYTES;
+        let permits_needed = (total_size / 1024).max(1);
 
         let _permit = tokio::time::timeout(
             self.inner.config.request_timeout,
@@ -792,10 +859,11 @@ impl Producer {
         let value = value.into();
 
         // Apply the same backpressure, stats, and flush tracking
-        // as send_with_key(). Previously this method bypassed all of these,
-        // causing unbounded memory growth and broken flush().
+        // as send_with_key().
+        // Include per-record overhead (see RECORD_OVERHEAD_BYTES).
         let value_size = value.len() + key.as_ref().map(|k| k.len()).unwrap_or(0);
-        let permits_needed = (value_size / 1024).max(1);
+        let total_size = value_size + topic.len() + RECORD_OVERHEAD_BYTES;
+        let permits_needed = (total_size / 1024).max(1);
 
         let _permit = tokio::time::timeout(
             self.inner.config.request_timeout,
@@ -982,19 +1050,9 @@ async fn fetch_topic_metadata(inner: &ProducerInner, topic: &str) -> Result<u32>
     let mut new_client: Option<crate::Client> = None;
     let mut last_err = None;
     for addr in &inner.config.bootstrap_servers {
-        match tokio::time::timeout(
-            inner.config.connection_timeout,
-            crate::Client::connect(addr),
-        )
-        .await
-        {
-            Ok(Ok(mut c)) => {
-                if let Some(auth) = &inner.config.auth {
-                    if let Err(e) = c.authenticate_scram(&auth.username, &auth.password).await {
-                        last_err = Some(format!("Auth failed on {}: {}", addr, e));
-                        continue;
-                    }
-                }
+        let connect_fut = connect_producer_client(addr, &inner.config);
+        match tokio::time::timeout(inner.config.connection_timeout, connect_fut).await {
+            Ok(Ok(c)) => {
                 new_client = Some(c);
                 break;
             }
@@ -1034,9 +1092,9 @@ async fn fetch_topic_metadata(inner: &ProducerInner, topic: &str) -> Result<u32>
 /// Send `InitProducerId` request to the broker and return
 /// (producer_id, producer_epoch). This must be called once before
 /// producing idempotent records.
-async fn init_producer_id(
-    writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>,
-    reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+async fn init_producer_id<W: AsyncWrite + Unpin, R: AsyncRead + Unpin>(
+    writer: &mut BufWriter<W>,
+    reader: &mut BufReader<R>,
     inner: &Arc<ProducerInner>,
 ) -> Result<(u64, u16)> {
     let current_pid = inner.producer_id.load(Ordering::Acquire);
@@ -1105,14 +1163,119 @@ async fn init_producer_id(
 // Sender Task
 // ============================================================================
 
+/// Connect to a bootstrap server with optional TLS and SCRAM auth.
+///
+/// Shared by `Producer::new()`, `fetch_topic_metadata()`, and the
+/// sender-task reconnection path so that TLS/auth logic lives in one place.
+async fn connect_producer_client(addr: &str, config: &ProducerConfig) -> Result<crate::Client> {
+    // Defensive check: reject tls_config without a server name so we never
+    // silently fall back to a plaintext connection.
+    #[cfg(feature = "tls")]
+    if config.tls_config.is_some() && config.tls_server_name.is_none() {
+        return Err(Error::ConfigError(
+            "tls_config is set but tls_server_name is missing; \
+             a server name is required for TLS certificate verification"
+                .to_string(),
+        ));
+    }
+
+    #[allow(unused_mut)]
+    let mut client = {
+        #[cfg(feature = "tls")]
+        {
+            if let (Some(tls_cfg), Some(server_name)) =
+                (&config.tls_config, &config.tls_server_name)
+            {
+                crate::Client::connect_tls(addr, tls_cfg, server_name).await?
+            } else {
+                crate::Client::connect(addr).await?
+            }
+        }
+        #[cfg(not(feature = "tls"))]
+        {
+            crate::Client::connect(addr).await?
+        }
+    };
+
+    // Authenticate if credentials are configured
+    if let Some(auth) = &config.auth {
+        client
+            .authenticate_scram(&auth.username, &auth.password)
+            .await
+            .map_err(|e| {
+                Error::ConnectionError(format!("Authentication failed on {}: {}", addr, e))
+            })?;
+    }
+
+    Ok(client)
+}
+
+/// Attempt to reconnect to any bootstrap server, returning the new
+/// `ClientStream`.  Uses exponential backoff with jitter internally
+/// (100 ms → 10 s, plus up to 25 % random jitter to avoid thundering herd).
+async fn reconnect_producer_stream(
+    inner: &Arc<ProducerInner>,
+    shutdown_rx: &mut tokio::sync::watch::Receiver<bool>,
+) -> Option<ClientStream> {
+    let mut backoff = Duration::from_millis(100);
+    let max_backoff = Duration::from_secs(10);
+
+    loop {
+        // Respect shutdown while waiting
+        if *shutdown_rx.borrow() {
+            return None;
+        }
+
+        for addr in &inner.config.bootstrap_servers {
+            let connect_fut = connect_producer_client(addr, &inner.config);
+            match tokio::time::timeout(inner.config.connection_timeout, connect_fut).await {
+                Ok(Ok(c)) => {
+                    info!("Reconnected to bootstrap server {}", addr);
+                    return Some(c.into_client_stream());
+                }
+                Ok(Err(e)) => {
+                    debug!("Reconnect failed to {}: {}", addr, e);
+                }
+                Err(_) => {
+                    debug!("Reconnect timeout to {}", addr);
+                }
+            }
+        }
+
+        // Add random jitter (up to 25% of backoff) to avoid thundering herd
+        let jitter =
+            Duration::from_millis(rand::thread_rng().gen_range(0..=backoff.as_millis() as u64 / 4));
+        let sleep_duration = backoff + jitter;
+
+        warn!(
+            "All bootstrap servers unreachable, retrying in {:?}",
+            sleep_duration
+        );
+
+        // Wait with shutdown awareness
+        tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    return None;
+                }
+            }
+            _ = tokio::time::sleep(sleep_duration) => {}
+        }
+
+        backoff = (backoff * 2).min(max_backoff);
+    }
+}
+
 /// Background task that batches and sends records
 async fn sender_task(
     inner: Arc<ProducerInner>,
-    stream: TcpStream,
+    stream: ClientStream,
     mut record_rx: mpsc::Receiver<ProducerRecord>,
     mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    init_tx: oneshot::Sender<Result<()>>,
 ) {
-    let (read_half, write_half) = stream.into_split();
+    let (read_half, write_half) = tokio::io::split(stream);
     let mut writer = BufWriter::with_capacity(64 * 1024, write_half);
     let mut reader = BufReader::with_capacity(64 * 1024, read_half);
 
@@ -1129,20 +1292,22 @@ async fn sender_task(
                     "Idempotent producer initialized: id={}, epoch={}",
                     pid, epoch
                 );
+                let _ = init_tx.send(Ok(()));
             }
             Err(e) => {
-                // Log at error level — user explicitly requested
-                // idempotence but we cannot deliver it. Proceed non-idempotent
-                // but make the degradation highly visible for operators.
-                // idempotence_active stays false — callers can
-                // check is_idempotent() to detect the degradation.
-                tracing::error!(
-                    "Failed to init producer ID for idempotent mode: {}. \
-                     Falling back to non-idempotent delivery — duplicates are possible.",
+                // Return error instead of silently degrading
+                // to at-least-once delivery.
+                error!("Failed to init producer ID for idempotent mode: {}", e);
+                let _ = init_tx.send(Err(Error::ConnectionError(format!(
+                    "Failed to establish idempotent producer: {}. \
+                     Cannot silently degrade to at-least-once delivery.",
                     e
-                );
+                ))));
+                return;
             }
         }
+    } else {
+        let _ = init_tx.send(Ok(()));
     }
 
     // Per-partition sequence tracker for idempotent publishing
@@ -1151,11 +1316,54 @@ async fn sender_task(
     // Batches by topic-partition
     let mut batches: HashMap<(String, u32), RecordBatch> = HashMap::new();
     let mut last_flush = Instant::now();
+    // Track whether current connection is healthy for reconnect detection
+    let mut needs_reconnect = false;
 
     loop {
         // Check shutdown
         if *shutdown_rx.borrow() {
             break;
+        }
+
+        // ── Reconnection ────────────────────────────────────────────────
+        if needs_reconnect {
+            warn!("Connection lost, attempting reconnect with exponential backoff");
+            match reconnect_producer_stream(&inner, &mut shutdown_rx).await {
+                Some(new_stream) => {
+                    let (rh, wh) = tokio::io::split(new_stream);
+                    writer = BufWriter::with_capacity(64 * 1024, wh);
+                    reader = BufReader::with_capacity(64 * 1024, rh);
+                    needs_reconnect = false;
+                    info!("Sender task reconnected successfully");
+
+                    // Re-init idempotent state on the new connection
+                    if inner.config.enable_idempotence {
+                        match init_producer_id(&mut writer, &mut reader, &inner).await {
+                            Ok((pid, epoch)) => {
+                                inner.producer_id.store(pid, Ordering::Release);
+                                inner.idempotence_active.store(true, Ordering::Release);
+                                producer_epoch = epoch;
+                                partition_sequences.clear();
+                                debug!(
+                                    "Re-initialized idempotent producer: id={}, epoch={}",
+                                    pid, epoch
+                                );
+                            }
+                            Err(e) => {
+                                error!("Failed to re-init producer ID after reconnect: {}", e);
+                                // Mark idempotence as inactive so the
+                                // producer does not send IdempotentPublish
+                                // requests with a stale producer_id.
+                                inner.idempotence_active.store(false, Ordering::Release);
+                            }
+                        }
+                    }
+                }
+                None => {
+                    // Shutdown requested during reconnect
+                    break;
+                }
+            }
         }
 
         // Calculate remaining linger time
@@ -1263,6 +1471,11 @@ async fn sender_task(
                     if prev <= batch_record_count as u64 {
                         inner.flush_notify.notify_waiters();
                     }
+
+                    // Mark connection as broken so we reconnect before
+                    // the next send attempt.
+                    needs_reconnect = true;
+                    break;
                 }
             }
 
@@ -1291,9 +1504,26 @@ async fn sender_task(
 /// Writes all records first (coalesced into single syscall via BufWriter),
 /// then reads all responses. This is more efficient than request-response
 /// per record.
-async fn send_batch(
-    writer: &mut BufWriter<tokio::net::tcp::OwnedWriteHalf>,
-    reader: &mut BufReader<tokio::net::tcp::OwnedReadHalf>,
+///
+/// ## Response correlation
+///
+/// Responses are matched to requests **by sequential order**, not by a
+/// correlation ID. This is safe because:
+///
+/// 1. This is a **dedicated, single TCP connection** — no other requests
+///    are interleaved on this stream.
+/// 2. The server processes requests in FIFO order on the same connection
+///    and writes responses back in the **same order**.
+/// 3. The batch is fully flushed before any response is read, so there is
+///    no request/response interleaving within a batch.
+///
+/// If the server ever reorders responses (protocol violation), records
+/// would receive the wrong offset. The `PipelinedClient` in `pipeline.rs`
+/// uses 8-byte request IDs for true out-of-order correlation and should
+/// be used when multiplexing is required.
+async fn send_batch<W: AsyncWrite + Unpin, R: AsyncRead + Unpin>(
+    writer: &mut BufWriter<W>,
+    reader: &mut BufReader<R>,
     inner: &Arc<ProducerInner>,
     batch: RecordBatch,
     producer_epoch: u16,
@@ -1395,7 +1625,34 @@ async fn send_batch(
         .await
         .map_err(|e| Error::IoError(e.to_string()))?;
 
-    // Phase 2: Read all responses
+    // acks=0 (fire-and-forget) — skip reading responses.
+    // The broker still processes the writes, but the producer does not
+    // wait for confirmation, trading durability guarantees for latency.
+    if inner.config.acks == 0 {
+        for response_tx in response_channels {
+            let _ = response_tx.send(Ok(RecordMetadata {
+                topic: topic.clone(),
+                partition,
+                offset: 0, // unknown without server response
+                timestamp: 0,
+            }));
+            inner
+                .stats
+                .records_delivered
+                .fetch_add(1, Ordering::Relaxed);
+            let prev = inner.pending_records.fetch_sub(1, Ordering::Release);
+            if prev == 1 {
+                inner.flush_notify.notify_waiters();
+            }
+        }
+        debug!(
+            "Sent batch of {} records to {}/{} (acks=0, fire-and-forget)",
+            num_records, topic, partition
+        );
+        return Ok(());
+    }
+
+    // Phase 2: Read all responses (sequential correlation, see doc comment)
     let mut len_buf = [0u8; 4];
     for response_tx in response_channels {
         // Read response length
@@ -1534,7 +1791,8 @@ mod tests {
             .buffer_memory(64 * 1024 * 1024)
             .enable_idempotence(true)
             .retries(5)
-            .build();
+            .build()
+            .expect("valid config");
 
         assert_eq!(config.bootstrap_servers.len(), 1);
         assert_eq!(config.batch_size, 32768);

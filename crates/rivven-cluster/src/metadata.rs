@@ -170,7 +170,18 @@ impl ClusterMetadata {
     /// Apply a command to the state machine
     pub fn apply(&mut self, index: u64, cmd: MetadataCommand) -> MetadataResponse {
         self.last_applied_index = index;
+        self.apply_cmd(cmd)
+    }
 
+    /// Execute a single command without updating `last_applied_index`.
+    ///
+    /// Batch sub-commands must NOT go through `apply()` because
+    /// the entire batch shares a single Raft log index.  Calling `apply()`
+    /// recursively would redundantly re-set `last_applied_index` and, more
+    /// critically, a nested `Batch` inside a `Batch` would hide the shared-
+    /// index semantics.  By routing through `apply_cmd()` instead, the index
+    /// is set exactly once at the top-level `apply()` call.
+    fn apply_cmd(&mut self, cmd: MetadataCommand) -> MetadataResponse {
         match cmd {
             MetadataCommand::CreateTopic {
                 config,
@@ -213,9 +224,13 @@ impl ClusterMetadata {
                 // succeed while others fail. The entire batch is a single Raft
                 // log entry (atomic at the consensus level), but individual
                 // command failures do NOT roll back prior successes.
+                //
+                // Sub-commands are dispatched via `apply_cmd` (not
+                // `apply`) so that `last_applied_index` is set exactly once for
+                // the entire batch rather than redundantly per sub-command.
                 let mut responses = Vec::with_capacity(commands.len());
                 for cmd in commands {
-                    let resp = self.apply(index, cmd);
+                    let resp = self.apply_cmd(cmd);
                     responses.push(resp);
                 }
                 // Return per-command responses so callers can inspect each result

@@ -69,6 +69,10 @@ The broker starts with sensible defaults:
 - **Listen address**: `0.0.0.0:9092`
 - **Data directory**: `./data`
 - **Max message size**: 10 MB
+- **Authentication**: required (use `--no-require-auth` for local development)
+
+{: .note }
+> Authentication is enabled by default. For quick local development without credentials, start with `rivvend --no-require-auth`.
 
 ### Custom Configuration
 

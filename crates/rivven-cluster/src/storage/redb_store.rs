@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
 use std::ops::RangeBounds;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
@@ -56,6 +57,15 @@ pub struct RedbLogStore {
     last_purged: RwLock<Option<RaftLogId>>,
     /// Committed log ID
     committed: RwLock<Option<RaftLogId>>,
+    /// Monotonic write-version counter.
+    ///
+    /// Incremented on every mutation (save_vote, save_committed, append, truncate,
+    /// purge). Log readers snapshot this value at clone time and can detect
+    /// staleness by comparing against the shared counter.
+    write_version: Arc<AtomicU64>,
+    /// The write-version observed when this instance was cloned (for readers).
+    /// `None` on the primary store (always authoritative).
+    snapshot_version: Option<u64>,
 }
 
 impl RedbLogStore {
@@ -109,6 +119,8 @@ impl RedbLogStore {
             vote: RwLock::new(vote),
             last_purged: RwLock::new(last_purged),
             committed: RwLock::new(committed),
+            write_version: Arc::new(AtomicU64::new(0)),
+            snapshot_version: None,
         })
     }
 
@@ -250,6 +262,39 @@ impl RedbLogStore {
         Ok(())
     }
 
+    /// Bump the write-version counter to invalidate reader caches.
+    fn bump_version(&self) {
+        self.write_version.fetch_add(1, Ordering::Release);
+    }
+
+    /// Check whether this instance's cached metadata is still current.
+    ///
+    /// Returns `true` when the shared write-version counter has advanced
+    /// past the version observed at clone-time, indicating that the
+    /// parent store has been mutated (vote, committed, purge, etc.).
+    /// The primary store (snapshot_version == None) is always authoritative.
+    pub fn is_cache_stale(&self) -> bool {
+        match self.snapshot_version {
+            Some(v) => self.write_version.load(Ordering::Acquire) != v,
+            None => false,
+        }
+    }
+
+    /// Reload cached metadata (vote, last_purged, committed) from the
+    /// database if the cache is stale. No-op on the primary store.
+    pub async fn refresh_cache_if_stale(&self) {
+        if !self.is_cache_stale() {
+            return;
+        }
+        let vote: Option<RaftVote> = Self::load_state_static(&self.db, KEY_VOTE);
+        let last_purged: Option<RaftLogId> = Self::load_state_static(&self.db, KEY_LAST_PURGED);
+        let committed: Option<RaftLogId> = Self::load_state_static(&self.db, KEY_COMMITTED);
+        *self.vote.write().await = vote;
+        *self.last_purged.write().await = last_purged;
+        *self.committed.write().await = committed;
+        debug!("Refreshed stale reader cache from DB");
+    }
+
     /// Delete log entries in range [start, end)
     ///
     /// Propagate errors instead of silently swallowing them
@@ -351,12 +396,22 @@ impl RaftLogStorage<TypeConfig> for RedbLogStore {
     }
 
     async fn get_log_reader(&mut self) -> Self::LogReader {
-        // Return a new instance sharing the same DB
+        // Return a new instance sharing the same DB and write-version counter.
+        //
+        // The reader records the current write-version at
+        // clone time. Consumers can call `is_cache_stale()` to detect when
+        // the parent store has been mutated, and `refresh_cache_if_stale()`
+        // to reload cached metadata from DB. The shared `Arc<AtomicU64>`
+        // counter is incremented on every mutation (save_vote, purge, etc.)
+        // providing a lightweight invalidation signal without locking.
+        let current_version = self.write_version.load(Ordering::Acquire);
         Self {
             db: self.db.clone(),
             vote: RwLock::new(*self.vote.read().await),
             last_purged: RwLock::new(*self.last_purged.read().await),
             committed: RwLock::new(*self.committed.read().await),
+            write_version: self.write_version.clone(),
+            snapshot_version: Some(current_version),
         }
     }
 
@@ -366,6 +421,7 @@ impl RaftLogStorage<TypeConfig> for RedbLogStore {
     ) -> std::result::Result<(), StorageError<NodeId>> {
         self.save_state(KEY_VOTE, vote)?;
         *self.vote.write().await = Some(*vote);
+        self.bump_version();
         debug!(?vote, "Saved vote");
         Ok(())
     }
@@ -382,6 +438,7 @@ impl RaftLogStorage<TypeConfig> for RedbLogStore {
             self.save_state(KEY_COMMITTED, c)?;
         }
         *self.committed.write().await = committed;
+        self.bump_version();
         Ok(())
     }
 
@@ -403,6 +460,7 @@ impl RaftLogStorage<TypeConfig> for RedbLogStore {
         // Collect entries for batch write
         let entries: Vec<_> = entries.into_iter().collect();
         self.append_logs(&entries)?;
+        self.bump_version();
 
         // Callback after successful write
         callback.log_io_completed(Ok(()));
@@ -419,6 +477,7 @@ impl RaftLogStorage<TypeConfig> for RedbLogStore {
         if let Some(last) = log_state.last_log_id {
             self.delete_logs_range(start, last.index + 1)?;
         }
+        self.bump_version();
         debug!(?log_id, "Truncated logs");
         Ok(())
     }
@@ -433,6 +492,7 @@ impl RaftLogStorage<TypeConfig> for RedbLogStore {
         // Update and persist last_purged
         self.save_state(KEY_LAST_PURGED, &log_id)?;
         *self.last_purged.write().await = Some(log_id);
+        self.bump_version();
         debug!(?log_id, "Purged logs");
         Ok(())
     }

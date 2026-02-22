@@ -155,25 +155,23 @@ impl Producer {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let mut offsets = Vec::with_capacity(messages.len());
 
+            // Acquire the lock once for the entire batch to avoid
+            // repeated lock/unlock overhead per message.
+            let mut guard = client.lock().await;
             for (value, key) in messages {
-                // Acquire and release the lock per-message to avoid
-                // holding the mutex across the entire batch of sequential RPCs.
-                let offset = {
-                    let mut guard = client.lock().await;
-                    match key {
-                        Some(k) => {
-                            guard
-                                .publish_with_key(
-                                    &topic,
-                                    Some(bytes::Bytes::from(k)),
-                                    bytes::Bytes::from(value),
-                                )
-                                .await
-                        }
-                        None => guard.publish(&topic, bytes::Bytes::from(value)).await,
+                let offset = match key {
+                    Some(k) => {
+                        guard
+                            .publish_with_key(
+                                &topic,
+                                Some(bytes::Bytes::from(k)),
+                                bytes::Bytes::from(value),
+                            )
+                            .await
                     }
-                    .into_py_err()?
-                };
+                    None => guard.publish(&topic, bytes::Bytes::from(value)).await,
+                }
+                .into_py_err()?;
                 offsets.push(offset);
             }
 

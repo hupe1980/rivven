@@ -16,7 +16,7 @@ use kube::api::{Api, Patch, PatchParams};
 use kube::runtime::controller::{Action, Controller};
 use kube::runtime::finalizer::{finalizer, Event as FinalizerEvent};
 use kube::runtime::watcher::Config;
-use kube::{Client, ResourceExt};
+use kube::{Client, Resource, ResourceExt};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, instrument, warn};
@@ -281,7 +281,39 @@ async fn cleanup_cluster(
     Ok(Action::await_change())
 }
 
-/// Apply a ConfigMap using server-side apply
+/// Verify the operator still owns a resource before force-applying.
+///
+/// Checks whether an existing resource was created by the rivven-operator by
+/// inspecting the `app.kubernetes.io/managed-by` label. If the resource
+/// exists and is managed by a different controller (e.g. Helm, another
+/// operator), the apply is rejected to prevent silently hijacking ownership.
+/// If the resource does not yet exist (404), ownership is trivially valid.
+fn verify_ownership<K: Resource>(existing: &K) -> Result<()> {
+    let labels = existing.meta().labels.as_ref();
+    let managed_by = labels.and_then(|l| l.get("app.kubernetes.io/managed-by"));
+    match managed_by {
+        Some(manager) if manager != "rivven-operator" => {
+            let name = existing.meta().name.as_deref().unwrap_or("<unknown>");
+            Err(OperatorError::InvalidConfig(format!(
+                "resource '{}' is managed by '{}', not rivven-operator; \
+                 refusing to force-apply to avoid ownership conflict",
+                name, manager
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Apply a ConfigMap using server-side apply.
+///
+/// # Force-apply and field ownership
+///
+/// Uses `PatchParams::apply("rivven-operator").force()` which takes
+/// ownership of **all** fields in the patch, even if they were previously
+/// managed by another field manager (e.g. kubectl, Helm, or another
+/// controller). Before force-applying, verifies the operator owns the
+/// resource via the `app.kubernetes.io/managed-by` label to prevent
+/// silently hijacking resources managed by other controllers.
 async fn apply_configmap(client: &Client, namespace: &str, cm: ConfigMap) -> Result<()> {
     let api: Api<ConfigMap> = Api::namespaced(client.clone(), namespace);
     let name =
@@ -290,6 +322,11 @@ async fn apply_configmap(client: &Client, namespace: &str, cm: ConfigMap) -> Res
         })?;
 
     debug!(name = %name, "Applying ConfigMap");
+
+    // Verify ownership before force-applying
+    if let Ok(existing) = api.get(name).await {
+        verify_ownership(&existing)?;
+    }
 
     let patch_params = PatchParams::apply("rivven-operator").force();
     api.patch(name, &patch_params, &Patch::Apply(&cm))
@@ -309,6 +346,11 @@ async fn apply_service(client: &Client, namespace: &str, svc: Service) -> Result
         .ok_or_else(|| OperatorError::InvalidConfig("Service missing metadata.name".into()))?;
 
     debug!(name = %name, "Applying Service");
+
+    // Verify ownership before force-applying
+    if let Ok(existing) = api.get(name).await {
+        verify_ownership(&existing)?;
+    }
 
     let patch_params = PatchParams::apply("rivven-operator").force();
     api.patch(name, &patch_params, &Patch::Apply(&svc))
@@ -332,6 +374,11 @@ async fn apply_statefulset(
 
     debug!(name = %name, "Applying StatefulSet");
 
+    // Verify ownership before force-applying
+    if let Ok(existing) = api.get(name).await {
+        verify_ownership(&existing)?;
+    }
+
     let patch_params = PatchParams::apply("rivven-operator").force();
     let result = api
         .patch(name, &patch_params, &Patch::Apply(&sts))
@@ -351,6 +398,11 @@ async fn apply_pdb(client: &Client, namespace: &str, pdb: PodDisruptionBudget) -
         .ok_or_else(|| OperatorError::InvalidConfig("PDB missing metadata.name".into()))?;
 
     debug!(name = %name, "Applying PodDisruptionBudget");
+
+    // Verify ownership before force-applying
+    if let Ok(existing) = api.get(name).await {
+        verify_ownership(&existing)?;
+    }
 
     let patch_params = PatchParams::apply("rivven-operator").force();
     api.patch(name, &patch_params, &Patch::Apply(&pdb))

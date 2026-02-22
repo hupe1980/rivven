@@ -1,8 +1,16 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, warn};
+
+/// Number of offset commits between automatic checkpoints.
+///
+/// Batching avoids an fsync on every single `commit_offset` call while still
+/// bounding the amount of data that could be lost on a crash to at most this
+/// many commits.
+const CHECKPOINT_INTERVAL: u32 = 50;
 
 /// Partition to offset mapping
 type PartitionOffsets = HashMap<u32, u64>;
@@ -14,14 +22,21 @@ type GroupOffsets = HashMap<String, TopicOffsets>;
 /// Manages consumer offsets for topics and partitions.
 ///
 /// Supports optional file-based persistence — when a `data_dir` is provided,
-/// offsets are atomically checkpointed to `<data_dir>/offsets.json` on every
-/// commit and loaded on startup.
+/// offsets are atomically checkpointed to `<data_dir>/offsets.json` and loaded
+/// on startup.
+///
+/// To avoid an expensive fsync on every single commit, checkpoints are batched:
+/// offsets are written to disk every [`CHECKPOINT_INTERVAL`] commits. Callers
+/// should invoke [`flush()`](Self::flush) during graceful shutdown to persist
+/// any remaining uncommitted changes.
 #[derive(Debug, Clone)]
 pub struct OffsetManager {
     /// Map of consumer_group -> topic -> partition -> offset
     offsets: Arc<RwLock<GroupOffsets>>,
     /// Optional persistence path
     data_dir: Option<PathBuf>,
+    /// Number of commits since the last checkpoint (shared across clones).
+    pending_commits: Arc<AtomicU32>,
 }
 
 impl OffsetManager {
@@ -30,6 +45,7 @@ impl OffsetManager {
         Self {
             offsets: Arc::new(RwLock::new(HashMap::new())),
             data_dir: None,
+            pending_commits: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -72,15 +88,14 @@ impl OffsetManager {
         Ok(Self {
             offsets: Arc::new(RwLock::new(offsets)),
             data_dir: Some(data_dir),
+            pending_commits: Arc::new(AtomicU32::new(0)),
         })
     }
 
     /// Atomically checkpoint offsets to disk (if persistence is enabled).
     ///
-    /// Clone the data and drop the read lock before disk I/O.
-    /// Previously the read lock was held through the entire `spawn_blocking`
-    /// fsync, serializing all concurrent `commit_offset` writes behind the
-    /// slow I/O latency.
+    /// Clones the data and drops the read lock before disk I/O to avoid
+    /// serializing concurrent `commit_offset` writes.
     async fn checkpoint(&self) {
         if let Some(ref dir) = self.data_dir {
             // Clone snapshot and release lock before any I/O
@@ -123,7 +138,12 @@ impl OffsetManager {
         }
     }
 
-    /// Commit an offset for a consumer group
+    /// Commit an offset for a consumer group.
+    ///
+    /// The in-memory state is updated immediately. The on-disk checkpoint is
+    /// written only every [`CHECKPOINT_INTERVAL`] commits to amortize fsync
+    /// cost. Call [`flush()`](Self::flush) during shutdown to persist any
+    /// remaining changes.
     pub async fn commit_offset(
         &self,
         consumer_group: &str,
@@ -142,7 +162,21 @@ impl OffsetManager {
                 .insert(partition, offset);
         }
 
-        self.checkpoint().await;
+        let pending = self.pending_commits.fetch_add(1, Ordering::Relaxed) + 1;
+        if pending >= CHECKPOINT_INTERVAL {
+            self.pending_commits.store(0, Ordering::Relaxed);
+            self.checkpoint().await;
+        }
+    }
+
+    /// Force an immediate checkpoint of all pending offset changes.
+    ///
+    /// Should be called during graceful shutdown to ensure no committed
+    /// offsets are lost.
+    pub async fn flush(&self) {
+        if self.pending_commits.swap(0, Ordering::Relaxed) > 0 {
+            self.checkpoint().await;
+        }
     }
 
     /// Get the committed offset for a consumer group
@@ -244,6 +278,7 @@ mod tests {
             manager.commit_offset("grp1", "orders", 0, 42).await;
             manager.commit_offset("grp1", "orders", 1, 99).await;
             manager.commit_offset("grp2", "events", 0, 7).await;
+            manager.flush().await;
         }
 
         // Reload from disk
@@ -260,6 +295,7 @@ mod tests {
 
         let manager = OffsetManager::with_persistence(data_dir.clone()).unwrap();
         manager.commit_offset("grp1", "t", 0, 10).await;
+        manager.flush().await;
         assert!(manager.delete_group("grp1").await);
 
         // Reload — should be gone

@@ -34,6 +34,10 @@ Rivven provides **native CDC support** for PostgreSQL, MySQL/MariaDB, and SQL Se
 | **Full Observability** | Comprehensive Prometheus metrics |
 | **Health Monitoring** | Auto-recovery, liveness probes, lag monitoring |
 | **Notifications** | Snapshot progress, streaming status, webhook alerts |
+| **Automatic Reconnection** | Exponential backoff with jitter for MySQL binlog reconnection |
+| **Proactive WAL Keepalives** | PostgreSQL sends periodic standby status updates to prevent slot timeout |
+| **Full JSON Type Support** | MySQL binary JSON columns decoded to structured values (not raw bytes) |
+| **Composite PK Snapshots** | PostgreSQL snapshots support multi-column primary keys |
 
 ### Supported Databases
 

@@ -249,6 +249,14 @@ All standard snapshot modes are supported:
 | `lsn_commit_timeout` | duration | `5s` | LSN commit timeout |
 | `wal_sender_timeout` | duration | `60s` | Replication timeout |
 
+### Composite Primary Key Snapshots
+
+Tables with composite primary keys are fully supported during snapshots. Keyset pagination uses all key columns in the `ORDER BY` and `WHERE` clauses, so initial snapshots work correctly on tables with multi-column primary keys without manual configuration.
+
+### Proactive WAL Status Updates
+
+Rivven sends proactive `StandbyStatusUpdate` messages to PostgreSQL during streaming, including keepalive responses. This prevents the server from terminating idle replication connections due to `wal_sender_timeout` and keeps replication slot positions advancing even during periods of low change activity.
+
 ---
 
 ## TLS Configuration

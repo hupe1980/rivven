@@ -612,8 +612,7 @@ impl QuotaManager {
         limit: u64,
     ) -> QuotaResult {
         // Get or create state with a single read-lock scope.
-        // Previously acquired the read lock twice (check + touch) — eliminated
-        // the redundant round-trip.
+        // Single read-lock scope for check + touch.
         {
             let states = self.states.read();
             if let Some(s) = states.get(entity_key) {

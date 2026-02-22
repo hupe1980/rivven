@@ -563,6 +563,14 @@ impl GuardrailsConfigBuilder {
 ///
 /// Prevents resource exhaustion by limiting events/sec per connection.
 ///
+/// # Concurrency Note
+///
+/// The `last_refill` field uses `tokio::sync::RwLock` (not `std::sync::Mutex`),
+/// and the token counter uses `AtomicU32`, so this type is safe to use in async
+/// contexts without risking blocking the executor. The `RwLock` is only held
+/// briefly during refill calculations with no `.await` inside the write-locked
+/// critical section (the write guard is dropped before any async work).
+///
 /// # Example
 ///
 /// ```rust,ignore

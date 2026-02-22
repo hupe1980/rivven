@@ -282,59 +282,49 @@ fn build_connect_configmap(connect: &RivvenConnect) -> Result<ConfigMap> {
 }
 
 /// Build the pipeline YAML from the spec
+///
+/// Constructs the pipeline configuration as a `serde_json::Value` tree and
+/// serializes it with `serde_yaml` instead of manual string interpolation.
+/// This guarantees valid YAML output regardless of user-provided values
+/// (special characters, newlines, YAML metacharacters, etc.).
 fn build_pipeline_yaml(spec: &RivvenConnectSpec) -> Result<String> {
-    use std::fmt::Write;
-
-    let mut yaml = String::new();
-
-    writeln!(yaml, "version: \"1.0\"").map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
-    writeln!(yaml).map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
+    let mut pipeline = serde_json::Map::new();
+    pipeline.insert("version".to_string(), serde_json::json!("1.0"));
 
     // Broker configuration
-    writeln!(yaml, "broker:").map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
-    writeln!(yaml, "  bootstrap_servers:")
-        .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
-
-    // Use cluster service discovery
     let cluster_ns = spec.cluster_ref.namespace.as_deref().unwrap_or("default");
     let cluster_svc = format!(
         "rivven-{}.{}.svc.cluster.local:9092",
         spec.cluster_ref.name, cluster_ns
     );
-    writeln!(yaml, "    - {}", cluster_svc)
-        .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
-    writeln!(yaml).map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
+    pipeline.insert(
+        "broker".to_string(),
+        serde_json::json!({ "bootstrap_servers": [cluster_svc] }),
+    );
 
     // Global settings
     if !spec.sources.is_empty() || !spec.sinks.is_empty() {
-        writeln!(yaml, "settings:").map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
-        writeln!(yaml, "  topic:").map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
-        writeln!(yaml, "    auto_create: {}", spec.settings.topic.auto_create)
-            .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
-        writeln!(
-            yaml,
-            "    default_partitions: {}",
-            spec.settings.topic.default_partitions
-        )
-        .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
-        writeln!(yaml).map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
+        pipeline.insert(
+            "settings".to_string(),
+            serde_json::json!({
+                "topic": {
+                    "auto_create": spec.settings.topic.auto_create,
+                    "default_partitions": spec.settings.topic.default_partitions
+                }
+            }),
+        );
     }
 
     // Sources
     if !spec.sources.is_empty() {
-        writeln!(yaml, "sources:").map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
+        let mut sources = serde_json::Map::new();
         for source in &spec.sources {
-            writeln!(yaml, "  {}:", source.name)
-                .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
-            writeln!(yaml, "    connector: {}", source.connector)
-                .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
-            writeln!(yaml, "    topic: {}", source.topic)
-                .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
-            writeln!(yaml, "    enabled: {}", source.enabled)
-                .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
+            let mut entry = serde_json::Map::new();
+            entry.insert("connector".to_string(), serde_json::json!(source.connector));
+            entry.insert("topic".to_string(), serde_json::json!(source.topic));
+            entry.insert("enabled".to_string(), serde_json::json!(source.enabled));
 
-            // Write config - merge topic_routing into config for CDC connectors
-            // topic_routing is CDC-specific and must be in the connector config section
+            // Merge topic_routing into config for CDC connectors
             let mut config = source.config.clone();
             if let Some(ref routing) = source.topic_routing {
                 if let serde_json::Value::Object(ref mut map) = config {
@@ -345,55 +335,39 @@ fn build_pipeline_yaml(spec: &RivvenConnectSpec) -> Result<String> {
             }
 
             if !config.is_null() {
-                writeln!(yaml, "    config:")
-                    .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
-                // Serialize JSON config to YAML
-                let config_str = serde_json::to_string_pretty(&config)
-                    .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
-                for line in config_str.lines() {
-                    writeln!(yaml, "      {}", line)
-                        .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
-                }
+                entry.insert("config".to_string(), config);
             }
+
+            sources.insert(source.name.clone(), serde_json::Value::Object(entry));
         }
-        writeln!(yaml).map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
+        pipeline.insert("sources".to_string(), serde_json::Value::Object(sources));
     }
 
     // Sinks
     if !spec.sinks.is_empty() {
-        writeln!(yaml, "sinks:").map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
+        let mut sinks = serde_json::Map::new();
         for sink in &spec.sinks {
-            writeln!(yaml, "  {}:", sink.name)
-                .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
-            writeln!(yaml, "    connector: {}", sink.connector)
-                .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
-            // emit proper YAML list syntax instead of Rust debug format
-            writeln!(yaml, "    topics:")
-                .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
-            for topic in &sink.topics {
-                writeln!(yaml, "      - {}", topic)
-                    .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
-            }
-            writeln!(yaml, "    consumer_group: {}", sink.consumer_group)
-                .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
-            writeln!(yaml, "    enabled: {}", sink.enabled)
-                .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
+            let mut entry = serde_json::Map::new();
+            entry.insert("connector".to_string(), serde_json::json!(sink.connector));
+            entry.insert("topics".to_string(), serde_json::json!(sink.topics));
+            entry.insert(
+                "consumer_group".to_string(),
+                serde_json::json!(sink.consumer_group),
+            );
+            entry.insert("enabled".to_string(), serde_json::json!(sink.enabled));
 
-            // Write config if not null/empty
             if !sink.config.is_null() {
-                writeln!(yaml, "    config:")
-                    .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
-                let config_str = serde_json::to_string_pretty(&sink.config)
-                    .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
-                for line in config_str.lines() {
-                    writeln!(yaml, "      {}", line)
-                        .map_err(|e| OperatorError::InvalidConfig(e.to_string()))?;
-                }
+                entry.insert("config".to_string(), sink.config.clone());
             }
+
+            sinks.insert(sink.name.clone(), serde_json::Value::Object(entry));
         }
+        pipeline.insert("sinks".to_string(), serde_json::Value::Object(sinks));
     }
 
-    Ok(yaml)
+    serde_yaml::to_string(&serde_json::Value::Object(pipeline)).map_err(|e| {
+        OperatorError::InvalidConfig(format!("failed to serialize pipeline YAML: {e}"))
+    })
 }
 
 /// Build the Deployment for connect workers
@@ -713,6 +687,27 @@ fn build_connect_service(connect: &RivvenConnect) -> Result<Service> {
     })
 }
 
+/// Verify the operator still owns a resource before force-applying.
+///
+/// Checks whether an existing resource was created by the rivven-operator by
+/// inspecting the `app.kubernetes.io/managed-by` label. If the resource
+/// exists and is managed by a different controller, the apply is rejected.
+fn verify_ownership<K: Resource>(existing: &K) -> Result<()> {
+    let labels = existing.meta().labels.as_ref();
+    let managed_by = labels.and_then(|l| l.get("app.kubernetes.io/managed-by"));
+    match managed_by {
+        Some(manager) if manager != "rivven-operator" => {
+            let name = existing.meta().name.as_deref().unwrap_or("<unknown>");
+            Err(OperatorError::InvalidConfig(format!(
+                "resource '{}' is managed by '{}', not rivven-operator; \
+                 refusing to force-apply to avoid ownership conflict",
+                name, manager
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Apply ConfigMap using server-side apply
 async fn apply_connect_configmap(client: &Client, namespace: &str, cm: ConfigMap) -> Result<()> {
     let api: Api<ConfigMap> = Api::namespaced(client.clone(), namespace);
@@ -722,6 +717,11 @@ async fn apply_connect_configmap(client: &Client, namespace: &str, cm: ConfigMap
         })?;
 
     debug!(name = %name, "Applying Connect ConfigMap");
+
+    // Verify ownership before force-applying
+    if let Ok(existing) = api.get(name).await {
+        verify_ownership(&existing)?;
+    }
 
     let patch_params = PatchParams::apply("rivven-operator").force();
     api.patch(name, &patch_params, &Patch::Apply(&cm))
@@ -745,6 +745,11 @@ async fn apply_connect_deployment(
 
     debug!(name = %name, "Applying Connect Deployment");
 
+    // Verify ownership before force-applying
+    if let Ok(existing) = api.get(name).await {
+        verify_ownership(&existing)?;
+    }
+
     let patch_params = PatchParams::apply("rivven-operator").force();
     let result = api
         .patch(name, &patch_params, &Patch::Apply(&deployment))
@@ -764,6 +769,11 @@ async fn apply_connect_service(client: &Client, namespace: &str, svc: Service) -
         .ok_or_else(|| OperatorError::InvalidConfig("Service missing metadata.name".into()))?;
 
     debug!(name = %name, "Applying Connect Service");
+
+    // Verify ownership before force-applying
+    if let Ok(existing) = api.get(name).await {
+        verify_ownership(&existing)?;
+    }
 
     let patch_params = PatchParams::apply("rivven-operator").force();
     api.patch(name, &patch_params, &Patch::Apply(&svc))
@@ -902,6 +912,8 @@ fn build_connect_status(
             } else {
                 "pending".to_string()
             },
+            status_source: "synthetic".to_string(),
+            last_probed: None,
             events_processed: 0, // Would need to query metrics
             last_error: None,
             last_success_time: None,
@@ -920,6 +932,8 @@ fn build_connect_status(
             } else {
                 "pending".to_string()
             },
+            status_source: "synthetic".to_string(),
+            last_probed: None,
             events_processed: 0,
             last_error: None,
             last_success_time: None,
@@ -992,21 +1006,81 @@ async fn update_connect_status(
 }
 
 /// Cleanup resources when connect is deleted
-#[instrument(skip(connect, _ctx))]
+#[instrument(skip(connect, ctx))]
 async fn cleanup_connect(
     connect: Arc<RivvenConnect>,
-    _ctx: Arc<ConnectControllerContext>,
+    ctx: Arc<ConnectControllerContext>,
 ) -> Result<Action> {
     let name = connect.name_any();
     let namespace = connect.namespace().unwrap_or_else(|| "default".to_string());
 
     info!(name = %name, namespace = %namespace, "Cleaning up RivvenConnect resources");
 
-    // Resources with owner references will be garbage collected automatically
-    // Additional cleanup could include:
-    // 1. Graceful connector shutdown
-    // 2. Offset commit for sinks
-    // 3. External resource cleanup
+    // If this connect CR had sink connectors, set status to Terminating so
+    // the connect workers can attempt a final offset commit before shutdown.
+    let has_sinks = !connect.spec.sinks.is_empty();
+    if has_sinks {
+        info!(name = %name, "Sink connectors detected — setting Terminating status for final offset commit");
+        let draining_status = RivvenConnectStatus {
+            phase: ConnectPhase::Terminating,
+            replicas: 0,
+            ready_replicas: 0,
+            sources_running: 0,
+            sinks_running: 0,
+            sources_total: connect.spec.sources.len() as i32,
+            sinks_total: connect.spec.sinks.len() as i32,
+            observed_generation: connect.metadata.generation.unwrap_or(0),
+            conditions: vec![],
+            connector_statuses: vec![],
+            last_updated: Some(Utc::now().to_rfc3339()),
+            message: Some("Draining sink connectors before deletion".to_string()),
+        };
+        if let Err(e) = update_connect_status(&ctx.client, &namespace, &name, draining_status).await
+        {
+            warn!(name = %name, error = %e, "Failed to set Terminating status — continuing cleanup");
+        }
+    }
+
+    // Delete operator-owned ConfigMap: rivven-connect-{name}
+    let cm_name = format!("rivven-connect-{}", name);
+    let configmaps: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &namespace);
+    match configmaps.delete(&cm_name, &Default::default()).await {
+        Ok(_) => info!(name = %name, configmap = %cm_name, "Deleted operator-owned ConfigMap"),
+        Err(kube::Error::Api(ae)) if ae.code == 404 => {
+            debug!(name = %name, configmap = %cm_name, "ConfigMap already deleted");
+        }
+        Err(e) => {
+            warn!(name = %name, configmap = %cm_name, error = %e, "Failed to delete ConfigMap — continuing cleanup");
+        }
+    }
+
+    // Delete operator-owned Deployment: rivven-connect-{name}
+    let deploy_name = format!("rivven-connect-{}", name);
+    let deployments: Api<Deployment> = Api::namespaced(ctx.client.clone(), &namespace);
+    match deployments.delete(&deploy_name, &Default::default()).await {
+        Ok(_) => {
+            info!(name = %name, deployment = %deploy_name, "Deleted operator-owned Deployment")
+        }
+        Err(kube::Error::Api(ae)) if ae.code == 404 => {
+            debug!(name = %name, deployment = %deploy_name, "Deployment already deleted");
+        }
+        Err(e) => {
+            warn!(name = %name, deployment = %deploy_name, error = %e, "Failed to delete Deployment — continuing cleanup");
+        }
+    }
+
+    // Delete operator-owned Service: rivven-connect-{name}
+    let svc_name = format!("rivven-connect-{}", name);
+    let services: Api<Service> = Api::namespaced(ctx.client.clone(), &namespace);
+    match services.delete(&svc_name, &Default::default()).await {
+        Ok(_) => info!(name = %name, service = %svc_name, "Deleted operator-owned Service"),
+        Err(kube::Error::Api(ae)) if ae.code == 404 => {
+            debug!(name = %name, service = %svc_name, "Service already deleted");
+        }
+        Err(e) => {
+            warn!(name = %name, service = %svc_name, error = %e, "Failed to delete Service — continuing cleanup");
+        }
+    }
 
     info!(name = %name, "Connect cleanup complete");
 
@@ -1159,13 +1233,15 @@ mod tests {
         let connect = create_test_connect();
         let yaml = build_pipeline_yaml(&connect.spec).unwrap();
 
-        assert!(yaml.contains("version: \"1.0\""));
+        // serde_yaml serializes the full structure; verify key elements are present
+        assert!(yaml.contains("version:"));
+        assert!(yaml.contains("1.0"));
         assert!(yaml.contains("bootstrap_servers:"));
         assert!(yaml.contains("rivven-test-cluster"));
         assert!(yaml.contains("sources:"));
-        assert!(yaml.contains("test-source:"));
+        assert!(yaml.contains("test-source"));
         assert!(yaml.contains("sinks:"));
-        assert!(yaml.contains("test-sink:"));
+        assert!(yaml.contains("test-sink"));
     }
 
     #[test]
@@ -1263,5 +1339,38 @@ mod tests {
             .find(|c| c.condition_type == "BrokerConnected")
             .unwrap();
         assert_eq!(broker_cond.status, "True");
+    }
+
+    #[test]
+    fn test_yaml_escape_prevents_injection() {
+        // serde_yaml is now used for serialization which handles escaping
+        // automatically. Verify that special characters in connector names
+        // are safely serialized.
+        let mut connect = create_test_connect();
+        connect.spec.sources[0].name = "evil\ninjected_key: true".to_string();
+        let yaml = build_pipeline_yaml(&connect.spec).unwrap();
+
+        // serde_yaml must properly quote/escape the malicious key.
+        // The raw string must NOT appear as a bare top-level key.
+        assert!(!yaml.contains("\ninjected_key: true\n"));
+
+        // The YAML must still be parseable
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let sources = parsed.get("sources").unwrap().as_mapping().unwrap();
+        // The key with newline must be present as a single key, not split
+        assert!(sources
+            .keys()
+            .any(|k| k.as_str() == Some("evil\ninjected_key: true")));
+    }
+
+    #[test]
+    fn test_build_pipeline_yaml_escapes_values() {
+        let mut connect = create_test_connect();
+        // Inject a malicious source name with YAML special chars
+        connect.spec.sources[0].name = "evil\ninjected_key: true".to_string();
+        let yaml = build_pipeline_yaml(&connect.spec).unwrap();
+        // The YAML must round-trip correctly
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        assert!(parsed.get("sources").is_some());
     }
 }

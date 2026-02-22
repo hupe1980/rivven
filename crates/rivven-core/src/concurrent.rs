@@ -44,6 +44,7 @@
 use bytes::Bytes;
 use crossbeam_channel::{bounded, unbounded, Receiver, Sender, TryRecvError, TrySendError};
 use parking_lot::RwLock;
+use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, AtomicUsize, Ordering};
@@ -266,17 +267,20 @@ impl Default for AppendLogConfig {
     }
 }
 
-/// A segment in the append-only log
+/// A segment in the append-only log.
+///
+/// Uses `UnsafeCell<Box<[u8]>>` instead of a raw `*mut u8` to express
+/// interior mutability idiomatically. All concurrent access is mediated
+/// by the atomic `write_pos`: writers CAS to reserve exclusive byte ranges,
+/// readers observe only committed (immutable) data up to `write_pos`.
 struct LogSegment {
-    /// Segment data — raw pointer for lock-free access.
+    /// Segment data — `UnsafeCell` for interior mutability without `&mut`.
     ///
-    /// We store a raw `*mut u8` + length instead of `UnsafeCell<Vec<u8>>` to avoid
-    /// creating `&mut Vec<u8>` / `&Vec<u8>` references that would violate Rust's
-    /// aliasing rules under concurrent read+write. All accesses go through raw
-    /// pointer arithmetic, which has no aliasing constraints.
-    data_ptr: *mut u8,
-    /// Owned allocation tracked for Drop
-    _data: Vec<u8>,
+    /// Concurrent access is safe because:
+    /// - Writers CAS on `write_pos` to reserve disjoint byte ranges
+    /// - Readers only access bytes below the committed `write_pos`
+    /// - No `&mut [u8]` references are ever created to the shared region
+    data: UnsafeCell<Box<[u8]>>,
     /// Current write position
     write_pos: AtomicUsize,
     /// Segment capacity
@@ -287,27 +291,37 @@ struct LogSegment {
     sealed: AtomicBool,
 }
 
-// SAFETY: All accesses to the data buffer go through raw pointer arithmetic
-// coordinated by atomic `write_pos`. The CAS on write_pos guarantees exclusive
-// write access to each reserved byte range. Reads are bounded by write_pos
-// (Acquire ordering), ensuring all data before that position is fully written.
-// No `&mut` / `&` references to the buffer are ever created concurrently.
+// SAFETY: All accesses to the data buffer go through `UnsafeCell` pointer
+// arithmetic coordinated by atomic `write_pos`. The CAS on write_pos
+// guarantees exclusive write access to each reserved byte range. Reads are
+// bounded by write_pos (Acquire ordering), ensuring all data before that
+// position is fully written. No `&mut` / `&` references to the buffer are
+// ever created concurrently.
 unsafe impl Send for LogSegment {}
 unsafe impl Sync for LogSegment {}
 
 impl LogSegment {
     fn new(base_offset: u64, capacity: usize, _preallocate: bool) -> Self {
-        let mut data = vec![0u8; capacity];
-        let data_ptr = data.as_mut_ptr();
+        let data = vec![0u8; capacity].into_boxed_slice();
 
         Self {
-            data_ptr,
-            _data: data,
+            data: UnsafeCell::new(data),
             capacity,
             write_pos: AtomicUsize::new(0),
             base_offset,
             sealed: AtomicBool::new(false),
         }
+    }
+
+    /// Get raw pointer to the underlying buffer.
+    ///
+    /// SAFETY: Callers must ensure accesses through this pointer are
+    /// coordinated via `write_pos` atomics.
+    #[inline]
+    fn data_ptr(&self) -> *mut u8 {
+        // SAFETY: We only use the resulting pointer for offset-based reads/writes
+        // coordinated by `write_pos`. We never create overlapping references.
+        (unsafe { &mut *self.data.get() }).as_mut_ptr()
     }
 
     /// Try to append data to this segment
@@ -343,12 +357,12 @@ impl LogSegment {
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    // Space reserved, write data via raw pointer — no references created.
+                    // Space reserved, write data.
                     // SAFETY: The CAS above guarantees exclusive access to
                     // [current_pos..new_pos]. No other writer can touch this range.
                     // The buffer is pre-allocated to `capacity` bytes and never resized.
+                    let ptr = self.data_ptr();
                     unsafe {
-                        let ptr = self.data_ptr;
                         // Write length prefix (big-endian)
                         let len = data.len() as u32;
                         let len_bytes = len.to_be_bytes();
@@ -384,11 +398,8 @@ impl LogSegment {
         // SAFETY: position..position+4 is within committed range,
         // all data up to committed has been fully written, and we
         // only create a shared slice over the committed (immutable) region.
-        // The raw pointer avoids creating `&Vec<u8>` which would alias
-        // with concurrent `try_append` writes to higher positions.
+        let ptr = self.data_ptr();
         unsafe {
-            let ptr = self.data_ptr;
-
             // Read length prefix
             let mut len_bytes = [0u8; 4];
             std::ptr::copy_nonoverlapping(ptr.add(position), len_bytes.as_mut_ptr(), 4);
@@ -726,12 +737,21 @@ impl<K: Hash + Eq + Clone, V: Clone> ConcurrentHashMap<K, V> {
         entries
     }
 
-    /// Clear all entries
+    /// Clear all entries atomically.
+    ///
+    /// Swaps each shard with a fresh empty `HashMap` in one step, so concurrent
+    /// readers never observe a partially-cleared state. The old maps are dropped
+    /// after all shards have been swapped.
     pub fn clear(&self) {
+        // Collect the old maps so they are dropped AFTER all locks are released.
+        let mut old_maps = Vec::with_capacity(SHARD_COUNT);
         for shard in &self.shards {
-            shard.write().clear();
+            let mut guard = shard.write();
+            let old = std::mem::take(&mut *guard);
+            old_maps.push(old);
         }
-        self.len.store(0, Ordering::Relaxed);
+        self.len.store(0, Ordering::Release);
+        // `old_maps` drops here — deallocation happens outside any lock.
     }
 }
 

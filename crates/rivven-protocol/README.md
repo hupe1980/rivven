@@ -203,8 +203,8 @@ The protobuf schema defines 31+ message types covering all major protocol operat
 
 Wire protocol conversions use validated and saturating casts to prevent silent truncation of untrusted wire data:
 
-- **`safe_producer_epoch()`**: Validates `u32 → u16` conversion for producer epoch — returns `ProtocolError::InvalidFormat` on overflow instead of silently truncating
-- **Saturating casts**: `max_messages` (`usize → u32`), `expires_in` (`u64 → u32`), and `port` (`u32 → u16`) use `try_from().unwrap_or(T::MAX)` instead of `as` casts
+- **`safe_producer_epoch()`**: Validates `u32 → u16` conversion for producer epoch — returns `ProtocolError::InvalidFormat` on overflow
+- **Saturating casts**: `max_messages` (`usize → u32`), `expires_in` (`u64 → u32`), and `port` (`u32 → u16`) use `try_from().unwrap_or(T::MAX)` for safe saturation
 - **Credential redaction**: Custom `Debug` impl redacts `password` and `auth_bytes` fields in log output
 - **Variant stability**: Enum discriminant order is tested to ensure backward compatibility across protocol versions
 

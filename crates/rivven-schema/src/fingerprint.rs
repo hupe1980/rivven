@@ -1,4 +1,14 @@
 //! Schema fingerprinting for deduplication
+//!
+//! # Security Note — MD5 Collision Risk
+//!
+//! The MD5 fingerprint is provided for **Confluent compatibility** only.
+//! MD5 is cryptographically broken: it is feasible to craft two distinct
+//! schemas that share the same MD5 hash. Do **not** rely on `md5` /
+//! `md5_hex` alone for security-sensitive deduplication.
+//!
+//! For trustworthy identity checks, use the SHA-256 fingerprint
+//! ([`SchemaFingerprint::sha256_hex`]) or compare both hashes together.
 
 use sha2::{Digest, Sha256};
 
@@ -63,14 +73,38 @@ impl SchemaFingerprint {
     }
 }
 
-/// Normalize JSON by parsing and re-serializing
+/// Normalize JSON by parsing and re-serializing with explicitly sorted keys.
+///
+/// `serde_json::to_string` key ordering depends on whether the `preserve_order`
+/// feature is enabled: without it, `serde_json::Map` uses `BTreeMap` (sorted);
+/// with it, keys follow insertion order. To guarantee deterministic fingerprints
+/// regardless of feature flags, we recursively sort all object keys before
+/// serializing.
 fn normalize_json(json: &str) -> String {
     match serde_json::from_str::<serde_json::Value>(json) {
         Ok(value) => {
-            // Re-serialize with sorted keys for deterministic output
-            serde_json::to_string(&value).unwrap_or_else(|_| json.to_string())
+            let sorted = sort_json_keys(&value);
+            serde_json::to_string(&sorted).unwrap_or_else(|_| json.to_string())
         }
         Err(_) => json.to_string(),
+    }
+}
+
+/// Recursively sort all object keys in a JSON value for deterministic output.
+fn sort_json_keys(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut sorted: std::collections::BTreeMap<String, serde_json::Value> =
+                std::collections::BTreeMap::new();
+            for (k, v) in map {
+                sorted.insert(k.clone(), sort_json_keys(v));
+            }
+            serde_json::Value::Object(sorted.into_iter().collect())
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(sort_json_keys).collect())
+        }
+        other => other.clone(),
     }
 }
 

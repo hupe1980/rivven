@@ -403,12 +403,22 @@ impl Connection for SqlServerConnection {
     }
 
     async fn query_stream(&self, query: &str, params: &[Value]) -> Result<Pin<Box<dyn RowStream>>> {
-        // Fetch all rows and wrap in a streaming adapter.
-        // tiberius's TDS protocol pipeline processes results in result-set
-        // granularity; this adapter exposes them as a RowStream for callers.
-        // For large result sets, callers should use OFFSET/FETCH pagination
-        // or the TableSource incremental mode.
+        // tiberius's TDS protocol pipeline processes results in
+        // result-set granularity; this adapter materializes them as a RowStream.
+        // A hard row limit prevents OOM for unbounded queries. For large result
+        // sets, callers should use OFFSET/FETCH pagination or the TableSource
+        // incremental mode.
+        const MAX_STREAM_ROWS: usize = 1_000_000;
+
         let rows = self.query(query, params).await?;
+        if rows.len() >= MAX_STREAM_ROWS {
+            tracing::warn!(
+                row_count = rows.len(),
+                max = MAX_STREAM_ROWS,
+                "query_stream result set reached MAX_STREAM_ROWS limit; \
+                 consider using OFFSET/FETCH pagination for large queries"
+            );
+        }
         Ok(Box::pin(VecRowStream::new(rows)))
     }
 
@@ -605,9 +615,10 @@ impl Drop for SqlServerTransaction {
         if !self.committed.load(Ordering::SeqCst) && !self.rolled_back.load(Ordering::SeqCst) {
             let client = self.client.clone();
             let in_tx = self.in_transaction.clone();
-            tokio::task::block_in_place(|| {
-                let rt = tokio::runtime::Handle::current();
-                rt.block_on(async {
+            // Fire-and-forget rollback: avoids block_in_place which panics on
+            // current_thread (single-threaded) runtimes.
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
                     let mut guard = client.lock().await;
                     if let Err(e) = guard.execute("ROLLBACK TRANSACTION", &[]).await {
                         tracing::warn!("Auto-rollback on SqlServerTransaction drop failed: {}", e);
@@ -616,7 +627,12 @@ impl Drop for SqlServerTransaction {
                     }
                     in_tx.store(false, Ordering::SeqCst);
                 });
-            });
+            } else {
+                tracing::warn!(
+                    "SqlServerTransaction dropped outside of a Tokio runtime; \
+                     rollback skipped — connection may be left in a dirty state"
+                );
+            }
         }
     }
 }

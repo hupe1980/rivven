@@ -328,7 +328,7 @@ impl MySqlCdc {
 #[async_trait]
 impl CdcSource for MySqlCdc {
     async fn start(&mut self) -> Result<()> {
-        if self.running.load(Ordering::SeqCst) {
+        if self.running.load(Ordering::Acquire) {
             return Ok(());
         }
 
@@ -337,7 +337,7 @@ impl CdcSource for MySqlCdc {
             self.config.host, self.config.port, self.config.server_id
         );
 
-        self.running.store(true, Ordering::SeqCst);
+        self.running.store(true, Ordering::Release);
 
         let config = self.config.clone();
         let running = self.running.clone();
@@ -345,12 +345,31 @@ impl CdcSource for MySqlCdc {
         let schema_cache = self.schema_cache.clone();
 
         tokio::spawn(async move {
-            if let Err(e) =
-                run_mysql_cdc_loop(config, running.clone(), event_sender, schema_cache).await
-            {
-                error!("MySQL CDC loop failed: {:?}", e);
-                running.store(false, Ordering::SeqCst);
+            let mut reconnect_delay = Duration::from_secs(1);
+            while running.load(Ordering::Acquire) {
+                match run_mysql_cdc_loop(
+                    config.clone(),
+                    running.clone(),
+                    event_sender.clone(),
+                    schema_cache.clone(),
+                )
+                .await
+                {
+                    Ok(_) => break, // Graceful shutdown
+                    Err(e) => {
+                        if !running.load(Ordering::Acquire) {
+                            break;
+                        }
+                        error!(
+                            "MySQL CDC loop failed: {:?} — reconnecting in {:?}",
+                            e, reconnect_delay
+                        );
+                        tokio::time::sleep(reconnect_delay).await;
+                        reconnect_delay = (reconnect_delay * 2).min(Duration::from_secs(60));
+                    }
+                }
             }
+            running.store(false, Ordering::Release);
         });
 
         Ok(())
@@ -358,12 +377,12 @@ impl CdcSource for MySqlCdc {
 
     async fn stop(&mut self) -> Result<()> {
         info!("Stopping MySQL CDC");
-        self.running.store(false, Ordering::SeqCst);
+        self.running.store(false, Ordering::Release);
         Ok(())
     }
 
     async fn is_healthy(&self) -> bool {
-        self.running.load(Ordering::SeqCst)
+        self.running.load(Ordering::Acquire)
     }
 }
 
@@ -452,6 +471,15 @@ async fn run_mysql_cdc_loop(
         if client.is_tls() { ", TLS" } else { "" }
     );
 
+    // Security warning: password configured without TLS
+    if !client.is_tls() && config.password.is_some() {
+        warn!(
+            "⚠️ SECURITY: Connecting to MySQL without TLS while password is configured. \
+             Credentials are protected by the auth protocol but all traffic is unencrypted. \
+             Enable TLS via the `tls_config` option for production use."
+        );
+    }
+
     // Detect if server is MariaDB
     let is_mariadb = client.server_version().contains("MariaDB");
 
@@ -533,7 +561,7 @@ async fn run_mysql_cdc_loop(
     let mut current_binlog_pos = binlog_pos;
     let mut consecutive_errors: u32 = 0;
 
-    while running.load(Ordering::SeqCst) {
+    while running.load(Ordering::Acquire) {
         let event_data = match stream.next_event().await {
             Ok(Some(data)) => {
                 consecutive_errors = 0;
@@ -546,6 +574,14 @@ async fn run_mysql_cdc_loop(
             }
             Err(e) => {
                 consecutive_errors = consecutive_errors.saturating_add(1);
+                if consecutive_errors >= 5 {
+                    anyhow::bail!(
+                        "Binlog stream failed after {} consecutive errors — \
+                         connection likely broken, triggering reconnect. Last error: {:?}",
+                        consecutive_errors,
+                        e
+                    );
+                }
                 let backoff_secs = (1u64 << consecutive_errors.min(6)).min(60);
                 error!(
                     error = ?e,

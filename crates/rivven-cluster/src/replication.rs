@@ -146,16 +146,22 @@ impl PartitionReplication {
                         node_id: node_id.clone(),
                         log_end_offset: 0,
                         last_fetch: Instant::now(),
-                        in_sync: false,
-                        lag: u64::MAX,
+                        in_sync: true,
+                        lag: 0,
                     },
                 );
             }
         }
 
-        // Initialize ISR with just ourselves
+        // Initialize ISR with all replicas (including ourselves).
+        // Replicas that participated in the leader election are assumed
+        // healthy; the normal ISR-shrink mechanism will remove any that
+        // subsequently fall behind.
         let mut isr = self.isr.write().await;
         isr.clear();
+        for node_id in &replicas {
+            isr.insert(node_id.clone());
+        }
         isr.insert(self.local_node.clone());
 
         info!(
@@ -997,18 +1003,30 @@ mod tests {
         replication.record_appended(1).await.unwrap();
         replication.record_appended(2).await.unwrap();
 
-        // HWM should still be 0 (only leader in ISR)
-        assert_eq!(replication.high_watermark(), 3);
+        // HWM should be 0: all replicas are in ISR from the start, and
+        // node-2 has not fetched yet (LEO = 0), so min(LEO) across ISR = 0.
+        assert_eq!(replication.high_watermark(), 0);
 
-        // Replica fetches
+        // Replica fetches up to offset 2 (LEO = 2)
         replication
             .handle_replica_fetch(&"node-2".to_string(), 2)
             .await
             .unwrap();
 
-        // Now node-2 should be in ISR and HWM should advance
+        // node-2 is still in ISR (lag = 1, within replica_lag_max_messages).
+        // HWM advances to min(3, 2) = 2.
         let isr = replication.get_isr().await;
         assert!(isr.contains("node-2"));
+        assert_eq!(replication.high_watermark(), 2);
+
+        // Replica catches up fully (LEO = 3)
+        replication
+            .handle_replica_fetch(&"node-2".to_string(), 3)
+            .await
+            .unwrap();
+
+        // HWM advances to min(3, 3) = 3
+        assert_eq!(replication.high_watermark(), 3);
     }
 
     #[tokio::test]

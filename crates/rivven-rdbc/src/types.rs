@@ -139,8 +139,20 @@ impl Value {
             Self::Int16(n) => Some(i64::from(*n)),
             Self::Int32(n) => Some(i64::from(*n)),
             Self::Int64(n) => Some(*n),
-            Self::Float32(n) => Some(*n as i64),
-            Self::Float64(n) => Some(*n as i64),
+            Self::Float32(n) => {
+                if n.is_finite() {
+                    Some(*n as i64)
+                } else {
+                    None
+                }
+            }
+            Self::Float64(n) => {
+                if n.is_finite() {
+                    Some(*n as i64)
+                } else {
+                    None
+                }
+            }
             Self::Decimal(d) => d.to_string().parse().ok(),
             Self::String(s) => s.parse().ok(),
             _ => None,

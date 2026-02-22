@@ -176,6 +176,31 @@ impl RaftApiState {
         self
     }
 
+    /// Return the number of nodes in the cluster (blocking).
+    ///
+    /// Used by the dashboard to derive the replication factor.
+    /// Returns `None` if the raft lock cannot be acquired synchronously
+    /// (non-async context).
+    pub fn node_count(&self) -> Option<usize> {
+        match self.raft_node.try_read() {
+            Ok(raft) => {
+                // metadata() is async — we cannot call it here. Instead,
+                // use the node_addresses map which is populated during
+                // cluster formation and always includes the local node.
+                // Fall back to 1 (standalone) when the map is empty.
+                let count = self
+                    .node_addresses
+                    .try_read()
+                    .map(|addrs| addrs.len().max(1))
+                    .unwrap_or(1);
+                // Drop raft guard
+                drop(raft);
+                Some(count)
+            }
+            Err(_) => None,
+        }
+    }
+
     /// Register a node's HTTP address for leader forwarding
     pub async fn register_node_address(&self, node_id: u64, http_addr: String) {
         self.node_addresses.write().await.insert(node_id, http_addr);
@@ -306,7 +331,7 @@ pub struct BatchProposalResponse {
 /// Middleware that validates the `Authorization: Bearer <token>` header against
 /// the configured cluster authentication token. Uses constant-time comparison
 /// to prevent timing side-channel attacks.
-async fn cluster_auth_middleware(
+pub async fn cluster_auth_middleware(
     expected_token: Arc<String>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -400,9 +425,8 @@ fn create_raft_router_base<S: Clone + Send + Sync + 'static>(state: RaftApiState
                 .collect::<String>()
         );
         tracing::warn!(
-            "No cluster_auth_token configured — generated ephemeral token for Raft API: {}...{}",
-            &token[..20],
-            &token[token.len() - 4..],
+            "No cluster_auth_token configured — generated ephemeral token for Raft API: {}…[REDACTED]",
+            &token[..16],
         );
         Arc::new(token)
     };
@@ -414,7 +438,13 @@ fn create_raft_router_base<S: Clone + Send + Sync + 'static>(state: RaftApiState
         }))
     };
 
-    public.merge(protected).with_state(state)
+    public
+        .merge(protected)
+        // Limit request body size to 10 MiB to prevent OOM
+        // attacks. The /raft/snapshot endpoint may need larger payloads;
+        // individual routes can override with their own layer if needed.
+        .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024))
+        .with_state(state)
 }
 
 // ============================================================================
@@ -1482,6 +1512,7 @@ pub async fn start_raft_api_server_with_dashboard(
         stats: dashboard_config.stats,
         topic_manager: dashboard_config.topic_manager,
         offset_manager: dashboard_config.offset_manager,
+        cluster_auth_token: state.cluster_auth_token.clone(),
     };
 
     // Build app with both Raft API and Dashboard routes

@@ -205,9 +205,24 @@ impl Drop for PooledConnection {
         if let Some(conn) = self.conn.take() {
             let pool = self.pool.clone();
             let created_at = self.created_at;
-            tokio::spawn(async move {
-                pool.return_connection(conn, created_at).await;
-            });
+            // Only spawn if a tokio runtime is still available.
+            // During shutdown the runtime may already be gone, in which
+            // case the connection is dropped without being returned to the
+            // pool. This leaks the semaphore permit, effectively reducing
+            // the pool's capacity by one. Because this only occurs during
+            // runtime shutdown (after which no new `get()` calls will
+            // succeed), the leak is harmless in practice.
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    pool.return_connection(conn, created_at).await;
+                });
+            } else {
+                tracing::warn!(
+                    "Tokio runtime unavailable during PooledConnection drop; \
+                     connection dropped without being returned to pool \
+                     (semaphore permit leaked — only expected during shutdown)"
+                );
+            }
         }
     }
 }

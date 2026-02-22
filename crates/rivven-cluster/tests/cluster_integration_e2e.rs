@@ -31,6 +31,7 @@ async fn create_test_raft_node(
         election_timeout_max_ms: 300,
         snapshot_threshold: 1000,
         initial_members: vec![],
+        cluster_secret: None,
     };
 
     let mut raft = RaftNode::with_config(config).await?;
@@ -267,6 +268,7 @@ async fn test_metadata_persistence() -> Result<(), Box<dyn std::error::Error>> {
             election_timeout_max_ms: 300,
             snapshot_threshold: 10, // Lower threshold to force snapshot
             initial_members: vec![],
+            cluster_secret: None,
         };
 
         let mut raft = RaftNode::with_config(config).await?;
@@ -293,6 +295,10 @@ async fn test_metadata_persistence() -> Result<(), Box<dyn std::error::Error>> {
 
         // Give time for write to disk
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Force a snapshot so state is persisted beyond WAL
+        let _ = raft.snapshot().await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
     }
 
     // Create second instance from same data directory
@@ -306,23 +312,32 @@ async fn test_metadata_persistence() -> Result<(), Box<dyn std::error::Error>> {
             election_timeout_max_ms: 300,
             snapshot_threshold: 10,
             initial_members: vec![],
+            cluster_secret: None,
         };
 
         let mut raft = RaftNode::with_config(config).await?;
         raft.start().await?;
 
         // Give time for state to load
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
         // Verify topic exists (from WAL or snapshot)
         let metadata_guard = raft.metadata().await;
 
-        // In standalone mode with fresh restart, metadata might be empty initially
-        // This is OK - we verified the write succeeded in the first instance
+        // Standalone Raft recovery does not yet replay commands from persisted log entries.
+        // Only snapshot-based recovery works. This is a known limitation.
+        // TODO: Fix Raft log replay for standalone mode to enable full persistence.
         if metadata_guard.topics.is_empty() {
-            println!("Note: Metadata not persisted across restarts in current implementation");
+            eprintln!(
+                "WARNING: Metadata recovery returned empty topics. \
+                 Standalone Raft log replay is not yet implemented — \
+                 only snapshot-based recovery is supported."
+            );
         } else {
-            assert!(metadata_guard.topics.contains_key("persistent-topic"));
+            assert!(
+                metadata_guard.topics.contains_key("persistent-topic"),
+                "Expected persistent-topic to exist after recovery"
+            );
         }
     }
 

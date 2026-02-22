@@ -272,6 +272,10 @@ impl StateMachine {
     }
 
     /// Install a snapshot from deserialized data
+    ///
+    /// All three fields are updated while holding all write locks
+    /// simultaneously (lock ordering: metadata → last_applied → membership)
+    /// so that concurrent readers never observe partially-installed state.
     async fn install_snapshot_data(
         &self,
         data: &[u8],
@@ -281,9 +285,20 @@ impl StateMachine {
                 source: StorageIOError::read_state_machine(openraft::AnyError::new(&e)),
             })?;
 
-        *self.metadata.write().await = snapshot_data.metadata;
-        *self.last_applied.write().await = snapshot_data.last_applied;
-        *self.membership.write().await = snapshot_data.membership;
+        // Acquire all write locks before mutating any field to ensure
+        // atomicity. Lock ordering matches create_snapshot / get_snapshot_builder.
+        let mut metadata_guard = self.metadata.write().await;
+        let mut last_applied_guard = self.last_applied.write().await;
+        let mut membership_guard = self.membership.write().await;
+
+        *metadata_guard = snapshot_data.metadata;
+        *last_applied_guard = snapshot_data.last_applied;
+        *membership_guard = snapshot_data.membership;
+
+        // Guards are dropped here, releasing all locks together.
+        drop(membership_guard);
+        drop(last_applied_guard);
+        drop(metadata_guard);
 
         info!("Installed snapshot from data");
         Ok(())
@@ -461,7 +476,14 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
     ) -> std::result::Result<Box<tokio::fs::File>, StorageError<NodeId>> {
         // Create a temporary file for receiving snapshot chunks.
         // openraft will write chunks to this file via AsyncWrite.
-        let tmp_path = self.snapshot_dir.join("incoming.snap.tmp");
+        // Use PID + random suffix to avoid collisions between concurrent
+        // snapshot transfers or multiple processes sharing the same directory.
+        let unique_id = format!(
+            "incoming-{}-{}.snap.tmp",
+            std::process::id(),
+            uuid::Uuid::new_v4().as_simple()
+        );
+        let tmp_path = self.snapshot_dir.join(&unique_id);
         let file = tokio::fs::OpenOptions::new()
             .create(true)
             .write(true)
@@ -521,15 +543,28 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
         // Update membership from snapshot meta
         *self.membership.write().await = meta.last_membership.clone();
 
-        // Persist: move temp file to permanent location
+        // Persist: move temp file to permanent location.
+        // Clean up any incoming temp files matching our PID pattern.
         let snap_path = self.snapshot_dir.join(format!("{}.snap", meta.snapshot_id));
-        let tmp_path = self.snapshot_dir.join("incoming.snap.tmp");
-        if tmp_path.exists() {
-            tokio::fs::rename(&tmp_path, &snap_path)
-                .await
-                .map_err(|e| StorageError::IO {
-                    source: StorageIOError::write_snapshot(Some(meta.signature()), &e),
-                })?;
+        let pid_prefix = format!("incoming-{}-", std::process::id());
+        if let Ok(mut entries) = tokio::fs::read_dir(&self.snapshot_dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with(&pid_prefix) && name_str.ends_with(".snap.tmp") {
+                    let tmp_path = entry.path();
+                    // Rename the first matching temp file; remove any extras
+                    if !snap_path.exists() {
+                        let _ = tokio::fs::rename(&tmp_path, &snap_path).await.map_err(|e| {
+                            StorageError::IO {
+                                source: StorageIOError::write_snapshot(Some(meta.signature()), &e),
+                            }
+                        });
+                    } else {
+                        let _ = tokio::fs::remove_file(&tmp_path).await;
+                    }
+                }
+            }
         }
 
         // Update tracking
@@ -658,6 +693,13 @@ impl Default for RaftCompressionConfig {
     }
 }
 
+/// HTTP header used for Raft RPC shared-secret authentication.
+///
+/// When `cluster_secret` is configured, every outgoing Raft
+/// RPC includes this header and every incoming RPC must present a matching
+/// value. Constant-time comparison is used to prevent timing attacks.
+pub const CLUSTER_SECRET_HEADER: &str = "X-Rivven-Cluster-Secret";
+
 /// Network factory for creating Raft network connections
 #[derive(Clone)]
 pub struct NetworkFactory {
@@ -669,6 +711,8 @@ pub struct NetworkFactory {
     format: SerializationFormat,
     /// Compression configuration
     compression: RaftCompressionConfig,
+    /// Shared secret for Raft RPC authentication
+    cluster_secret: Option<String>,
 }
 
 impl NetworkFactory {
@@ -693,6 +737,7 @@ impl NetworkFactory {
                 })?,
             format,
             compression: RaftCompressionConfig::default(),
+            cluster_secret: None,
         })
     }
 
@@ -705,6 +750,12 @@ impl NetworkFactory {
             compression,
             ..Self::with_format(format)?
         })
+    }
+
+    /// Set cluster secret for Raft RPC authentication.
+    pub fn with_cluster_secret(mut self, secret: Option<String>) -> Self {
+        self.cluster_secret = secret;
+        self
     }
 
     /// Register a node address
@@ -727,6 +778,8 @@ pub struct Network {
     client: reqwest::Client,
     format: SerializationFormat,
     compression: RaftCompressionConfig,
+    /// Shared secret for Raft RPC authentication
+    cluster_secret: Option<String>,
 }
 
 impl Network {
@@ -736,6 +789,7 @@ impl Network {
         client: reqwest::Client,
         format: SerializationFormat,
         compression: RaftCompressionConfig,
+        cluster_secret: Option<String>,
     ) -> Self {
         Self {
             target,
@@ -743,6 +797,16 @@ impl Network {
             client,
             format,
             compression,
+            cluster_secret,
+        }
+    }
+
+    /// Apply authentication header to request if cluster_secret is set.
+    fn apply_auth(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(ref secret) = self.cluster_secret {
+            request.header(CLUSTER_SECRET_HEADER, secret)
+        } else {
+            request
         }
     }
 
@@ -848,6 +912,7 @@ impl RaftNetworkFactory<TypeConfig> for NetworkFactory {
             self.client.clone(),
             self.format,
             self.compression.clone(),
+            self.cluster_secret.clone(),
         )
     }
 }
@@ -882,6 +947,7 @@ impl RaftNetwork<TypeConfig> for Network {
         // Add compression header if compressed
         let mut request = self.client.post(&url).body(body);
         request = request.header("Content-Type", self.content_type());
+        request = self.apply_auth(request);
         if compressed {
             request = request.header("X-Rivven-Compressed", "1");
             request = request.header("X-Rivven-Original-Size", uncompressed_size.to_string());
@@ -966,6 +1032,7 @@ impl RaftNetwork<TypeConfig> for Network {
         // Add compression header if compressed
         let mut request = self.client.post(&url).body(body);
         request = request.header("Content-Type", self.content_type());
+        request = self.apply_auth(request);
         if compressed {
             request = request.header("X-Rivven-Compressed", "1");
             request = request.header("X-Rivven-Original-Size", uncompressed_size.to_string());
@@ -1027,13 +1094,12 @@ impl RaftNetwork<TypeConfig> for Network {
             .client
             .post(&url)
             .body(body)
-            .header("Content-Type", self.content_type())
-            .send()
-            .await
-            .map_err(|e| {
-                NetworkMetrics::increment_rpc_errors("vote");
-                openraft::error::RPCError::Network(openraft::error::NetworkError::new(&e))
-            })?;
+            .header("Content-Type", self.content_type());
+        let resp = self.apply_auth(resp);
+        let resp = resp.send().await.map_err(|e| {
+            NetworkMetrics::increment_rpc_errors("vote");
+            openraft::error::RPCError::Network(openraft::error::NetworkError::new(&e))
+        })?;
 
         if !resp.status().is_success() {
             NetworkMetrics::increment_rpc_errors("vote");
@@ -1086,6 +1152,8 @@ pub struct RaftNodeConfig {
     pub snapshot_threshold: u64,
     /// Initial cluster members (for bootstrapping)
     pub initial_members: Vec<(NodeId, BasicNode)>,
+    /// Shared secret for Raft RPC authentication
+    pub cluster_secret: Option<String>,
 }
 
 // ============================================================================
@@ -1222,6 +1290,7 @@ impl Default for RaftNodeConfig {
             election_timeout_max_ms: 600,
             snapshot_threshold: 10000,
             initial_members: vec![],
+            cluster_secret: None,
         }
     }
 }
@@ -1249,6 +1318,8 @@ pub struct RaftNode {
     data_dir: std::path::PathBuf,
     /// Raft config for start
     raft_config: RaftNodeConfig,
+    /// Shared secret for Raft RPC authentication
+    cluster_secret: Option<String>,
 }
 
 impl RaftNode {
@@ -1263,6 +1334,7 @@ impl RaftNode {
             election_timeout_max_ms: config.raft.election_timeout_max.as_millis() as u64,
             snapshot_threshold: config.raft.snapshot_threshold,
             initial_members: vec![],
+            cluster_secret: config.raft.cluster_secret.clone(),
         };
         Self::with_config(raft_config).await
     }
@@ -1274,9 +1346,11 @@ impl RaftNode {
 
         let snapshot_dir = config.data_dir.join("snapshots");
         let state_machine = StateMachine::new(snapshot_dir);
-        let network = NetworkFactory::new().map_err(|e| {
-            ClusterError::RaftStorage(format!("Failed to create network factory: {}", e))
-        })?;
+        let network = NetworkFactory::new()
+            .map_err(|e| {
+                ClusterError::RaftStorage(format!("Failed to create network factory: {}", e))
+            })?
+            .with_cluster_secret(config.cluster_secret.clone());
         let node_id = hash_node_id(&config.node_id);
 
         info!(
@@ -1297,6 +1371,7 @@ impl RaftNode {
             standalone: config.standalone,
             next_index: RwLock::new(1),
             data_dir: config.data_dir.clone(),
+            cluster_secret: config.cluster_secret.clone(),
             raft_config: config,
         })
     }
@@ -1343,9 +1418,9 @@ impl RaftNode {
         }
 
         // Create a new network factory for openraft (it takes ownership)
-        let network = NetworkFactory::new().map_err(|e| {
-            ClusterError::Network(format!("Failed to create network factory: {}", e))
-        })?;
+        let network = NetworkFactory::new()
+            .map_err(|e| ClusterError::Network(format!("Failed to create network factory: {}", e)))?
+            .with_cluster_secret(self.cluster_secret.clone());
         // Copy node addresses to the new network
         for (id, addr) in self.network.nodes.read().await.iter() {
             network.add_node(*id, addr.clone()).await;
@@ -1396,10 +1471,11 @@ impl RaftNode {
                 *next += 1;
                 idx
             };
-            // Use term 1 (not 0) so standalone entries never conflict
-            // with real Raft elections (which start at term 1+), enabling a future
-            // standalone-to-cluster migration path.
-            let log_id = LogId::new(openraft::CommittedLeaderId::new(1, self.node_id), index);
+            // Use term 0 for standalone entries.  Real Raft elections
+            // start at term 1, so term-0 entries can never conflict with
+            // cluster-mode log entries, enabling a future standalone-to-cluster
+            // migration path.
+            let log_id = LogId::new(openraft::CommittedLeaderId::new(0, self.node_id), index);
             let response = self.state_machine.apply_command(&log_id, command).await;
 
             RaftMetrics::increment_proposals();
@@ -1681,6 +1757,57 @@ impl RaftNode {
                 "Raft not initialized".to_string(),
             ))
         }
+    }
+
+    /// Verify that an incoming Raft RPC carries the correct cluster secret.
+    ///
+    /// HTTP handlers should call this before dispatching to
+    /// `handle_append_entries` / `handle_install_snapshot` / `handle_vote`.
+    /// Returns `Ok(())` when:
+    ///   - No cluster_secret is configured (open cluster, backward compat), or
+    ///   - The provided header value matches the configured secret.
+    ///
+    /// Returns `Err(Unauthorized)` when a secret is configured and the header
+    /// is missing or does not match. Uses constant-time comparison to prevent
+    /// timing side-channels.
+    pub fn verify_cluster_secret(
+        &self,
+        header_value: Option<&str>,
+    ) -> std::result::Result<(), ClusterError> {
+        let Some(ref expected) = self.cluster_secret else {
+            return Ok(()); // No secret configured — open cluster
+        };
+
+        let Some(provided) = header_value else {
+            return Err(ClusterError::Unauthorized(
+                "Missing X-Rivven-Cluster-Secret header".to_string(),
+            ));
+        };
+
+        // Constant-time comparison to prevent timing attacks
+        let expected_bytes = expected.as_bytes();
+        let provided_bytes = provided.as_bytes();
+        if expected_bytes.len() != provided_bytes.len() {
+            return Err(ClusterError::Unauthorized(
+                "Invalid cluster secret".to_string(),
+            ));
+        }
+        let mut diff = 0u8;
+        for (a, b) in expected_bytes.iter().zip(provided_bytes.iter()) {
+            diff |= a ^ b;
+        }
+        if diff != 0 {
+            return Err(ClusterError::Unauthorized(
+                "Invalid cluster secret".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Get the cluster secret (for HTTP server setup).
+    pub fn cluster_secret(&self) -> Option<&str> {
+        self.cluster_secret.as_deref()
     }
 }
 

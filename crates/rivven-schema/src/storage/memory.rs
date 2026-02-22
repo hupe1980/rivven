@@ -289,6 +289,16 @@ impl StorageBackend for MemoryStorage {
 
     async fn undelete_subject(&self, subject: &Subject) -> SchemaResult<Vec<u32>> {
         if let Some((key, versions)) = self.deleted_subjects.remove(&subject.0) {
+            // Prevent collision: if a new subject was registered with the same
+            // name after the soft-delete, restoring would overwrite it.
+            if self.subjects.contains_key(&key) {
+                // Put back into deleted_subjects so the entry isn't lost
+                self.deleted_subjects.insert(key, versions);
+                return Err(SchemaError::AlreadyExists(format!(
+                    "Cannot undelete subject '{}': a subject with the same name already exists",
+                    subject
+                )));
+            }
             let version_nums: Vec<u32> = versions.iter().map(|v| v.version).collect();
             // Restore to active subjects
             self.subjects.insert(key, versions);

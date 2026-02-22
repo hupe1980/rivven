@@ -47,7 +47,7 @@ The token-bucket rate limiter on source and sink hot paths is **fully lock-free*
 
 ### Zero-Allocation Batch Sizing
 
-Batch size estimation uses `SourceEvent::estimated_size()` — a heuristic that walks field lengths without serialization. This eliminates the `serde_json::to_vec()` allocation that was previously required per event during batch splitting, keeping the hot path allocation-free.
+Batch size estimation uses `SourceEvent::estimated_size()` — a heuristic that walks field lengths without serialization. This eliminates the `serde_json::to_vec()` allocation per event during batch splitting, keeping the hot path allocation-free.
 
 ## Security Architecture
 

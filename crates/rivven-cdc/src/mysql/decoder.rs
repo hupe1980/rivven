@@ -506,6 +506,27 @@ impl BinlogDecoder {
         self.table_cache.get(&table_id)
     }
 
+    /// Decode a Format Description Event (FDE) and detect its checksum algorithm.
+    ///
+    /// # FDE layout (after the 19-byte event header, which is already stripped)
+    ///
+    /// ```text
+    /// [binlog_version: 2] [server_version: 50] [create_timestamp: 4]
+    /// [header_length: 1] [post_header_lengths: N] [checksum_alg: 1]
+    ///          ┌── only present when checksum_alg == 1 ──┐
+    ///          [crc32: 4]
+    /// ```
+    ///
+    /// The fixed portion before the variable-length post-header-lengths array
+    /// is 57 bytes: `2 + 50 + 4 + 1`.
+    ///
+    /// ## Checksum detection strategy
+    ///
+    /// The `checksum_alg` byte is the last byte of the FDE payload. The caller
+    /// strips any trailing CRC32 bytes before passing the payload here, so the
+    /// detection simply reads the last byte of `data`. If it contains a valid
+    /// algorithm value (`0` = NONE, `1` = CRC32) it is used directly; otherwise
+    /// the server version is used as a fallback hint.
     fn decode_format_description(&self, data: &[u8]) -> Result<FormatDescriptionEvent> {
         let mut cursor = Cursor::new(data);
 
@@ -520,42 +541,27 @@ impl BinlogDecoder {
         let create_timestamp = cursor.get_u32_le();
         let header_length = cursor.get_u8();
 
-        // The post-header lengths array follows (one byte per event type)
-        // MySQL 8 has ~40 event types, so the array is ~40 bytes
-        // The checksum_type is the last byte before the optional CRC32
-        //
-        // For MySQL 5.6.4+ with checksum:
-        // - data ends with: [post_header_lengths...][checksum_alg (1)][crc32 (4)]
-        // - checksum_alg: 0 = NONE, 1 = CRC32
-        //
-        // Total FDE size (without header):
-        // - 2 (version) + 50 (server) + 4 (timestamp) + 1 (header_len) + N (post_headers) + 1 (checksum_alg)
-        // - With CRC32: add 4 bytes
-        //
-        // We need to find the checksum_alg byte which is either:
-        // - The last byte if no checksum (checksum_alg = 0)
-        // - 5 bytes from the end if checksum enabled (checksum_alg = 1)
+        // Parse the server version to decide whether CRC32 is expected.
+        let version_supports_checksum = Self::mysql_version_has_checksum(&server_version);
 
-        // Try to detect checksum: if last byte is 0 or 1, check if it makes sense
-        let checksum_type = if data.len() >= 5 {
-            let potential_type = data[data.len() - 5];
-            if potential_type == 1 {
-                // CRC32 enabled, checksum_type is 5 bytes from end
-                1
-            } else if data[data.len() - 1] == 0 || data[data.len() - 1] == 1 {
-                // No CRC32 or checksum disabled
-                data[data.len() - 1]
+        // The checksum_alg byte is the last byte of the payload.
+        // The caller has already stripped any trailing CRC32 bytes,
+        // so checksum_alg is always the last byte of `data`.
+        let checksum_type = if !data.is_empty() {
+            let last = data[data.len() - 1];
+            if last <= 1 {
+                last
             } else {
-                // Default to CRC32 for MySQL 8.x
-                1
+                // Invalid value — fall back on version hint.
+                u8::from(version_supports_checksum)
             }
         } else {
             0
         };
 
         debug!(
-            "FDE: binlog_version={}, server={}, checksum_type={}",
-            binlog_version, server_version, checksum_type
+            "FDE: binlog_version={}, server={}, checksum_type={}, version_supports_checksum={}",
+            binlog_version, server_version, checksum_type, version_supports_checksum
         );
 
         Ok(FormatDescriptionEvent {
@@ -565,6 +571,43 @@ impl BinlogDecoder {
             header_length,
             checksum_type,
         })
+    }
+
+    /// Returns `true` when the MySQL server version string indicates a server
+    /// that supports (and enables by default) binlog checksums.
+    ///
+    /// Checksums were introduced in MySQL 5.6.1 and are enabled by default
+    /// starting with 5.6.6. MariaDB 5.3+ also supports them.
+    fn mysql_version_has_checksum(version: &str) -> bool {
+        // Extract major.minor.patch from strings like "8.0.35-0ubuntu0.22.04.1-log"
+        let parts: Vec<&str> = version.split('.').collect();
+        if parts.len() < 2 {
+            // Can't parse → assume modern MySQL with checksums.
+            return true;
+        }
+        let major: u32 = parts[0].parse().unwrap_or(0);
+        let minor: u32 = parts[1]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .parse()
+            .unwrap_or(0);
+
+        // MariaDB embeds "MariaDB" in the version string
+        if version.contains("MariaDB") {
+            // MariaDB 5.3+ supports checksums
+            return major > 5 || (major == 5 && minor >= 3);
+        }
+
+        // MySQL: 5.6.1+ supports checksums
+        if major > 5 {
+            return true; // 8.x, 9.x, etc.
+        }
+        if major == 5 && minor >= 6 {
+            return true;
+        }
+
+        false
     }
 
     fn decode_table_map(&self, data: &[u8]) -> Result<TableMapEvent> {
@@ -1111,9 +1154,11 @@ impl BinlogDecoder {
                 };
                 let mut bytes = vec![0u8; len];
                 cursor.read_exact(&mut bytes)?;
-                // MySQL stores JSON in binary format, but we'll just return as bytes for now
-                // A full implementation would decode the MySQL JSON binary format
-                Ok(ColumnValue::Bytes(bytes))
+                // Decode MySQL binary JSON format into structured values.
+                // MySQL stores JSON in a custom binary representation
+                // in the binlog. We parse this into serde_json::Value.
+                let json_value = decode_mysql_json_binary(&bytes)?;
+                Ok(ColumnValue::Json(json_value))
             }
             ColumnType::NewDecimal => {
                 let precision = (metadata >> 8) as usize;
@@ -1412,6 +1457,383 @@ fn read_be_int(cursor: &mut Cursor<&[u8]>, bytes: usize) -> Result<u32> {
     Ok(val)
 }
 
+// ── MySQL binary JSON format decoder ────────────────────────────────────────
+//
+// MySQL stores JSON documents in a custom binary format in the binlog (not
+// as UTF-8 text). The format encodes type tags, key/value offset tables,
+// and inline values for small integers for efficient random access.
+//
+// Reference: MySQL source sql/json_binary.h / sql/json_binary.cc
+// Binary JSON wire types (stored as u8):
+//   0x00 = small JSON object (< 64 KB)
+//   0x01 = large JSON object
+//   0x02 = small JSON array
+//   0x03 = large JSON array
+//   0x04 = literal (null/true/false)
+//   0x05 = int16
+//   0x06 = uint16
+//   0x07 = int32
+//   0x08 = uint32
+//   0x09 = int64
+//   0x0a = uint64
+//   0x0b = double
+//   0x0c = utf8 string
+//   0x0f = opaque (custom MySQL type)
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Decode MySQL binary JSON into serde_json::Value.
+///
+/// Falls back to UTF-8 string parse when the binary payload is actually
+/// text-encoded JSON (as happens with some MySQL versions / configs).
+fn decode_mysql_json_binary(data: &[u8]) -> Result<serde_json::Value> {
+    if data.is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
+    // Try binary decode first; on any structural error fall back to text.
+    match mysql_json_parse_value_entry(data, true) {
+        Ok(v) => Ok(v),
+        Err(_) => {
+            // Some MySQL configs emit plain UTF-8 JSON instead of binary.
+            match serde_json::from_slice(data) {
+                Ok(v) => Ok(v),
+                Err(_) => Ok(serde_json::Value::String(
+                    String::from_utf8_lossy(data).into_owned(),
+                )),
+            }
+        }
+    }
+}
+
+/// The top-level binary JSON blob starts with a type byte followed by the
+/// encoded value. This function dispatches on that type.
+fn mysql_json_parse_value_entry(data: &[u8], top_level: bool) -> Result<serde_json::Value> {
+    if data.is_empty() {
+        bail!("empty json binary data");
+    }
+    if top_level {
+        let type_byte = data[0];
+        let rest = &data[1..];
+        mysql_json_parse_typed(type_byte, rest)
+    } else {
+        // Inline values will be parsed by the caller; this shouldn't be reached.
+        bail!("unexpected non-top-level call without type byte");
+    }
+}
+
+fn mysql_json_parse_typed(type_byte: u8, data: &[u8]) -> Result<serde_json::Value> {
+    match type_byte {
+        0x00 => mysql_json_parse_object(data, false), // small object
+        0x01 => mysql_json_parse_object(data, true),  // large object
+        0x02 => mysql_json_parse_array(data, false),  // small array
+        0x03 => mysql_json_parse_array(data, true),   // large array
+        0x04 => {
+            // literal: 0x00=null, 0x01=true, 0x02=false
+            if data.is_empty() {
+                Ok(serde_json::Value::Null)
+            } else {
+                match data[0] {
+                    0x01 => Ok(serde_json::Value::Bool(true)),
+                    0x02 => Ok(serde_json::Value::Bool(false)),
+                    _ => Ok(serde_json::Value::Null),
+                }
+            }
+        }
+        0x05 => {
+            // int16
+            if data.len() < 2 {
+                bail!("truncated int16");
+            }
+            let v = i16::from_le_bytes([data[0], data[1]]);
+            Ok(serde_json::json!(v))
+        }
+        0x06 => {
+            // uint16
+            if data.len() < 2 {
+                bail!("truncated uint16");
+            }
+            let v = u16::from_le_bytes([data[0], data[1]]);
+            Ok(serde_json::json!(v))
+        }
+        0x07 => {
+            // int32
+            if data.len() < 4 {
+                bail!("truncated int32");
+            }
+            let v = i32::from_le_bytes(data[..4].try_into()?);
+            Ok(serde_json::json!(v))
+        }
+        0x08 => {
+            // uint32
+            if data.len() < 4 {
+                bail!("truncated uint32");
+            }
+            let v = u32::from_le_bytes(data[..4].try_into()?);
+            Ok(serde_json::json!(v))
+        }
+        0x09 => {
+            // int64
+            if data.len() < 8 {
+                bail!("truncated int64");
+            }
+            let v = i64::from_le_bytes(data[..8].try_into()?);
+            Ok(serde_json::json!(v))
+        }
+        0x0a => {
+            // uint64
+            if data.len() < 8 {
+                bail!("truncated uint64");
+            }
+            let v = u64::from_le_bytes(data[..8].try_into()?);
+            Ok(serde_json::json!(v))
+        }
+        0x0b => {
+            // double
+            if data.len() < 8 {
+                bail!("truncated double");
+            }
+            let v = f64::from_le_bytes(data[..8].try_into()?);
+            Ok(serde_json::json!(v))
+        }
+        0x0c => {
+            // utf8 string — variable-length-encoded length prefix (1-5 bytes),
+            // followed by the raw UTF-8 bytes.
+            let (str_len, prefix_bytes) = mysql_json_read_variable_length(data)?;
+            let start = prefix_bytes;
+            let end = start + str_len;
+            if end > data.len() {
+                bail!("truncated string");
+            }
+            let s = std::str::from_utf8(&data[start..end]).unwrap_or("<invalid utf8>");
+            Ok(serde_json::Value::String(s.to_string()))
+        }
+        0x0f => {
+            // opaque — type_id (1 byte) + variable-length data
+            // Render as string representation
+            if data.is_empty() {
+                return Ok(serde_json::Value::Null);
+            }
+            let _field_type = data[0];
+            let rest = &data[1..];
+            let (blob_len, prefix_bytes) = mysql_json_read_variable_length(rest)?;
+            let start = prefix_bytes;
+            let end = start + blob_len;
+            if end > rest.len() {
+                bail!("truncated opaque");
+            }
+            // Try to interpret as UTF-8 text, otherwise base64
+            match std::str::from_utf8(&rest[start..end]) {
+                Ok(s) => Ok(serde_json::Value::String(s.to_string())),
+                Err(_) => {
+                    use base64::Engine;
+                    Ok(serde_json::Value::String(
+                        base64::engine::general_purpose::STANDARD.encode(&rest[start..end]),
+                    ))
+                }
+            }
+        }
+        other => bail!("unknown JSON binary type 0x{:02x}", other),
+    }
+}
+
+/// Parse a binary JSON object. `large` toggles between 2-byte and 4-byte
+/// offset/size encoding.
+fn mysql_json_parse_object(data: &[u8], large: bool) -> Result<serde_json::Value> {
+    let offset_size: usize = if large { 4 } else { 2 };
+    if data.len() < offset_size * 2 {
+        bail!("truncated object header");
+    }
+    let (element_count, size) = if large {
+        let ec = u32::from_le_bytes(data[0..4].try_into()?) as usize;
+        let sz = u32::from_le_bytes(data[4..8].try_into()?) as usize;
+        (ec, sz)
+    } else {
+        let ec = u16::from_le_bytes(data[0..2].try_into()?) as usize;
+        let sz = u16::from_le_bytes(data[2..4].try_into()?) as usize;
+        (ec, sz)
+    };
+
+    let header_size = offset_size * 2;
+    // key entries: each is (key_offset: offset_size, key_length: u16)
+    let key_entry_size = offset_size + 2;
+    // value entries: each is (type: u8, offset_or_inline: offset_size)
+    let value_entry_size = offset_size + 1;
+
+    let key_entries_start = header_size;
+    let value_entries_start = key_entries_start + element_count * key_entry_size;
+
+    let mut map = serde_json::Map::with_capacity(element_count);
+    let _ = size; // total object size (for bounds checking)
+
+    for i in 0..element_count {
+        // Read key entry
+        let ke_offset = key_entries_start + i * key_entry_size;
+        if ke_offset + key_entry_size > data.len() {
+            bail!("truncated key entry");
+        }
+        let key_offset = if large {
+            u32::from_le_bytes(data[ke_offset..ke_offset + 4].try_into()?) as usize
+        } else {
+            u16::from_le_bytes(data[ke_offset..ke_offset + 2].try_into()?) as usize
+        };
+        let key_len = u16::from_le_bytes(
+            data[ke_offset + offset_size..ke_offset + offset_size + 2].try_into()?,
+        ) as usize;
+
+        if key_offset + key_len > data.len() {
+            bail!("truncated key data");
+        }
+        let key = std::str::from_utf8(&data[key_offset..key_offset + key_len])
+            .unwrap_or("<invalid>")
+            .to_string();
+
+        // Read value entry
+        let ve_offset = value_entries_start + i * value_entry_size;
+        if ve_offset + value_entry_size > data.len() {
+            bail!("truncated value entry");
+        }
+        let value_type = data[ve_offset];
+        let value = mysql_json_resolve_value(data, value_type, ve_offset + 1, large)?;
+
+        map.insert(key, value);
+    }
+
+    Ok(serde_json::Value::Object(map))
+}
+
+/// Parse a binary JSON array.
+fn mysql_json_parse_array(data: &[u8], large: bool) -> Result<serde_json::Value> {
+    let offset_size: usize = if large { 4 } else { 2 };
+    if data.len() < offset_size * 2 {
+        bail!("truncated array header");
+    }
+    let (element_count, _size) = if large {
+        let ec = u32::from_le_bytes(data[0..4].try_into()?) as usize;
+        let sz = u32::from_le_bytes(data[4..8].try_into()?) as usize;
+        (ec, sz)
+    } else {
+        let ec = u16::from_le_bytes(data[0..2].try_into()?) as usize;
+        let sz = u16::from_le_bytes(data[2..4].try_into()?) as usize;
+        (ec, sz)
+    };
+
+    let header_size = offset_size * 2;
+    let value_entry_size = offset_size + 1;
+    let value_entries_start = header_size;
+
+    let mut arr = Vec::with_capacity(element_count);
+
+    for i in 0..element_count {
+        let ve_offset = value_entries_start + i * value_entry_size;
+        if ve_offset + value_entry_size > data.len() {
+            bail!("truncated array value entry");
+        }
+        let value_type = data[ve_offset];
+        let value = mysql_json_resolve_value(data, value_type, ve_offset + 1, large)?;
+        arr.push(value);
+    }
+
+    Ok(serde_json::Value::Array(arr))
+}
+
+/// Resolve a value from a value-entry. Small scalars (int16, uint16, literal,
+/// and for large format also int32/uint32) are stored inline (at the offset
+/// position in the header). Larger values store an offset into the data blob.
+fn mysql_json_resolve_value(
+    data: &[u8],
+    type_byte: u8,
+    entry_data_offset: usize,
+    large: bool,
+) -> Result<serde_json::Value> {
+    let offset_size: usize = if large { 4 } else { 2 };
+    // Inline types — value stored directly in the entry's offset field
+    match type_byte {
+        0x04 => {
+            // literal — inline: value is the literal code stored in offset field
+            if entry_data_offset + 2 > data.len() {
+                return Ok(serde_json::Value::Null);
+            }
+            let lit =
+                u16::from_le_bytes(data[entry_data_offset..entry_data_offset + 2].try_into()?);
+            return Ok(match lit {
+                0x01 => serde_json::Value::Bool(true),
+                0x02 => serde_json::Value::Bool(false),
+                _ => serde_json::Value::Null,
+            });
+        }
+        0x05 => {
+            // int16 inline
+            if entry_data_offset + 2 > data.len() {
+                bail!("truncated inline int16");
+            }
+            let v = i16::from_le_bytes(data[entry_data_offset..entry_data_offset + 2].try_into()?);
+            return Ok(serde_json::json!(v));
+        }
+        0x06 => {
+            // uint16 inline
+            if entry_data_offset + 2 > data.len() {
+                bail!("truncated inline uint16");
+            }
+            let v = u16::from_le_bytes(data[entry_data_offset..entry_data_offset + 2].try_into()?);
+            return Ok(serde_json::json!(v));
+        }
+        _ => {}
+    }
+    // For large objects, int32/uint32 are also inline
+    if large {
+        match type_byte {
+            0x07 => {
+                if entry_data_offset + 4 > data.len() {
+                    bail!("truncated inline int32");
+                }
+                let v =
+                    i32::from_le_bytes(data[entry_data_offset..entry_data_offset + 4].try_into()?);
+                return Ok(serde_json::json!(v));
+            }
+            0x08 => {
+                if entry_data_offset + 4 > data.len() {
+                    bail!("truncated inline uint32");
+                }
+                let v =
+                    u32::from_le_bytes(data[entry_data_offset..entry_data_offset + 4].try_into()?);
+                return Ok(serde_json::json!(v));
+            }
+            _ => {}
+        }
+    }
+    // Non-inline: read offset, then parse value at that offset
+    if entry_data_offset + offset_size > data.len() {
+        bail!("truncated value offset");
+    }
+    let value_offset = if large {
+        u32::from_le_bytes(data[entry_data_offset..entry_data_offset + 4].try_into()?) as usize
+    } else {
+        u16::from_le_bytes(data[entry_data_offset..entry_data_offset + 2].try_into()?) as usize
+    };
+    if value_offset >= data.len() {
+        bail!("value offset out of bounds");
+    }
+    mysql_json_parse_typed(type_byte, &data[value_offset..])
+}
+
+/// Read a variable-length integer used for string/opaque lengths.
+/// MySQL uses 1-5 bytes: each byte encodes 7 bits, high bit = continuation.
+fn mysql_json_read_variable_length(data: &[u8]) -> Result<(usize, usize)> {
+    let mut length: usize = 0;
+    let mut bytes_read: usize = 0;
+    for i in 0..5 {
+        if i >= data.len() {
+            bail!("truncated variable-length integer");
+        }
+        let b = data[i] as usize;
+        length |= (b & 0x7F) << (7 * i);
+        bytes_read = i + 1;
+        if b & 0x80 == 0 {
+            break;
+        }
+    }
+    Ok((length, bytes_read))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1618,5 +2040,61 @@ mod tests {
         assert_eq!(event.rows.len(), 1);
         assert!(event.rows[0].before.is_some());
         assert!(event.rows[0].after.is_some());
+    }
+
+    #[test]
+    fn test_decode_mysql_json_binary_literal_null() {
+        // type=0x04 (literal), value=0x00 (null)
+        let data = [0x04, 0x00];
+        let result = decode_mysql_json_binary(&data).unwrap();
+        assert_eq!(result, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_decode_mysql_json_binary_literal_true() {
+        let data = [0x04, 0x01];
+        let result = decode_mysql_json_binary(&data).unwrap();
+        assert_eq!(result, serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn test_decode_mysql_json_binary_int16() {
+        // type=0x05 (int16), value=42 as le bytes
+        let data = [0x05, 42, 0];
+        let result = decode_mysql_json_binary(&data).unwrap();
+        assert_eq!(result, serde_json::json!(42_i16));
+    }
+
+    #[test]
+    fn test_decode_mysql_json_binary_double() {
+        // type=0x0b (double), value=3.14 as le bytes
+        let val: f64 = 3.125;
+        let mut data = vec![0x0b];
+        data.extend_from_slice(&val.to_le_bytes());
+        let result = decode_mysql_json_binary(&data).unwrap();
+        assert_eq!(result, serde_json::json!(3.125));
+    }
+
+    #[test]
+    fn test_decode_mysql_json_binary_string() {
+        // type=0x0c (string), varint length=5, then "hello"
+        let mut data = vec![0x0c, 5]; // varint 5 in 1 byte
+        data.extend_from_slice(b"hello");
+        let result = decode_mysql_json_binary(&data).unwrap();
+        assert_eq!(result, serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn test_decode_mysql_json_binary_empty() {
+        let result = decode_mysql_json_binary(&[]).unwrap();
+        assert_eq!(result, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn test_decode_mysql_json_binary_plain_text_fallback() {
+        // Plain UTF-8 JSON should be handled by fallback
+        let data = b"{\"key\": \"value\"}";
+        let result = decode_mysql_json_binary(data).unwrap();
+        assert_eq!(result, serde_json::json!({"key": "value"}));
     }
 }

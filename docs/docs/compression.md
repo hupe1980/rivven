@@ -20,7 +20,7 @@ LZ4, Zstd, and Snappy compression for storage and network efficiency.
 
 ## Overview
 
-Rivven supports **four compression algorithms** optimized for different use cases:
+Rivven supports **three compression algorithms** plus uncompressed, optimized for different use cases:
 
 | Algorithm | Speed | Ratio | Best For |
 |:----------|:------|:------|:---------|
@@ -28,6 +28,9 @@ Rivven supports **four compression algorithms** optimized for different use case
 | **Snappy** | ~1.5 GB/s | ~2-3x | Interoperability, balanced workloads |
 | **Zstd** | ~1 GB/s | ~3-5x | Storage, network transfers, cold data |
 | **None** | N/A | 1x | Pre-compressed data, tiny payloads |
+
+{: .warning }
+> **Gzip is not supported.** Configuring Gzip compression returns an error. Use LZ4, Snappy, or Zstd directly.
 
 ---
 
@@ -97,7 +100,7 @@ defaults:
 
 ## Algorithm Comparison
 
-> **Note**: Gzip is not natively supported. If configured, it is automatically mapped to Zstd (a superior algorithm) with a warning logged. Use LZ4, Snappy, or Zstd directly.
+> **Note**: Gzip is not supported. Configuring Gzip compression returns an error. Use LZ4, Snappy, or Zstd directly.
 
 ### LZ4
 

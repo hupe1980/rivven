@@ -111,6 +111,13 @@ fn connect_tls<'py>(
         use rivven_client::TlsConfig;
         use rivven_core::tls::CertificateSource;
 
+        let tls_params = client::TlsParams {
+            ca_cert_path: ca_cert_path.clone(),
+            server_name: server_name.clone(),
+            client_cert_path: client_cert_path.clone(),
+            client_key_path: client_key_path.clone(),
+        };
+
         let tls_config = match (client_cert_path, client_key_path) {
             (Some(cert), Some(key)) => TlsConfig::mtls_from_pem_files(cert, key, &ca_cert_path),
             _ => TlsConfig {
@@ -122,10 +129,11 @@ fn connect_tls<'py>(
             },
         };
 
+        let addr = address.clone();
         let inner = rivven_client::Client::connect_tls(&address, &tls_config, &server_name)
             .await
             .into_py_err()?;
-        Ok(RivvenClient::new(inner))
+        Ok(RivvenClient::with_tls(inner, addr, tls_params))
     })
 }
 

@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use bytes::Buf;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 use url::Url;
@@ -135,6 +135,10 @@ impl PostgresCdcConfig {
     }
 }
 
+/// Maximum length for PostgreSQL identifiers (slot names, publication names, etc.).
+/// PostgreSQL limits identifiers to 63 bytes (NAMEDATALEN - 1).
+const PG_MAX_IDENTIFIER_LEN: usize = 63;
+
 impl CdcConfig for PostgresCdcConfig {
     fn source_type(&self) -> &'static str {
         "postgres"
@@ -151,8 +155,22 @@ impl CdcConfig for PostgresCdcConfig {
         if self.slot_name.is_empty() {
             return Err(CdcError::config("Slot name is required"));
         }
+        if self.slot_name.len() > PG_MAX_IDENTIFIER_LEN {
+            return Err(CdcError::config(format!(
+                "Slot name exceeds PostgreSQL identifier limit of {} characters (got {})",
+                PG_MAX_IDENTIFIER_LEN,
+                self.slot_name.len()
+            )));
+        }
         if self.publication_name.is_empty() {
             return Err(CdcError::config("Publication name is required"));
+        }
+        if self.publication_name.len() > PG_MAX_IDENTIFIER_LEN {
+            return Err(CdcError::config(format!(
+                "Publication name exceeds PostgreSQL identifier limit of {} characters (got {})",
+                PG_MAX_IDENTIFIER_LEN,
+                self.publication_name.len()
+            )));
         }
         Ok(())
     }
@@ -480,6 +498,7 @@ async fn run_cdc_loop(
 
     let mut relations: HashMap<u32, RelationBody> = HashMap::new();
     let mut event_buffer: Vec<CdcEvent> = Vec::new();
+    let mut last_wal_end: u64 = config.start_lsn;
 
     loop {
         // Process any pending signals from the CDC stream
@@ -505,7 +524,19 @@ async fn run_cdc_loop(
             continue;
         }
 
-        let msg_opt = stream.next_message().await?;
+        // Use timeout to periodically send status updates and prevent WAL accumulation
+        let msg_opt =
+            match tokio::time::timeout(Duration::from_secs(10), stream.next_message()).await {
+                Ok(result) => result?,
+                Err(_) => {
+                    // Timeout — send proactive status update to prevent WAL accumulation
+                    if last_wal_end > 0 {
+                        debug!("Sending proactive status update for LSN {}", last_wal_end);
+                        stream.send_status_update(last_wal_end).await?;
+                    }
+                    continue;
+                }
+            };
 
         match msg_opt {
             Some(mut bytes) => {
@@ -518,8 +549,9 @@ async fn run_cdc_loop(
                     b'w' => {
                         // XLogData
                         let _wal_start = bytes.get_u64();
-                        let _wal_end = bytes.get_u64();
+                        let wal_end = bytes.get_u64();
                         let _ts = bytes.get_i64();
+                        last_wal_end = last_wal_end.max(wal_end);
 
                         match PgOutputDecoder::decode(&mut bytes) {
                             Ok(msg) => match msg {
@@ -615,6 +647,7 @@ async fn run_cdc_loop(
                         let wal_end = bytes.get_u64();
                         let _ts = bytes.get_i64();
                         let reply_requested = bytes.get_u8();
+                        last_wal_end = last_wal_end.max(wal_end);
 
                         if reply_requested == 1 {
                             debug!("Sending KeepAlive response for LSN {}", wal_end);
@@ -650,6 +683,81 @@ async fn run_cdc_loop(
     Ok(())
 }
 
+/// Convert a text-encoded tuple column to a typed `serde_json::Value` using the
+/// PostgreSQL OID from the cached relation schema.  Unrecognised OIDs fall back
+/// to `Value::String` which is safe — the consumer simply doesn't get an
+/// automatic type upgrade for exotic types.
+fn pg_text_to_typed_json(text: &str, type_oid: i32) -> serde_json::Value {
+    // PostgreSQL OID constants (from `pg_type.dat`)
+    const BOOL_OID: i32 = 16;
+    const INT2_OID: i32 = 21;
+    const INT4_OID: i32 = 23;
+    const INT8_OID: i32 = 20;
+    const FLOAT4_OID: i32 = 700;
+    const FLOAT8_OID: i32 = 701;
+    const NUMERIC_OID: i32 = 1700;
+    const JSON_OID: i32 = 114;
+    const JSONB_OID: i32 = 3802;
+    const JSON_ARRAY_OID: i32 = 199;
+    const JSONB_ARRAY_OID: i32 = 3807;
+    const OID_OID: i32 = 26;
+
+    match type_oid {
+        // Boolean — PG sends "t" / "f"
+        BOOL_OID => match text {
+            "t" | "true" | "TRUE" => serde_json::Value::Bool(true),
+            "f" | "false" | "FALSE" => serde_json::Value::Bool(false),
+            _ => serde_json::Value::String(text.to_string()),
+        },
+
+        // Integer types
+        INT2_OID | INT4_OID | INT8_OID | OID_OID => {
+            if let Ok(n) = text.parse::<i64>() {
+                serde_json::Value::Number(n.into())
+            } else {
+                serde_json::Value::String(text.to_string())
+            }
+        }
+
+        // Floating-point types
+        FLOAT4_OID | FLOAT8_OID => {
+            if let Ok(f) = text.parse::<f64>() {
+                serde_json::Number::from_f64(f)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::String(text.to_string()))
+            } else {
+                // "NaN", "Infinity", "-Infinity" — keep as string
+                serde_json::Value::String(text.to_string())
+            }
+        }
+
+        // Numeric/decimal — preserve precision by keeping as string, but wrap in
+        // Number if it fits without loss
+        NUMERIC_OID => {
+            if let Ok(n) = text.parse::<i64>() {
+                serde_json::Value::Number(n.into())
+            } else if let Ok(f) = text.parse::<f64>() {
+                serde_json::Number::from_f64(f)
+                    .map(serde_json::Value::Number)
+                    .unwrap_or(serde_json::Value::String(text.to_string()))
+            } else {
+                // "NaN" or extreme precision — keep as string
+                serde_json::Value::String(text.to_string())
+            }
+        }
+
+        // JSON / JSONB — parse into structured JSON
+        JSON_OID | JSONB_OID | JSON_ARRAY_OID | JSONB_ARRAY_OID => serde_json::from_str(text)
+            .unwrap_or_else(|_| {
+                tracing::warn!("Failed to parse JSON column value, emitting as string");
+                serde_json::Value::String(text.to_string())
+            }),
+
+        // Everything else: text, varchar, timestamp, uuid, bytea, etc.
+        _ => serde_json::Value::String(text.to_string()),
+    }
+}
+
 fn tuple_to_json(tuple: &Tuple, schema: &RelationBody) -> serde_json::Value {
     let mut map = serde_json::Map::new();
     for (i, col_data) in tuple.0.iter().enumerate() {
@@ -659,7 +767,7 @@ fn tuple_to_json(tuple: &Tuple, schema: &RelationBody) -> serde_json::Value {
                 TupleData::Toast => serde_json::Value::String("<toast>".to_string()),
                 TupleData::Text(bytes) => {
                     let s = String::from_utf8_lossy(bytes);
-                    serde_json::Value::String(s.to_string())
+                    pg_text_to_typed_json(&s, col_def.type_id)
                 }
             };
             map.insert(col_def.name.clone(), value);

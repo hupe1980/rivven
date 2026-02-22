@@ -399,16 +399,16 @@ impl GroupCommitWal {
 
     /// Recover state from existing WAL files
     ///
-    /// Scans ALL WAL files to find the true max LSN, not just
+    /// Scans ALL WAL files to find the next LSN to write, not just
     /// the latest file. Each file is named with its starting LSN, so the
-    /// true max LSN is the file's starting LSN + its valid record count.
+    /// next LSN is the file's starting LSN + its valid record count.
     ///
     /// # LSN Invariant (§3.5)
     ///
     /// This method relies on the invariant that **LSNs increment by exactly 1
     /// per record** within a WAL file. File names encode the starting LSN
-    /// (e.g. `00000000000000000100.wal` starts at LSN 100). The max LSN in
-    /// a file is therefore `start_lsn + record_count`.
+    /// (e.g. `00000000000000000100.wal` starts at LSN 100). The next LSN
+    /// after a file is therefore `start_lsn + record_count`.
     ///
     /// This invariant is maintained by [`flush_batch()`], which assigns LSNs
     /// via `current_lsn.fetch_add(1, Ordering::AcqRel)`. If the LSN assignment
@@ -419,7 +419,7 @@ impl GroupCommitWal {
     /// The coupling chain: `flush_batch()` → `fetch_add(1)` → `recover_state()`
     /// → `start_lsn + record_count` → `scan_wal_file()` → counts valid records.
     async fn recover_state(config: &WalConfig) -> io::Result<(PathBuf, u64)> {
-        let mut max_lsn = 0u64;
+        let mut next_lsn = 0u64;
         let mut latest_file = None;
 
         if let Ok(entries) = std::fs::read_dir(&config.dir) {
@@ -443,9 +443,9 @@ impl GroupCommitWal {
             // Scan ALL WAL files to find the true max LSN
             for (start_lsn, path) in &wal_files {
                 if let Ok(record_count) = Self::scan_wal_file(path).await {
-                    let file_max_lsn = start_lsn + record_count;
-                    if file_max_lsn >= max_lsn {
-                        max_lsn = file_max_lsn;
+                    let file_next_lsn = start_lsn + record_count;
+                    if file_next_lsn >= next_lsn {
+                        next_lsn = file_next_lsn;
                         latest_file = Some(path.clone());
                     }
                 }
@@ -455,7 +455,7 @@ impl GroupCommitWal {
         // Create new file if none exists
         let file = latest_file.unwrap_or_else(|| config.dir.join(format!("{:020}.wal", 0)));
 
-        Ok((file, max_lsn))
+        Ok((file, next_lsn))
     }
 
     /// Replay all valid WAL records across all WAL files (§3.3 fix).
@@ -522,7 +522,7 @@ impl GroupCommitWal {
     async fn scan_wal_file(path: &Path) -> io::Result<u64> {
         let data = tokio::fs::read(path).await?;
         let mut offset = 0;
-        let mut max_lsn = 0u64;
+        let mut record_count = 0u64;
 
         while offset + RECORD_HEADER_SIZE <= data.len() {
             // Check magic
@@ -578,11 +578,11 @@ impl GroupCommitWal {
                 break;
             }
 
-            max_lsn += 1;
+            record_count += 1;
             offset += record_size;
         }
 
-        Ok(max_lsn)
+        Ok(record_count)
     }
 
     /// Write a record to the WAL (async, batched)
@@ -702,9 +702,37 @@ impl GroupCommitWal {
     /// records are no longer needed for recovery. Clearing them prevents
     /// duplicate replay on the next startup.
     ///
+    /// # Mutual exclusion
+    ///
+    /// This method acquires the writer mutex before deleting WAL files,
+    /// ensuring no concurrent writes can be in progress during deletion.
+    /// The writer mutex ensures no concurrent writes during deletion.
+    ///
     /// This is a no-op if the WAL directory does not exist.
-    pub fn checkpoint(&self) -> io::Result<()> {
-        let wal_dir = &self.config.dir;
+    pub async fn checkpoint(&self) -> io::Result<()> {
+        // Hold the writer lock to prevent concurrent writes during file deletion.
+        // This ensures no writer can be appending to a file we're about to remove.
+        let _writer_guard = self.writer.lock().await;
+        Self::checkpoint_dir(&self.config.dir)
+    }
+
+    /// Remove all WAL files from the given directory (static variant).
+    ///
+    /// Use this after a successful WAL replay at startup to prevent
+    /// duplicate replay on subsequent crashes.
+    /// Since the WAL instance is created *after* replay, callers that
+    /// don't yet have a `GroupCommitWal` can call this directly.
+    ///
+    /// # Mutual exclusion
+    ///
+    /// The caller must ensure no `GroupCommitWal` is concurrently writing
+    /// to files in `wal_dir`. In practice this is guaranteed because the
+    /// WAL instance is only created *after* this function returns.
+    /// For instance-level checkpointing with lock-based safety, use the
+    /// async [`checkpoint()`](Self::checkpoint) method instead.
+    ///
+    /// This is a no-op if the directory does not exist.
+    pub fn checkpoint_dir(wal_dir: &Path) -> io::Result<()> {
         if !wal_dir.exists() {
             return Ok(());
         }
@@ -804,7 +832,7 @@ impl GroupCommitWal {
     /// Each record is assigned a monotonically increasing LSN via
     /// `current_lsn.fetch_add(1)`. This guarantees the +1-per-record
     /// invariant that [`recover_state()`] depends on when computing
-    /// `file_max_lsn = start_lsn + record_count`.
+    /// `file_next_lsn = start_lsn + record_count`.
     async fn flush_batch(
         &self,
         pending: &mut VecDeque<WriteRequest>,
@@ -1156,6 +1184,14 @@ impl WalWriter {
         self.file = BufWriter::with_capacity(self.config.max_batch_size, file);
         self.path = new_path;
         self.position = 0;
+
+        // fsync the WAL directory after rotation to ensure the new file's
+        // directory entry is durable. Without this, a crash could leave the
+        // directory in a state where the rotated file doesn't appear.
+        {
+            let dir_file = std::fs::File::open(&self.config.dir)?;
+            dir_file.sync_all()?;
+        }
 
         // Use tokio::task::spawn_blocking instead of std::thread::spawn
         // to avoid unbounded OS thread creation under rapid WAL rotation.

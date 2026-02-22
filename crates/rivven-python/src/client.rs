@@ -13,6 +13,15 @@ use rivven_client::Client;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Stored TLS parameters for spawning dedicated connections
+#[derive(Clone)]
+pub struct TlsParams {
+    pub ca_cert_path: String,
+    pub server_name: String,
+    pub client_cert_path: Option<String>,
+    pub client_key_path: Option<String>,
+}
+
 /// Main client for interacting with a Rivven broker
 ///
 /// The client provides methods for:
@@ -43,6 +52,8 @@ pub struct RivvenClient {
     client: Arc<Mutex<Client>>,
     /// Broker address for creating dedicated producer/consumer connections
     addr: Option<String>,
+    /// TLS parameters for dedicated connections (None = plaintext)
+    tls_params: Option<TlsParams>,
 }
 
 impl RivvenClient {
@@ -51,6 +62,7 @@ impl RivvenClient {
         Self {
             client: Arc::new(Mutex::new(client)),
             addr: None,
+            tls_params: None,
         }
     }
 
@@ -59,6 +71,16 @@ impl RivvenClient {
         Self {
             client: Arc::new(Mutex::new(client)),
             addr: Some(addr),
+            tls_params: None,
+        }
+    }
+
+    /// Create with address and TLS params for spawning dedicated TLS connections
+    pub fn with_tls(client: Client, addr: String, tls_params: TlsParams) -> Self {
+        Self {
+            client: Arc::new(Mutex::new(client)),
+            addr: Some(addr),
+            tls_params: Some(tls_params),
         }
     }
 }
@@ -176,12 +198,13 @@ impl RivvenClient {
     ///     >>> await producer.send(b"Hello!")
     pub fn producer<'py>(&self, py: Python<'py>, topic: String) -> PyResult<Bound<'py, PyAny>> {
         let addr = self.addr.clone();
+        let tls_params = self.tls_params.clone();
         let fallback_client = Arc::clone(&self.client);
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let client = match addr {
                 Some(a) => {
-                    let dedicated = Client::connect(&a).await.into_py_err()?;
+                    let dedicated = connect_dedicated(&a, tls_params.as_ref()).await?;
                     Arc::new(Mutex::new(dedicated))
                 }
                 None => fallback_client,
@@ -225,13 +248,14 @@ impl RivvenClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         let main_client = Arc::clone(&self.client);
         let addr = self.addr.clone();
+        let tls_params = self.tls_params.clone();
         let group_clone = group.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             // Create a dedicated connection for the consumer
             let client = match addr {
                 Some(a) => {
-                    let dedicated = Client::connect(&a).await.into_py_err()?;
+                    let dedicated = connect_dedicated(&a, tls_params.as_ref()).await?;
                     Arc::new(Mutex::new(dedicated))
                 }
                 None => Arc::clone(&main_client),
@@ -876,6 +900,19 @@ impl RivvenClient {
     /// Starts an atomic transaction that can span multiple topics/partitions.
     /// All writes in the transaction either all succeed or all fail.
     ///
+    /// # Concurrency safety
+    ///
+    /// Transaction methods (`begin_transaction`, `commit_transaction`,
+    /// `abort_transaction`, `add_partitions_to_txn`) acquire the inner
+    /// client `Mutex` for each RPC call individually. They are **not**
+    /// safe to call concurrently from multiple tasks with the **same**
+    /// `transactional_id` — doing so can interleave begin/commit/abort
+    /// calls and corrupt transaction state on the broker. Callers must
+    /// serialize transaction lifecycle calls for a given
+    /// `transactional_id` (e.g. by owning the id in a single task).
+    /// Different `transactional_id` values may safely be used from
+    /// separate tasks.
+    ///
     /// Args:
     ///     transactional_id (str): Unique transaction identifier
     ///     producer_state (ProducerState): State from init_producer_id
@@ -1012,5 +1049,50 @@ impl RivvenClient {
 
     fn __repr__(&self) -> String {
         "RivvenClient(connected)".to_string()
+    }
+}
+
+/// Open a dedicated connection, using TLS when `tls_params` is provided.
+pub(crate) async fn connect_dedicated(
+    addr: &str,
+    tls_params: Option<&TlsParams>,
+) -> PyResult<Client> {
+    use crate::error::IntoPyErr;
+
+    match tls_params {
+        Some(params) => {
+            #[cfg(feature = "tls")]
+            {
+                use rivven_client::TlsConfig;
+                use rivven_core::tls::CertificateSource;
+
+                let tls_config = match (&params.client_cert_path, &params.client_key_path) {
+                    (Some(cert), Some(key)) => TlsConfig::mtls_from_pem_files(
+                        cert.clone(),
+                        key.clone(),
+                        &params.ca_cert_path,
+                    ),
+                    _ => TlsConfig {
+                        enabled: true,
+                        root_ca: Some(CertificateSource::File {
+                            path: params.ca_cert_path.clone().into(),
+                        }),
+                        ..Default::default()
+                    },
+                };
+
+                Client::connect_tls(addr, &tls_config, &params.server_name)
+                    .await
+                    .into_py_err()
+            }
+            #[cfg(not(feature = "tls"))]
+            {
+                let _ = params;
+                Err(pyo3::exceptions::PyRuntimeError::new_err(
+                    "TLS support is not available: the 'tls' feature was not enabled at compile time.",
+                ))
+            }
+        }
+        None => Client::connect(addr).await.into_py_err(),
     }
 }

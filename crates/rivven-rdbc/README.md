@@ -13,6 +13,9 @@ rivven-rdbc provides a unified abstraction over multiple SQL database backends w
 - **Schema introspection** and evolution capabilities
 - **Prepared statement caching**
 - **SQL injection prevention** — identifier, type name, and string literal validation on all DDL/introspection paths
+- **Deferred rollback** — rollback operations avoid `block_in_place`, preventing Tokio runtime stalls
+- **MAX_STREAM_ROWS safeguard** — streaming queries enforce a row limit to prevent unbounded memory growth
+- **Range literal serialization** — PostgreSQL `Range` types are correctly serialized as SQL literals
 
 ## Supported Databases
 

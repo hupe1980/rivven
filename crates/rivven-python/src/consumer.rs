@@ -5,6 +5,7 @@ use crate::message::Message;
 use pyo3::prelude::*;
 use rivven_client::Client;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -13,6 +14,21 @@ use tokio::sync::Mutex;
 ///
 /// Consumers support both async iteration and manual fetch.
 /// They can track offsets via consumer groups for resumable consumption.
+///
+/// # Auto-commit behaviour
+///
+/// When `auto_commit` is `true` (the default) **and** a consumer group is
+/// configured, offsets are committed automatically during `async for`
+/// iteration. Commits happen **once per batch refill** — i.e. when the
+/// internal prefetch buffer is drained and the next batch is fetched —
+/// rather than after every individual message. This means:
+///
+/// * If the process crashes mid-batch, messages from the current batch
+///   may be redelivered (at-least-once semantics).
+/// * Manual `fetch()` calls do **not** trigger auto-commit; call
+///   `commit()` explicitly after processing a manually fetched batch.
+/// * To disable auto-commit entirely, pass `auto_commit=False` when
+///   creating the consumer and manage offsets manually via `commit()`.
 ///
 /// # Example
 ///
@@ -45,6 +61,9 @@ pub struct Consumer {
     /// `__anext__` fetches `batch_size` messages at once, then drains
     /// the buffer one-by-one for each Python iteration step.
     prefetch: Arc<Mutex<VecDeque<rivven_client::MessageData>>>,
+    /// Flag indicating the consumer has been closed; checked by `__anext__`
+    /// to break out of the poll loop and honour Python-side cancellation.
+    closed: Arc<AtomicBool>,
 }
 
 impl Consumer {
@@ -68,6 +87,7 @@ impl Consumer {
             auto_commit,
             poll_interval: Duration::from_millis(100),
             prefetch: Arc::new(Mutex::new(VecDeque::new())),
+            closed: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -281,6 +301,23 @@ impl Consumer {
         })
     }
 
+    /// Close the consumer, breaking any active `__anext__` poll loop.
+    ///
+    /// After calling `close()`, an in-progress `async for` will raise
+    /// `StopAsyncIteration` on the next iteration.
+    ///
+    /// Example:
+    ///     >>> consumer.close()
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+    }
+
+    /// Whether the consumer has been closed
+    #[getter]
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
     /// Enable async iteration over messages
     fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
@@ -310,8 +347,14 @@ impl Consumer {
         let prefetch = Arc::clone(&self.prefetch);
         let batch_size = self.batch_size;
         let poll_interval = self.poll_interval;
+        let closed = Arc::clone(&self.closed);
 
         let fut = pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            // Check for cancellation upfront
+            if closed.load(Ordering::Acquire) {
+                return Ok(None);
+            }
+
             // Fast path: serve from prefetch buffer (no commit — deferred to refill)
             {
                 let mut buf = prefetch.lock().await;
@@ -345,6 +388,11 @@ impl Consumer {
 
             // Poll with backoff until data arrives
             loop {
+                // Check for cancellation on each iteration
+                if closed.load(Ordering::Acquire) {
+                    return Ok(None);
+                }
+
                 let current_offset = {
                     let guard = offset.lock().await;
                     *guard

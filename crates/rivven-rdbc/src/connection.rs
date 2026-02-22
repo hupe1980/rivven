@@ -201,7 +201,7 @@ impl std::fmt::Display for IsolationLevel {
 }
 
 /// Configuration for creating connections
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ConnectionConfig {
     /// Connection URL (e.g., postgres://user:pass@host:5432/db)
     pub url: String,
@@ -215,6 +215,30 @@ pub struct ConnectionConfig {
     pub application_name: Option<String>,
     /// Additional connection properties
     pub properties: std::collections::HashMap<String, String>,
+}
+
+impl std::fmt::Debug for ConnectionConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Redact credentials from the URL to prevent leaking passwords to logs.
+        let redacted_url = match url::Url::parse(&self.url) {
+            Ok(mut parsed) => {
+                if parsed.password().is_some() {
+                    let _ = parsed.set_password(Some("***"));
+                }
+                parsed.to_string()
+            }
+            Err(_) => "***".to_string(),
+        };
+
+        f.debug_struct("ConnectionConfig")
+            .field("url", &redacted_url)
+            .field("connect_timeout_ms", &self.connect_timeout_ms)
+            .field("query_timeout_ms", &self.query_timeout_ms)
+            .field("statement_cache_size", &self.statement_cache_size)
+            .field("application_name", &self.application_name)
+            .field("properties", &self.properties)
+            .finish()
+    }
 }
 
 impl Default for ConnectionConfig {

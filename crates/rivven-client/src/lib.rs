@@ -129,7 +129,7 @@
 //!     .batch_size(16384)
 //!     .linger_ms(5)
 //!     .enable_idempotence(true)
-//!     .build();
+//!     .build()?;
 //!
 //! let producer = Arc::new(Producer::new(config).await?);
 //!

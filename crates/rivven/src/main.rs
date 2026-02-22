@@ -80,6 +80,10 @@ enum Commands {
         /// Follow mode - continuously consume new messages (like tail -f)
         #[arg(short, long)]
         follow: bool,
+
+        /// Poll interval in milliseconds for follow mode (default: 100ms)
+        #[arg(long, default_value = "100")]
+        poll_interval: u64,
     },
 
     /// Ping the server to check connectivity
@@ -294,6 +298,7 @@ async fn main() -> anyhow::Result<()> {
             max,
             server,
             follow,
+            poll_interval,
         } => {
             let mut client = Client::connect(&server).await?;
 
@@ -304,7 +309,7 @@ async fn main() -> anyhow::Result<()> {
 
                 ctrlc::set_handler(move || {
                     println!("\n✓ Stopping consumer...");
-                    r.store(false, Ordering::SeqCst);
+                    r.store(false, Ordering::Release);
                 })?;
 
                 let mut current_offset = offset;
@@ -313,7 +318,7 @@ async fn main() -> anyhow::Result<()> {
                     topic, partition
                 );
 
-                while running.load(Ordering::SeqCst) {
+                while running.load(Ordering::Acquire) {
                     let messages = client
                         .consume(&topic, partition, current_offset, 10)
                         .await?;
@@ -331,7 +336,7 @@ async fn main() -> anyhow::Result<()> {
                     }
 
                     if messages.is_empty() {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(poll_interval)).await;
                     }
                 }
             } else {

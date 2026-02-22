@@ -26,6 +26,29 @@ use crate::schema::{ForeignKeyAction, ForeignKeyMetadata, IndexMetadata, SchemaP
 use crate::security::validate_sql_identifier;
 use crate::types::{ColumnMetadata, Row, TableMetadata, Value};
 
+/// Convert a `Value` to its string representation for use in PostgreSQL range literals.
+fn value_to_range_bound(v: &Value) -> String {
+    match v {
+        Value::Null => String::new(),
+        Value::Bool(b) => b.to_string(),
+        Value::Int8(n) => n.to_string(),
+        Value::Int16(n) => n.to_string(),
+        Value::Int32(n) => n.to_string(),
+        Value::Int64(n) => n.to_string(),
+        Value::Float32(n) => n.to_string(),
+        Value::Float64(n) => n.to_string(),
+        Value::Decimal(d) => d.to_string(),
+        Value::String(s) => s.clone(),
+        Value::Date(d) => d.to_string(),
+        Value::Time(t) => t.to_string(),
+        Value::DateTime(dt) => dt.to_string(),
+        Value::DateTimeTz(dt) => dt.to_rfc3339(),
+        Value::Uuid(u) => u.to_string(),
+        // Fallback: Debug representation for complex types
+        other => format!("{other:?}"),
+    }
+}
+
 /// Convert a rivven Value to a tokio-postgres compatible parameter
 fn value_to_sql(value: &Value) -> Box<dyn tokio_postgres::types::ToSql + Sync + Send> {
     match value {
@@ -61,9 +84,28 @@ fn value_to_sql(value: &Value) -> Box<dyn tokio_postgres::types::ToSql + Sync + 
         Value::Bit(bits) => Box::new(bits.clone()),
         Value::Enum(s) => Box::new(s.clone()),
         Value::Geometry(wkb) | Value::Geography(wkb) => Box::new(wkb.clone()),
-        Value::Range { .. } => {
-            // Ranges need special handling - for now serialize as JSON
-            Box::new(serde_json::json!(null))
+        Value::Range {
+            lower,
+            upper,
+            lower_inclusive,
+            upper_inclusive,
+        } => {
+            // Serialize ranges as a JSON string representation
+            // instead of silently mapping to NULL. PostgreSQL's native range
+            // types aren't supported by tokio-postgres parameterized queries,
+            // so we emit a human-readable range literal that can be cast server-side.
+            let lb = if *lower_inclusive { "[" } else { "(" };
+            let ub = if *upper_inclusive { "]" } else { ")" };
+            let lower_str = lower
+                .as_ref()
+                .map(|v| value_to_range_bound(v))
+                .unwrap_or_default();
+            let upper_str = upper
+                .as_ref()
+                .map(|v| value_to_range_bound(v))
+                .unwrap_or_default();
+            let range_str = format!("{lb}{lower_str},{upper_str}{ub}");
+            Box::new(range_str)
         }
         Value::Composite(map) => {
             let json = serde_json::to_value(map).unwrap_or_else(|e| {
@@ -213,6 +255,18 @@ pub struct PgConnection {
     closed: AtomicBool,
     created_at: Instant,
     last_used: Mutex<Instant>,
+    /// Handle to the background connection task so we can abort it on close.
+    connection_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Set to `true` when the background connection task terminates with an
+    /// error. Subsequent queries will return [`Error::connection`] immediately
+    /// instead of hanging or producing confusing tokio-postgres errors.
+    bg_task_failed: Arc<AtomicBool>,
+    /// Set to `true` when a [`PgTransaction`] is dropped without being
+    /// committed or rolled back. The next operation on this connection will
+    /// issue a synchronous `ROLLBACK` before proceeding, ensuring the
+    /// connection is never handed to the next pool consumer in a dirty
+    /// transaction state.
+    needs_rollback: Arc<AtomicBool>,
 }
 
 impl PgConnection {
@@ -224,7 +278,65 @@ impl PgConnection {
             closed: AtomicBool::new(false),
             created_at: now,
             last_used: Mutex::new(now),
+            connection_task: Mutex::new(None),
+            bg_task_failed: Arc::new(AtomicBool::new(false)),
+            needs_rollback: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Create a new connection with the background connection task handle
+    pub fn with_task(client: tokio_postgres::Client, task: tokio::task::JoinHandle<()>) -> Self {
+        let now = Instant::now();
+        let bg_task_failed = Arc::new(AtomicBool::new(false));
+        let bg_flag = bg_task_failed.clone();
+
+        // Wrap the original task in a monitoring task that sets the flag on error
+        let monitored_task = tokio::spawn(async move {
+            let result = task.await;
+            match result {
+                Ok(()) => {}
+                Err(e) => {
+                    // JoinError means the task panicked or was cancelled
+                    tracing::error!("PostgreSQL background connection task failed: {}", e);
+                    bg_flag.store(true, Ordering::Release);
+                }
+            }
+        });
+
+        Self {
+            client: Arc::new(client),
+            closed: AtomicBool::new(false),
+            created_at: now,
+            last_used: Mutex::new(now),
+            connection_task: Mutex::new(Some(monitored_task)),
+            bg_task_failed,
+            needs_rollback: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Check whether the background connection task has failed, marking the
+    /// connection as unusable.
+    fn check_bg_task(&self) -> Result<()> {
+        if self.bg_task_failed.load(Ordering::Acquire) {
+            return Err(Error::connection(
+                "PostgreSQL background connection task has terminated; connection is unusable",
+            ));
+        }
+        Ok(())
+    }
+
+    /// If a previous transaction was dropped without commit/rollback, issue a
+    /// synchronous `ROLLBACK` to clean the connection state before the next
+    /// operation. This prevents dirty transaction state from leaking to pool
+    /// consumers.
+    async fn ensure_clean_state(&self) -> Result<()> {
+        if self.needs_rollback.swap(false, Ordering::AcqRel) {
+            tracing::debug!("Issuing deferred ROLLBACK for dirty connection state");
+            self.client.execute("ROLLBACK", &[]).await.map_err(|e| {
+                Error::connection(format!("Failed to rollback dirty transaction state: {e}"))
+            })?;
+        }
+        Ok(())
     }
 
     /// Get the underlying client
@@ -276,6 +388,8 @@ impl Connection for PgConnection {
         if self.closed.load(Ordering::Relaxed) {
             return Err(Error::connection("connection is closed"));
         }
+        self.check_bg_task()?;
+        self.ensure_clean_state().await?;
 
         // Build boxed parameters
         let boxed_params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> =
@@ -299,6 +413,8 @@ impl Connection for PgConnection {
         if self.closed.load(Ordering::Relaxed) {
             return Err(Error::connection("connection is closed"));
         }
+        self.check_bg_task()?;
+        self.ensure_clean_state().await?;
 
         let boxed_params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> =
             params.iter().map(value_to_sql).collect();
@@ -321,6 +437,8 @@ impl Connection for PgConnection {
         if self.closed.load(Ordering::Relaxed) {
             return Err(Error::connection("connection is closed"));
         }
+        self.check_bg_task()?;
+        self.ensure_clean_state().await?;
 
         let stmt = self
             .client
@@ -339,6 +457,8 @@ impl Connection for PgConnection {
         if self.closed.load(Ordering::Relaxed) {
             return Err(Error::connection("connection is closed"));
         }
+        self.check_bg_task()?;
+        self.ensure_clean_state().await?;
 
         self.client
             .execute("BEGIN", &[])
@@ -352,6 +472,7 @@ impl Connection for PgConnection {
             client: Arc::clone(&self.client),
             committed: AtomicBool::new(false),
             rolled_back: AtomicBool::new(false),
+            needs_rollback: Arc::clone(&self.needs_rollback),
         }))
     }
 
@@ -359,6 +480,8 @@ impl Connection for PgConnection {
         if self.closed.load(Ordering::Relaxed) {
             return Err(Error::connection("connection is closed"));
         }
+        self.check_bg_task()?;
+        self.ensure_clean_state().await?;
 
         // Use query_raw for true incremental row streaming from PostgreSQL.
         // Unlike query() which collects all rows into a Vec first, query_raw
@@ -388,11 +511,35 @@ impl Connection for PgConnection {
         if self.closed.load(Ordering::Relaxed) {
             return false;
         }
+        if self.bg_task_failed.load(Ordering::Acquire) {
+            return false;
+        }
+        // Clean up any dirty transaction state before the health check.
+        // This covers the pool's test-on-borrow path.
+        if self.needs_rollback.swap(false, Ordering::AcqRel) {
+            tracing::debug!("Issuing deferred ROLLBACK during health check");
+            if self.client.execute("ROLLBACK", &[]).await.is_err() {
+                return false;
+            }
+        }
         self.client.simple_query("SELECT 1").await.is_ok()
     }
 
     async fn close(&self) -> Result<()> {
         self.closed.store(true, Ordering::Relaxed);
+        // Abort the background connection task to actually close the TCP connection.
+        //
+        // NOTE: This does NOT send a PostgreSQL Terminate ('X') message to the
+        // server. The server will detect the closed socket via TCP and clean up
+        // the backend process, but the connection will appear as an unexpected
+        // disconnect in the PostgreSQL server logs rather than a graceful close.
+        // Sending Terminate would require ownership of the client or a raw socket
+        // write, which tokio-postgres does not expose. The TCP RST from the abort
+        // is sufficient for correctness — the server releases all resources
+        // associated with the backend.
+        if let Some(task) = self.connection_task.lock().await.take() {
+            task.abort();
+        }
         Ok(())
     }
 }
@@ -478,6 +625,10 @@ pub struct PgTransaction {
     client: Arc<tokio_postgres::Client>,
     committed: AtomicBool,
     rolled_back: AtomicBool,
+    /// Shared flag with the parent [`PgConnection`]. Set on drop when the
+    /// transaction was not explicitly committed or rolled back, so the
+    /// connection can issue a deferred `ROLLBACK` before its next operation.
+    needs_rollback: Arc<AtomicBool>,
 }
 
 #[async_trait]
@@ -601,22 +752,17 @@ impl Transaction for PgTransaction {
 
 impl Drop for PgTransaction {
     fn drop(&mut self) {
-        // If transaction wasn't committed or rolled back, issue ROLLBACK
-        // to prevent the connection from being returned to the pool in an open
-        // transaction state. Uses block_in_place since Drop can't be async.
+        // If the transaction wasn't explicitly committed or rolled back, set
+        // the shared `needs_rollback` flag on the parent connection. The next
+        // operation on the connection (or the pool's health-check) will issue
+        // a synchronous `ROLLBACK` before proceeding, preventing a race
+        // with pool connection reuse.
         if !self.committed.load(Ordering::Relaxed) && !self.rolled_back.load(Ordering::Relaxed) {
-            let client = self.client.clone();
-            // Best-effort synchronous rollback
-            tokio::task::block_in_place(|| {
-                let rt = tokio::runtime::Handle::current();
-                rt.block_on(async {
-                    if let Err(e) = client.execute("ROLLBACK", &[]).await {
-                        tracing::warn!("Auto-rollback on PgTransaction drop failed: {}", e);
-                    } else {
-                        tracing::debug!("PgTransaction auto-rolled back on drop");
-                    }
-                });
-            });
+            tracing::debug!(
+                "PgTransaction dropped without commit/rollback; \
+                 marking connection for deferred rollback"
+            );
+            self.needs_rollback.store(true, Ordering::Release);
         }
     }
 }
@@ -628,22 +774,100 @@ pub struct PgConnectionFactory;
 #[async_trait]
 impl ConnectionFactory for PgConnectionFactory {
     async fn connect(&self, config: &ConnectionConfig) -> Result<Box<dyn Connection>> {
-        let (client, connection) = tokio_postgres::connect(&config.url, tokio_postgres::NoTls)
-            .await
-            .map_err(|e| Error::connection_with_source("failed to connect", e))?;
+        let (client, connection) = Self::connect_with_tls(config).await?;
 
-        // Spawn the connection handler
-        tokio::spawn(async move {
+        // Spawn the connection handler and store the handle so
+        // PgConnection::close() can abort it to close the TCP connection.
+        let bg_flag = Arc::new(AtomicBool::new(false));
+        let bg_flag_clone = bg_flag.clone();
+        let task = tokio::spawn(async move {
             if let Err(e) = connection.await {
                 tracing::warn!("PostgreSQL connection error: {}", e);
+                bg_flag_clone.store(true, Ordering::Release);
             }
         });
 
-        Ok(Box::new(PgConnection::new(client)))
+        let mut conn = PgConnection::with_task(client, task);
+        conn.bg_task_failed = bg_flag;
+        Ok(Box::new(conn))
     }
 
     fn database_type(&self) -> DatabaseType {
         DatabaseType::PostgreSQL
+    }
+}
+
+impl PgConnectionFactory {
+    /// Connect using TLS when the `postgres-tls` feature is enabled and the
+    /// connection URL or properties request it (e.g. `sslmode=require`).
+    /// Falls back to `NoTls` when TLS is not compiled in or not requested.
+    #[cfg(feature = "postgres-tls")]
+    async fn connect_with_tls(
+        config: &ConnectionConfig,
+    ) -> Result<(
+        tokio_postgres::Client,
+        impl std::future::Future<Output = std::result::Result<(), tokio_postgres::Error>>,
+    )> {
+        let wants_tls = Self::wants_tls(config);
+
+        if wants_tls {
+            let tls_config = rustls::ClientConfig::builder()
+                .with_root_certificates(Self::root_cert_store())
+                .with_no_client_auth();
+            let tls = tokio_postgres_rustls::MakeRustlsConnect::new(tls_config);
+            tokio_postgres::connect(&config.url, tls)
+                .await
+                .map_err(|e| Error::connection_with_source("failed to connect (TLS)", e))
+        } else {
+            tokio_postgres::connect(
+                &config.url,
+                tokio_postgres_rustls::MakeRustlsConnect::new(
+                    rustls::ClientConfig::builder()
+                        .with_root_certificates(Self::root_cert_store())
+                        .with_no_client_auth(),
+                ),
+            )
+            .await
+            .map_err(|e| Error::connection_with_source("failed to connect", e))
+        }
+    }
+
+    #[cfg(not(feature = "postgres-tls"))]
+    async fn connect_with_tls(
+        config: &ConnectionConfig,
+    ) -> Result<(
+        tokio_postgres::Client,
+        impl std::future::Future<Output = std::result::Result<(), tokio_postgres::Error>>,
+    )> {
+        tokio_postgres::connect(&config.url, tokio_postgres::NoTls)
+            .await
+            .map_err(|e| Error::connection_with_source("failed to connect", e))
+    }
+
+    /// Check whether the config requests TLS (via URL params or properties).
+    #[cfg(feature = "postgres-tls")]
+    fn wants_tls(config: &ConnectionConfig) -> bool {
+        // Check properties map
+        if let Some(mode) = config.properties.get("sslmode") {
+            return mode != "disable";
+        }
+        // Check URL query parameters
+        if let Ok(url) = url::Url::parse(&config.url) {
+            for (k, v) in url.query_pairs() {
+                if k == "sslmode" {
+                    return v != "disable";
+                }
+            }
+        }
+        // Default: prefer TLS when the feature is compiled in
+        true
+    }
+
+    #[cfg(feature = "postgres-tls")]
+    fn root_cert_store() -> rustls::RootCertStore {
+        let mut store = rustls::RootCertStore::empty();
+        store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        store
     }
 }
 

@@ -94,26 +94,59 @@ pub struct CdcEvent {
     pub transaction: Option<TransactionMetadata>,
 }
 
-/// CDC operation type
+/// CDC operation type representing the kind of change captured from the source database.
+///
+/// # CDC Semantics
+///
+/// These variants map to database-level operations as observed through the
+/// replication stream. In CDC terminology:
+///
+/// - **Insert** / **Update** / **Delete** correspond to DML row-level changes.
+///   For PostgreSQL logical replication, `Insert` maps to the WAL `INSERT` message,
+///   `Update` to the `UPDATE` message (which may carry both before and after images
+///   depending on `REPLICA IDENTITY`), and `Delete` to the `DELETE` message
+///   (which carries the old key columns or full row depending on `REPLICA IDENTITY`).
+///
+/// - **Tombstone** is a Rivven-level concept (not a database operation) used for
+///   downstream log compaction.
+///
+/// - **Snapshot** represents rows read during the initial consistent snapshot,
+///   not a real-time change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum CdcOp {
-    /// Row inserted
-    Insert,
-    /// Row updated
-    Update,
-    /// Row deleted
-    Delete,
-    /// Tombstone marker (null payload for log compaction)
+    /// A new row was inserted into the source table.
     ///
-    /// A tombstone is emitted after a DELETE event with the same key
+    /// The `after` field of the corresponding [`CdcEvent`] contains the full row data.
+    /// The `before` field is `None`.
+    Insert,
+    /// An existing row was updated in the source table.
+    ///
+    /// The `after` field contains the new row state. The `before` field may contain
+    /// the previous row state if the source database is configured to emit it
+    /// (e.g., PostgreSQL `REPLICA IDENTITY FULL`). With the default replica identity,
+    /// `before` only contains the primary key columns.
+    Update,
+    /// A row was deleted from the source table.
+    ///
+    /// The `before` field contains the deleted row's key columns (or the full row
+    /// if `REPLICA IDENTITY FULL` is configured). The `after` field is `None`.
+    Delete,
+    /// Tombstone marker (null payload for log compaction).
+    ///
+    /// A tombstone is emitted after a `Delete` event with the same key
     /// but null value. This signals to log compaction that the key
-    /// should be removed from the compacted log.
+    /// should be removed from the compacted log. This is a Rivven-internal
+    /// concept and does not correspond to a database operation.
     Tombstone,
-    /// Table truncated
+    /// All rows in the table were removed via a `TRUNCATE` statement.
     Truncate,
-    /// Snapshot read (initial sync)
+    /// A row read during the initial consistent snapshot (not a real-time change).
+    ///
+    /// Snapshot events are produced during the initial sync phase before
+    /// streaming begins. They represent the table's state at a specific
+    /// point-in-time and are semantically equivalent to inserts.
     Snapshot,
-    /// Schema change (DDL event)
+    /// Schema change (DDL event).
     ///
     /// Published to a dedicated schema_changes topic when table
     /// structure changes (CREATE/ALTER/DROP TABLE, etc.)

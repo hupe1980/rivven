@@ -113,6 +113,19 @@ fn default_rebalance_delay_ms() -> u64 {
     3000
 }
 
+/// Minimum allowed rebalance delay (ms).
+const MIN_REBALANCE_DELAY_MS: u64 = 100;
+/// Maximum allowed rebalance delay (ms).
+const MAX_REBALANCE_DELAY_MS: u64 = 60_000;
+
+impl DistributedConfig {
+    /// Return the rebalance delay clamped to the allowed range [100ms, 60s].
+    pub fn clamped_rebalance_delay_ms(&self) -> u64 {
+        self.rebalance_delay_ms
+            .clamp(MIN_REBALANCE_DELAY_MS, MAX_REBALANCE_DELAY_MS)
+    }
+}
+
 fn default_failover_heartbeat_ms() -> u64 {
     1000
 }
@@ -617,6 +630,20 @@ impl ConnectConfig {
 
     /// Validate configuration
     pub fn validate(&self) -> anyhow::Result<()> {
+        // Warn about important fields that are using defaults
+        if !self.settings.health.enabled {
+            tracing::warn!("Health check endpoint is disabled (default). Enable with settings.health.enabled=true for production monitoring.");
+        }
+        if !self.settings.metrics.enabled {
+            tracing::warn!("Metrics endpoint is disabled (default). Enable with settings.metrics.enabled=true for production observability.");
+        }
+        if !self.broker.tls.enabled {
+            tracing::warn!("Broker TLS is disabled (default). Enable with broker.tls.enabled=true for encrypted connections.");
+        }
+        if self.distributed.is_none() {
+            tracing::warn!("Distributed mode is not configured (default: standalone). Set 'distributed.enabled=true' for multi-node coordination.");
+        }
+
         // Validate sources
         for (name, source) in &self.sources {
             // topic is required (fallback for non-CDC or when routing doesn't match)

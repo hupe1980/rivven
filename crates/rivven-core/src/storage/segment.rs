@@ -16,13 +16,14 @@
 //! - If external tooling is required, stop the broker first
 
 use crate::{Error, Message, Result};
+use arc_swap::ArcSwapOption;
 use bytes::{BufMut, BytesMut};
 use crc32fast::Hasher;
 use memmap2::Mmap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -76,10 +77,18 @@ pub struct Segment {
     /// Counter for tracking writes between fsyncs (for EveryNWrites policy)
     writes_since_sync: std::sync::atomic::AtomicU64,
     /// Cached read-only memory map (H-11/H-12 fix).
-    /// Invalidated on write, lazily re-created on next read.
-    /// Avoids creating a new mmap per read and moves the blocking
-    /// mmap syscall off the hot path for repeat reads.
-    cached_mmap: tokio::sync::RwLock<Option<Arc<Mmap>>>,
+    /// Uses lock-free `ArcSwapOption` instead of `tokio::sync::RwLock` to
+    /// eliminate contention between concurrent producers and consumers.
+    /// Lazily re-created on read when stale (write_generation > mmap_generation).
+    cached_mmap: ArcSwapOption<Mmap>,
+    /// Monotonically increasing counter bumped on every append.
+    /// Compared against `mmap_generation` to detect staleness without
+    /// invalidating the mmap on each write.
+    write_generation: AtomicU64,
+    /// The `write_generation` value at which the current cached mmap was created.
+    /// When `mmap_generation < write_generation`, the cached mmap is stale and
+    /// will be refreshed on the next read (after flushing dirty buffers).
+    mmap_generation: AtomicU64,
     /// Cached (min_ts, max_ts) for sealed segments.
     /// Once a segment is sealed, timestamps never change, so we cache
     /// the result of `timestamp_bounds()` to avoid repeated O(n) scans.
@@ -169,7 +178,9 @@ impl Segment {
             pending_index_entries: SyncMutex::new(Vec::new()),
             sync_policy,
             writes_since_sync: std::sync::atomic::AtomicU64::new(0),
-            cached_mmap: tokio::sync::RwLock::new(None),
+            cached_mmap: ArcSwapOption::empty(),
+            write_generation: AtomicU64::new(0),
+            mmap_generation: AtomicU64::new(0),
             cached_timestamp_bounds: SyncMutex::new(None),
             write_dirty: AtomicBool::new(false),
             sync_file,
@@ -184,6 +195,14 @@ impl Segment {
             if let Some((_, pos)) = segment.index_buffer.last() {
                 segment.last_index_position = *pos;
             }
+        }
+
+        // fsync the parent directory after creating new segment files.
+        // This ensures the directory entries (new .log / .index files) are
+        // durable — without this, a crash could leave the directory in a
+        // state where the files don't appear despite having been written.
+        if current_size == 0 {
+            File::open(dir)?.sync_all()?;
         }
 
         Ok(segment)
@@ -264,8 +283,9 @@ impl Segment {
         self.write_dirty.store(true, AtomicOrdering::Release);
         self.current_size += frame_len;
 
-        // Invalidate cached mmap since the file has changed
-        *self.cached_mmap.write().await = None;
+        // Bump write generation so readers know the mmap is stale.
+        // Lock-free: no mmap invalidation on the write path.
+        self.write_generation.fetch_add(1, AtomicOrdering::Release);
         // Invalidate cached timestamp bounds since new data was written
         self.invalidate_timestamp_cache();
 
@@ -365,8 +385,9 @@ impl Segment {
         self.write_dirty.store(true, AtomicOrdering::Release);
         self.current_size += total_frame.len() as u64;
 
-        // Invalidate cached mmap since the file has changed
-        *self.cached_mmap.write().await = None;
+        // Bump write generation so readers know the mmap is stale.
+        // Lock-free: no mmap invalidation on the write path.
+        self.write_generation.fetch_add(1, AtomicOrdering::Release);
         // Invalidate cached timestamp bounds since new data was written
         self.invalidate_timestamp_cache();
 
@@ -382,6 +403,10 @@ impl Segment {
             writer.get_ref().sync_all()?;
         }
         self.write_dirty.store(false, AtomicOrdering::Release);
+
+        // Invalidate cached mmap on flush so the next read creates a fresh
+        // mmap that reflects all flushed data.
+        self.cached_mmap.store(None);
 
         // Drain and write pending index entries (uses std::sync::Mutex for &self access)
         let entries: Vec<(u32, u64)> = {
@@ -577,14 +602,17 @@ impl Segment {
         }
 
         // 2. Get or create cached mmap (H-11/H-12 fix)
+        //    Uses lock-free ArcSwapOption with generation tracking:
+        //    the mmap is refreshed only when write_generation has advanced
+        //    past the generation recorded when the mmap was created.
+        let current_gen = self.write_generation.load(AtomicOrdering::Acquire);
         let mmap = {
-            // Fast path: check if we have a cached mmap
-            let cached = self.cached_mmap.read().await;
-            if let Some(ref m) = *cached {
+            // Fast path: load cached mmap (lock-free)
+            let cached = self.cached_mmap.load();
+            let is_stale = self.mmap_generation.load(AtomicOrdering::Acquire) < current_gen;
+            if let Some(m) = cached.as_ref().filter(|_| !is_stale) {
                 Arc::clone(m)
             } else {
-                drop(cached);
-
                 // Slow path: create new mmap via spawn_blocking to avoid
                 // blocking the tokio runtime thread
                 let log_path = self.log_path.clone();
@@ -607,9 +635,10 @@ impl Segment {
 
                 match new_mmap {
                     Some(m) => {
-                        // Cache it for future reads
-                        let mut cached = self.cached_mmap.write().await;
-                        *cached = Some(Arc::clone(&m));
+                        // Cache it for future reads (lock-free store)
+                        self.cached_mmap.store(Some(Arc::clone(&m)));
+                        self.mmap_generation
+                            .store(current_gen, AtomicOrdering::Release);
                         m
                     }
                     None => {
@@ -805,7 +834,76 @@ impl Segment {
         // the pre-truncation value, causing premature segment rolling.
         self.current_size = valid_len;
 
+        // Invalidate/rebuild sparse index after truncation.
+        // After crash recovery truncates the segment, the index_buffer may
+        // contain entries pointing beyond the new file end. Trim stale entries
+        // and rewrite the .index file to match the valid data.
+        self.rebuild_index_after_truncation(valid_len);
+
+        // Force-invalidate cached mmap since the file was truncated.
+        // Also bump write_generation so any concurrent reader treats
+        // a previously loaded mmap as stale.
+        self.cached_mmap.store(None);
+        self.write_generation.fetch_add(1, AtomicOrdering::Release);
+        // Invalidate cached timestamp bounds
+        self.invalidate_timestamp_cache();
+
         Ok(last_offset)
+    }
+
+    /// Trim the sparse index to remove entries at or beyond `valid_len`
+    /// and rewrite the on-disk `.index` file to match.
+    ///
+    /// Called after crash-recovery truncation in `recover_last_offset()` and
+    /// whenever the underlying segment data changes in a way that invalidates
+    /// previously recorded byte positions.
+    fn rebuild_index_after_truncation(&mut self, valid_len: u64) {
+        let before = self.index_buffer.len();
+        self.index_buffer.retain(|&(_, pos)| pos < valid_len);
+        let removed = before - self.index_buffer.len();
+
+        // Update last_index_position to the last valid entry
+        self.last_index_position = self.index_buffer.last().map(|&(_, pos)| pos).unwrap_or(0);
+
+        // Clear pending index entries — they may also reference stale positions
+        self.pending_index_entries.lock().clear();
+
+        if removed > 0 {
+            tracing::info!(
+                base_offset = self.base_offset,
+                removed,
+                remaining = self.index_buffer.len(),
+                "Trimmed stale sparse index entries after segment truncation"
+            );
+
+            // Rewrite the .index file from the trimmed buffer
+            if let Err(e) = self.rewrite_index_file() {
+                tracing::warn!(
+                    base_offset = self.base_offset,
+                    error = %e,
+                    "Failed to rewrite index file after truncation"
+                );
+            }
+        }
+    }
+
+    /// Rewrite the `.index` file from the in-memory `index_buffer`.
+    fn rewrite_index_file(&self) -> Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&self.index_path)?;
+
+        let mut buf = BytesMut::with_capacity(self.index_buffer.len() * INDEX_ENTRY_SIZE);
+        for &(rel_offset, pos) in &self.index_buffer {
+            buf.put_u32(rel_offset);
+            buf.put_u64(pos);
+        }
+        file.write_all(&buf)?;
+        file.sync_all()?;
+
+        Ok(())
     }
 
     /// Find the first offset with timestamp >= target_timestamp

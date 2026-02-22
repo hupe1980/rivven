@@ -275,6 +275,16 @@ impl From<serde_json::Error> for DistributedError {
 pub type DistributedResult<T> = Result<T, DistributedError>;
 
 /// Generation number for leader election
+///
+/// # Default Value
+///
+/// The default generation is `0`, which represents an **unassigned / initial**
+/// state before any leader election has occurred. The first successful
+/// election produces generation `1` (via [`increment`](Self::increment)).
+///
+/// Callers should **not** treat generation `0` as proof of a valid election;
+/// use [`is_assigned`](Self::is_assigned) to distinguish unassigned tasks
+/// from tasks that have gone through at least one election cycle.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
 )]
@@ -283,6 +293,12 @@ pub struct Generation(pub u64);
 impl Generation {
     pub fn new(gen: u64) -> Self {
         Self(gen)
+    }
+
+    /// Returns `true` if this generation has been through at least one
+    /// election cycle (i.e. is not the default `0`).
+    pub fn is_assigned(&self) -> bool {
+        self.0 > 0
     }
 
     pub fn increment(&mut self) -> Self {

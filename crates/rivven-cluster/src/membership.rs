@@ -317,7 +317,18 @@ impl Membership {
     }
 
     /// Start the SWIM protocol
-    pub async fn run(self) -> Result<()> {
+    ///
+    /// The background loops (receiver, failure detector, sync) are
+    /// now gated on a shutdown signal.  When the broadcast sender is dropped or
+    /// a shutdown message is sent, the `select!` below fires and all spawned
+    /// tasks are aborted, preventing leaked background loops.
+    pub async fn run(mut self) -> Result<()> {
+        // Extract the shutdown receiver before wrapping `self` in Arc, because
+        // broadcast::Receiver is not accessible through Arc without interior
+        // mutability.  Replace with a dummy receiver so the struct stays valid.
+        let (_shutdown_placeholder_tx, shutdown_placeholder_rx) = broadcast::channel::<()>(1);
+        let mut shutdown_rx = std::mem::replace(&mut self.shutdown, shutdown_placeholder_rx);
+
         let membership = Arc::new(self);
 
         // Spawn receiver task
@@ -333,7 +344,7 @@ impl Membership {
         let sync_membership = membership.clone();
         let mut sync_handle = tokio::spawn(async move { sync_membership.run_sync().await });
 
-        // Wait for any task to complete
+        // Wait for any task to complete or shutdown signal
         tokio::select! {
             r = &mut recv_handle => {
                 error!("Receiver task ended: {:?}", r);
@@ -343,6 +354,9 @@ impl Membership {
             }
             r = &mut sync_handle => {
                 error!("Sync task ended: {:?}", r);
+            }
+            _ = shutdown_rx.recv() => {
+                info!("SWIM protocol received shutdown signal");
             }
         }
 
@@ -536,9 +550,7 @@ impl Membership {
         // Update member state
         if let Some(mut member) = self.members.get_mut(source) {
             let old_state = member.state;
-            member.mark_alive(incarnation);
-
-            if old_state != NodeState::Alive {
+            if member.mark_alive(incarnation) && old_state != NodeState::Alive {
                 let _ = self
                     .event_tx
                     .send(MembershipEvent::NodeRecovered(source.clone()));
@@ -670,8 +682,7 @@ impl Membership {
 
         // Update member state if incarnation is newer
         if let Some(mut member) = self.members.get_mut(node_id) {
-            if incarnation >= member.incarnation && member.state == NodeState::Alive {
-                member.mark_suspect();
+            if incarnation >= member.incarnation && member.mark_suspect() {
                 let _ = self
                     .event_tx
                     .send(MembershipEvent::NodeSuspected(node_id.clone()));
@@ -686,9 +697,7 @@ impl Membership {
         if let Some(mut member) = self.members.get_mut(node_id) {
             if incarnation > member.incarnation {
                 let old_state = member.state;
-                member.mark_alive(incarnation);
-
-                if old_state == NodeState::Suspect {
+                if member.mark_alive(incarnation) && old_state == NodeState::Suspect {
                     let _ = self
                         .event_tx
                         .send(MembershipEvent::NodeRecovered(node_id.clone()));
@@ -706,8 +715,7 @@ impl Membership {
         }
 
         if let Some(mut member) = self.members.get_mut(node_id) {
-            if incarnation >= member.incarnation {
-                member.mark_dead();
+            if incarnation >= member.incarnation && member.mark_dead() {
                 let _ = self
                     .event_tx
                     .send(MembershipEvent::NodeFailed(node_id.clone()));
@@ -723,10 +731,18 @@ impl Membership {
             // Only update if incarnation is newer
             if state.incarnation > member.incarnation {
                 match state.state {
-                    NodeState::Alive => member.mark_alive(state.incarnation),
-                    NodeState::Suspect => member.mark_suspect(),
-                    NodeState::Dead => member.mark_dead(),
-                    NodeState::Leaving => member.mark_leaving(),
+                    NodeState::Alive => {
+                        member.mark_alive(state.incarnation);
+                    }
+                    NodeState::Suspect => {
+                        member.mark_suspect();
+                    }
+                    NodeState::Dead => {
+                        member.mark_dead();
+                    }
+                    NodeState::Leaving => {
+                        member.mark_leaving();
+                    }
                     _ => {}
                 }
             }
@@ -744,8 +760,12 @@ impl Membership {
             };
             let mut node = Node::new(info.clone());
             match state.state {
-                NodeState::Alive => node.mark_alive(state.incarnation),
-                NodeState::Suspect => node.mark_suspect(),
+                NodeState::Alive => {
+                    node.mark_alive(state.incarnation);
+                }
+                NodeState::Suspect => {
+                    node.mark_suspect();
+                }
                 _ => {}
             }
             self.members.insert(state.id.clone(), node);
@@ -840,10 +860,7 @@ impl Membership {
                             if pending_pings.remove(&target_id).is_some() {
                                 // Inline mark_suspect logic for the spawned task
                                 if let Some(mut member) = members.get_mut(&target_id) {
-                                    if member.state == NodeState::Alive
-                                        || member.state == NodeState::Unknown
-                                    {
-                                        member.mark_suspect();
+                                    if member.mark_suspect() {
                                         let suspect = SwimMessage::Suspect {
                                             node_id: target_id.clone(),
                                             incarnation: member.incarnation,
@@ -1016,16 +1033,16 @@ impl Membership {
 
         for node_id in dead_nodes {
             if let Some(mut member) = self.members.get_mut(&node_id) {
-                member.mark_dead();
+                if member.mark_dead() {
+                    // Enqueue death notice for piggyback dissemination
+                    let dead = SwimMessage::Dead {
+                        node_id: node_id.clone(),
+                        incarnation: member.incarnation,
+                    };
+                    self.enqueue_gossip(dead).await;
 
-                // Enqueue death notice for piggyback dissemination
-                let dead = SwimMessage::Dead {
-                    node_id: node_id.clone(),
-                    incarnation: member.incarnation,
-                };
-                self.enqueue_gossip(dead).await;
-
-                let _ = self.event_tx.send(MembershipEvent::NodeFailed(node_id));
+                    let _ = self.event_tx.send(MembershipEvent::NodeFailed(node_id));
+                }
             }
         }
 

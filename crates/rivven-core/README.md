@@ -10,8 +10,8 @@
 
 | Category | Features |
 |:---------|:---------|
-| **Hot Path** | Zero-copy buffers, cache-line alignment, lock-free queues |
-| **Storage** | Log segments, tiered storage (hot/warm/cold), compaction |
+| **Hot Path** | Zero-copy buffers, cache-line alignment, lock-free queues, ArcSwap mmap cache |
+| **Storage** | Log segments, tiered storage (hot/warm/cold), compaction, atomic write generation tracking |
 | **I/O** | Portable async I/O (io_uring-style API, std::fs fallback), memory-mapped files |
 | **Compression** | LZ4, Zstd, Snappy (streaming-optimized) |
 | **Transactions** | Exactly-once semantics, 2PC protocol |
@@ -135,13 +135,17 @@ Batch append — 2 allocations for N messages:
 
 `LogManager::append_batch()` uses `split_off()` to partition batches across segment
 boundaries without cloning `Message` structs — eliminates per-message `String`/`Vec<u8>`
-header allocations that occurred with the prior `to_vec()` approach.
+header allocations.
 
 ### Read Path (Dirty-Flag Lock Elision)
 
 Segment reads check an atomic `write_dirty` flag before acquiring the write mutex.
 When no writes are pending (common case for consumer-heavy workloads), the read path
 bypasses the mutex entirely — eliminating head-of-line blocking behind concurrent appends.
+
+### Lock-Free Mmap Cache (ArcSwap)
+
+Read-only memory maps for segment files are cached in an `ArcSwap`, providing lock-free access for readers. The mmap is only re-created when the segment's write generation changes (tracked via `AtomicU64`). Writers increment the atomic write generation after each append, and readers compare generations to detect staleness — a single `load()` + compare instead of a lock acquisition.
 
 ### Zero-Copy Buffers
 

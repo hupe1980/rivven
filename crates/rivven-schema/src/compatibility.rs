@@ -196,6 +196,17 @@ impl CompatibilityChecker {
     }
 
     /// Check compatibility between two JSON schemas
+    ///
+    /// # Limitations
+    ///
+    /// This check is **shallow**: only top-level `properties` and `required`
+    /// arrays are compared. Nested objects, `additionalProperties`, `oneOf`,
+    /// `anyOf`, `allOf`, `$ref`, and other JSON Schema keywords are **not**
+    /// evaluated. Deeply nested field additions, removals, or type changes
+    /// will not be detected.
+    ///
+    /// For production schemas with deep nesting, consider registering
+    /// flattened schemas or contributing a recursive compatibility checker.
     fn check_json_pair(
         &self,
         new: &serde_json::Value,
@@ -313,6 +324,23 @@ impl CompatibilityChecker {
     /// - Field numbers cannot be reused with different names
     /// - Reserved field numbers cannot be reused
     /// - Required fields cannot be removed (proto2)
+    ///
+    /// # Limitations
+    ///
+    /// This implementation uses **regex-based parsing** rather than a full
+    /// protobuf descriptor/AST analysis. It handles common `.proto` patterns
+    /// but may produce false positives or negatives for:
+    /// - Nested messages or `oneof` fields
+    /// - `map<K,V>` fields
+    /// - Fields inside `extend` blocks
+    /// - Multi-line field declarations
+    ///
+    /// **Limitation:** This is a regex-based heuristic, NOT a full protobuf
+    /// parser. It can miss fields inside nested messages, `oneof` blocks,
+    /// or `map` declarations. Field number preservation checking *is*
+    /// performed (Rules 1-3 below), but edge cases exist. A proper
+    /// implementation would use `protobuf-parse` or `prost-reflect`
+    /// to build a descriptor and compare field descriptors directly.
     fn check_protobuf(
         &self,
         new_schema: &str,

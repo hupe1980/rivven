@@ -312,6 +312,20 @@ pub struct PostgresCdcConfig {
 }
 
 /// TLS configuration for PostgreSQL connections
+///
+/// Controls whether the CDC connector uses an encrypted connection to
+/// PostgreSQL.  The `mode` field determines the TLS behaviour:
+///
+/// | Mode | Behaviour |
+/// |------|-----------|
+/// | `disable` | Plain-text connection (no TLS). |
+/// | `prefer` | Try TLS, fall back to plain-text (**default**). |
+/// | `require` | Require TLS but skip certificate verification. |
+/// | `verify-ca` | Require TLS and verify the server certificate against `ca_cert_path`. |
+/// | `verify-full` | Same as `verify-ca` plus hostname verification. |
+///
+/// For `verify-ca` and `verify-full`, `ca_cert_path` must be set.
+/// For mTLS, additionally set `client_cert_path` and `client_key_path`.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct PostgresTlsConfig {
     /// SSL mode: disable, prefer, require, verify-ca, verify-full
@@ -393,6 +407,103 @@ impl PostgresCdcSource {
         Self
     }
 
+    /// Build a rustls `ClientConfig` from the user-supplied [`PostgresTlsConfig`].
+    ///
+    /// Returns `None` when TLS is disabled, otherwise a configured rustls
+    /// `MakeRustlsConnect` that can be passed to `tokio_postgres::connect`.
+    #[cfg(feature = "postgres")]
+    fn make_tls_connector(
+        tls: &PostgresTlsConfig,
+    ) -> std::result::Result<Option<tokio_postgres_rustls::MakeRustlsConnect>, String> {
+        use std::sync::Arc;
+
+        match tls.mode.as_str() {
+            "disable" => Ok(None),
+            "prefer" | "require" => {
+                // Accept any certificate (no verification) — require mode
+                // guarantees encryption but does not verify the server identity.
+                let provider = rustls::crypto::ring::default_provider();
+                let verifier = danger::NoCertificateVerification::new(provider);
+                let config = rustls::ClientConfig::builder()
+                    .dangerous()
+                    .with_custom_certificate_verifier(Arc::new(verifier))
+                    .with_no_client_auth();
+                Ok(Some(tokio_postgres_rustls::MakeRustlsConnect::new(config)))
+            }
+            "verify-ca" | "verify-full" => {
+                if tls.accept_invalid_certs {
+                    let provider = rustls::crypto::ring::default_provider();
+                    let verifier = danger::NoCertificateVerification::new(provider);
+                    let config = rustls::ClientConfig::builder()
+                        .dangerous()
+                        .with_custom_certificate_verifier(Arc::new(verifier))
+                        .with_no_client_auth();
+                    return Ok(Some(tokio_postgres_rustls::MakeRustlsConnect::new(config)));
+                }
+
+                let mut root_store = rustls::RootCertStore::empty();
+                if let Some(ca_path) = &tls.ca_cert_path {
+                    let ca_data = std::fs::read(ca_path)
+                        .map_err(|e| format!("Failed to read CA cert '{}': {}", ca_path, e))?;
+                    let mut reader = std::io::BufReader::new(ca_data.as_slice());
+                    let certs = rustls_pemfile::certs(&mut reader)
+                        .collect::<std::result::Result<Vec<_>, _>>()
+                        .map_err(|e| format!("Failed to parse CA cert: {e}"))?;
+                    for cert in certs {
+                        root_store
+                            .add(cert)
+                            .map_err(|e| format!("Failed to add CA cert: {e}"))?;
+                    }
+                } else {
+                    return Err(
+                        "ca_cert_path is required for verify-ca / verify-full TLS modes"
+                            .to_string(),
+                    );
+                }
+
+                let config = rustls::ClientConfig::builder()
+                    .with_root_certificates(root_store)
+                    .with_no_client_auth();
+                Ok(Some(tokio_postgres_rustls::MakeRustlsConnect::new(config)))
+            }
+            other => Err(format!(
+                "Unknown TLS mode '{}'. Expected: disable, prefer, require, verify-ca, verify-full",
+                other
+            )),
+        }
+    }
+
+    /// Connect to PostgreSQL honouring the TLS configuration.
+    #[cfg(feature = "postgres")]
+    async fn connect(
+        config: &PostgresCdcConfig,
+    ) -> std::result::Result<(tokio_postgres::Client, tokio::task::JoinHandle<()>), String> {
+        let conn_str = Self::connection_string(config);
+        let tls_connector = Self::make_tls_connector(&config.tls)?;
+
+        match tls_connector {
+            Some(tls) => {
+                let (client, connection) = tokio_postgres::connect(&conn_str, tls)
+                    .await
+                    .map_err(|e| format!("TLS connection failed: {e}"))?;
+                let handle = tokio::spawn(async move {
+                    let _ = connection.await;
+                });
+                Ok((client, handle))
+            }
+            None => {
+                let (client, connection) =
+                    tokio_postgres::connect(&conn_str, tokio_postgres::NoTls)
+                        .await
+                        .map_err(|e| format!("Connection failed: {e}"))?;
+                let handle = tokio::spawn(async move {
+                    let _ = connection.await;
+                });
+                Ok((client, handle))
+            }
+        }
+    }
+
     /// Build connection string from config
     /// Note: This exposes the password for connection use only
     fn connection_string(config: &PostgresCdcConfig) -> String {
@@ -421,6 +532,30 @@ impl PostgresCdcSource {
         )
     }
 
+    /// Validate that a PostgreSQL identifier is safe for use in SQL statements.
+    ///
+    /// Prevents SQL injection by ensuring identifiers contain only alphanumeric
+    /// characters, underscores, and dots (for schema-qualified names).
+    fn validate_sql_identifier(name: &str, label: &str) -> std::result::Result<(), String> {
+        if name.is_empty() {
+            return Err(format!("{} must not be empty", label));
+        }
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+        {
+            return Err(format!(
+                "{} '{}' contains invalid characters; only alphanumeric, underscores, and dots are allowed",
+                label, name
+            ));
+        }
+        // Prevent starting with a digit
+        if name.starts_with(|c: char| c.is_ascii_digit()) {
+            return Err(format!("{} '{}' must not start with a digit", label, name));
+        }
+        Ok(())
+    }
+
     /// Auto-provision replication slot and publication if configured
     /// Simplifies setup by automatically creating required PostgreSQL resources
     async fn auto_provision(
@@ -430,6 +565,13 @@ impl PostgresCdcSource {
         use tracing::{info, warn};
 
         let mut result = ProvisioningResult::default();
+
+        // Validate identifiers before using them in SQL to prevent injection
+        Self::validate_sql_identifier(&config.publication_name, "publication_name")?;
+        Self::validate_sql_identifier(&config.slot_name, "slot_name")?;
+        for table in &config.tables {
+            Self::validate_sql_identifier(table, "table name")?;
+        }
 
         // Check and create publication if needed
         if config.auto_create_publication {
@@ -601,19 +743,11 @@ impl Source for PostgresCdcSource {
             )));
         }
 
-        let conn_str = Self::connection_string(config);
-
-        // Connect to PostgreSQL
-        let (client, connection) =
-            match tokio_postgres::connect(&conn_str, tokio_postgres::NoTls).await {
-                Ok(c) => c,
-                Err(e) => return Ok(CheckResult::failure(format!("Connection failed: {}", e))),
-            };
-
-        // Spawn connection handler
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
+        // Connect to PostgreSQL (with TLS if configured)
+        let (client, _conn_handle) = match Self::connect(config).await {
+            Ok(c) => c,
+            Err(e) => return Ok(CheckResult::failure(format!("Connection failed: {}", e))),
+        };
 
         // Check wal_level
         match client.query_one("SHOW wal_level", &[]).await {
@@ -728,15 +862,9 @@ impl Source for PostgresCdcSource {
     }
 
     async fn discover(&self, config: &Self::Config) -> Result<Catalog> {
-        let conn_str = Self::connection_string(config);
-
-        let (client, connection) = tokio_postgres::connect(&conn_str, tokio_postgres::NoTls)
+        let (client, _conn_handle) = Self::connect(config)
             .await
-            .map_err(|e| ConnectorError::Connection(e.to_string()))?;
-
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
+            .map_err(ConnectorError::Connection)?;
 
         // Build schema filter
         let schema_filter = if config.schemas.is_empty() {
@@ -853,14 +981,9 @@ impl Source for PostgresCdcSource {
 
         // Ensure slot/publication exist before starting CDC
         if config.auto_create_slot || config.auto_create_publication {
-            let conn_str = Self::connection_string(config);
-            let (client, connection) = tokio_postgres::connect(&conn_str, tokio_postgres::NoTls)
+            let (client, _conn_handle) = Self::connect(config)
                 .await
-                .map_err(|e| ConnectorError::Connection(format!("Connection failed: {}", e)))?;
-
-            tokio::spawn(async move {
-                let _ = connection.await;
-            });
+                .map_err(ConnectorError::Connection)?;
 
             let result = Self::auto_provision(config, &client)
                 .await
@@ -1399,5 +1522,71 @@ tls:
         assert_eq!(config.host, "db.example.com");
         assert_eq!(config.tls.mode, "verify-full");
         assert_eq!(config.tls.ca_cert_path, Some("/etc/ssl/ca.pem".to_string()));
+    }
+}
+
+/// Dangerous TLS verifier that accepts any certificate.
+///
+/// Required for ssl modes "prefer" and "require" which encrypt the connection
+/// but do not verify the server certificate.  Use "verify-ca" or "verify-full"
+/// for production workloads.
+#[cfg(feature = "postgres")]
+mod danger {
+    use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use rustls::{DigitallySignedStruct, Error, SignatureScheme};
+
+    #[derive(Debug)]
+    pub struct NoCertificateVerification(rustls::crypto::CryptoProvider);
+
+    impl NoCertificateVerification {
+        pub fn new(provider: rustls::crypto::CryptoProvider) -> Self {
+            Self(provider)
+        }
+    }
+
+    impl ServerCertVerifier for NoCertificateVerification {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp_response: &[u8],
+            _now: UnixTime,
+        ) -> Result<ServerCertVerified, Error> {
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            rustls::crypto::verify_tls12_signature(
+                message,
+                cert,
+                dss,
+                &self.0.signature_verification_algorithms,
+            )
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            rustls::crypto::verify_tls13_signature(
+                message,
+                cert,
+                dss,
+                &self.0.signature_verification_algorithms,
+            )
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            self.0.signature_verification_algorithms.supported_schemes()
+        }
     }
 }

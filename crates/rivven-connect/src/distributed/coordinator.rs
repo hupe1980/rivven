@@ -12,7 +12,7 @@ use crate::distributed::assignment::{
 };
 use crate::distributed::membership::MembershipManager;
 use crate::distributed::protocol::*;
-use crate::distributed::task::{ConnectorTask, SingletonState};
+use crate::distributed::task::{ConnectorTask, SingletonState, TaskState};
 use crate::distributed::types::*;
 use crate::error::ConnectError;
 
@@ -22,6 +22,32 @@ use tracing::{debug, info, warn};
 
 /// Result type for coordinator operations
 pub type CoordinatorResult<T> = std::result::Result<T, ConnectError>;
+
+/// Minimum allowed rebalance delay.
+const MIN_REBALANCE_DELAY: Duration = Duration::from_millis(100);
+/// Maximum allowed rebalance delay.
+const MAX_REBALANCE_DELAY: Duration = Duration::from_secs(60);
+
+/// Clamp a rebalance delay to the allowed range [100ms, 60s].
+///
+/// Logs a warning when the input value is out of bounds.
+fn clamp_rebalance_delay(delay: Duration) -> Duration {
+    if delay < MIN_REBALANCE_DELAY {
+        warn!(
+            "rebalance_delay {:?} is below minimum {:?}, clamping",
+            delay, MIN_REBALANCE_DELAY
+        );
+        MIN_REBALANCE_DELAY
+    } else if delay > MAX_REBALANCE_DELAY {
+        warn!(
+            "rebalance_delay {:?} exceeds maximum {:?}, clamping",
+            delay, MAX_REBALANCE_DELAY
+        );
+        MAX_REBALANCE_DELAY
+    } else {
+        delay
+    }
+}
 
 /// Configuration for the coordinator
 #[derive(Debug, Clone)]
@@ -119,6 +145,11 @@ pub struct ConnectCoordinator {
 impl ConnectCoordinator {
     /// Create a new coordinator
     pub fn new(config: CoordinatorConfig) -> Self {
+        // Validate rebalance delay at construction time
+        let config = CoordinatorConfig {
+            rebalance_delay: clamp_rebalance_delay(config.rebalance_delay),
+            ..config
+        };
         Self {
             membership: MembershipManager::new(config.node_id.clone()),
             assigner: TaskAssigner::new(config.assignment_strategy),
@@ -485,6 +516,9 @@ impl ConnectCoordinator {
             }
         }
 
+        // Promote connectors from Starting → Running when all tasks are healthy
+        self.check_connector_readiness();
+
         // Drain pending actions for this node
         let actions = self
             .pending_actions
@@ -501,6 +535,34 @@ impl ConnectCoordinator {
     // =========================================================================
     // Task Assignment
     // =========================================================================
+
+    /// Check if connectors in Starting state have all tasks running
+    fn check_connector_readiness(&mut self) {
+        let starting: Vec<ConnectorId> = self
+            .connectors
+            .iter()
+            .filter(|(_, c)| c.state == ConnectorState::Starting)
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        for connector_id in starting {
+            let all_running = self
+                .tasks
+                .values()
+                .filter(|t| t.connector == connector_id)
+                .all(|t| t.status.state == TaskState::Running);
+
+            if all_running {
+                if let Some(connector) = self.connectors.get_mut(&connector_id) {
+                    connector.state = ConnectorState::Running;
+                    info!(
+                        connector = %connector_id.0,
+                        "All tasks running, connector promoted to Running"
+                    );
+                }
+            }
+        }
+    }
 
     /// Schedule a rebalance
     fn schedule_rebalance(&mut self) {
@@ -542,13 +604,21 @@ impl ConnectCoordinator {
 
                 match decision {
                     AssignmentDecision::Assign(node) => {
-                        let connector = self.connectors.get(&task.connector);
+                        let mut connector = self.connectors.get_mut(&task.connector);
                         let is_singleton = connector
+                            .as_ref()
                             .map(|c| c.mode == ConnectorMode::Singleton)
                             .unwrap_or(false);
                         let is_leader = is_singleton; // For singleton, assigned node is always leader
 
-                        task.assign(node.clone(), Generation::default(), self.epoch);
+                        // Increment connector generation for each new assignment
+                        let generation = if let Some(c) = connector.as_mut() {
+                            c.generation.increment()
+                        } else {
+                            Generation::new(1)
+                        };
+
+                        task.assign(node.clone(), generation, self.epoch);
 
                         assignments.push(TaskAssignmentMessage {
                             task_id: task.id.clone(),
@@ -572,12 +642,20 @@ impl ConnectCoordinator {
                         );
                     }
                     AssignmentDecision::Reassign { from, to } => {
-                        let connector = self.connectors.get(&task.connector);
+                        let mut connector = self.connectors.get_mut(&task.connector);
                         let is_singleton = connector
+                            .as_ref()
                             .map(|c| c.mode == ConnectorMode::Singleton)
                             .unwrap_or(false);
 
-                        task.assign(to.clone(), Generation::default(), self.epoch);
+                        // Increment connector generation for each reassignment
+                        let generation = if let Some(c) = connector.as_mut() {
+                            c.generation.increment()
+                        } else {
+                            Generation::new(1)
+                        };
+
+                        task.assign(to.clone(), generation, self.epoch);
 
                         assignments.push(TaskAssignmentMessage {
                             task_id: task.id.clone(),
@@ -658,43 +736,61 @@ impl ConnectCoordinator {
             .collect();
 
         for connector_id in singleton_connectors {
-            if let Some(state) = self.assigner.singleton_state(&connector_id) {
-                if !state.is_leader_healthy(timeout) {
+            let needs_failover = self
+                .assigner
+                .singleton_state(&connector_id)
+                .map(|s| !s.is_leader_healthy(timeout))
+                .unwrap_or(false);
+
+            if !needs_failover {
+                continue;
+            }
+
+            info!(
+                connector = %connector_id.0,
+                "Singleton leader unhealthy, triggering failover"
+            );
+
+            // Execute failover and capture the new leader + generation
+            let failover_info =
+                self.assigner
+                    .singleton_state_mut(&connector_id)
+                    .and_then(|state| {
+                        state
+                            .start_failover()
+                            .map(|new_leader| (new_leader, state.generation))
+                    });
+
+            if let Some((new_leader, generation)) = failover_info {
+                // Increment epoch to fence off the old leader
+                self.increment_epoch();
+
+                let task_id = TaskId::new(&connector_id.0, 0);
+                if let Some(task) = self.tasks.get_mut(&task_id) {
+                    task.assign(new_leader.clone(), generation, self.epoch);
+
+                    let connector = self.connectors.get(&connector_id);
+                    failovers.push(TaskAssignmentMessage {
+                        task_id: task.id.clone(),
+                        connector_id: connector_id.clone(),
+                        task_number: 0,
+                        node_id: new_leader.clone(),
+                        generation: task.generation,
+                        epoch: self.epoch,
+                        is_singleton: true,
+                        is_leader: true,
+                        config: connector
+                            .map(|c| c.config.clone())
+                            .unwrap_or(serde_json::Value::Null),
+                    });
+
                     info!(
                         connector = %connector_id.0,
-                        "Singleton leader unhealthy, triggering failover"
+                        new_leader = %new_leader.0,
+                        generation = %generation.0,
+                        epoch = %self.epoch.0,
+                        "Singleton failover complete with fencing"
                     );
-
-                    // Get the singleton task
-                    let task_id = TaskId::new(&connector_id.0, 0);
-                    if let Some(task) = self.tasks.get_mut(&task_id) {
-                        if let Some(state) = self.assigner.singleton_state_mut(&connector_id) {
-                            if let Some(new_leader) = state.start_failover() {
-                                task.assign(new_leader.clone(), Generation::default(), self.epoch);
-
-                                let connector = self.connectors.get(&connector_id);
-                                failovers.push(TaskAssignmentMessage {
-                                    task_id: task.id.clone(),
-                                    connector_id: connector_id.clone(),
-                                    task_number: 0,
-                                    node_id: new_leader.clone(),
-                                    generation: task.generation,
-                                    epoch: self.epoch,
-                                    is_singleton: true,
-                                    is_leader: true,
-                                    config: connector
-                                        .map(|c| c.config.clone())
-                                        .unwrap_or(serde_json::Value::Null),
-                                });
-
-                                info!(
-                                    connector = %connector_id.0,
-                                    new_leader = %new_leader.0,
-                                    "Singleton failover complete"
-                                );
-                            }
-                        }
-                    }
                 }
             }
         }
@@ -728,9 +824,8 @@ impl ConnectCoordinator {
         match connector.state {
             ConnectorState::Registered | ConnectorState::Paused => {
                 connector.state = ConnectorState::Starting;
-                info!(connector = %id.0, "Starting connector");
-                // Transition to Running (in real implementation, this would wait for task startup)
-                connector.state = ConnectorState::Running;
+                info!(connector = %id.0, "Starting connector (waiting for task health)");
+                // Connector stays in Starting until all tasks report Running via heartbeats
                 Ok(())
             }
             ConnectorState::Running => Ok(()), // Already running
@@ -749,7 +844,7 @@ impl ConnectCoordinator {
             .ok_or_else(|| ConnectError::Config(format!("Connector '{}' not found", id.0)))?;
 
         match connector.state {
-            ConnectorState::Running => {
+            ConnectorState::Running | ConnectorState::Starting => {
                 connector.state = ConnectorState::Paused;
                 info!(connector = %id.0, "Pausing connector");
                 Ok(())
@@ -822,8 +917,7 @@ impl ConnectCoordinator {
     /// Trigger an immediate rebalance
     ///
     /// Returns the task assignments produced by the rebalance so
-    /// the caller can dispatch them. Previously the assignments were silently
-    /// discarded.
+    /// the caller can dispatch them.
     pub fn rebalance(&mut self) -> CoordinatorResult<Vec<TaskAssignmentMessage>> {
         self.rebalance_pending = true;
         let assignments = self.execute_rebalance();

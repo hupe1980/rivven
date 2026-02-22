@@ -180,6 +180,21 @@ impl RequestHandler {
             )
         });
 
+        // Validate partition ID against topic partition count
+        if let Err(e) = Validator::validate_partition(partition_id, topic.num_partitions() as u32) {
+            self.pending_bytes
+                .fetch_sub(msg_size, std::sync::atomic::Ordering::AcqRel);
+            warn!(
+                "Invalid partition {} for topic '{}': {}",
+                partition_id,
+                topic.name(),
+                e
+            );
+            return Response::Error {
+                message: format!("INVALID_PARTITION: {}", e),
+            };
+        }
+
         let txn_partition = TransactionPartition::new(topic_name, partition_id);
 
         // Epoch fencing for transactional publish
@@ -638,8 +653,14 @@ impl RequestHandler {
                 }
             };
 
-        // Write ABORT markers to all affected partitions
-        // Track failures and surface them
+        // Write ABORT markers only to partitions that had writes.
+        //
+        // Derive the set of written partitions from `pending_writes`
+        // and only write ABORT markers there. This avoids unnecessary I/O
+        // and ensures every partition that actually has uncommitted data
+        // gets a proper ABORT marker. If a marker write fails, we track
+        // the failure and report it to the client.
+        //
         // WAL-write the abort decision BEFORE writing partition markers.
         if let Some(ref wal) = self.wal {
             let abort_record = format!("txn_abort:{}:{}:{}", txn_id, producer_id, producer_epoch);
@@ -660,8 +681,24 @@ impl RequestHandler {
             }
         }
 
+        // Build the set of partitions that actually received writes
+        // from pending_writes, so we target cleanup precisely.
+        let written_partitions: std::collections::HashSet<_> = txn
+            .pending_writes
+            .iter()
+            .map(|w| w.partition.clone())
+            .collect();
+
+        debug!(
+            "Transaction {} abort: {} registered partitions, {} with actual writes",
+            txn_id,
+            txn.partitions.len(),
+            written_partitions.len()
+        );
+
         let mut abort_marker_failures: Vec<String> = Vec::new();
-        for tp in &txn.partitions {
+        let mut abort_marker_successes: Vec<String> = Vec::new();
+        for tp in &written_partitions {
             if let Ok(topic_obj) = self.topic_manager.get_topic(&tp.topic).await {
                 if let Ok(partition) = topic_obj.partition(tp.partition) {
                     let marker = Message {
@@ -676,8 +713,22 @@ impl RequestHandler {
                             txn_id, tp.topic, tp.partition, e
                         );
                         abort_marker_failures.push(format!("{}/{}", tp.topic, tp.partition));
+                    } else {
+                        abort_marker_successes.push(format!("{}/{}", tp.topic, tp.partition));
                     }
+                } else {
+                    warn!(
+                        "Partition {}/{} not found during abort of txn {} — partition may have been deleted",
+                        tp.topic, tp.partition, txn_id
+                    );
+                    abort_marker_failures.push(format!("{}/{}", tp.topic, tp.partition));
                 }
+            } else {
+                warn!(
+                    "Topic {} not found during abort of txn {} — topic may have been deleted",
+                    tp.topic, txn_id
+                );
+                abort_marker_failures.push(format!("{}/{}", tp.topic, tp.partition));
             }
         }
 

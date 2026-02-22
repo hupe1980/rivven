@@ -146,6 +146,7 @@ fn test_table_source_config_builder_methods() {
         .with_schema("public")
         .with_columns(vec!["id".to_string(), "name".to_string()])
         .with_where("active = true")
+        .unwrap()
         .with_batch_size(500)
         .with_poll_interval(Duration::from_secs(10))
         .with_topic("users-events");

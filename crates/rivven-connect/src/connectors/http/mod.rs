@@ -415,7 +415,6 @@ impl HttpWebhookSink {
 
     /// Initialize circuit breaker and concurrency settings from config.
     ///
-    /// Previously marked `#[allow(dead_code)]` and never called.
     /// Call this after construction to wire config-based circuit breaker and
     /// concurrency settings before the first `write()` invocation.
     pub fn init_from_config(&mut self, config: &HttpWebhookConfig) {

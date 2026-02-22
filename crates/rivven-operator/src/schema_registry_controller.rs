@@ -22,7 +22,7 @@ use kube::api::{Api, Patch, PatchParams};
 use kube::runtime::controller::{Action, Controller};
 use kube::runtime::finalizer::{finalizer, Event as FinalizerEvent};
 use kube::runtime::watcher::Config;
-use kube::{Client, ResourceExt};
+use kube::{Client, Resource, ResourceExt};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -725,6 +725,23 @@ fn owner_reference(registry: &RivvenSchemaRegistry) -> OwnerReference {
     }
 }
 
+/// Verify the operator still owns a resource before force-applying.
+fn verify_ownership<K: Resource>(existing: &K) -> Result<()> {
+    let labels = existing.meta().labels.as_ref();
+    let managed_by = labels.and_then(|l| l.get("app.kubernetes.io/managed-by"));
+    match managed_by {
+        Some(manager) if manager != "rivven-operator" => {
+            let name = existing.meta().name.as_deref().unwrap_or("<unknown>");
+            Err(OperatorError::InvalidConfig(format!(
+                "resource '{}' is managed by '{}', not rivven-operator; \
+                 refusing to force-apply to avoid ownership conflict",
+                name, manager
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Apply ConfigMap to cluster
 async fn apply_registry_configmap(
     client: &Client,
@@ -733,6 +750,11 @@ async fn apply_registry_configmap(
 ) -> Result<()> {
     let configmaps: Api<ConfigMap> = Api::namespaced(client.clone(), namespace);
     let name = configmap.metadata.name.clone().unwrap_or_default();
+
+    // Verify ownership before force-applying
+    if let Ok(existing) = configmaps.get(&name).await {
+        verify_ownership(&existing)?;
+    }
 
     let patch = Patch::Apply(&configmap);
     let params = PatchParams::apply("rivven-operator").force();
@@ -755,6 +777,11 @@ async fn apply_registry_deployment(
     let deployments: Api<Deployment> = Api::namespaced(client.clone(), namespace);
     let name = deployment.metadata.name.clone().unwrap_or_default();
 
+    // Verify ownership before force-applying
+    if let Ok(existing) = deployments.get(&name).await {
+        verify_ownership(&existing)?;
+    }
+
     let patch = Patch::Apply(&deployment);
     let params = PatchParams::apply("rivven-operator").force();
 
@@ -776,6 +803,11 @@ async fn apply_registry_service(client: &Client, namespace: &str, service: Servi
     let services: Api<Service> = Api::namespaced(client.clone(), namespace);
     let name = service.metadata.name.clone().unwrap_or_default();
 
+    // Verify ownership before force-applying
+    if let Ok(existing) = services.get(&name).await {
+        verify_ownership(&existing)?;
+    }
+
     let patch = Patch::Apply(&service);
     let params = PatchParams::apply("rivven-operator").force();
 
@@ -796,6 +828,11 @@ async fn apply_registry_pdb(
 ) -> Result<()> {
     let pdbs: Api<PodDisruptionBudget> = Api::namespaced(client.clone(), namespace);
     let name = pdb.metadata.name.clone().unwrap_or_default();
+
+    // Verify ownership before force-applying
+    if let Ok(existing) = pdbs.get(&name).await {
+        verify_ownership(&existing)?;
+    }
 
     let patch = Patch::Apply(&pdb);
     let params = PatchParams::apply("rivven-operator").force();

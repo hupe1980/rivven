@@ -381,10 +381,18 @@ impl ManagedConnection {
 
         self.active_streams.fetch_add(1, Ordering::SeqCst);
 
-        let stream =
-            self.connection.open_bi().await.map_err(|e| {
-                ClusterError::ConnectionFailed(format!("Failed to open stream: {}", e))
-            })?;
+        let stream = match self.connection.open_bi().await {
+            Ok(s) => s,
+            Err(e) => {
+                // Decrement active_streams on open_bi() failure
+                // to prevent a slow leak of the counter.
+                self.active_streams.fetch_sub(1, Ordering::SeqCst);
+                return Err(ClusterError::ConnectionFailed(format!(
+                    "Failed to open stream: {}",
+                    e
+                )));
+            }
+        };
 
         Ok(stream)
     }
@@ -930,15 +938,34 @@ impl QuicTransport {
 
         conn.touch();
 
+        // Ensure active_streams is decremented on ALL error
+        // paths after open_bi_stream() succeeds, not only on read errors.
+
         // Send request
-        let request_bytes = encode_request(&request)?;
-        Self::write_message(&mut send, &request_bytes, &self.config).await?;
+        let request_bytes = match encode_request(&request) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                conn.active_streams.fetch_sub(1, Ordering::SeqCst);
+                return Err(e);
+            }
+        };
+        if let Err(e) = Self::write_message(&mut send, &request_bytes, &self.config).await {
+            conn.active_streams.fetch_sub(1, Ordering::SeqCst);
+            conn.mark_unhealthy();
+            return Err(e);
+        }
         self.stats
             .bytes_sent
             .fetch_add(request_bytes.len() as u64, Ordering::Relaxed);
 
-        send.finish()
-            .map_err(|e| ClusterError::Network(format!("Failed to finish send: {}", e)))?;
+        if let Err(e) = send.finish() {
+            conn.active_streams.fetch_sub(1, Ordering::SeqCst);
+            conn.mark_unhealthy();
+            return Err(ClusterError::Network(format!(
+                "Failed to finish send: {}",
+                e
+            )));
+        }
 
         // Receive response
         let response_bytes = match Self::read_message(&mut recv, &self.config).await {
@@ -963,7 +990,13 @@ impl QuicTransport {
             .responses_received
             .fetch_add(1, Ordering::Relaxed);
 
-        let response = decode_response(&response_bytes)?;
+        let response = match decode_response(&response_bytes) {
+            Ok(r) => r,
+            Err(e) => {
+                conn.active_streams.fetch_sub(1, Ordering::SeqCst);
+                return Err(e);
+            }
+        };
 
         conn.active_streams.fetch_sub(1, Ordering::SeqCst);
 
@@ -976,11 +1009,25 @@ impl QuicTransport {
 
         let (mut send, _recv) = conn.open_bi_stream().await?;
 
-        let request_bytes = encode_request(&request)?;
-        Self::write_message(&mut send, &request_bytes, &self.config).await?;
+        // Ensure active_streams is decremented on ALL error paths.
+        let request_bytes = match encode_request(&request) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                conn.active_streams.fetch_sub(1, Ordering::SeqCst);
+                return Err(e);
+            }
+        };
+        if let Err(e) = Self::write_message(&mut send, &request_bytes, &self.config).await {
+            conn.active_streams.fetch_sub(1, Ordering::SeqCst);
+            conn.mark_unhealthy();
+            return Err(e);
+        }
 
-        send.finish()
-            .map_err(|e| ClusterError::Network(format!("Failed to finish: {}", e)))?;
+        if let Err(e) = send.finish() {
+            conn.active_streams.fetch_sub(1, Ordering::SeqCst);
+            conn.mark_unhealthy();
+            return Err(ClusterError::Network(format!("Failed to finish: {}", e)));
+        }
 
         conn.active_streams.fetch_sub(1, Ordering::SeqCst);
 

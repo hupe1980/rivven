@@ -211,10 +211,16 @@ impl TableSourceConfig {
         self
     }
 
-    /// Set where clause
-    pub fn with_where(mut self, clause: impl Into<String>) -> Self {
-        self.where_clause = Some(clause.into());
-        self
+    /// Set where clause.
+    ///
+    /// The clause is validated against common SQL injection patterns
+    /// (`;`, `--`, `/* */`, `\`). Returns an error if the clause
+    /// is rejected.
+    pub fn with_where(mut self, clause: impl Into<String>) -> Result<Self> {
+        let clause = clause.into();
+        crate::security::validate_where_clause(&clause)?;
+        self.where_clause = Some(clause);
+        Ok(self)
     }
 
     /// Set batch size
@@ -657,8 +663,9 @@ mod tests {
 
     #[test]
     fn test_source_query_builder_timestamp() {
-        let config =
-            TableSourceConfig::timestamp("events", "created_at").with_where("status = 'active'");
+        let config = TableSourceConfig::timestamp("events", "created_at")
+            .with_where("status = 'active'")
+            .unwrap();
         let dialect = PostgresDialect;
         let builder = SourceQueryBuilder::new(&config, &dialect);
 

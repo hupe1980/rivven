@@ -157,6 +157,79 @@ pub fn validate_sql_type_name(type_name: &str) -> crate::Result<()> {
     Ok(())
 }
 
+/// Validate a user-supplied WHERE clause for safe interpolation.
+///
+/// The clause is injected as a raw SQL fragment (via `Expr::cust()`), so it
+/// **cannot** be parameterized. This function applies basic deny-list checks
+/// to reject the most common SQL injection patterns:
+///
+/// - Semicolons (statement terminators / stacking)
+/// - Double-dash `--` line comments
+/// - C-style `/* */` block comments
+/// - Backslash escapes (MySQL-specific injection vector)
+///
+/// # Security note
+///
+/// This is a **best-effort** safeguard, **not** a guarantee. A determined
+/// attacker can craft payloads that bypass simple deny-list checks. Prefer
+/// parameterized queries wherever possible. This clause should only come
+/// from **trusted connector configuration**, never from end-user input.
+///
+/// # Examples
+///
+/// ```
+/// use rivven_rdbc::security::validate_where_clause;
+///
+/// assert!(validate_where_clause("status = 'active'").is_ok());
+/// assert!(validate_where_clause("id > 0 AND deleted = false").is_ok());
+///
+/// assert!(validate_where_clause("1=1; DROP TABLE users").is_err());
+/// assert!(validate_where_clause("1=1 -- bypass").is_err());
+/// assert!(validate_where_clause("1=1 /* comment */").is_err());
+/// ```
+pub fn validate_where_clause(clause: &str) -> crate::Result<()> {
+    if clause.is_empty() {
+        return Err(Error::config("WHERE clause cannot be empty"));
+    }
+
+    if clause.len() > 4096 {
+        return Err(Error::config(format!(
+            "WHERE clause too long: {} chars (max 4096)",
+            clause.len()
+        )));
+    }
+
+    if clause.contains(';') {
+        return Err(Error::config(format!(
+            "WHERE clause contains prohibited character ';': {}",
+            clause
+        )));
+    }
+
+    if clause.contains("--") {
+        return Err(Error::config(format!(
+            "WHERE clause contains prohibited pattern '--': {}",
+            clause
+        )));
+    }
+
+    if clause.contains("/*") || clause.contains("*/") {
+        return Err(Error::config(format!(
+            "WHERE clause contains prohibited comment syntax: {}",
+            clause
+        )));
+    }
+
+    if clause.contains('\\') {
+        return Err(Error::config(format!(
+            "WHERE clause contains prohibited backslash escape: {}",
+            clause
+        )));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

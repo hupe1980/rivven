@@ -225,6 +225,9 @@ impl SqlServerSnapshotExecutor {
                 .map(|i| i.columns.clone())
                 .unwrap_or_default();
 
+            // Get primary key columns for deterministic pagination ordering
+            let pk_columns = client.get_pk_columns_by_name(schema, table).await?;
+
             // Get starting offset from progress
             let start_offset = state
                 .tables
@@ -236,7 +239,14 @@ impl SqlServerSnapshotExecutor {
             let mut offset = start_offset;
             loop {
                 let rows = client
-                    .snapshot_table(schema, table, &columns, self.batch_size, offset)
+                    .snapshot_table(
+                        schema,
+                        table,
+                        &columns,
+                        &pk_columns,
+                        self.batch_size,
+                        offset,
+                    )
                     .await?;
 
                 if rows.is_empty() {

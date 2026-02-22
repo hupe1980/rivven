@@ -129,6 +129,10 @@ pub enum ClusterError {
     #[error("crypto error: {0}")]
     CryptoError(String),
 
+    /// Raft RPC authentication failure
+    #[error("unauthorized: {0}")]
+    Unauthorized(String),
+
     // ==================== Internal Errors ====================
     #[error("internal error: {0}")]
     Internal(String),

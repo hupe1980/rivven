@@ -81,8 +81,30 @@ pub struct DeleteRecordsResult {
 /// Adding new variants should only be done at the end of the enum.
 #[derive(Clone, Serialize, Deserialize)]
 pub enum Request {
-    /// Authenticate with username/password (SASL/PLAIN compatible)
-    Authenticate { username: String, password: String },
+    /// Authenticate with username/password (SASL/PLAIN compatible).
+    ///
+    /// # Security — transport encryption required
+    ///
+    /// The password is sent in **plaintext** on the wire (SASL/PLAIN).
+    /// This variant must only be used over a TLS-encrypted connection;
+    /// otherwise the password is exposed to network observers.
+    ///
+    /// # Deprecation
+    ///
+    /// Prefer `ScramClientFirst` / `ScramClientFinal` (SCRAM-SHA-256
+    /// challenge-response) which never sends the password over the wire.
+    #[deprecated(
+        note = "Use SCRAM-SHA-256 (ScramClientFirst/ScramClientFinal) instead of plaintext auth"
+    )]
+    Authenticate {
+        username: String,
+        password: String,
+        /// When `true` the server **must** reject this request if the
+        /// connection is not TLS-encrypted, preventing accidental
+        /// credential exposure on cleartext transports.
+        #[serde(default)]
+        require_tls: bool,
+    },
 
     /// Authenticate with SASL bytes (for Kafka client compatibility)
     SaslAuthenticate {
@@ -388,10 +410,16 @@ pub enum Request {
 impl std::fmt::Debug for Request {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Authenticate { username, .. } => f
+            #[allow(deprecated)]
+            Self::Authenticate {
+                username,
+                require_tls,
+                ..
+            } => f
                 .debug_struct("Authenticate")
                 .field("username", username)
                 .field("password", &"[REDACTED]")
+                .field("require_tls", require_tls)
                 .finish(),
             Self::SaslAuthenticate { mechanism, .. } => f
                 .debug_struct("SaslAuthenticate")
@@ -902,9 +930,14 @@ impl Request {
     /// - payload: serialized message
     ///
     /// Note: Length prefix is NOT included (handled by transport layer)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::MessageTooLarge`] if the serialized message
+    /// exceeds [`MAX_MESSAGE_SIZE`](crate::MAX_MESSAGE_SIZE).
     #[inline]
     pub fn to_wire(&self, format: crate::WireFormat, correlation_id: u32) -> Result<Vec<u8>> {
-        match format {
+        let result = match format {
             crate::WireFormat::Postcard => {
                 // Single allocation — serialize directly into the output
                 // Vec via `postcard::to_extend` instead of double-allocating
@@ -912,8 +945,7 @@ impl Request {
                 let mut result = Vec::with_capacity(crate::WIRE_HEADER_SIZE + 128);
                 result.push(format.as_byte());
                 result.extend_from_slice(&correlation_id.to_be_bytes());
-                let result = postcard::to_extend(self, result)?;
-                Ok(result)
+                postcard::to_extend(self, result)?
             }
             crate::WireFormat::Protobuf => {
                 // Protobuf requires the `protobuf` feature
@@ -924,16 +956,26 @@ impl Request {
                     result.push(format.as_byte());
                     result.extend_from_slice(&correlation_id.to_be_bytes());
                     result.extend_from_slice(&payload);
-                    Ok(result)
+                    result
                 }
                 #[cfg(not(feature = "protobuf"))]
                 {
-                    Err(crate::ProtocolError::Serialization(
+                    return Err(crate::ProtocolError::Serialization(
                         "Protobuf support requires the 'protobuf' feature".into(),
-                    ))
+                    ));
                 }
             }
+        };
+
+        // Enforce MAX_MESSAGE_SIZE before the bytes leave this crate.
+        if result.len() > crate::MAX_MESSAGE_SIZE {
+            return Err(crate::ProtocolError::MessageTooLarge(
+                result.len(),
+                crate::MAX_MESSAGE_SIZE,
+            ));
         }
+
+        Ok(result)
     }
 
     /// Deserialize request with format auto-detection
@@ -995,17 +1037,27 @@ impl Response {
     }
 
     /// Serialize response with wire format prefix
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::MessageTooLarge`] if the serialized message
+    /// exceeds [`MAX_MESSAGE_SIZE`](crate::MAX_MESSAGE_SIZE).
     #[inline]
     pub fn to_wire(&self, format: crate::WireFormat, correlation_id: u32) -> Result<Vec<u8>> {
-        match format {
+        let result = match format {
             crate::WireFormat::Postcard => {
-                // Single allocation — serialize directly into the output
-                // Vec via `postcard::to_extend` instead of double-allocating.
-                let mut result = Vec::with_capacity(crate::WIRE_HEADER_SIZE + 128);
+                // Estimate payload size to avoid reallocations.
+                // For Messages responses, use message count × estimated per-message
+                // size (offset 8 + partition 4 + value ~256 + timestamp 8 + overhead ~24 ≈ 300 bytes).
+                // For other variants the default 128-byte hint is usually sufficient.
+                let size_hint = match self {
+                    Response::Messages { messages } => messages.len().saturating_mul(300).max(128),
+                    _ => 128,
+                };
+                let mut result = Vec::with_capacity(crate::WIRE_HEADER_SIZE + size_hint);
                 result.push(format.as_byte());
                 result.extend_from_slice(&correlation_id.to_be_bytes());
-                let result = postcard::to_extend(self, result)?;
-                Ok(result)
+                postcard::to_extend(self, result)?
             }
             crate::WireFormat::Protobuf => {
                 #[cfg(feature = "protobuf")]
@@ -1015,16 +1067,26 @@ impl Response {
                     result.push(format.as_byte());
                     result.extend_from_slice(&correlation_id.to_be_bytes());
                     result.extend_from_slice(&payload);
-                    Ok(result)
+                    result
                 }
                 #[cfg(not(feature = "protobuf"))]
                 {
-                    Err(crate::ProtocolError::Serialization(
+                    return Err(crate::ProtocolError::Serialization(
                         "Protobuf support requires the 'protobuf' feature".into(),
-                    ))
+                    ));
                 }
             }
+        };
+
+        // Enforce MAX_MESSAGE_SIZE before the bytes leave this crate.
+        if result.len() > crate::MAX_MESSAGE_SIZE {
+            return Err(crate::ProtocolError::MessageTooLarge(
+                result.len(),
+                crate::MAX_MESSAGE_SIZE,
+            ));
         }
+
+        Ok(result)
     }
 
     /// Deserialize response with format auto-detection
@@ -1074,6 +1136,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(deprecated)]
     fn test_request_roundtrip() {
         let requests = vec![
             Request::Ping,
@@ -1085,6 +1148,7 @@ mod tests {
             Request::Authenticate {
                 username: "admin".to_string(),
                 password: "secret".to_string(),
+                require_tls: true,
             },
         ];
 
@@ -1214,7 +1278,10 @@ mod tests {
     /// Snapshot test: postcard serializes enum variants by ordinal position.
     /// If someone reorders variants in Request or Response, this test fails
     /// because the byte prefix (discriminant) will change, breaking wire compat.
+    ///
+    /// Exhaustive — every Request variant is pinned.
     #[test]
+    #[allow(deprecated)]
     fn test_postcard_wire_stability_request_discriminants() {
         use bytes::Bytes;
 
@@ -1227,8 +1294,31 @@ mod tests {
                 Request::Authenticate {
                     username: "u".into(),
                     password: "p".into(),
+                    require_tls: false,
                 },
                 0,
+            ),
+            // variant 1: SaslAuthenticate
+            (
+                Request::SaslAuthenticate {
+                    mechanism: Bytes::from("PLAIN"),
+                    auth_bytes: Bytes::from("data"),
+                },
+                1,
+            ),
+            // variant 2: ScramClientFirst
+            (
+                Request::ScramClientFirst {
+                    message: Bytes::from("n,,n=user,r=nonce"),
+                },
+                2,
+            ),
+            // variant 3: ScramClientFinal
+            (
+                Request::ScramClientFinal {
+                    message: Bytes::from("c=bind,r=nonce,p=proof"),
+                },
+                3,
             ),
             // variant 4: Publish
             (
@@ -1240,6 +1330,18 @@ mod tests {
                     leader_epoch: None,
                 },
                 4,
+            ),
+            // variant 5: Consume
+            (
+                Request::Consume {
+                    topic: "t".into(),
+                    partition: 0,
+                    offset: 0,
+                    max_messages: 1,
+                    isolation_level: None,
+                    max_wait_ms: None,
+                },
+                5,
             ),
             // variant 6: CreateTopic
             (
@@ -1253,10 +1355,188 @@ mod tests {
             (Request::ListTopics, 7),
             // variant 8: DeleteTopic
             (Request::DeleteTopic { name: "t".into() }, 8),
+            // variant 9: CommitOffset
+            (
+                Request::CommitOffset {
+                    consumer_group: "g".into(),
+                    topic: "t".into(),
+                    partition: 0,
+                    offset: 0,
+                },
+                9,
+            ),
+            // variant 10: GetOffset
+            (
+                Request::GetOffset {
+                    consumer_group: "g".into(),
+                    topic: "t".into(),
+                    partition: 0,
+                },
+                10,
+            ),
             // variant 11: GetMetadata
             (Request::GetMetadata { topic: "t".into() }, 11),
+            // variant 12: GetClusterMetadata
+            (Request::GetClusterMetadata { topics: vec![] }, 12),
             // variant 13: Ping
             (Request::Ping, 13),
+            // variant 14: GetOffsetBounds
+            (
+                Request::GetOffsetBounds {
+                    topic: "t".into(),
+                    partition: 0,
+                },
+                14,
+            ),
+            // variant 15: ListGroups
+            (Request::ListGroups, 15),
+            // variant 16: DescribeGroup
+            (
+                Request::DescribeGroup {
+                    consumer_group: "g".into(),
+                },
+                16,
+            ),
+            // variant 17: DeleteGroup
+            (
+                Request::DeleteGroup {
+                    consumer_group: "g".into(),
+                },
+                17,
+            ),
+            // variant 18: GetOffsetForTimestamp
+            (
+                Request::GetOffsetForTimestamp {
+                    topic: "t".into(),
+                    partition: 0,
+                    timestamp_ms: 0,
+                },
+                18,
+            ),
+            // variant 19: InitProducerId
+            (Request::InitProducerId { producer_id: None }, 19),
+            // variant 20: IdempotentPublish
+            (
+                Request::IdempotentPublish {
+                    topic: "t".into(),
+                    partition: None,
+                    key: None,
+                    value: Bytes::from("v"),
+                    producer_id: 1,
+                    producer_epoch: 0,
+                    sequence: 0,
+                    leader_epoch: None,
+                },
+                20,
+            ),
+            // variant 21: BeginTransaction
+            (
+                Request::BeginTransaction {
+                    txn_id: "tx".into(),
+                    producer_id: 1,
+                    producer_epoch: 0,
+                    timeout_ms: None,
+                },
+                21,
+            ),
+            // variant 22: AddPartitionsToTxn
+            (
+                Request::AddPartitionsToTxn {
+                    txn_id: "tx".into(),
+                    producer_id: 1,
+                    producer_epoch: 0,
+                    partitions: vec![],
+                },
+                22,
+            ),
+            // variant 23: TransactionalPublish
+            (
+                Request::TransactionalPublish {
+                    txn_id: "tx".into(),
+                    topic: "t".into(),
+                    partition: None,
+                    key: None,
+                    value: Bytes::from("v"),
+                    producer_id: 1,
+                    producer_epoch: 0,
+                    sequence: 0,
+                    leader_epoch: None,
+                },
+                23,
+            ),
+            // variant 24: AddOffsetsToTxn
+            (
+                Request::AddOffsetsToTxn {
+                    txn_id: "tx".into(),
+                    producer_id: 1,
+                    producer_epoch: 0,
+                    group_id: "g".into(),
+                    offsets: vec![],
+                },
+                24,
+            ),
+            // variant 25: CommitTransaction
+            (
+                Request::CommitTransaction {
+                    txn_id: "tx".into(),
+                    producer_id: 1,
+                    producer_epoch: 0,
+                },
+                25,
+            ),
+            // variant 26: AbortTransaction
+            (
+                Request::AbortTransaction {
+                    txn_id: "tx".into(),
+                    producer_id: 1,
+                    producer_epoch: 0,
+                },
+                26,
+            ),
+            // variant 27: DescribeQuotas
+            (Request::DescribeQuotas { entities: vec![] }, 27),
+            // variant 28: AlterQuotas
+            (
+                Request::AlterQuotas {
+                    alterations: vec![],
+                },
+                28,
+            ),
+            // variant 29: AlterTopicConfig
+            (
+                Request::AlterTopicConfig {
+                    topic: "t".into(),
+                    configs: vec![],
+                },
+                29,
+            ),
+            // variant 30: CreatePartitions
+            (
+                Request::CreatePartitions {
+                    topic: "t".into(),
+                    new_partition_count: 2,
+                    assignments: vec![],
+                },
+                30,
+            ),
+            // variant 31: DeleteRecords
+            (
+                Request::DeleteRecords {
+                    topic: "t".into(),
+                    partition_offsets: vec![],
+                },
+                31,
+            ),
+            // variant 32: DescribeTopicConfigs
+            (Request::DescribeTopicConfigs { topics: vec![] }, 32),
+            // variant 33: Handshake
+            (
+                Request::Handshake {
+                    protocol_version: crate::PROTOCOL_VERSION,
+                    client_id: "test".into(),
+                },
+                33,
+            ),
         ];
 
         for (request, expected_discriminant) in test_cases {
@@ -1269,8 +1549,11 @@ mod tests {
         }
     }
 
+    /// Exhaustive — every Response variant is pinned.
     #[test]
     fn test_postcard_wire_stability_response_discriminants() {
+        use bytes::Bytes;
+
         let test_cases: Vec<(Response, u8)> = vec![
             // variant 0: Authenticated
             (
@@ -1280,6 +1563,22 @@ mod tests {
                 },
                 0,
             ),
+            // variant 1: ScramServerFirst
+            (
+                Response::ScramServerFirst {
+                    message: Bytes::from("r=nonce,s=salt,i=4096"),
+                },
+                1,
+            ),
+            // variant 2: ScramServerFinal
+            (
+                Response::ScramServerFinal {
+                    message: Bytes::from("v=verifier"),
+                    session_id: None,
+                    expires_in: None,
+                },
+                2,
+            ),
             // variant 3: Published
             (
                 Response::Published {
@@ -1288,6 +1587,8 @@ mod tests {
                 },
                 3,
             ),
+            // variant 4: Messages
+            (Response::Messages { messages: vec![] }, 4),
             // variant 5: TopicCreated
             (
                 Response::TopicCreated {
@@ -1300,10 +1601,51 @@ mod tests {
             (Response::Topics { topics: vec![] }, 6),
             // variant 7: TopicDeleted
             (Response::TopicDeleted, 7),
+            // variant 8: OffsetCommitted
+            (Response::OffsetCommitted, 8),
+            // variant 9: Offset
+            (Response::Offset { offset: None }, 9),
+            // variant 10: Metadata
+            (
+                Response::Metadata {
+                    name: "t".into(),
+                    partitions: 1,
+                },
+                10,
+            ),
+            // variant 11: ClusterMetadata
+            (
+                Response::ClusterMetadata {
+                    controller_id: None,
+                    brokers: vec![],
+                    topics: vec![],
+                },
+                11,
+            ),
             // variant 12: Pong
             (Response::Pong, 12),
+            // variant 13: OffsetBounds
+            (
+                Response::OffsetBounds {
+                    earliest: 0,
+                    latest: 0,
+                },
+                13,
+            ),
             // variant 14: Groups
             (Response::Groups { groups: vec![] }, 14),
+            // variant 15: GroupDescription
+            (
+                Response::GroupDescription {
+                    consumer_group: "g".into(),
+                    offsets: HashMap::new(),
+                },
+                15,
+            ),
+            // variant 16: GroupDeleted
+            (Response::GroupDeleted, 16),
+            // variant 17: OffsetForTimestamp
+            (Response::OffsetForTimestamp { offset: None }, 17),
             // variant 18: Error
             (
                 Response::Error {
@@ -1313,6 +1655,116 @@ mod tests {
             ),
             // variant 19: Ok
             (Response::Ok, 19),
+            // variant 20: ProducerIdInitialized
+            (
+                Response::ProducerIdInitialized {
+                    producer_id: 1,
+                    producer_epoch: 0,
+                },
+                20,
+            ),
+            // variant 21: IdempotentPublished
+            (
+                Response::IdempotentPublished {
+                    offset: 0,
+                    partition: 0,
+                    duplicate: false,
+                },
+                21,
+            ),
+            // variant 22: TransactionStarted
+            (
+                Response::TransactionStarted {
+                    txn_id: "tx".into(),
+                },
+                22,
+            ),
+            // variant 23: PartitionsAddedToTxn
+            (
+                Response::PartitionsAddedToTxn {
+                    txn_id: "tx".into(),
+                    partition_count: 0,
+                },
+                23,
+            ),
+            // variant 24: TransactionalPublished
+            (
+                Response::TransactionalPublished {
+                    offset: 0,
+                    partition: 0,
+                    sequence: 0,
+                },
+                24,
+            ),
+            // variant 25: OffsetsAddedToTxn
+            (
+                Response::OffsetsAddedToTxn {
+                    txn_id: "tx".into(),
+                },
+                25,
+            ),
+            // variant 26: TransactionCommitted
+            (
+                Response::TransactionCommitted {
+                    txn_id: "tx".into(),
+                },
+                26,
+            ),
+            // variant 27: TransactionAborted
+            (
+                Response::TransactionAborted {
+                    txn_id: "tx".into(),
+                },
+                27,
+            ),
+            // variant 28: QuotasDescribed
+            (Response::QuotasDescribed { entries: vec![] }, 28),
+            // variant 29: QuotasAltered
+            (Response::QuotasAltered { altered_count: 0 }, 29),
+            // variant 30: Throttled
+            (
+                Response::Throttled {
+                    throttle_time_ms: 0,
+                    quota_type: "produce_bytes_rate".into(),
+                    entity: "user".into(),
+                },
+                30,
+            ),
+            // variant 31: TopicConfigAltered
+            (
+                Response::TopicConfigAltered {
+                    topic: "t".into(),
+                    changed_count: 0,
+                },
+                31,
+            ),
+            // variant 32: PartitionsCreated
+            (
+                Response::PartitionsCreated {
+                    topic: "t".into(),
+                    new_partition_count: 2,
+                },
+                32,
+            ),
+            // variant 33: RecordsDeleted
+            (
+                Response::RecordsDeleted {
+                    topic: "t".into(),
+                    results: vec![],
+                },
+                33,
+            ),
+            // variant 34: TopicConfigsDescribed
+            (Response::TopicConfigsDescribed { configs: vec![] }, 34),
+            // variant 35: HandshakeResult
+            (
+                Response::HandshakeResult {
+                    server_version: crate::PROTOCOL_VERSION,
+                    compatible: true,
+                    message: String::new(),
+                },
+                35,
+            ),
         ];
 
         for (response, expected_discriminant) in test_cases {
@@ -1323,5 +1775,45 @@ mod tests {
                 response
             );
         }
+    }
+
+    /// Verify that to_wire rejects oversized messages.
+    #[test]
+    fn test_to_wire_rejects_oversized_request() {
+        use bytes::Bytes;
+        // Create a request with a payload larger than MAX_MESSAGE_SIZE
+        let huge_value = vec![0u8; crate::MAX_MESSAGE_SIZE + 1];
+        let request = Request::Publish {
+            topic: "t".into(),
+            partition: None,
+            key: None,
+            value: Bytes::from(huge_value),
+            leader_epoch: None,
+        };
+        let result = request.to_wire(crate::WireFormat::Postcard, 0);
+        assert!(
+            matches!(result, Err(crate::ProtocolError::MessageTooLarge(_, _))),
+            "Expected MessageTooLarge error for oversized request"
+        );
+    }
+
+    #[test]
+    fn test_to_wire_rejects_oversized_response() {
+        let huge_messages = vec![MessageData {
+            offset: 0,
+            partition: 0,
+            timestamp: 0,
+            key: None,
+            value: bytes::Bytes::from(vec![0u8; crate::MAX_MESSAGE_SIZE + 1]),
+            headers: vec![],
+        }];
+        let response = Response::Messages {
+            messages: huge_messages,
+        };
+        let result = response.to_wire(crate::WireFormat::Postcard, 0);
+        assert!(
+            matches!(result, Err(crate::ProtocolError::MessageTooLarge(_, _))),
+            "Expected MessageTooLarge error for oversized response"
+        );
     }
 }

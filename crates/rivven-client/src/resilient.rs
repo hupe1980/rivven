@@ -266,9 +266,19 @@ impl CircuitBreaker {
                 let last_failure = self.last_failure.read().await;
                 if let Some(t) = *last_failure {
                     if t.elapsed() > self.config.circuit_breaker_timeout {
-                        self.state.store(2, Ordering::SeqCst); // HalfOpen
-                        self.success_count.store(0, Ordering::SeqCst);
-                        return true;
+                        // Use compare_exchange so only one thread
+                        // transitions Open → HalfOpen atomically. Without this,
+                        // multiple threads race through the probe window.
+                        if self
+                            .state
+                            .compare_exchange(1, 2, Ordering::SeqCst, Ordering::SeqCst)
+                            .is_ok()
+                        {
+                            self.success_count.store(0, Ordering::SeqCst);
+                            return true;
+                        }
+                        // Another thread already transitioned — allow if now HalfOpen
+                        return self.get_state() == CircuitState::HalfOpen;
                     }
                 }
                 false
@@ -377,12 +387,14 @@ impl ConnectionPool {
 
         // Auto-authenticate new connections when credentials are configured.
         // Uses SCRAM-SHA-256 for secure challenge-response authentication.
+        // Use AuthenticationFailed (not ConnectionError) so that
+        // the retry logic does not treat credential errors as transient.
         if let Some(auth) = &self.config.auth {
             client
                 .authenticate_scram(&auth.username, &auth.password)
                 .await
                 .map_err(|e| {
-                    Error::ConnectionError(format!(
+                    Error::AuthenticationFailed(format!(
                         "Authentication failed for {}: {}",
                         self.addr, e
                     ))
@@ -488,6 +500,9 @@ impl ResilientClient {
                                 Err(e) => {
                                     pool.record_failure().await;
                                     warn!("Health check failed for {}: {}", addr, e);
+                                    // Discard connections that fail health
+                                    // checks — do not return them to the pool.
+                                    continue;
                                 }
                             }
                             pool.put(conn).await;
@@ -511,8 +526,18 @@ impl ResilientClient {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
         let servers: Vec<_> = self.config.bootstrap_servers.clone();
         let num_servers = servers.len();
+        let mut last_error: Option<Error> = None;
 
-        for attempt in 0..self.config.retry_max_attempts {
+        // Use a manual attempt counter so that circuit-breaker
+        // skips do not consume retry budget. Guard against infinite loops
+        // with a max-iterations bound (attempts × servers).
+        let mut attempt: u32 = 0;
+        let max_iterations = self.config.retry_max_attempts as usize * num_servers.max(1) * 2;
+        let mut iteration: usize = 0;
+
+        while attempt < self.config.retry_max_attempts && iteration < max_iterations {
+            iteration += 1;
+
             // Round-robin server selection with failover
             let server_idx =
                 (self.current_server.fetch_add(1, Ordering::Relaxed) as usize) % num_servers;
@@ -523,11 +548,15 @@ impl ResilientClient {
                 None => continue,
             };
 
-            // Skip servers with open circuit breaker
+            // Skip servers with open circuit breaker — does NOT
+            // consume a retry attempt.
             if pool.circuit_state() == CircuitState::Open {
                 debug!("Skipping {} (circuit breaker open)", server);
                 continue;
             }
+
+            // This is a real request attempt — count it.
+            attempt += 1;
 
             // Get connection from pool
             let conn = match pool.get().await {
@@ -535,6 +564,7 @@ impl ResilientClient {
                 Err(e) => {
                     warn!("Failed to get connection from {}: {}", server, e);
                     pool.record_failure().await;
+                    last_error = Some(e);
                     continue;
                 }
             };
@@ -553,20 +583,24 @@ impl ResilientClient {
                     pool.record_failure().await;
 
                     // Determine if error is retryable
-                    if is_retryable_error(&e) && attempt < self.config.retry_max_attempts - 1 {
+                    if is_retryable_error(&e) && attempt < self.config.retry_max_attempts {
                         let delay = calculate_backoff(
-                            attempt,
+                            attempt - 1,
                             self.config.retry_initial_delay,
                             self.config.retry_max_delay,
                             self.config.retry_multiplier,
                         );
                         warn!(
                             "Retryable error on attempt {}: {}. Retrying in {:?}",
-                            attempt + 1,
-                            e,
-                            delay
+                            attempt, e, delay
                         );
-                        pool.put(conn).await;
+                        // Do not return connection to pool after
+                        // retryable I/O errors (ConnectionError, IoError) —
+                        // the stream is likely corrupted / desynchronized.
+                        // Dropping `conn` releases the semaphore permit and
+                        // closes the underlying TCP connection.
+                        last_error = Some(e);
+                        drop(conn);
                         sleep(delay).await;
                         continue;
                     }
@@ -577,10 +611,14 @@ impl ResilientClient {
                     self.total_failures.fetch_add(1, Ordering::Relaxed);
                     pool.record_failure().await;
                     warn!("Request timeout to {}", server);
+                    last_error = Some(Error::TimeoutWithMessage(format!(
+                        "Request timeout to {}",
+                        server
+                    )));
 
-                    if attempt < self.config.retry_max_attempts - 1 {
+                    if attempt < self.config.retry_max_attempts {
                         let delay = calculate_backoff(
-                            attempt,
+                            attempt - 1,
                             self.config.retry_initial_delay,
                             self.config.retry_max_delay,
                             self.config.retry_multiplier,
@@ -591,10 +629,13 @@ impl ResilientClient {
             }
         }
 
-        Err(Error::ConnectionError(format!(
-            "All {} retry attempts exhausted",
-            self.config.retry_max_attempts
-        )))
+        // Return the original error to preserve its kind
+        // (e.g. Timeout, IoError) instead of wrapping everything in
+        // ConnectionError which loses the discriminant for callers.
+        match last_error {
+            Some(e) => Err(e),
+            None => Err(Error::AllServersUnavailable),
+        }
     }
 
     /// Publish a message to a topic with automatic retries
@@ -889,11 +930,16 @@ pub struct ServerStats {
 // ============================================================================
 
 /// Determine if an error is retryable
+///
+/// Authentication failures are NOT retryable — they indicate
+/// permanent credential problems, not transient network issues. Retrying
+/// them wastes time and may trigger account lockout policies.
 fn is_retryable_error(error: &Error) -> bool {
-    matches!(
-        error,
-        Error::ConnectionError(_) | Error::IoError(_) | Error::CircuitBreakerOpen(_)
-    )
+    match error {
+        Error::AuthenticationFailed(_) => false,
+        Error::ConnectionError(_) | Error::IoError(_) | Error::CircuitBreakerOpen(_) => true,
+        _ => false,
+    }
 }
 
 /// Calculate exponential backoff with jitter
@@ -964,11 +1010,16 @@ mod tests {
     #[test]
     fn test_is_retryable_error() {
         assert!(is_retryable_error(&Error::ConnectionError("test".into())));
+        assert!(is_retryable_error(&Error::IoError("test".into())));
         assert!(is_retryable_error(&Error::CircuitBreakerOpen(
             "test".into()
         )));
         assert!(!is_retryable_error(&Error::InvalidResponse));
         assert!(!is_retryable_error(&Error::ServerError("test".into())));
+        // Auth failures must NOT be retried
+        assert!(!is_retryable_error(&Error::AuthenticationFailed(
+            "bad password".into()
+        )));
     }
 
     #[test]

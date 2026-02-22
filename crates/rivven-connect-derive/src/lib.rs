@@ -36,9 +36,6 @@
 //! }
 //! ```
 
-// Allow unused fields in darling attribute structs - they're parsed but not all are used yet
-#![allow(dead_code)]
-
 use darling::{FromDeriveInput, FromMeta};
 use proc_macro::TokenStream;
 use quote::quote;
@@ -51,31 +48,40 @@ struct SourceAttrs {
     ident: syn::Ident,
     /// Connector name (e.g., "postgres-cdc")
     #[darling(default)]
+    #[allow(dead_code)]
     name: Option<String>,
     /// Connector version (e.g., "1.0.0")
     #[darling(default)]
+    #[allow(dead_code)]
     version: Option<String>,
     /// Description of the connector
     #[darling(default)]
+    #[allow(dead_code)]
     description: Option<String>,
     /// Author or maintainer
     #[darling(default)]
+    #[allow(dead_code)]
     author: Option<String>,
     /// License identifier (e.g., "Apache-2.0")
     #[darling(default)]
+    #[allow(dead_code)]
     license: Option<String>,
     /// Documentation URL
     #[darling(default)]
+    #[allow(dead_code)]
     documentation_url: Option<String>,
     /// Whether the source supports incremental sync
     #[darling(default)]
+    #[allow(dead_code)]
     incremental: bool,
     /// Supported source types (e.g., full_refresh, incremental)
     #[darling(default)]
+    #[allow(dead_code)]
     source_types: Option<SourceTypesAttr>,
 }
 
 #[derive(Debug, Default, FromMeta)]
+#[allow(dead_code)]
 struct SourceTypesAttr {
     full_refresh: bool,
     incremental: bool,
@@ -88,27 +94,35 @@ struct SinkAttrs {
     ident: syn::Ident,
     /// Connector name (e.g., "s3-sink")
     #[darling(default)]
+    #[allow(dead_code)]
     name: Option<String>,
     /// Connector version (e.g., "1.0.0")
     #[darling(default)]
+    #[allow(dead_code)]
     version: Option<String>,
     /// Description of the connector
     #[darling(default)]
+    #[allow(dead_code)]
     description: Option<String>,
     /// Author or maintainer
     #[darling(default)]
+    #[allow(dead_code)]
     author: Option<String>,
     /// License identifier (e.g., "Apache-2.0")
     #[darling(default)]
+    #[allow(dead_code)]
     license: Option<String>,
     /// Documentation URL
     #[darling(default)]
+    #[allow(dead_code)]
     documentation_url: Option<String>,
     /// Whether the sink supports batching
     #[darling(default)]
+    #[allow(dead_code)]
     batching: bool,
     /// Default batch size
     #[darling(default)]
+    #[allow(dead_code)]
     batch_size: Option<usize>,
 }
 
@@ -119,12 +133,15 @@ struct TransformAttrs {
     ident: syn::Ident,
     /// Transform name (e.g., "filter-transform")
     #[darling(default)]
+    #[allow(dead_code)]
     name: Option<String>,
     /// Transform version (e.g., "1.0.0")
     #[darling(default)]
+    #[allow(dead_code)]
     version: Option<String>,
     /// Description of the transform
     #[darling(default)]
+    #[allow(dead_code)]
     description: Option<String>,
 }
 
@@ -176,7 +193,16 @@ pub fn derive_source_config(input: TokenStream) -> TokenStream {
         let name = struct_name.to_string();
         name.strip_suffix("Config").unwrap_or(&name).to_lowercase()
     });
-    let version = attrs.version.unwrap_or_else(|| "0.0.1".to_string());
+    // Use the calling crate's CARGO_PKG_VERSION when no version
+    // is explicitly specified, falling back to "0.0.1" only if that env var
+    // is unavailable.
+    let version_code = match &attrs.version {
+        Some(v) => quote! { #v },
+        None => quote! { match option_env!("CARGO_PKG_VERSION") {
+            Some(v) => v,
+            None => "0.0.1",
+        } },
+    };
 
     let description_code = match &attrs.description {
         Some(desc) => quote! { .description(#desc) },
@@ -211,7 +237,7 @@ pub fn derive_source_config(input: TokenStream) -> TokenStream {
         impl #spec_struct_name {
             /// Returns the connector specification with config schema
             pub fn spec() -> rivven_connect::ConnectorSpec {
-                rivven_connect::ConnectorSpec::builder(#name, #version)
+                rivven_connect::ConnectorSpec::builder(#name, #version_code)
                     #description_code
                     #author_code
                     #license_code
@@ -227,8 +253,8 @@ pub fn derive_source_config(input: TokenStream) -> TokenStream {
             }
 
             /// Returns the connector version
-            pub const fn version() -> &'static str {
-                #version
+            pub fn version() -> &'static str {
+                #version_code
             }
         }
     };
@@ -245,7 +271,7 @@ pub fn derive_source_config(input: TokenStream) -> TokenStream {
 /// # Attributes
 ///
 /// - `#[sink(name = "...")]` - Connector name (defaults to struct name without "Config")
-/// - `#[sink(version = "...")]` - Connector version (default: "0.0.1")
+/// - `#[sink(version = "...")]` - Connector version (default: env!("CARGO_PKG_VERSION") or "0.0.1")
 /// - `#[sink(description = "...")]` - Connector description
 /// - `#[sink(author = "...")]` - Author or maintainer
 /// - `#[sink(license = "...")]` - License identifier (e.g., "Apache-2.0")
@@ -287,7 +313,13 @@ pub fn derive_sink_config(input: TokenStream) -> TokenStream {
         let name = struct_name.to_string();
         name.strip_suffix("Config").unwrap_or(&name).to_lowercase()
     });
-    let version = attrs.version.unwrap_or_else(|| "0.0.1".to_string());
+    let version_code = match &attrs.version {
+        Some(v) => quote! { #v },
+        None => quote! { match option_env!("CARGO_PKG_VERSION") {
+            Some(v) => v,
+            None => "0.0.1",
+        } },
+    };
 
     let description_code = match &attrs.description {
         Some(desc) => quote! { .description(#desc) },
@@ -331,7 +363,7 @@ pub fn derive_sink_config(input: TokenStream) -> TokenStream {
         impl #spec_struct_name {
             /// Returns the connector specification with config schema
             pub fn spec() -> rivven_connect::ConnectorSpec {
-                rivven_connect::ConnectorSpec::builder(#name, #version)
+                rivven_connect::ConnectorSpec::builder(#name, #version_code)
                     #description_code
                     #author_code
                     #license_code
@@ -346,8 +378,8 @@ pub fn derive_sink_config(input: TokenStream) -> TokenStream {
             }
 
             /// Returns the connector version
-            pub const fn version() -> &'static str {
-                #version
+            pub fn version() -> &'static str {
+                #version_code
             }
 
             #batch_config_code
@@ -362,7 +394,7 @@ pub fn derive_sink_config(input: TokenStream) -> TokenStream {
 /// # Attributes
 ///
 /// - `#[transform(name = "...")]` - Transform name (required)
-/// - `#[transform(version = "...")]` - Transform version (default: "0.0.1")
+/// - `#[transform(version = "...")]` - Transform version (default: env!("CARGO_PKG_VERSION") or "0.0.1")
 /// - `#[transform(description = "...")]` - Transform description
 ///
 /// # Example
@@ -391,7 +423,13 @@ pub fn derive_transform_config(input: TokenStream) -> TokenStream {
         let name = struct_name.to_string();
         name.strip_suffix("Config").unwrap_or(&name).to_lowercase()
     });
-    let version = attrs.version.unwrap_or_else(|| "0.0.1".to_string());
+    let version_code = match &attrs.version {
+        Some(v) => quote! { #v },
+        None => quote! { match option_env!("CARGO_PKG_VERSION") {
+            Some(v) => v,
+            None => "0.0.1",
+        } },
+    };
 
     // Use `.description()` consistent with SourceConfig/SinkConfig
     let description_code = match attrs.description {
@@ -404,10 +442,11 @@ pub fn derive_transform_config(input: TokenStream) -> TokenStream {
         pub struct #spec_struct_name;
 
         impl #spec_struct_name {
-            /// Returns the connector specification
+            /// Returns the connector specification with config schema
             pub fn spec() -> rivven_connect::ConnectorSpec {
-                rivven_connect::ConnectorSpec::builder(#name, #version)
+                rivven_connect::ConnectorSpec::builder(#name, #version_code)
                     #description_code
+                    .config_schema::<#struct_name>()
                     .build()
             }
 
@@ -417,8 +456,8 @@ pub fn derive_transform_config(input: TokenStream) -> TokenStream {
             }
 
             /// Returns the transform version
-            pub const fn version() -> &'static str {
-                #version
+            pub fn version() -> &'static str {
+                #version_code
             }
         }
     };
@@ -429,17 +468,20 @@ pub fn derive_transform_config(input: TokenStream) -> TokenStream {
 /// Attributes for connector_spec macro
 #[derive(Debug, Default, FromMeta)]
 struct ConnectorSpecAttrs {
-    /// Connector name
+    /// Connector name (required — compile error if missing)
     #[darling(default)]
     name: Option<String>,
     /// Connector version
     #[darling(default)]
+    #[allow(dead_code)]
     version: Option<String>,
     /// Description of the connector
     #[darling(default)]
+    #[allow(dead_code)]
     description: Option<String>,
     /// Documentation URL
     #[darling(default)]
+    #[allow(dead_code)]
     documentation_url: Option<String>,
 }
 
@@ -474,8 +516,27 @@ pub fn connector_spec(attr: TokenStream, item: TokenStream) -> TokenStream {
         Err(e) => return TokenStream::from(e.write_errors()),
     };
 
-    let name = attrs.name.unwrap_or_else(|| "unknown".to_string());
-    let version = attrs.version.unwrap_or_else(|| "0.0.1".to_string());
+    // Emit a compile error when `name` is not provided,
+    // instead of silently defaulting to "unknown".
+    let name = match attrs.name {
+        Some(n) => n,
+        None => {
+            return TokenStream::from(
+                syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    "connector_spec requires `name = \"...\"` attribute",
+                )
+                .to_compile_error(),
+            );
+        }
+    };
+    let version_code = match &attrs.version {
+        Some(v) => quote! { #v },
+        None => quote! { match option_env!("CARGO_PKG_VERSION") {
+            Some(v) => v,
+            None => "0.0.1",
+        } },
+    };
 
     // Use `.description()` and `.documentation_url()` consistent with builder API
     let description_code = match attrs.description {
@@ -495,7 +556,7 @@ pub fn connector_spec(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         /// Auto-generated connector specification
         pub fn connector_spec() -> rivven_connect::ConnectorSpec {
-            rivven_connect::ConnectorSpec::builder(#name, #version)
+            rivven_connect::ConnectorSpec::builder(#name, #version_code)
                 #description_code
                 #doc_url_code
                 .build()

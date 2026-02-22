@@ -19,7 +19,9 @@ SQL database connectivity layer for the Rivven event streaming platform.
 | **Table Sink** | Batch writes with upsert, delete propagation |
 | **Schema Discovery** | Automatic schema introspection and evolution |
 | **Type System** | 25+ value types with Debezium parity |
-| **SQL Injection Prevention** | Identifier validation, type name validation, string literal escaping on all DDL/introspection paths |
+| **SQL Injection Prevention** | Identifier validation, type name validation, SQL-standard string literal escaping on all DDL/introspection paths |
+| **NaN/Infinity Handling** | `Float32` and `Float64` values of NaN, +Infinity, and -Infinity are detected and converted to `NULL` before binding, preventing database driver errors |
+| **Where Clause Validation** | User-supplied `where_clause` values are validated to reject unsafe patterns (semicolons, comments, stacked queries) before inclusion in generated SQL |
 
 ## Quick Start
 
@@ -245,7 +247,7 @@ let config = TableSourceConfig::incrementing("orders", "order_id")
 
 // Timestamp mode (for updated_at columns)
 let config = TableSourceConfig::timestamp("events", "updated_at")
-    .with_where("status = 'active'")
+    .with_where("status = 'active'")?
     .with_columns(vec!["id", "name", "updated_at"]);
 
 // Timestamp + Incrementing (most reliable)

@@ -138,6 +138,9 @@ pub struct DashboardState {
     pub topic_manager: rivven_core::TopicManager,
     /// Offset manager for consumer group info
     pub offset_manager: rivven_core::OffsetManager,
+    /// Optional cluster auth token — when set, the `/dashboard/data`
+    /// endpoint requires `Authorization: Bearer <token>`.
+    pub cluster_auth_token: Option<Arc<String>>,
 }
 
 // ============================================================================
@@ -198,9 +201,21 @@ async fn security_headers_middleware(request: Request<Body>, next: Next) -> Resp
 /// Create the dashboard router with security middleware
 #[cfg(feature = "dashboard")]
 pub fn create_dashboard_router(state: DashboardState) -> Router {
-    Router::new()
-        // Dashboard data API
-        .route("/dashboard/data", get(dashboard_data_handler))
+    // Gate /dashboard/data behind cluster auth token when
+    // configured. Static assets remain public so the HTML page loads,
+    // the data API returns 401 without a valid Bearer token.
+    let data_route = if let Some(ref token) = state.cluster_auth_token {
+        let token = token.clone();
+        Router::new()
+            .route("/dashboard/data", get(dashboard_data_handler))
+            .layer(axum::middleware::from_fn(move |req, next| {
+                crate::raft_api::cluster_auth_middleware(token.clone(), req, next)
+            }))
+    } else {
+        Router::new().route("/dashboard/data", get(dashboard_data_handler))
+    };
+
+    data_route
         // Static file serving (catch-all for SPA)
         .fallback(static_handler)
         // Apply security headers middleware
@@ -292,19 +307,27 @@ async fn dashboard_data_handler(State(state): State<DashboardState>) -> impl Int
                 });
             }
 
+            // Use the actual cluster node count as the
+            // replication factor instead of hardcoding 1. In standalone
+            // mode the Raft state returns a single-node list, so this
+            // naturally reports 1. In cluster mode it reflects the true
+            // configured replication.
+            let replication_factor = state.raft_state.node_count().unwrap_or(1) as u16;
+
             topics.push(TopicInfo {
                 name,
                 partitions: num_partitions,
-                replication_factor: 1, // Single-node for now
+                replication_factor,
                 message_count: total_messages,
                 partition_offsets,
             });
         } else {
             // Fallback if topic access fails
+            let replication_factor = state.raft_state.node_count().unwrap_or(1) as u16;
             topics.push(TopicInfo {
                 name,
                 partitions: 1,
-                replication_factor: 1,
+                replication_factor,
                 message_count: 0,
                 partition_offsets: vec![],
             });

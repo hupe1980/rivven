@@ -43,6 +43,7 @@ use crate::types::{
 };
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::sync::Mutex;
 use tracing::debug;
 
 /// Configuration for the validation engine
@@ -90,6 +91,8 @@ pub struct ValidationEngine {
     global_rules: Vec<ValidationRule>,
     /// Per-subject rules
     subject_rules: HashMap<String, Vec<ValidationRule>>,
+    /// Cache for compiled regexes (pattern → compiled Regex)
+    regex_cache: Mutex<HashMap<String, regex::Regex>>,
 }
 
 impl ValidationEngine {
@@ -99,6 +102,7 @@ impl ValidationEngine {
             config,
             global_rules: Vec::new(),
             subject_rules: HashMap::new(),
+            regex_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -151,6 +155,21 @@ impl ValidationEngine {
     pub fn clear(&mut self) {
         self.global_rules.clear();
         self.subject_rules.clear();
+        self.regex_cache.lock().unwrap().clear();
+    }
+
+    /// Get a compiled regex from the cache, or compile and cache it.
+    fn get_or_compile_regex(&self, pattern: &str) -> SchemaResult<regex::Regex> {
+        let mut cache = self.regex_cache.lock().unwrap();
+        if let Some(re) = cache.get(pattern) {
+            return Ok(re.clone());
+        }
+        let re = regex::RegexBuilder::new(pattern)
+            .size_limit(1_000_000)
+            .build()
+            .map_err(|e| SchemaError::Validation(format!("Invalid regex pattern: {}", e)))?;
+        cache.insert(pattern.to_string(), re.clone());
+        Ok(re)
     }
 
     /// Validate a schema against all applicable rules
@@ -271,11 +290,8 @@ impl ValidationEngine {
             SchemaError::Validation(format!("Invalid naming_convention config: {}", e))
         })?;
 
-        // size-limited regex to prevent ReDoS from adversarial patterns
-        let regex = regex::RegexBuilder::new(&config.pattern)
-            .size_limit(1_000_000)
-            .build()
-            .map_err(|e| SchemaError::Validation(format!("Invalid regex pattern: {}", e)))?;
+        // Use cached regex or compile and cache a new one
+        let regex = self.get_or_compile_regex(&config.pattern)?;
 
         // Extract name based on schema type
         let name = match schema_type {
@@ -424,11 +440,8 @@ impl ValidationEngine {
         let config: Config = serde_json::from_str(&rule.config)
             .map_err(|e| SchemaError::Validation(format!("Invalid regex config: {}", e)))?;
 
-        // size-limited regex to prevent ReDoS from adversarial patterns
-        let regex = regex::RegexBuilder::new(&config.pattern)
-            .size_limit(1_000_000)
-            .build()
-            .map_err(|e| SchemaError::Validation(format!("Invalid regex pattern: {}", e)))?;
+        // Use cached regex or compile and cache a new one
+        let regex = self.get_or_compile_regex(&config.pattern)?;
 
         let matches = regex.is_match(schema);
         let expected = config.must_match;

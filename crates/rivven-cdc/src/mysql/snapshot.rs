@@ -199,7 +199,11 @@ impl MySqlSnapshotSource {
             Some(Ok(Value::Bytes(bytes))) => {
                 // Try to interpret as UTF-8 string first
                 match String::from_utf8(bytes.clone()) {
-                    Ok(s) => serde_json::Value::String(s),
+                    Ok(s) => {
+                        // Try parsing as JSON to avoid double-encoding
+                        // JSON columns arrive as Value::Bytes in the query protocol
+                        serde_json::from_str(&s).unwrap_or_else(|_| serde_json::Value::String(s))
+                    }
                     Err(_) => serde_json::Value::String(hex::encode(bytes)),
                 }
             }

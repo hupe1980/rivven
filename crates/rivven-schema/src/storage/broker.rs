@@ -497,7 +497,20 @@ impl BrokerStorage {
         Ok(())
     }
 
-    /// Write a schema record to the broker topic
+    /// Write a schema record to the broker topic.
+    ///
+    /// # Atomicity
+    ///
+    /// Each individual write is durable once the broker acknowledges it,
+    /// but a full registration (ID counter + schema + subject-version)
+    /// spans **three separate writes** that are **not atomic**. If the
+    /// process crashes between writes, the topic may contain partial
+    /// state. On restart the bootstrap routine replays the topic and
+    /// applies only the records that are present, which self-heals
+    /// most partial-write scenarios (the next registration will
+    /// re-allocate an ID). However, a dangling schema record without
+    /// a corresponding subject-version record is possible. Operators
+    /// should be aware of this when diagnosing post-crash state.
     async fn write_schema_record(&self, record: &SchemaRecord) -> SchemaResult<()> {
         let key = format!("schema/{}", record.id);
         let value = serde_json::to_vec(record).map_err(|e| {
@@ -823,13 +836,10 @@ impl StorageBackend for BrokerStorage {
         self.ensure_connected().await?;
 
         let id = schema.id.0;
-        self.schemas.insert(id, schema.clone());
 
-        if let Some(ref fp) = schema.fingerprint {
-            self.fingerprints.insert(fp.clone(), id);
-        }
-
-        // Write to broker for durability
+        // Write to broker FIRST for durability. If the broker write fails,
+        // we must not update the in-memory index — otherwise the state would
+        // be lost on restart when bootstrapping from the topic.
         let record = SchemaRecord {
             id,
             schema_type: schema.schema_type,
@@ -839,6 +849,13 @@ impl StorageBackend for BrokerStorage {
             metadata: schema.metadata.clone(),
         };
         self.write_schema_record(&record).await?;
+
+        // Broker write succeeded — now update in-memory index
+        self.schemas.insert(id, schema.clone());
+
+        if let Some(ref fp) = schema.fingerprint {
+            self.fingerprints.insert(fp.clone(), id);
+        }
 
         Ok(schema.id)
     }
@@ -871,7 +888,7 @@ impl StorageBackend for BrokerStorage {
             .await?
             .ok_or_else(|| SchemaError::NotFound(format!("Schema ID {}", schema_id)))?;
 
-        let mut entry = self.subjects.entry(subject.0.clone()).or_default();
+        let entry = self.subjects.entry(subject.0.clone()).or_default();
         let version = entry.len() as u32 + 1;
 
         let version_entry = SubjectVersionEntry {
@@ -882,9 +899,9 @@ impl StorageBackend for BrokerStorage {
             state: VersionState::Enabled,
         };
 
-        entry.push(version_entry.clone());
-
-        // Write to broker for durability
+        // Write to broker FIRST for durability. If the broker write fails,
+        // we must not update the in-memory index to avoid inconsistency
+        // that would be lost on restart.
         let record = SubjectVersionRecord {
             subject: subject.0.clone(),
             version,
@@ -893,7 +910,15 @@ impl StorageBackend for BrokerStorage {
             deleted: false,
             state: VersionState::Enabled,
         };
+        // Drop the DashMap entry guard before the async write to avoid
+        // holding the lock across the await point.
+        drop(entry);
+
         self.write_subject_version_record(&record).await?;
+
+        // Broker write succeeded — now update in-memory index
+        let mut entry = self.subjects.entry(subject.0.clone()).or_default();
+        entry.push(version_entry.clone());
 
         debug!(
             subject = %subject,
@@ -1007,6 +1032,12 @@ impl StorageBackend for BrokerStorage {
 
     async fn delete_subject(&self, subject: &Subject, permanent: bool) -> SchemaResult<Vec<u32>> {
         self.ensure_connected().await?;
+
+        // NOTE: Multi-version deletes are NOT atomic. If a broker write fails
+        // partway through, some version records will be marked deleted and
+        // others won't. On bootstrap the state will reflect whatever was
+        // actually persisted. A future improvement could batch these into a
+        // single multi-record produce request.
 
         if permanent {
             // Hard delete
@@ -1135,7 +1166,14 @@ impl StorageBackend for BrokerStorage {
     async fn next_schema_id(&self) -> SchemaResult<SchemaId> {
         self.ensure_connected().await?;
 
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        // Use fetch_update with checked_add to detect overflow at u32::MAX
+        // instead of silently wrapping to 0 (which would produce duplicate IDs).
+        let id = self
+            .next_id
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_add(1))
+            .map_err(|_| {
+                SchemaError::Internal("Schema ID space exhausted (u32::MAX reached)".into())
+            })?;
 
         // Persist the ID counter to broker for durability
         // We persist the next value (id + 1) so on restart we continue from there

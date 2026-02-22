@@ -67,6 +67,12 @@ let provider = BedrockProvider::builder()
 Credentials are resolved from the standard AWS credential chain (env vars, profiles, IMDS, ECS).
 Uses the official `aws-sdk-bedrockruntime` — SigV4 signing, credential refresh, and retries are handled automatically by the SDK.
 
+**Concurrent embeddings**: Bedrock embedding requests are dispatched concurrently, enabling high-throughput vector generation for batch workloads.
+
+## HTTP Transport Security
+
+All HTTP-based LLM providers (OpenAI) require HTTPS by default. To connect to an HTTP endpoint (e.g., a local proxy or development server), set `allow_insecure: true` in the provider configuration. This opt-in prevents accidental credential transmission over unencrypted connections.
+
 ## Error Handling
 
 All errors return `LlmError` with helpful classification:

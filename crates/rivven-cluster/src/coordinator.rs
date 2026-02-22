@@ -16,6 +16,7 @@ use crate::partition::{PartitionId, TopicConfig};
 use crate::placement::{PartitionPlacer, PlacementConfig};
 use crate::raft::RaftNode;
 use crate::replication::ReplicationManager;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, info, warn};
@@ -76,6 +77,9 @@ pub struct ClusterCoordinator {
     /// Whether we are the Raft leader (used only when raft_node is None)
     is_leader_flag: RwLock<bool>,
 
+    /// Round-robin counter for partition selection (replaces wall-clock time)
+    round_robin_counter: AtomicUsize,
+
     /// Shutdown signal
     shutdown_tx: broadcast::Sender<()>,
 }
@@ -115,6 +119,7 @@ impl ClusterCoordinator {
             replication,
             raft_leader: RwLock::new(None),
             is_leader_flag: RwLock::new(false),
+            round_robin_counter: AtomicUsize::new(0),
             shutdown_tx,
         })
     }
@@ -364,6 +369,18 @@ impl ClusterCoordinator {
     /// partitions automatically recover leadership without manual intervention.
     ///
     /// Only the Raft leader executes this to avoid duplicate proposals.
+    ///
+    /// # Leader-only limitation
+    ///
+    /// If the Raft **leader itself** dies, partition reassignment is stalled until
+    /// a new leader is elected. During this window (bounded by `election_timeout_max`),
+    /// partitions formerly led by the dead leader-node remain unavailable because no
+    /// node will drive the reassignment proposals.  Once a new Raft leader is elected
+    /// and SWIM detects the failure, the new leader will trigger reassignment.  If
+    /// SWIM's failure event was already processed (and discarded) before the new Raft
+    /// leader was elected, the partitions will remain orphaned until the next SWIM
+    /// protocol round re-detects the dead node.  A future improvement could persist
+    /// pending reassignment intents so the new leader replays them on election.
     async fn reassign_dead_node_partitions(
         dead_node_id: &str,
         raft_node: &RwLock<Option<Arc<RwLock<RaftNode>>>>,
@@ -761,12 +778,9 @@ impl ClusterCoordinator {
             let hash = hasher.finish();
             Some((hash % partition_count as u64) as u32)
         } else {
-            // Simple round-robin (uses modulo based on current time for distribution)
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            Some((now % partition_count as u128) as u32)
+            // Deterministic round-robin via atomic counter
+            let idx = self.round_robin_counter.fetch_add(1, Ordering::Relaxed);
+            Some((idx % partition_count) as u32)
         }
     }
 

@@ -141,7 +141,8 @@ proptest! {
         username in arbitrary_string(200),
         password in arbitrary_string(200),
     ) {
-        let request = Request::Authenticate { username, password };
+        #[allow(deprecated)]
+        let request = Request::Authenticate { username, password, require_tls: false };
 
         if let Ok(bytes) = request.to_bytes() {
             let decoded = Request::from_bytes(&bytes);

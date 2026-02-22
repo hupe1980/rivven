@@ -402,15 +402,39 @@ impl TopicManager {
         let content = serde_json::to_string_pretty(&metadata)
             .map_err(|e| Error::Other(format!("Failed to serialize topic metadata: {}", e)))?;
 
-        // Atomic write via temp file + rename.
+        // Atomic write via temp file + fsync + rename.
         // A crash during write only corrupts the temp file; the original
         // metadata file remains intact for recovery.
-        fs::write(&tmp_path, content)
+        fs::write(&tmp_path, &content)
             .await
             .map_err(|e| Error::Other(format!("Failed to write topic metadata temp: {}", e)))?;
+
+        // fsync the temp file before rename to ensure data is on durable storage.
+        // Without this, a crash after rename could leave a zero-length or
+        // partially-written metadata file.
+        {
+            let tmp_file = fs::File::open(&tmp_path)
+                .await
+                .map_err(|e| Error::Other(format!("Failed to open temp file for fsync: {}", e)))?;
+            tmp_file
+                .sync_all()
+                .await
+                .map_err(|e| Error::Other(format!("Failed to fsync temp file: {}", e)))?;
+        }
+
         fs::rename(&tmp_path, &metadata_path)
             .await
             .map_err(|e| Error::Other(format!("Failed to rename topic metadata: {}", e)))?;
+
+        // fsync the parent directory to ensure the rename (directory entry update)
+        // is durable. Without this, a crash could revert the rename.
+        {
+            let dir_file = std::fs::File::open(&data_dir)
+                .map_err(|e| Error::Other(format!("Failed to open data dir for fsync: {}", e)))?;
+            dir_file
+                .sync_all()
+                .map_err(|e| Error::Other(format!("Failed to fsync data dir: {}", e)))?;
+        }
 
         info!("Persisted metadata for {} topics", topics.len());
         Ok(())

@@ -392,10 +392,8 @@ impl LogManager {
             total_removed += removed;
 
             // Write-to-temp-then-rename to prevent data loss on crash.
-            // Previously, delete_files() was called before the new segment was
-            // written — a crash between the two would permanently lose data.
             //
-            // New approach:
+            // Approach:
             // 1. Create a temporary segment in a ".compacting" subdirectory
             // 2. Write compacted messages + flush/fsync
             // 3. Delete old segment files
@@ -421,24 +419,15 @@ impl LogManager {
             let tmp_idx = tmp_dir.join(format!("{:020}.index", base_offset));
             drop(tmp_segment);
 
-            // Crash-safe rename: rename temp files into place FIRST (atomic
-            // overwrite on POSIX), THEN delete old backup files. A crash
-            // between rename and delete leaves harmless .old files that are
-            // cleaned up on next startup — no data loss window.
+            // Crash-safe rename: rename temp files directly into final
+            // position (POSIX rename atomically replaces the destination),
+            // THEN delete the temp directory. No intermediate .bak/.old step
+            // is needed — if the rename succeeds the old data is already gone;
+            // if it fails (crash) the original files are still intact.
             let final_log = self.dir.join(format!("{:020}.log", base_offset));
             let final_idx = self.dir.join(format!("{:020}.index", base_offset));
-            let old_log_backup = self.dir.join(format!("{:020}.log.old", base_offset));
-            let old_idx_backup = self.dir.join(format!("{:020}.index.old", base_offset));
 
-            // 1. Rename old files to .old (preserves data if crash happens next)
-            if final_log.exists() {
-                std::fs::rename(&final_log, &old_log_backup)?;
-            }
-            if final_idx.exists() {
-                std::fs::rename(&final_idx, &old_idx_backup)?;
-            }
-
-            // 2. Rename temp files into final position (atomic)
+            // 1. Rename temp files into final position (atomic overwrite on POSIX)
             if tmp_log.exists() {
                 std::fs::rename(&tmp_log, &final_log)?;
             }
@@ -446,11 +435,13 @@ impl LogManager {
                 std::fs::rename(&tmp_idx, &final_idx)?;
             }
 
-            // 3. Delete backups (best-effort — harmless if left behind)
-            let _ = std::fs::remove_file(&old_log_backup);
-            let _ = std::fs::remove_file(&old_idx_backup);
+            // 2. fsync parent directory to ensure renames are durable
+            {
+                let dir_file = std::fs::File::open(&self.dir)?;
+                dir_file.sync_all()?;
+            }
 
-            // Clean up temp directory (best-effort)
+            // 3. Clean up temp directory (best-effort)
             let _ = std::fs::remove_dir(&tmp_dir);
 
             // Re-open the final segment at its canonical path

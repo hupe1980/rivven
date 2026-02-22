@@ -45,10 +45,7 @@ impl Default for RateLimitConfig {
 
 /// Token bucket for per-IP rate limiting
 ///
-/// Fully lock-free implementation. The previous design used
-/// `RwLock<Instant>` for `last_refill`, causing nested lock acquisition
-/// when called from within `ip_states.read()`. Now uses `AtomicU64`
-/// storing microseconds since process start for lock-free refill timing.
+/// Uses `AtomicU64` storing microseconds since process start for lock-free refill timing.
 struct TokenBucket {
     tokens: AtomicU64,
     /// Microseconds since `EPOCH` of the last refill (lock-free)
@@ -150,7 +147,9 @@ impl IpState {
     }
 
     fn decrement_connections(&self) {
-        self.connections.fetch_sub(1, Ordering::Relaxed);
+        let _ = self
+            .connections
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
     }
 
     fn get_connections(&self) -> u32 {
@@ -215,12 +214,18 @@ impl std::fmt::Debug for ConnectionGuard {
 
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
-        // Decrement counters - all atomic, no blocking
-        self.total_connections.fetch_sub(1, Ordering::Relaxed);
+        // Decrement counters — saturating to avoid underflow on double-drop
+        let _ = self
+            .total_connections
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1));
         self.ip_state.decrement_connections();
         debug!("Connection released from {}", self.ip);
     }
 }
+
+/// Maximum number of tracked IPs before forced eviction of stale entries.
+/// Prevents unbounded HashMap growth from many unique source IPs.
+const MAX_TRACKED_IPS: usize = 100_000;
 
 /// Thread-safe rate limiter managing per-IP and global limits
 pub struct RateLimiter {
@@ -276,6 +281,10 @@ impl RateLimiter {
                 if let Some(state) = states.get(&ip) {
                     state.clone()
                 } else {
+                    // Evict stale entries when the map grows too large
+                    if states.len() >= MAX_TRACKED_IPS {
+                        self.evict_stale_entries_locked(&mut states);
+                    }
                     let state = Arc::new(IpState::new(self.config.rate_limit_per_ip));
                     states.insert(ip, state.clone());
                     state
@@ -395,18 +404,29 @@ impl RateLimiter {
     /// Cleanup stale IP entries (should be called periodically)
     pub async fn cleanup_stale(&self) {
         let mut states = self.ip_states.write().await;
+        self.evict_stale_entries_locked(&mut states);
+    }
+
+    /// Evict stale entries from the map while holding the write lock.
+    fn evict_stale_entries_locked(&self, states: &mut HashMap<IpAddr, Arc<IpState>>) {
         let stale_timeout = self.config.idle_timeout * 2; // Give extra time
 
-        let mut to_remove = Vec::new();
-        for (ip, state) in states.iter() {
-            if state.is_stale(stale_timeout) {
-                to_remove.push(*ip);
+        let before = states.len();
+        states.retain(|ip, state| {
+            let stale = state.is_stale(stale_timeout);
+            if stale {
+                debug!("Cleaned up stale rate limit state for {}", ip);
             }
-        }
+            !stale
+        });
 
-        for ip in to_remove {
-            states.remove(&ip);
-            debug!("Cleaned up stale rate limit state for {}", ip);
+        let evicted = before - states.len();
+        if evicted > 0 {
+            debug!(
+                "Evicted {} stale IP entries ({} remaining)",
+                evicted,
+                states.len()
+            );
         }
     }
 }

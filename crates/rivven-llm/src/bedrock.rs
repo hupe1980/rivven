@@ -362,7 +362,7 @@ impl LlmProvider for BedrockProvider {
                 }
                 _ => {
                     let role = match msg.role {
-                        Role::User => ConversationRole::User,
+                        Role::User | Role::Tool => ConversationRole::User,
                         _ => ConversationRole::Assistant,
                     };
                     messages.push(
@@ -461,6 +461,15 @@ impl LlmProvider for BedrockProvider {
         })
     }
 
+    /// Generate embeddings for the given input texts.
+    ///
+    /// # Concurrent execution
+    ///
+    /// Bedrock's `InvokeModel` API does not support batched embedding
+    /// requests. Each input text is sent as a separate HTTP call, running
+    /// concurrently via `tokio::task::JoinSet` (bounded to 10 in-flight
+    /// requests to respect typical Bedrock throttling limits). For very large
+    /// input lists, consider batching at the application level.
     async fn embed(&self, request: &EmbeddingRequest) -> LlmResult<EmbeddingResponse> {
         if request.input.is_empty() {
             return Err(LlmError::Config(
@@ -473,92 +482,111 @@ impl LlmProvider for BedrockProvider {
             .as_deref()
             .unwrap_or(&self.config.embedding_model);
 
-        // Bedrock embedding — one request per input (no native batching)
-        let mut embeddings = Vec::with_capacity(request.input.len());
-        let mut total_tokens = 0u32;
+        // Concurrency limit to avoid Bedrock throttling (typical: 10 TPS)
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(10));
+        let mut join_set = tokio::task::JoinSet::new();
 
         for (i, text) in request.input.iter().enumerate() {
             let api_request = if model_id.starts_with("amazon.titan-embed") {
-                // Titan Embed format
                 let mut req = serde_json::json!({ "inputText": text });
                 if let Some(dims) = request.dimensions {
                     req["dimensions"] = serde_json::json!(dims);
                 }
                 req
             } else if model_id.starts_with("cohere.embed") {
-                // Cohere format — respect input_type if specified
                 let input_type = request.input_type.as_deref().unwrap_or("search_document");
                 serde_json::json!({
                     "texts": [text],
                     "input_type": input_type
                 })
             } else {
-                // Generic fallback
                 serde_json::json!({ "inputText": text })
             };
 
             let body_bytes = serde_json::to_vec(&api_request)?;
+            let client = self.client.clone();
+            let model = model_id.to_string();
+            let sem = semaphore.clone();
 
-            debug!(model = %model_id, index = i, "Bedrock embedding request");
+            join_set.spawn(async move {
+                let _permit = sem
+                    .acquire()
+                    .await
+                    .map_err(|_| LlmError::Config("semaphore closed".to_string()))?;
 
-            let resp = self
-                .client
-                .invoke_model()
-                .model_id(model_id)
-                .content_type("application/json")
-                .accept("application/json")
-                .body(aws_sdk_bedrockruntime::primitives::Blob::new(body_bytes))
-                .send()
-                .await
-                .map_err(Self::map_invoke_model_error)?;
+                debug!(model = %model, index = i, "Bedrock embedding request");
 
-            let resp_body: serde_json::Value = serde_json::from_slice(resp.body().as_ref())
-                .map_err(|e| {
-                    LlmError::Serialization(format!("failed to parse embedding response: {e}"))
-                })?;
+                let resp = client
+                    .invoke_model()
+                    .model_id(&model)
+                    .content_type("application/json")
+                    .accept("application/json")
+                    .body(aws_sdk_bedrockruntime::primitives::Blob::new(body_bytes))
+                    .send()
+                    .await
+                    .map_err(Self::map_invoke_model_error)?;
 
-            // Parse embedding from response (Titan format)
-            let values = if let Some(emb) = resp_body.get("embedding") {
-                emb.as_array()
-                    .ok_or_else(|| {
-                        LlmError::Serialization("embedding field is not an array".to_string())
-                    })?
-                    .iter()
-                    .map(|v| v.as_f64().unwrap_or(0.0) as f32)
-                    .collect()
-            } else if let Some(embs) = resp_body.get("embeddings") {
-                // Cohere format
-                let arr = embs
-                    .as_array()
-                    .and_then(|a| a.first())
-                    .and_then(|e| e.as_array())
-                    .ok_or_else(|| {
-                        LlmError::Serialization(
-                            "embeddings field has unexpected format".to_string(),
-                        )
+                let resp_body: serde_json::Value = serde_json::from_slice(resp.body().as_ref())
+                    .map_err(|e| {
+                        LlmError::Serialization(format!("failed to parse embedding response: {e}"))
                     })?;
-                arr.iter()
-                    .map(|v| v.as_f64().unwrap_or(0.0) as f32)
-                    .collect()
-            } else {
-                return Err(LlmError::Serialization(
-                    "no embedding field in response".to_string(),
-                ));
-            };
 
-            // Token count from response (if available)
-            if let Some(tokens) = resp_body
-                .get("inputTextTokenCount")
-                .and_then(|v| v.as_u64())
-            {
-                total_tokens += tokens as u32;
-            }
+                let values = if let Some(emb) = resp_body.get("embedding") {
+                    emb.as_array()
+                        .ok_or_else(|| {
+                            LlmError::Serialization("embedding field is not an array".to_string())
+                        })?
+                        .iter()
+                        .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+                        .collect()
+                } else if let Some(embs) = resp_body.get("embeddings") {
+                    let arr = embs
+                        .as_array()
+                        .and_then(|a| a.first())
+                        .and_then(|e| e.as_array())
+                        .ok_or_else(|| {
+                            LlmError::Serialization(
+                                "embeddings field has unexpected format".to_string(),
+                            )
+                        })?;
+                    arr.iter()
+                        .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+                        .collect()
+                } else {
+                    return Err(LlmError::Serialization(
+                        "no embedding field in response".to_string(),
+                    ));
+                };
 
-            embeddings.push(Embedding {
-                index: i as u32,
-                values,
+                let tokens = resp_body
+                    .get("inputTextTokenCount")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as u32;
+
+                Ok::<_, LlmError>((i, values, tokens))
             });
         }
+
+        // Collect results, sorted by original index
+        let mut results: Vec<(usize, Vec<f32>, u32)> = Vec::with_capacity(request.input.len());
+        while let Some(res) = join_set.join_next().await {
+            let (idx, values, tokens) =
+                res.map_err(|e| LlmError::Config(format!("embedding task panicked: {e}")))??;
+            results.push((idx, values, tokens));
+        }
+        results.sort_by_key(|(idx, _, _)| *idx);
+
+        let mut total_tokens = 0u32;
+        let embeddings: Vec<Embedding> = results
+            .into_iter()
+            .map(|(idx, values, tokens)| {
+                total_tokens += tokens;
+                Embedding {
+                    index: idx as u32,
+                    values,
+                }
+            })
+            .collect();
 
         Ok(EmbeddingResponse {
             model: model_id.to_string(),
@@ -638,6 +666,17 @@ mod tests {
     #[test]
     fn test_sdk_conversation_roles() {
         assert_ne!(ConversationRole::User, ConversationRole::Assistant);
+    }
+
+    #[test]
+    fn test_tool_role_maps_to_user() {
+        // Bedrock Converse API requires tool-result messages to carry the
+        // "user" role, not "assistant".
+        let role = match Role::Tool {
+            Role::User | Role::Tool => ConversationRole::User,
+            _ => ConversationRole::Assistant,
+        };
+        assert_eq!(role, ConversationRole::User);
     }
 
     #[test]

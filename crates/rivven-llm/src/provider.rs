@@ -20,6 +20,26 @@ pub struct ProviderCapabilities {
 /// Implementations handle authentication, HTTP transport, request serialization,
 /// response parsing, and error mapping for a specific cloud provider.
 ///
+/// # Security — Prompt Injection
+///
+/// **Callers must sanitize untrusted input before including it in chat messages.**
+///
+/// If user-supplied or externally-sourced text is passed directly as message
+/// content, an attacker can craft inputs that override the system prompt,
+/// extract sensitive context, or cause the model to produce harmful output.
+///
+/// Recommended mitigations:
+/// - Clearly separate system instructions from user content using distinct
+///   `ChatMessage` roles (`System` vs `User`).
+/// - Validate and sanitize external inputs before embedding them in prompts.
+/// - Apply output filtering on model responses when they are displayed to
+///   end users or used to drive actions (tool calls, code execution, etc.).
+/// - Consider using allow-lists or structured extraction rather than free-form
+///   LLM output for safety-critical decisions.
+///
+/// This crate intentionally does **not** perform automatic prompt sanitization
+/// because effective mitigation is application-specific.
+///
 /// # Example
 ///
 /// ```rust,no_run

@@ -17,8 +17,10 @@ The Rivven Operator provides Custom Resource Definitions (CRDs) for declarative,
 
 Additional capabilities:
 - Automated reconciliation with eventual consistency
+- Active `cleanup_connect` — orphaned RivvenConnect resources are actively cleaned up on deletion
 - Ordered deployment, scaling, and rolling updates
 - Secure credential handling for sources and sinks
+- Environment variable validation including `value_from` references — blocks dangerous variables (e.g., `LD_PRELOAD`) to prevent injection attacks
 - Prometheus-compatible operator metrics
 
 ## Quick Start

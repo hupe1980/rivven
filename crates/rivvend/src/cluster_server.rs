@@ -21,6 +21,7 @@
 //!         --tls-ca ca.crt --tls-verify-client
 //! ```
 
+use crate::auth_handler::{AuthenticatedHandler, ConnectionAuth};
 use crate::cli::Cli;
 use crate::handler::RequestHandler;
 use crate::partitioner::StickyPartitionerConfig;
@@ -78,9 +79,13 @@ impl ServerStats {
         self.active_connections.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Decrement active connections
+    /// Decrement active connections (saturating to prevent underflow)
     pub fn connection_closed(&self) {
-        self.active_connections.fetch_sub(1, Ordering::Relaxed);
+        self.active_connections
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            })
+            .ok();
     }
 
     /// Increment total requests
@@ -127,6 +132,8 @@ pub struct ClusterServer {
     /// §3.3: Write-ahead log for crash-safe durability on the produce path.
     /// Instantiated after WAL replay during server startup.
     wal: Option<Arc<rivven_core::GroupCommitWal>>,
+    /// Authentication manager (active when --require-auth is set)
+    auth_manager: Option<Arc<rivven_core::AuthManager>>,
     /// TLS acceptor for secure connections
     #[cfg(feature = "tls")]
     tls_acceptor: Option<Arc<TlsAcceptor>>,
@@ -189,25 +196,46 @@ impl ClusterServer {
                             "WAL replay: {} records recovered at startup",
                             records.len()
                         );
-                        // Apply replayed records to the topic manager
+                        // Apply replayed records to the topic manager.
+                        // Any failure here means the server state would be
+                        // inconsistent — abort startup rather than risk silent
+                        // data loss.
                         for record in &records {
                             if let Err(e) = topic_manager.apply_wal_record(record).await {
-                                tracing::warn!(
-                                    lsn = record.lsn,
-                                    error = %e,
-                                    "WAL replay: failed to apply record"
-                                );
+                                return Err(anyhow::anyhow!(
+                                    "WAL replay: failed to apply record (lsn={}): {}. \
+                                     Aborting startup to prevent data loss. \
+                                     Inspect the WAL files in the data directory and retry, \
+                                     or remove them to accept data loss.",
+                                    record.lsn,
+                                    e
+                                ));
                             }
+                        }
+
+                        // §3.3 / Checkpoint WAL after successful replay.
+                        // Remove replayed WAL files so a subsequent crash does not
+                        // replay the same records again, which would produce
+                        // duplicate messages.
+                        if let Err(e) = rivven_core::GroupCommitWal::checkpoint_dir(&wal_config.dir)
+                        {
+                            tracing::warn!(
+                                error = %e,
+                                "WAL post-replay checkpoint failed — duplicates possible on next crash"
+                            );
                         }
                     }
                     Ok(_) => {
                         tracing::debug!("WAL replay: no records to replay");
                     }
                     Err(e) => {
-                        tracing::error!(
-                            error = %e,
-                            "WAL replay: failed to read WAL files — starting with potential data loss!"
-                        );
+                        // Abort startup instead of silently losing data.
+                        return Err(anyhow::anyhow!(
+                            "WAL replay: failed to read WAL files: {}. \
+                             Aborting startup to prevent data loss. \
+                             Inspect or remove corrupt WAL files in the data directory to proceed.",
+                            e
+                        ));
                     }
                 }
             }
@@ -300,6 +328,15 @@ impl ClusterServer {
             "Rate limiting enabled"
         );
 
+        // Create auth manager (enabled by default).
+        let auth_manager = if cli.require_auth {
+            info!("Client authentication enabled");
+            Some(Arc::new(rivven_core::AuthManager::new(Default::default())))
+        } else {
+            warn!("Client authentication DISABLED (--no-require-auth). Do not use in production.");
+            None
+        };
+
         // Initialize TLS acceptor if enabled
         #[cfg(feature = "tls")]
         let tls_acceptor = if cli.tls_enabled {
@@ -355,9 +392,66 @@ impl ClusterServer {
             shutdown_tx,
             rate_limiter,
             wal,
+            auth_manager,
             #[cfg(feature = "tls")]
             tls_acceptor,
         })
+    }
+
+    /// Dedicated spawner task that owns a JoinSet without requiring a Mutex.
+    ///
+    /// Receives connection futures over an mpsc channel and spawns them into a
+    /// local JoinSet. When the channel closes (sender dropped), it drains all
+    /// remaining connections before returning.
+    async fn connection_spawner(
+        mut rx: tokio::sync::mpsc::Receiver<
+            std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+        >,
+        mut shutdown_rx: broadcast::Receiver<()>,
+    ) {
+        let mut join_set = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                biased;
+                // Reap finished tasks before accepting new work.
+                Some(result) = join_set.join_next(), if !join_set.is_empty() => {
+                    if let Err(e) = result {
+                        debug!("Connection task panicked: {}", e);
+                    }
+                }
+                msg = rx.recv() => {
+                    match msg {
+                        Some(fut) => { join_set.spawn(fut); }
+                        None => break, // channel closed
+                    }
+                }
+                _ = shutdown_rx.recv() => {
+                    break;
+                }
+            }
+        }
+        // Drain remaining connections with a 10-second timeout.
+        let connection_count = join_set.len();
+        if connection_count > 0 {
+            info!(
+                "Waiting for {} active connections to complete...",
+                connection_count
+            );
+            match tokio::time::timeout(Duration::from_secs(10), async {
+                while join_set.join_next().await.is_some() {}
+            })
+            .await
+            {
+                Ok(_) => {}
+                Err(_) => {
+                    warn!(
+                        "Connection drain timeout, aborting {} remaining",
+                        join_set.len()
+                    );
+                    join_set.abort_all();
+                }
+            }
+        }
     }
 
     /// Start the server
@@ -386,8 +480,6 @@ impl ClusterServer {
         let mut shutdown_rx_api = self.shutdown_tx.subscribe();
 
         // Track all infrastructure task JoinHandles for graceful shutdown.
-        // Previously these were fire-and-forget spawns, which leaked resources on
-        // shutdown and silently swallowed panics.
         let mut infra_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
 
         // Start the API server (with or without dashboard based on feature)
@@ -533,7 +625,7 @@ impl ClusterServer {
         let mut handler = RequestHandler::with_partitioner_config(
             self.topic_manager.clone(),
             self.offset_manager.clone(),
-            partitioner_config,
+            partitioner_config.clone(),
         );
 
         // §3.3: Wire the WAL into the request handler for produce-path durability
@@ -579,6 +671,23 @@ impl ClusterServer {
             handler.clone(),
         ));
 
+        // Create auth handler when --require-auth is set.
+        // Auth requests (Authenticate, SASL, SCRAM) are handled by the auth
+        // handler directly (they don't need routing). All other requests are
+        // first checked for valid auth state, then routed via the RequestRouter.
+        let auth_handler: Option<Arc<AuthenticatedHandler>> =
+            self.auth_manager.as_ref().map(|am| {
+                let mut auth_inner = RequestHandler::with_partitioner_config(
+                    self.topic_manager.clone(),
+                    self.offset_manager.clone(),
+                    partitioner_config,
+                );
+                if let Some(ref wal) = self.wal {
+                    auth_inner.set_wal(wal.clone());
+                }
+                Arc::new(AuthenticatedHandler::new(auth_inner, am.clone(), true))
+            });
+
         let mut shutdown_rx = self.shutdown_tx.subscribe();
         let stats = self.stats.clone();
         let rate_limiter = self.rate_limiter.clone();
@@ -595,11 +704,18 @@ impl ClusterServer {
         #[cfg(feature = "tls")]
         let connection_timeout = Duration::from_secs(30);
 
-        // Use JoinSet instead of Mutex<Vec<JoinHandle>> to avoid
-        // lock contention on every connection open/close. JoinSet handles
-        // automatic cleanup of finished tasks and provides efficient drain.
-        let active_connections: Arc<tokio::sync::Mutex<tokio::task::JoinSet<()>>> =
-            Arc::new(tokio::sync::Mutex::new(tokio::task::JoinSet::new()));
+        // Use an mpsc channel to send connection futures to a
+        // dedicated spawner task that owns the JoinSet without a Mutex.
+        // The accept loop never blocks on JoinSet::spawn; it only does a
+        // channel send (which is lock-free for bounded channels with capacity).
+        // The spawner task drains the channel and spawns into JoinSet,
+        // eliminating Mutex contention.
+        let (conn_tx, conn_rx) = tokio::sync::mpsc::channel::<
+            std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+        >(256);
+        let conn_shutdown_signal = self.shutdown_tx.subscribe();
+        let conn_join_handle =
+            tokio::spawn(Self::connection_spawner(conn_rx, conn_shutdown_signal));
 
         // Spawn periodic rate limiter cleanup task
         let cleanup_limiter = rate_limiter.clone();
@@ -682,8 +798,9 @@ impl ClusterServer {
                                     debug!("Connection accepted from {} (rate limit ok)", addr);
                                     let router = router.clone();
                                     let conn_stats = stats.clone();
-                                    let connections = active_connections.clone();
+                                    let conn_tx = conn_tx.clone();
                                     let req_limiter = rate_limiter.clone();
+                                    let conn_auth_handler = auth_handler.clone();
 
                                     #[cfg(feature = "tls")]
                                     let tls_acceptor = tls_acceptor.clone();
@@ -691,10 +808,11 @@ impl ClusterServer {
                                     // Track connection in stats
                                     conn_stats.connection_opened();
 
-                                    // Spawn into JoinSet directly — no separate tokio::spawn
-                                    // + Mutex<Vec> retain loop. JoinSet auto-cleans finished tasks.
-                                    let mut conns = connections.lock().await;
-                                    conns.spawn(async move {
+                                    // Send the future to the
+                                    // spawner task via the mpsc channel.
+                                    // This is lock-free; JoinSet is owned
+                                    // exclusively by the spawner task.
+                                    let fut: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> = Box::pin(async move {
                                         // conn_guard will be dropped when connection ends
 
                                         // Handle TLS handshake if enabled
@@ -727,6 +845,8 @@ impl ClusterServer {
                                                         client_ip,
                                                         max_request_size,
                                                         read_timeout,
+                                                        conn_auth_handler.clone(),
+                                                        true,
                                                     ).await
                                                 }
                                                 Ok(Err(e)) => {
@@ -748,6 +868,8 @@ impl ClusterServer {
                                                 client_ip,
                                                 max_request_size,
                                                 read_timeout,
+                                                conn_auth_handler.clone(),
+                                                false,
                                             ).await
                                         };
 
@@ -760,6 +882,8 @@ impl ClusterServer {
                                             client_ip,
                                             max_request_size,
                                             read_timeout,
+                                            conn_auth_handler.clone(),
+                                            false,
                                         ).await;
 
                                         conn_stats.connection_closed();
@@ -768,6 +892,9 @@ impl ClusterServer {
                                             debug!("Connection from {} closed: {}", addr, e);
                                         }
                                     });
+                                    if conn_tx.send(fut).await.is_err() {
+                                        debug!("Connection spawner shut down, dropping connection from {}", addr);
+                                    }
                                 }
                                 Err(crate::rate_limiter::ConnectionResult::TooManyConnectionsFromIp) => {
                                     warn!("Connection from {} rejected: too many connections from IP", addr);
@@ -799,33 +926,16 @@ impl ClusterServer {
         // Graceful shutdown: stop accepting new connections and wait for existing ones
         drop(listener);
 
-        // Drain JoinSet — automatically handles finished tasks
+        // Drop the sender so the spawner task knows no more connections are coming.
+        drop(conn_tx);
+
+        // Wait for the spawner task to drain all connections.
         let drain_timeout = tokio::time::Duration::from_secs(10);
-        let mut active = active_connections.lock().await;
-        let connection_count = active.len();
-
-        if connection_count > 0 {
-            info!(
-                "Waiting for {} active connections to complete...",
-                connection_count
-            );
-
-            match tokio::time::timeout(drain_timeout, async {
-                while active.join_next().await.is_some() {}
-            })
-            .await
-            {
-                Ok(_) => info!("All connections drained"),
-                Err(_) => {
-                    warn!(
-                        "Connection drain timeout, aborting {} remaining",
-                        active.len()
-                    );
-                    active.abort_all();
-                }
-            }
+        match tokio::time::timeout(drain_timeout, conn_join_handle).await {
+            Ok(Ok(_)) => info!("All connections drained"),
+            Ok(Err(e)) => warn!("Connection spawner task panicked: {}", e),
+            Err(_) => warn!("Connection drain timeout"),
         }
-        drop(active);
 
         // Await all infrastructure task handles with timeout.
         // The shutdown broadcast has already been sent above, so tasks that
@@ -872,10 +982,13 @@ impl ClusterServer {
         // are no longer needed for recovery. This prevents duplicate replay on
         // the next startup.
         if let Some(ref wal) = self.wal {
-            if let Err(e) = wal.checkpoint() {
+            if let Err(e) = wal.checkpoint().await {
                 warn!("WAL checkpoint error: {}", e);
             }
         }
+
+        // Flush any batched offset commits to disk before exit.
+        self.offset_manager.flush().await;
 
         // If we're the leader, try to step down gracefully
         {
@@ -1197,6 +1310,7 @@ impl RequestRouter {
                 topic, partition, ..
             } => self.route_consume(topic, *partition).await,
             // Authentication - handle locally (auth manager is local)
+            #[allow(deprecated)]
             Request::Authenticate { .. }
             | Request::SaslAuthenticate { .. }
             | Request::ScramClientFirst { .. }
@@ -1303,6 +1417,7 @@ impl RequestRouter {
 /// - Read timeout protects against slowloris-style DoS attacks
 /// - Request size limit prevents memory exhaustion
 /// - Rate limiting prevents request flooding
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection_with_rate_limit_async<S>(
     mut stream: S,
     router: Arc<RequestRouter>,
@@ -1311,12 +1426,23 @@ async fn handle_connection_with_rate_limit_async<S>(
     client_ip: std::net::IpAddr,
     max_request_size: usize,
     read_timeout: Duration,
+    auth_handler: Option<Arc<AuthenticatedHandler>>,
+    is_tls: bool,
 ) -> anyhow::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let mut buffer = BytesMut::with_capacity(8192);
     let peer_label = client_ip.to_string();
+
+    // Per-connection auth state. When auth_handler is present,
+    // connections start as Unauthenticated and must complete an auth handshake
+    // before non-auth requests are accepted.
+    let mut conn_auth = if auth_handler.is_some() {
+        ConnectionAuth::Unauthenticated
+    } else {
+        ConnectionAuth::Anonymous
+    };
 
     loop {
         // Use shared framing for read + parse
@@ -1369,8 +1495,57 @@ where
         // Track request
         stats.request_handled();
 
-        // Route and handle request
-        let response = router.route(request).await;
+        // Route through auth when enabled.
+        // Auth-specific requests (Authenticate, SASL, SCRAM) are handled
+        // directly by the AuthenticatedHandler (they don't need routing).
+        // All other requests are first validated for auth state, then
+        // routed via the RequestRouter for partition-aware dispatching.
+        let response = if let Some(ref auth) = auth_handler {
+            #[allow(deprecated)]
+            let is_auth_request = matches!(
+                &request,
+                Request::Authenticate { .. }
+                    | Request::SaslAuthenticate { .. }
+                    | Request::ScramClientFirst { .. }
+                    | Request::ScramClientFinal { .. }
+                    | Request::Handshake { .. }
+                    | Request::Ping
+            );
+
+            if is_auth_request {
+                auth.handle(request, &mut conn_auth, &peer_label, is_tls)
+                    .await
+            } else {
+                // Check auth state before routing
+                match &conn_auth {
+                    ConnectionAuth::Unauthenticated => Response::Error {
+                        message: "AUTHENTICATION_REQUIRED: Please authenticate first".to_string(),
+                    },
+                    ConnectionAuth::ScramInProgress(_) => Response::Error {
+                        message: "AUTHENTICATION_REQUIRED: Complete SCRAM handshake first"
+                            .to_string(),
+                    },
+                    ConnectionAuth::Authenticated(session) => {
+                        // Validate session (expiry + principal
+                        // deletion) and enforce RBAC/ACL permission checks on
+                        // every data-plane request.
+                        if let Err(resp) = auth.validate_session(session, &peer_label) {
+                            conn_auth = ConnectionAuth::Unauthenticated;
+                            resp
+                        } else if let Err(resp) =
+                            auth.authorize_request(&request, session, &peer_label)
+                        {
+                            resp
+                        } else {
+                            router.route(request).await
+                        }
+                    }
+                    ConnectionAuth::Anonymous => router.route(request).await,
+                }
+            }
+        } else {
+            router.route(request).await
+        };
 
         // Serialize and send response using same wire format as request
         let response_bytes = match response.to_wire(wire_format, correlation_id) {

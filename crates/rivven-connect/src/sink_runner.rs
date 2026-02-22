@@ -12,11 +12,19 @@ use crate::config::{ConnectConfig, SinkConfig, StartOffset, TransformStepConfig}
 use crate::connectors::{create_sink_registry, SinkRegistry};
 use crate::error::{ConnectError, ConnectorStatus, Result};
 use crate::rate_limiter::{RateLimiterStats, TokenBucketRateLimiter};
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, error, info, warn};
+
+/// Convert a broker message timestamp (milliseconds since epoch) into a
+/// `DateTime<Utc>`. Falls back to `Utc::now()` when the value cannot be
+/// represented as a valid datetime.
+fn timestamp_from_millis(ts_ms: i64) -> DateTime<Utc> {
+    DateTime::from_timestamp_millis(ts_ms).unwrap_or_else(Utc::now)
+}
 
 /// Sink runner state
 pub struct SinkRunner {
@@ -375,6 +383,12 @@ impl SinkRunner {
         const BACKOFF_MAX_MS: u64 = 100;
         let mut backoff_ms: u64 = BACKOFF_MIN_MS;
 
+        // Track consecutive errors. When this reaches the
+        // threshold the connector transitions to Failed and stops, rather
+        // than silently retrying forever and potentially losing data.
+        const MAX_CONSECUTIVE_ERRORS: u64 = 50;
+        let mut consecutive_errors: u64 = 0;
+
         info!("Sink '{}' ready, consuming events", self.name);
 
         loop {
@@ -410,6 +424,7 @@ impl SinkRunner {
                 {
                     Ok(messages) if !messages.is_empty() => {
                         received_any = true;
+                        consecutive_errors = 0; // reset on success
                         let mut max_offset = current_offset;
                         let batch_size = messages.len() as u64;
 
@@ -427,6 +442,9 @@ impl SinkRunner {
                             max_offset = max_offset.max(msg.offset);
 
                             // Convert broker message to SDK SourceEvent for formatting
+                            // Preserve the original broker message timestamp
+                            let event_ts = timestamp_from_millis(msg.timestamp);
+
                             let event = if let Ok(json) =
                                 serde_json::from_slice::<serde_json::Value>(&msg.value)
                             {
@@ -434,7 +452,7 @@ impl SinkRunner {
                                     event_type: SourceEventType::Record,
                                     stream: topic.clone(),
                                     namespace: None,
-                                    timestamp: chrono::Utc::now(),
+                                    timestamp: event_ts,
                                     data: json,
                                     metadata: Default::default(),
                                 }
@@ -443,7 +461,7 @@ impl SinkRunner {
                                     event_type: SourceEventType::Record,
                                     stream: topic.clone(),
                                     namespace: None,
-                                    timestamp: chrono::Utc::now(),
+                                    timestamp: event_ts,
                                     data: serde_json::json!({
                                         "raw": String::from_utf8_lossy(&msg.value)
                                     }),
@@ -465,14 +483,6 @@ impl SinkRunner {
                             offsets.insert(key.clone(), next_offset);
                         }
 
-                        // Commit offset periodically (every 100 messages)
-                        if self.events_consumed().is_multiple_of(100) {
-                            if let Err(e) = self.commit_offset(topic, *partition, next_offset).await
-                            {
-                                warn!("Sink '{}' failed to commit offset: {}", self.name, e);
-                            }
-                        }
-
                         // recover health status on successful consume
                         {
                             let status = self.status.read().await;
@@ -487,10 +497,38 @@ impl SinkRunner {
                         // No messages
                     }
                     Err(e) => {
+                        consecutive_errors += 1;
                         self.errors_count.fetch_add(1, Ordering::Relaxed);
-                        error!("Sink '{}' consume error: {}", self.name, e);
+                        error!(
+                            "Sink '{}' consume error ({}/{}): {}",
+                            self.name, consecutive_errors, MAX_CONSECUTIVE_ERRORS, e
+                        );
                         *self.status.write().await = ConnectorStatus::Unhealthy;
+
+                        // Fail after too many consecutive errors
+                        // instead of silently retrying forever.
+                        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                            error!(
+                                "Sink '{}' exceeded {} consecutive errors — transitioning to Failed",
+                                self.name, MAX_CONSECUTIVE_ERRORS
+                            );
+                            *self.status.write().await = ConnectorStatus::Failed;
+                            return Err(ConnectError::sink(
+                                &self.name,
+                                format!(
+                                    "Too many consecutive consume errors ({}). Last error: {}",
+                                    consecutive_errors, e
+                                ),
+                            ));
+                        }
                     }
+                }
+            }
+
+            // Commit ALL dirty partition offsets periodically (every 100 events)
+            if received_any && self.events_consumed().is_multiple_of(100) {
+                if let Err(e) = self.commit_all_offsets().await {
+                    warn!("Sink '{}' failed to commit offsets: {}", self.name, e);
                 }
             }
 
@@ -712,6 +750,9 @@ impl SinkRunner {
         const BACKOFF_MIN_MS: u64 = 1;
         const BACKOFF_MAX_MS: u64 = 100;
         let mut backoff_ms: u64 = BACKOFF_MIN_MS;
+        // Track consecutive errors for consistent failure behavior
+        const MAX_CONSECUTIVE_ERRORS: u64 = 50;
+        let mut consecutive_errors: u64 = 0;
         let batch_size: usize = self
             .config
             .config
@@ -781,7 +822,7 @@ impl SinkRunner {
                                     event_type: SourceEventType::Record,
                                     stream: topic.clone(),
                                     namespace: None,
-                                    timestamp: chrono::Utc::now(),
+                                    timestamp: timestamp_from_millis(msg.timestamp),
                                     data,
                                     metadata: Default::default(),
                                 }
@@ -796,9 +837,23 @@ impl SinkRunner {
                                     .fetch_add(result.records_written, Ordering::Relaxed);
                             }
                             Err(e) => {
-                                error!("Sink '{}' write error: {}", self.name, e);
+                                consecutive_errors += 1;
+                                error!(
+                                    "Sink '{}' write error ({}/{}): {}",
+                                    self.name, consecutive_errors, MAX_CONSECUTIVE_ERRORS, e
+                                );
                                 self.errors_count.fetch_add(1, Ordering::Relaxed);
                                 *self.status.write().await = ConnectorStatus::Unhealthy;
+                                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                                    *self.status.write().await = ConnectorStatus::Failed;
+                                    return Err(ConnectError::sink(
+                                        &self.name,
+                                        format!(
+                                            "Too many consecutive write errors ({}). Last: {}",
+                                            consecutive_errors, e
+                                        ),
+                                    ));
+                                }
                             }
                         }
 
@@ -809,15 +864,8 @@ impl SinkRunner {
                             offsets.insert(key.clone(), next_offset);
                         }
 
-                        // Commit offset periodically
-                        if self.events_consumed().is_multiple_of(100) {
-                            if let Err(e) = self.commit_offset(topic, *partition, next_offset).await
-                            {
-                                warn!("Sink '{}' failed to commit offset: {}", self.name, e);
-                            }
-                        }
-
                         // recover health status on successful consume
+                        consecutive_errors = 0;
                         {
                             let status = self.status.read().await;
                             if *status == ConnectorStatus::Unhealthy {
@@ -829,10 +877,31 @@ impl SinkRunner {
                     }
                     Ok(_) => {}
                     Err(e) => {
+                        consecutive_errors += 1;
                         self.errors_count.fetch_add(1, Ordering::Relaxed);
-                        error!("Sink '{}' consume error: {}", self.name, e);
+                        error!(
+                            "Sink '{}' consume error ({}/{}): {}",
+                            self.name, consecutive_errors, MAX_CONSECUTIVE_ERRORS, e
+                        );
                         *self.status.write().await = ConnectorStatus::Unhealthy;
+                        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                            *self.status.write().await = ConnectorStatus::Failed;
+                            return Err(ConnectError::sink(
+                                &self.name,
+                                format!(
+                                    "Too many consecutive consume errors ({}). Last: {}",
+                                    consecutive_errors, e
+                                ),
+                            ));
+                        }
                     }
+                }
+            }
+
+            // Commit ALL dirty partition offsets periodically (every 100 events)
+            if received_any && self.events_consumed().is_multiple_of(100) {
+                if let Err(e) = self.commit_all_offsets().await {
+                    warn!("Sink '{}' failed to commit offsets: {}", self.name, e);
                 }
             }
 

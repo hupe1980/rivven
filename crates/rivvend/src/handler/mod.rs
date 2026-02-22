@@ -228,6 +228,7 @@ impl RequestHandler {
 
         match request {
             // Authentication is handled by AuthenticatedHandler, not here
+            #[allow(deprecated)]
             Request::Authenticate { .. }
             | Request::SaslAuthenticate { .. }
             | Request::ScramClientFirst { .. }

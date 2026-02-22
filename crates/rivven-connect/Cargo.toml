@@ -24,7 +24,7 @@ path = "src/main.rs"
 
 [features]
 default = ["full"]
-postgres = ["rivven-cdc/postgres", "tokio-postgres"]
+postgres = ["rivven-cdc/postgres", "tokio-postgres", "dep:tokio-postgres-rustls", "dep:rustls", "dep:webpki-roots", "dep:rustls-pemfile"]
 mysql = ["rivven-cdc/mysql"]
 sqlserver = ["rivven-cdc/sqlserver"]
 tls = ["rivven-client/tls"]
@@ -122,6 +122,7 @@ chrono = { workspace = true }
 regex = "1.10"
 tokio-postgres = { version = "0.7", optional = true }
 reqwest = { workspace = true }
+axum = { workspace = true }
 metrics = { workspace = true, optional = true }
 
 # SDK dependencies (merged from rivven-connect-sdk)
@@ -200,6 +201,7 @@ hmac = { version = "0.12", optional = true }
 
 # Redshift TLS (optional)
 rustls = { workspace = true, optional = true }
+rustls-pemfile = { workspace = true, optional = true }
 webpki-roots = { version = "0.26", optional = true }
 tokio-postgres-rustls = { version = "0.13", optional = true }
 
@@ -226,5 +228,4 @@ static_assertions = "1.1"
 # Integration tests that need rivvend should be in a separate workspace crate
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
-tokio-postgres = "0.7"
 tempfile = "3.10"

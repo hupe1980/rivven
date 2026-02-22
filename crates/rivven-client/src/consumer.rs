@@ -40,7 +40,7 @@
 //! groups, use explicit partition assignment via [`ConsumerConfig::partitions`].
 
 use crate::client::Client;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use rivven_protocol::MessageData;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -68,6 +68,13 @@ pub struct ConsumerConfig {
     pub isolation_level: u8,
     /// Authentication credentials (optional)
     pub auth: Option<ConsumerAuthConfig>,
+    /// Interval for re-discovering partition assignments (default: 5 min).
+    /// Set to `Duration::MAX` to disable periodic re-discovery.
+    pub metadata_refresh_interval: Duration,
+    /// Initial reconnect backoff delay in milliseconds (default: 100)
+    pub reconnect_backoff_ms: u64,
+    /// Maximum reconnect backoff delay in milliseconds (default: 10 000)
+    pub reconnect_backoff_max_ms: u64,
 }
 
 /// Authentication configuration for the consumer.
@@ -88,6 +95,9 @@ pub struct ConsumerConfigBuilder {
     auto_commit_interval: Option<Duration>,
     isolation_level: u8,
     auth: Option<ConsumerAuthConfig>,
+    metadata_refresh_interval: Duration,
+    reconnect_backoff_ms: u64,
+    reconnect_backoff_max_ms: u64,
 }
 
 impl ConsumerConfigBuilder {
@@ -102,6 +112,9 @@ impl ConsumerConfigBuilder {
             auto_commit_interval: Some(Duration::from_secs(5)),
             isolation_level: 0,
             auth: None,
+            metadata_refresh_interval: Duration::from_secs(300),
+            reconnect_backoff_ms: 100,
+            reconnect_backoff_max_ms: 10_000,
         }
     }
 
@@ -174,6 +187,24 @@ impl ConsumerConfigBuilder {
         self
     }
 
+    /// Set the interval for periodic partition re-discovery.
+    pub fn metadata_refresh_interval(mut self, interval: Duration) -> Self {
+        self.metadata_refresh_interval = interval;
+        self
+    }
+
+    /// Set initial reconnect backoff delay in milliseconds.
+    pub fn reconnect_backoff_ms(mut self, ms: u64) -> Self {
+        self.reconnect_backoff_ms = ms;
+        self
+    }
+
+    /// Set maximum reconnect backoff delay in milliseconds.
+    pub fn reconnect_backoff_max_ms(mut self, ms: u64) -> Self {
+        self.reconnect_backoff_max_ms = ms;
+        self
+    }
+
     pub fn build(self) -> ConsumerConfig {
         ConsumerConfig {
             bootstrap_server: self
@@ -187,6 +218,9 @@ impl ConsumerConfigBuilder {
             auto_commit_interval: self.auto_commit_interval,
             isolation_level: self.isolation_level,
             auth: self.auth,
+            metadata_refresh_interval: self.metadata_refresh_interval,
+            reconnect_backoff_ms: self.reconnect_backoff_ms,
+            reconnect_backoff_max_ms: self.reconnect_backoff_max_ms,
         }
     }
 }
@@ -231,6 +265,8 @@ pub struct Consumer {
     assignment_list: Vec<(String, u32)>,
     /// Last auto-commit time
     last_commit: Instant,
+    /// Last partition discovery time
+    last_discovery: Instant,
     /// Whether initial assignment discovery has been done
     initialized: bool,
 }
@@ -257,6 +293,7 @@ impl Consumer {
             assignments: HashMap::new(),
             assignment_list: Vec::new(),
             last_commit: Instant::now(),
+            last_discovery: Instant::now(),
             initialized: false,
         };
 
@@ -352,16 +389,34 @@ impl Consumer {
 
     /// Poll for new records across all assigned partitions.
     ///
-    /// Fetches records from each partition round-robin, using long-polling
-    /// all assigned partitions are fetched in each poll cycle. If no data is
-    /// immediately available and long-polling is enabled, a single long-poll
-    /// request is issued on the first partition to avoid tight spin loops.
-    ///
-    /// If auto-commit is enabled and the interval has elapsed, offsets are
-    /// committed before returning.
+    /// Automatically reconnects with exponential backoff on connection
+    /// errors and periodically re-discovers partition
+    /// assignments.
     pub async fn poll(&mut self) -> Result<Vec<ConsumerRecord>> {
+        match self.poll_inner().await {
+            Ok(records) => Ok(records),
+            Err(e) if Self::is_connection_error(&e) => {
+                warn!(error = %e, "Connection error during poll, attempting reconnect");
+                self.reconnect().await?;
+                self.poll_inner().await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Inner poll implementation without reconnection wrapper.
+    async fn poll_inner(&mut self) -> Result<Vec<ConsumerRecord>> {
         if !self.initialized {
             self.discover_assignments().await?;
+        }
+
+        // Periodically re-discover partition assignments so
+        // that newly added partitions are picked up automatically.
+        if self.last_discovery.elapsed() >= self.config.metadata_refresh_interval {
+            if let Err(e) = self.discover_assignments().await {
+                warn!(error = %e, "Failed to re-discover assignments, continuing with existing");
+            }
+            self.last_discovery = Instant::now();
         }
 
         let mut records = Vec::new();
@@ -436,7 +491,7 @@ impl Consumer {
         // Auto-commit if interval has elapsed
         if let Some(interval) = self.config.auto_commit_interval {
             if self.last_commit.elapsed() >= interval {
-                if let Err(e) = self.commit().await {
+                if let Err(e) = self.commit_inner().await {
                     warn!(error = %e, "Auto-commit failed");
                 }
             }
@@ -447,9 +502,21 @@ impl Consumer {
 
     /// Commit current offsets to the server.
     ///
-    /// Sends a `CommitOffset` request for every tracked (topic, partition)
-    /// pair. Failures are logged but do not abort the remaining commits.
+    /// Automatically reconnects on connection errors.
     pub async fn commit(&mut self) -> Result<()> {
+        match self.commit_inner().await {
+            Ok(()) => Ok(()),
+            Err(e) if Self::is_connection_error(&e) => {
+                warn!(error = %e, "Connection error during commit, attempting reconnect");
+                self.reconnect().await?;
+                self.commit_inner().await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Inner commit implementation without reconnection wrapper.
+    async fn commit_inner(&mut self) -> Result<()> {
         let mut last_error = None;
 
         for ((topic, partition), offset) in &self.offsets {
@@ -513,6 +580,63 @@ impl Consumer {
     /// Get the consumer group ID.
     pub fn group_id(&self) -> &str {
         &self.config.group_id
+    }
+
+    // ========================================================================
+    // Reconnection
+    // ========================================================================
+
+    /// Attempt to reconnect to the bootstrap server with exponential backoff.
+    async fn reconnect(&mut self) -> Result<()> {
+        let mut backoff = Duration::from_millis(self.config.reconnect_backoff_ms);
+        let max_backoff = Duration::from_millis(self.config.reconnect_backoff_max_ms);
+
+        for attempt in 1..=10u32 {
+            info!(
+                attempt,
+                server = %self.config.bootstrap_server,
+                "Attempting to reconnect"
+            );
+            match Client::connect(&self.config.bootstrap_server).await {
+                Ok(mut new_client) => {
+                    // Re-authenticate if credentials are configured
+                    if let Some(ref auth) = self.config.auth {
+                        if let Err(e) = new_client
+                            .authenticate_scram(&auth.username, &auth.password)
+                            .await
+                        {
+                            warn!(error = %e, attempt, "Re-authentication failed during reconnect");
+                            tokio::time::sleep(backoff).await;
+                            backoff = (backoff * 2).min(max_backoff);
+                            continue;
+                        }
+                    }
+                    self.client = new_client;
+                    info!("Consumer reconnected successfully");
+                    return Ok(());
+                }
+                Err(e) => {
+                    warn!(error = %e, attempt, "Reconnect attempt failed");
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(max_backoff);
+                }
+            }
+        }
+        Err(Error::ConnectionError(format!(
+            "Failed to reconnect to {} after 10 attempts",
+            self.config.bootstrap_server
+        )))
+    }
+
+    /// Check whether an error indicates a broken connection.
+    fn is_connection_error(e: &Error) -> bool {
+        matches!(
+            e,
+            Error::ConnectionError(_)
+                | Error::IoError(_)
+                | Error::Timeout
+                | Error::TimeoutWithMessage(_)
+        )
     }
 
     /// Close the consumer, committing final offsets if auto-commit is enabled.

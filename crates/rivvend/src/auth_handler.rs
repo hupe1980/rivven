@@ -75,8 +75,29 @@ impl AuthenticatedHandler {
         is_tls: bool,
     ) -> Response {
         // Handle authentication requests first (don't require existing auth)
+        #[allow(deprecated)] // Server must handle the deprecated Authenticate variant
         match &request {
-            Request::Authenticate { username, password } => {
+            // Reject plaintext auth when the client requires TLS
+            // but the connection is not TLS-encrypted.  This prevents
+            // accidental credential exposure on cleartext transports.
+            Request::Authenticate {
+                username,
+                password,
+                require_tls,
+            } => {
+                if *require_tls && !is_tls {
+                    warn!(
+                        "Plaintext Authenticate rejected on non-TLS connection from {} \
+                         — client set require_tls=true",
+                        client_ip
+                    );
+                    return Response::Error {
+                        message: "PLAINTEXT_AUTH_REQUIRES_TLS: The client requires a TLS \
+                                  connection for plaintext authentication. \
+                                  Use a TLS listener or switch to SCRAM-SHA-256."
+                            .to_string(),
+                    };
+                }
                 return self
                     .handle_authenticate(username, password, client_ip, connection_auth)
                     .await;
@@ -344,6 +365,230 @@ impl AuthenticatedHandler {
         }
     }
 
+    /// Validate that a session is still valid (not expired, principal not deleted).
+    ///
+    /// Returns `Ok(())` if the session is valid, or `Err(Response)` with the
+    /// appropriate error response. When `Err` is returned, the caller should
+    /// also reset the connection auth state to `Unauthenticated`.
+    pub fn validate_session(&self, session: &AuthSession, client_ip: &str) -> Result<(), Response> {
+        if session.is_expired() {
+            warn!(
+                "Expired session for {} from {}",
+                session.principal_name, client_ip
+            );
+            return Err(Response::Error {
+                message: "SESSION_EXPIRED: Please re-authenticate".to_string(),
+            });
+        }
+        if self.auth_manager.get_session(&session.id).is_none() {
+            warn!("Invalid session {} from {}", session.id, client_ip);
+            return Err(Response::Error {
+                message: "INVALID_SESSION: Please re-authenticate".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Check authorization for a request without handling it.
+    ///
+    /// Returns `Ok(())` if the request is authorized, or `Err(Response)` with
+    /// an authorization error response if denied.
+    ///
+    /// This method is called by the cluster server's connection
+    /// handler to enforce RBAC/ACL checks on every data-plane request before
+    /// routing it via the `RequestRouter`. This closes the gap where
+    /// authenticated sessions could bypass permission checks.
+    pub fn authorize_request(
+        &self,
+        request: &Request,
+        session: &AuthSession,
+        client_ip: &str,
+    ) -> Result<(), Response> {
+        // Determine required permission for this request
+        let (resource, permission) = match request {
+            Request::Publish { topic, .. } => {
+                (ResourceType::Topic(topic.clone()), Permission::Write)
+            }
+            Request::Consume { topic, .. } => {
+                (ResourceType::Topic(topic.clone()), Permission::Read)
+            }
+            Request::CreateTopic { name, .. } => {
+                (ResourceType::Topic(name.clone()), Permission::Create)
+            }
+            Request::DeleteTopic { name } => {
+                (ResourceType::Topic(name.clone()), Permission::Delete)
+            }
+            Request::ListTopics => (ResourceType::Cluster, Permission::Describe),
+            Request::GetMetadata { topic } => {
+                (ResourceType::Topic(topic.clone()), Permission::Describe)
+            }
+            Request::GetOffsetBounds { topic, .. } => {
+                (ResourceType::Topic(topic.clone()), Permission::Describe)
+            }
+            Request::GetOffsetForTimestamp { topic, .. } => {
+                (ResourceType::Topic(topic.clone()), Permission::Describe)
+            }
+            Request::GetClusterMetadata { .. } => (ResourceType::Cluster, Permission::Describe),
+            Request::CommitOffset {
+                consumer_group,
+                topic,
+                ..
+            } => {
+                // Commit offset requires both consumer group Write and topic Read
+                self.auth_manager
+                    .authorize(
+                        session,
+                        &ResourceType::ConsumerGroup(consumer_group.clone()),
+                        Permission::Write,
+                        client_ip,
+                    )
+                    .map_err(|e| {
+                        warn!(
+                            "Authorization denied for '{}' on consumer group '{}': {}",
+                            session.principal_name, consumer_group, e
+                        );
+                        Response::Error {
+                            message: format!(
+                                "AUTHORIZATION_FAILED: Consumer group access denied: {}",
+                                e
+                            ),
+                        }
+                    })?;
+                (ResourceType::Topic(topic.clone()), Permission::Read)
+            }
+            Request::GetOffset {
+                consumer_group,
+                topic,
+                ..
+            } => {
+                // Get offset requires consumer group Read and topic Read
+                self.auth_manager
+                    .authorize(
+                        session,
+                        &ResourceType::ConsumerGroup(consumer_group.clone()),
+                        Permission::Read,
+                        client_ip,
+                    )
+                    .map_err(|e| {
+                        warn!(
+                            "Authorization denied for '{}' on consumer group '{}': {}",
+                            session.principal_name, consumer_group, e
+                        );
+                        Response::Error {
+                            message: format!(
+                                "AUTHORIZATION_FAILED: Consumer group access denied: {}",
+                                e
+                            ),
+                        }
+                    })?;
+                (ResourceType::Topic(topic.clone()), Permission::Read)
+            }
+            Request::ListGroups => (ResourceType::Cluster, Permission::Describe),
+            Request::DescribeGroup { consumer_group, .. } => (
+                ResourceType::ConsumerGroup(consumer_group.clone()),
+                Permission::Describe,
+            ),
+            Request::DeleteGroup { consumer_group, .. } => (
+                ResourceType::ConsumerGroup(consumer_group.clone()),
+                Permission::Delete,
+            ),
+            Request::InitProducerId { .. } => (ResourceType::Cluster, Permission::IdempotentWrite),
+            Request::IdempotentPublish { topic, .. } => {
+                // Idempotent publish requires IdempotentWrite on Cluster and Write on Topic
+                self.auth_manager
+                    .authorize(
+                        session,
+                        &ResourceType::Cluster,
+                        Permission::IdempotentWrite,
+                        client_ip,
+                    )
+                    .map_err(|e| {
+                        warn!(
+                            "IdempotentWrite denied for '{}' on cluster: {}",
+                            session.principal_name, e
+                        );
+                        Response::Error {
+                            message: format!(
+                                "AUTHORIZATION_FAILED: IdempotentWrite permission denied: {}",
+                                e
+                            ),
+                        }
+                    })?;
+                (ResourceType::Topic(topic.clone()), Permission::Write)
+            }
+            Request::BeginTransaction { .. }
+            | Request::AddPartitionsToTxn { .. }
+            | Request::AddOffsetsToTxn { .. }
+            | Request::CommitTransaction { .. }
+            | Request::AbortTransaction { .. } => {
+                (ResourceType::Cluster, Permission::IdempotentWrite)
+            }
+            Request::TransactionalPublish { topic, .. } => {
+                // Transactional publish requires IdempotentWrite on Cluster and Write on Topic
+                self.auth_manager
+                    .authorize(
+                        session,
+                        &ResourceType::Cluster,
+                        Permission::IdempotentWrite,
+                        client_ip,
+                    )
+                    .map_err(|e| {
+                        warn!(
+                            "IdempotentWrite denied for '{}' on cluster: {}",
+                            session.principal_name, e
+                        );
+                        Response::Error {
+                            message: format!(
+                                "AUTHORIZATION_FAILED: IdempotentWrite permission denied: {}",
+                                e
+                            ),
+                        }
+                    })?;
+                (ResourceType::Topic(topic.clone()), Permission::Write)
+            }
+            Request::DescribeQuotas { .. } => (ResourceType::Cluster, Permission::Describe),
+            Request::AlterQuotas { .. } => (ResourceType::Cluster, Permission::Alter),
+            Request::AlterTopicConfig { topic, .. } => {
+                (ResourceType::Topic(topic.clone()), Permission::Alter)
+            }
+            Request::CreatePartitions { topic, .. } => {
+                (ResourceType::Topic(topic.clone()), Permission::Alter)
+            }
+            Request::DeleteRecords { topic, .. } => {
+                (ResourceType::Topic(topic.clone()), Permission::Delete)
+            }
+            Request::DescribeTopicConfigs { .. } => (ResourceType::Cluster, Permission::Describe),
+            // Auth requests and Ping don't require authorization
+            #[allow(deprecated)]
+            Request::Authenticate { .. }
+            | Request::SaslAuthenticate { .. }
+            | Request::ScramClientFirst { .. }
+            | Request::ScramClientFinal { .. }
+            | Request::Handshake { .. }
+            | Request::Ping => return Ok(()),
+        };
+
+        // Authorize against the primary resource
+        self.auth_manager
+            .authorize(session, &resource, permission, client_ip)
+            .map_err(|e| {
+                warn!(
+                    "Authorization denied for '{}' on {:?}: {}",
+                    session.principal_name, resource, e
+                );
+                Response::Error {
+                    message: format!("AUTHORIZATION_FAILED: {}", e),
+                }
+            })?;
+
+        debug!(
+            "Authorized '{}' for {:?} on {:?}",
+            session.principal_name, permission, resource
+        );
+
+        Ok(())
+    }
+
     /// Authorize and handle a request
     async fn authorize_and_handle(
         &self,
@@ -531,6 +776,7 @@ impl AuthenticatedHandler {
                 (ResourceType::Cluster, Permission::Describe)
             }
             // Auth requests handled earlier
+            #[allow(deprecated)]
             Request::Authenticate { .. }
             | Request::SaslAuthenticate { .. }
             | Request::ScramClientFirst { .. }
@@ -645,7 +891,68 @@ mod tests {
         }
     }
 
+    /// When `require_tls = true` and the connection is NOT TLS,
+    /// the server must reject the Authenticate request.
     #[tokio::test]
+    #[allow(deprecated)]
+    async fn test_authenticate_rejected_when_require_tls_on_plaintext() {
+        let (handler, _) = setup_test_handler(true).await;
+        let mut conn_auth = ConnectionAuth::Unauthenticated;
+
+        let response = handler
+            .handle(
+                Request::Authenticate {
+                    username: "producer".to_string(),
+                    password: "Prod@Pass123".to_string(),
+                    require_tls: true,
+                },
+                &mut conn_auth,
+                "127.0.0.1",
+                false, // <-- NOT TLS
+            )
+            .await;
+
+        match response {
+            Response::Error { message } => {
+                assert!(
+                    message.contains("PLAINTEXT_AUTH_REQUIRES_TLS"),
+                    "Expected PLAINTEXT_AUTH_REQUIRES_TLS, got: {message}"
+                );
+            }
+            _ => panic!("Expected error response for require_tls on non-TLS connection"),
+        }
+    }
+
+    /// When `require_tls = true` over TLS the request proceeds normally.
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn test_authenticate_allowed_when_require_tls_on_tls() {
+        let (handler, _) = setup_test_handler(true).await;
+        let mut conn_auth = ConnectionAuth::Unauthenticated;
+
+        let response = handler
+            .handle(
+                Request::Authenticate {
+                    username: "producer".to_string(),
+                    password: "Prod@Pass123".to_string(),
+                    require_tls: true,
+                },
+                &mut conn_auth,
+                "127.0.0.1",
+                true, // <-- TLS active
+            )
+            .await;
+
+        match response {
+            Response::Authenticated { session_id, .. } => {
+                assert!(!session_id.is_empty());
+            }
+            other => panic!("Expected Authenticated, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    #[allow(deprecated)]
     async fn test_authentication_success() {
         let (handler, _) = setup_test_handler(true).await;
         let mut conn_auth = ConnectionAuth::Unauthenticated;
@@ -655,6 +962,7 @@ mod tests {
                 Request::Authenticate {
                     username: "producer".to_string(),
                     password: "Prod@Pass123".to_string(),
+                    require_tls: false,
                 },
                 &mut conn_auth,
                 "127.0.0.1",
@@ -672,6 +980,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)]
     async fn test_authentication_failure() {
         let (handler, _) = setup_test_handler(true).await;
         let mut conn_auth = ConnectionAuth::Unauthenticated;
@@ -681,6 +990,7 @@ mod tests {
                 Request::Authenticate {
                     username: "producer".to_string(),
                     password: "Wrong@Pass1".to_string(),
+                    require_tls: false,
                 },
                 &mut conn_auth,
                 "127.0.0.1",
@@ -697,6 +1007,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)]
     async fn test_authorized_request() {
         let (handler, _) = setup_test_handler(true).await;
         let mut conn_auth = ConnectionAuth::Unauthenticated;
@@ -707,6 +1018,7 @@ mod tests {
                 Request::Authenticate {
                     username: "producer".to_string(),
                     password: "Prod@Pass123".to_string(),
+                    require_tls: false,
                 },
                 &mut conn_auth,
                 "127.0.0.1",
@@ -732,6 +1044,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(deprecated)]
     async fn test_admin_can_create_topic() {
         let (handler, _) = setup_test_handler(true).await;
         let mut conn_auth = ConnectionAuth::Unauthenticated;
@@ -742,6 +1055,7 @@ mod tests {
                 Request::Authenticate {
                     username: "admin".to_string(),
                     password: "Admin@Pass1".to_string(),
+                    require_tls: false,
                 },
                 &mut conn_auth,
                 "127.0.0.1",

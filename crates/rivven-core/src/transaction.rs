@@ -265,9 +265,8 @@ impl Transaction {
     /// Check if transaction has timed out
     ///
     /// Returns `false` when `last_activity` is `None` (e.g., after
-    /// deserialization where `Instant` is not serializable). Previously returned
-    /// `true` for `None`, causing recovered in-doubt transactions to be
-    /// immediately aborted before the coordinator could resolve them.
+    /// deserialization), allowing the coordinator to resolve in-doubt
+    /// transactions.
     pub fn is_timed_out(&self) -> bool {
         self.last_activity
             .map(|t| t.elapsed() > self.timeout)
@@ -423,8 +422,7 @@ impl AbortedTransactionIndex {
     /// Record an aborted transaction
     ///
     /// Tracks both first and last offset to bound the aborted range.
-    /// `is_aborted` now checks `first_offset <= offset <= last_offset` instead
-    /// of the previous unbounded `first_offset <= offset`.
+    /// Checks `first_offset <= offset <= last_offset` (bounded range).
     pub fn record_abort(&self, producer_id: ProducerId, first_offset: u64, last_offset: u64) {
         let mut aborted = self.aborted.write();
         aborted.push(AbortedTransaction {

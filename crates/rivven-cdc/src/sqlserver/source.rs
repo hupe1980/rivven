@@ -209,16 +209,26 @@ impl SqlServerCdcConfig {
         SqlServerCdcConfigBuilder::default()
     }
 
+    /// Sanitize a value for use in an ADO.NET connection string.
+    /// Semicolons and braces could inject additional parameters.
+    fn sanitize_conn_value(value: &str) -> String {
+        value.replace([';', '{', '}'], "")
+    }
+
     /// Build ADO.NET style connection string for Tiberius
     pub fn connection_string(&self) -> String {
         let mut parts = vec![
-            format!("Server={},{}", self.host, self.port),
-            format!("Database={}", self.database),
-            format!("User Id={}", self.username),
+            format!(
+                "Server={},{}",
+                Self::sanitize_conn_value(&self.host),
+                self.port
+            ),
+            format!("Database={}", Self::sanitize_conn_value(&self.database)),
+            format!("User Id={}", Self::sanitize_conn_value(&self.username)),
         ];
 
         if let Some(ref pwd) = self.password {
-            parts.push(format!("Password={}", pwd));
+            parts.push(format!("Password={}", Self::sanitize_conn_value(pwd)));
         }
 
         parts.push(format!("Application Name={}", self.application_name));
@@ -666,11 +676,11 @@ impl CdcSource for SqlServerCdc {
             self.config.host, self.config.port, self.config.database
         );
 
-        if self.active.load(Ordering::SeqCst) {
+        if self.active.load(Ordering::Acquire) {
             return Err(CdcError::config("CDC source already started"));
         }
 
-        self.active.store(true, Ordering::SeqCst);
+        self.active.store(true, Ordering::Release);
 
         // Spawn the polling task
         let config = self.config.clone();
@@ -705,12 +715,12 @@ impl CdcSource for SqlServerCdc {
 
     async fn stop(&mut self) -> Result<()> {
         info!("Stopping SQL Server CDC");
-        self.active.store(false, Ordering::SeqCst);
+        self.active.store(false, Ordering::Release);
         Ok(())
     }
 
     async fn is_healthy(&self) -> bool {
-        self.active.load(Ordering::SeqCst)
+        self.active.load(Ordering::Acquire)
     }
 }
 
@@ -785,7 +795,7 @@ async fn run_cdc_poll_loop(
     let poll_interval = Duration::from_millis(config.poll_interval_ms);
 
     // Main polling loop
-    while active.load(Ordering::SeqCst) {
+    while active.load(Ordering::Acquire) {
         let poll_start = Instant::now();
         let mut events_this_poll = 0;
 

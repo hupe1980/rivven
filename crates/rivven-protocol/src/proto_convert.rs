@@ -101,7 +101,7 @@ impl Request {
                 offset: *offset,
                 max_messages: u32::try_from(*max_messages).unwrap_or(u32::MAX),
                 max_bytes: 0,
-                isolation_level: isolation_level.unwrap_or(0) as u32,
+                isolation_level: u32::from(isolation_level.unwrap_or(0)),
                 max_wait_ms: *max_wait_ms,
             })),
 
@@ -134,16 +134,20 @@ impl Request {
                 partition: *partition,
             })),
 
-            Request::Authenticate { username, password } => {
-                Some(RequestType::Authenticate(proto::AuthenticateRequest {
-                    mechanism: Some(proto::authenticate_request::Mechanism::Plain(
-                        proto::PlainAuth {
-                            username: username.clone(),
-                            password: password.clone(),
-                        },
-                    )),
-                }))
-            }
+            #[allow(deprecated)]
+            Request::Authenticate {
+                username,
+                password,
+                require_tls,
+            } => Some(RequestType::Authenticate(proto::AuthenticateRequest {
+                mechanism: Some(proto::authenticate_request::Mechanism::Plain(
+                    proto::PlainAuth {
+                        username: username.clone(),
+                        password: password.clone(),
+                        require_tls: *require_tls,
+                    },
+                )),
+            })),
 
             Request::GetClusterMetadata { topics } => Some(RequestType::GetClusterMetadata(
                 proto::GetClusterMetadataRequest {
@@ -211,7 +215,7 @@ impl Request {
                         has_key: key.is_some(),
                     }),
                     producer_id: *producer_id,
-                    producer_epoch: *producer_epoch as u32,
+                    producer_epoch: u32::from(*producer_epoch),
                     sequence: *sequence,
                     leader_epoch: *leader_epoch,
                 },
@@ -226,7 +230,7 @@ impl Request {
                 proto::BeginTransactionRequest {
                     txn_id: txn_id.clone(),
                     producer_id: *producer_id,
-                    producer_epoch: *producer_epoch as u32,
+                    producer_epoch: u32::from(*producer_epoch),
                     timeout_ms: *timeout_ms,
                 },
             )),
@@ -239,7 +243,7 @@ impl Request {
                 proto::CommitTransactionRequest {
                     txn_id: txn_id.clone(),
                     producer_id: *producer_id,
-                    producer_epoch: *producer_epoch as u32,
+                    producer_epoch: u32::from(*producer_epoch),
                 },
             )),
 
@@ -251,7 +255,7 @@ impl Request {
                 proto::AbortTransactionRequest {
                     txn_id: txn_id.clone(),
                     producer_id: *producer_id,
-                    producer_epoch: *producer_epoch as u32,
+                    producer_epoch: u32::from(*producer_epoch),
                 },
             )),
 
@@ -347,7 +351,7 @@ impl Request {
                         has_key: key.is_some(),
                     }),
                     producer_id: *producer_id,
-                    producer_epoch: *producer_epoch as u32,
+                    producer_epoch: u32::from(*producer_epoch),
                     sequence: *sequence,
                     leader_epoch: *leader_epoch,
                 },
@@ -362,7 +366,7 @@ impl Request {
                 proto::AddPartitionsToTxnRequest {
                     txn_id: txn_id.clone(),
                     producer_id: *producer_id,
-                    producer_epoch: *producer_epoch as u32,
+                    producer_epoch: u32::from(*producer_epoch),
                     partitions: partitions
                         .iter()
                         .map(|(t, p)| proto::TopicPartition {
@@ -383,7 +387,7 @@ impl Request {
                 proto::AddOffsetsToTxnRequest {
                     txn_id: txn_id.clone(),
                     producer_id: *producer_id,
-                    producer_epoch: *producer_epoch as u32,
+                    producer_epoch: u32::from(*producer_epoch),
                     group_id: group_id.clone(),
                     offsets: offsets
                         .iter()
@@ -490,7 +494,12 @@ impl Request {
                 topic: req.topic.clone(),
                 partition: req.partition,
                 offset: req.offset,
-                max_messages: req.max_messages as usize,
+                max_messages: usize::try_from(req.max_messages).map_err(|_| {
+                    crate::ProtocolError::InvalidFormat(format!(
+                        "max_messages {} exceeds usize::MAX",
+                        req.max_messages
+                    ))
+                })?,
                 isolation_level: if req.isolation_level > 0 {
                     Some(u8::try_from(req.isolation_level).map_err(|_| {
                         crate::ProtocolError::InvalidFormat(format!(
@@ -505,9 +514,19 @@ impl Request {
                 max_wait_ms: req.max_wait_ms,
             }),
 
-            RequestType::GetMetadata(req) => Ok(Request::GetMetadata {
-                topic: req.topics.first().cloned().unwrap_or_default(),
-            }),
+            RequestType::GetMetadata(req) => {
+                if req.topics.len() > 1 {
+                    tracing::debug!(
+                        dropped = req.topics.len() - 1,
+                        "GetMetadata request contained multiple topics; \
+                         only the first is used. Use GetClusterMetadata \
+                         for multi-topic queries."
+                    );
+                }
+                Ok(Request::GetMetadata {
+                    topic: req.topics.first().cloned().unwrap_or_default(),
+                })
+            }
 
             RequestType::CommitOffset(req) => Ok(Request::CommitOffset {
                 consumer_group: req.consumer_group.clone(),
@@ -522,11 +541,13 @@ impl Request {
                 partition: req.partition,
             }),
 
+            #[allow(deprecated)]
             RequestType::Authenticate(req) => match &req.mechanism {
                 Some(proto::authenticate_request::Mechanism::Plain(auth)) => {
                     Ok(Request::Authenticate {
                         username: auth.username.clone(),
                         password: auth.password.clone(),
+                        require_tls: auth.require_tls,
                     })
                 }
                 Some(proto::authenticate_request::Mechanism::Scram(scram)) => {
@@ -810,7 +831,7 @@ impl Response {
                         partitions: (0..*partitions)
                             .map(|id| proto::PartitionMetadata {
                                 id,
-                                leader: 0,
+                                leader: Some(0),
                                 replicas: vec![0],
                                 isr: vec![0],
                             })
@@ -869,7 +890,7 @@ impl Response {
                                 u32::MAX
                             }),
                             host: b.host.clone(),
-                            port: b.port as u32,
+                            port: u32::from(b.port),
                             rack: b.rack.clone().unwrap_or_default(),
                         })
                         .collect(),
@@ -885,8 +906,7 @@ impl Response {
                                     leader: p
                                         .leader
                                         .as_ref()
-                                        .and_then(|l| l.parse().ok())
-                                        .unwrap_or(0),
+                                        .and_then(|l| l.parse().ok()),
                                     replicas: p
                                         .replicas
                                         .iter()
@@ -948,7 +968,7 @@ impl Response {
             } => Some(ResponseType::InitProducerId(
                 proto::InitProducerIdResponse {
                     producer_id: *producer_id,
-                    producer_epoch: *producer_epoch as u32,
+                    producer_epoch: u32::from(*producer_epoch),
                 },
             )),
 
@@ -1189,28 +1209,32 @@ impl Response {
             }),
 
             ResponseType::GetMetadata(resp) => {
+                if resp.topics.len() > 1 {
+                    tracing::debug!(
+                        dropped = resp.topics.len() - 1,
+                        "GetMetadata response contained multiple topics; \
+                         only the first is returned. Use GetClusterMetadata \
+                         for multi-topic queries."
+                    );
+                }
                 let topic = resp.topics.first().ok_or_else(|| {
                     crate::ProtocolError::Serialization("No topic in metadata".into())
                 })?;
                 Ok(Response::Metadata {
                     name: topic.name.clone(),
-                    partitions: topic.partitions.len() as u32,
+                    partitions: topic.partitions.len().try_into().unwrap_or(u32::MAX),
                 })
             }
 
             ResponseType::CommitOffset(_) => Ok(Response::OffsetCommitted),
 
             ResponseType::GetOffset(resp) => Ok(Response::Offset {
-                offset: if resp.offset >= 0 {
-                    Some(resp.offset as u64)
-                } else {
-                    None
-                },
+                offset: resp.offset.try_into().ok(),
             }),
 
             ResponseType::Authenticate(resp) => Ok(Response::Authenticated {
                 session_id: resp.session_id.clone(),
-                expires_in: resp.expires_in as u64,
+                expires_in: resp.expires_in.into(),
             }),
 
             ResponseType::Error(resp) => Ok(Response::Error {
@@ -1250,14 +1274,10 @@ impl Response {
                             .iter()
                             .map(|p| crate::PartitionMetadata {
                                 partition: p.id,
-                                leader: if p.leader == 0 {
-                                    None
-                                } else {
-                                    Some(p.leader.to_string())
-                                },
+                                leader: p.leader.map(|l| l.to_string()),
                                 replicas: p.replicas.iter().map(|r| r.to_string()).collect(),
                                 isr: p.isr.iter().map(|i| i.to_string()).collect(),
-                                offline: p.leader == 0 && p.replicas.is_empty(),
+                                offline: p.leader.is_none() && p.replicas.is_empty(),
                             })
                             .collect(),
                     })
@@ -1319,7 +1339,7 @@ impl Response {
 
             ResponseType::AlterTopicConfig(resp) => Ok(Response::TopicConfigAltered {
                 topic: resp.topic.clone(),
-                changed_count: resp.changed_count as usize,
+                changed_count: resp.changed_count.try_into().unwrap_or(0),
             }),
 
             ResponseType::DescribeTopicConfigs(resp) => Ok(Response::TopicConfigsDescribed {
@@ -1381,7 +1401,7 @@ impl Response {
 
             ResponseType::PartitionsAddedToTxn(resp) => Ok(Response::PartitionsAddedToTxn {
                 txn_id: resp.txn_id.clone(),
-                partition_count: resp.partition_count as usize,
+                partition_count: resp.partition_count.try_into().unwrap_or(0),
             }),
 
             ResponseType::TransactionalPublish(resp) => Ok(Response::TransactionalPublished {
@@ -1407,7 +1427,7 @@ impl Response {
             }),
 
             ResponseType::QuotasAltered(resp) => Ok(Response::QuotasAltered {
-                altered_count: resp.altered_count as usize,
+                altered_count: resp.altered_count.try_into().unwrap_or(0),
             }),
 
             ResponseType::Throttled(resp) => Ok(Response::Throttled {

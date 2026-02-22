@@ -201,7 +201,7 @@ impl SqlServerClient {
         Ok(columns)
     }
 
-    /// Get primary key columns for a table
+    /// Get primary key columns for a table (by object_id)
     async fn get_primary_key_columns(&mut self, object_id: i32) -> Result<Vec<String>> {
         let query = r#"
             SELECT c.name
@@ -215,6 +215,42 @@ impl SqlServerClient {
         let result = self
             .client
             .query(query, &[&object_id])
+            .await
+            .map_err(|e| SqlServerError::QueryFailed(e.to_string()))?
+            .into_first_result()
+            .await
+            .map_err(|e| SqlServerError::QueryFailed(e.to_string()))?;
+
+        let pk_columns: Vec<String> = result
+            .iter()
+            .filter_map(|row| row.get::<&str, _>(0).map(|s| s.to_string()))
+            .collect();
+
+        Ok(pk_columns)
+    }
+
+    /// Get primary key columns for a table by schema and table name.
+    pub async fn get_pk_columns_by_name(
+        &mut self,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<String>> {
+        let query = r#"
+            SELECT c.name
+            FROM sys.index_columns ic
+            JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+            JOIN sys.indexes i ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+            JOIN sys.tables t ON ic.object_id = t.object_id
+            JOIN sys.schemas s ON t.schema_id = s.schema_id
+            WHERE i.is_primary_key = 1
+              AND s.name = @P1
+              AND t.name = @P2
+            ORDER BY ic.key_ordinal
+        "#;
+
+        let result = self
+            .client
+            .query(query, &[&schema, &table])
             .await
             .map_err(|e| SqlServerError::QueryFailed(e.to_string()))?
             .into_first_result()
@@ -307,13 +343,38 @@ impl SqlServerClient {
         Ok(Lsn::new(arr))
     }
 
-    /// Get changes from a capture instance
+    /// Get changes from a capture instance.
+    ///
+    /// When `merge_updates` is `true` (default Debezium-like behavior),
+    /// consecutive before/after update pairs (operation 3 followed by 4)
+    /// within the same `commit_lsn` are merged into a single
+    /// `CdcChangeRecord` with both `before` and `after` populated.
+    /// This loses intermediate states when multiple updates to the same
+    /// row occur within a single transaction.
+    ///
+    /// Set `merge_updates` to `false` to emit each update image as a
+    /// separate `CdcChangeRecord`, preserving every intermediate state.
     pub async fn get_changes(
         &mut self,
         capture_instance: &str,
         from_lsn: &Lsn,
         to_lsn: &Lsn,
         batch_size: u32,
+    ) -> Result<Vec<CdcChangeRecord>> {
+        self.get_changes_ex(capture_instance, from_lsn, to_lsn, batch_size, true)
+            .await
+    }
+
+    /// Get changes with explicit control over update-pair merging.
+    ///
+    /// See [`get_changes`](Self::get_changes) for details.
+    pub async fn get_changes_ex(
+        &mut self,
+        capture_instance: &str,
+        from_lsn: &Lsn,
+        to_lsn: &Lsn,
+        batch_size: u32,
+        merge_updates: bool,
     ) -> Result<Vec<CdcChangeRecord>> {
         // Validate capture_instance to prevent SQL injection — the value is
         // interpolated directly into the CDC function name, which cannot be
@@ -413,19 +474,30 @@ impl SqlServerClient {
             });
         }
 
-        // Merge update pairs (operation 3 followed by 4)
-        let changes = merge_update_pairs(changes);
+        // Merge update pairs (operation 3 followed by 4) unless the caller
+        // opted out to preserve intermediate states.
+        let changes = if merge_updates {
+            merge_update_pairs(changes)
+        } else {
+            changes
+        };
 
         trace!("Got {} changes from {}", changes.len(), capture_instance);
         Ok(changes)
     }
 
-    /// Execute a snapshot query for initial data load
+    /// Execute a snapshot query for initial data load.
+    ///
+    /// `pk_columns` must contain the primary-key column names for the table
+    /// so that `OFFSET / FETCH` pagination is deterministic.  When the table
+    /// has no primary key the caller should pass an empty slice — we fallback
+    /// to an unpaginated `SELECT *` with a single-batch warning.
     pub async fn snapshot_table(
         &mut self,
         schema: &str,
         table: &str,
         columns: &[String],
+        pk_columns: &[String],
         batch_size: u32,
         offset: u64,
     ) -> Result<Vec<Map<String, Value>>> {
@@ -439,17 +511,66 @@ impl SqlServerClient {
                 .join(", ")
         };
 
+        // Build a deterministic ORDER BY from the primary key columns.
+        // Falls back to an unpaginated query when no PK is available.
+        let order_by = if pk_columns.is_empty() {
+            tracing::warn!(
+                table = %table,
+                "Table has no primary key — snapshot will be loaded in a single unpaginated batch"
+            );
+            // Fallback: single batch, no OFFSET / FETCH
+            let query = format!(
+                r#"SELECT {columns} FROM [{schema}].[{table}]"#,
+                columns = column_list,
+                schema = schema.replace(']', "]]"),
+                table = table.replace(']', "]]"),
+            );
+
+            let result = self
+                .client
+                .query(&query, &[])
+                .await
+                .map_err(|e| SqlServerError::QueryFailed(e.to_string()))?
+                .into_first_result()
+                .await
+                .map_err(|e| SqlServerError::QueryFailed(e.to_string()))?;
+
+            let col_names: Vec<String> = if columns.is_empty() && !result.is_empty() {
+                result[0]
+                    .columns()
+                    .iter()
+                    .map(|c| c.name().to_string())
+                    .collect()
+            } else {
+                columns.to_vec()
+            };
+
+            let mut rows = Vec::with_capacity(result.len());
+            for row in result {
+                let data = parse_row_data(&row, &col_names, 0);
+                rows.push(data);
+            }
+            return Ok(rows);
+        } else {
+            pk_columns
+                .iter()
+                .map(|c| format!("[{}]", c.replace(']', "]]")))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+
         // Use OFFSET/FETCH for pagination (SQL Server 2012+)
         let query = format!(
             r#"
             SELECT {columns}
             FROM [{schema}].[{table}]
-            ORDER BY (SELECT NULL)
+            ORDER BY {order_by}
             OFFSET @P1 ROWS FETCH NEXT @P2 ROWS ONLY
             "#,
             columns = column_list,
             schema = schema.replace(']', "]]"),
-            table = table.replace(']', "]]")
+            table = table.replace(']', "]]"),
+            order_by = order_by,
         );
 
         let result = self
@@ -587,7 +708,16 @@ fn base64_encode(data: &[u8]) -> String {
     STANDARD.encode(data)
 }
 
-/// Merge update pairs (operation 3 followed by 4) into single change records
+/// Merge update pairs (operation 3 followed by 4) into single change records.
+///
+/// This merging strategy pairs consecutive before/after images
+/// strictly by adjacency within the same `commit_lsn`. If multiple updates
+/// to the same row occur within a single transaction (same LSN), only the
+/// first before-image and last after-image are retained — intermediate
+/// states are lost. This is acceptable for most CDC consumers that only
+/// care about the net change, but consumers that need every intermediate
+/// state should use `fn_cdc_get_all_changes` with `'all'` row filter mode
+/// instead of `'all update old'`.
 fn merge_update_pairs(changes: Vec<CdcChangeRecord>) -> Vec<CdcChangeRecord> {
     let mut merged = Vec::with_capacity(changes.len());
     let mut iter = changes.into_iter().peekable();

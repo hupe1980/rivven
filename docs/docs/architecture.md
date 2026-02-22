@@ -46,7 +46,8 @@ This multi-binary architecture provides **security isolation**—database creden
 - **Bootstrap server failover**: Connect to multiple brokers with automatic failover
 - **Auto-create topics**: Topics created automatically with configurable defaults
 - **Per-source configuration**: Override partitions and settings per connector
-- **Connection resilience**: Exponential backoff, automatic reconnection
+- **Connection resilience**: Exponential backoff with jitter, automatic reconnection
+- **Producer reconnection**: Producers automatically reconnect with exponential backoff and jitter on connection loss
 
 ---
 
@@ -384,7 +385,7 @@ Every produce is WAL-first — the message is written to the Group Commit WAL be
 
 Transaction commit and abort decisions are also WAL-protected: a `TxnCommit` or `TxnAbort` record is written to the WAL **before** individual partition markers, ensuring the transaction decision survives a crash during partial marker writes.
 
-Write batching for 10-100x throughput improvement:
+Write batching for 10-100x throughput improvement with batched fsync:
 
 - **Batch Window**: Configurable commit interval (default: 200μs)
 - **Batch Size**: Trigger flush at threshold (default: 4 MB)
@@ -400,7 +401,7 @@ Write batching for 10-100x throughput improvement:
 The read path minimizes lock contention:
 
 - **Dirty flag**: An atomic `write_dirty` flag tracks whether buffered data exists. Reads check the flag first and skip the write-mutex acquisition when no data is pending — eliminates head-of-line blocking behind concurrent appends
-- **Cached mmap**: Read-only memory maps are cached and only invalidated on write, avoiding per-read `mmap()` syscalls
+- **Cached mmap (ArcSwap)**: Read-only memory maps are cached in an `ArcSwap` (lock-free), replacing the previous `RwLock`-based cache. Readers load the current mmap via a single atomic pointer swap — no lock contention, no blocking. The mmap is only re-created when the segment’s write generation changes (tracked via `AtomicU64`), avoiding per-read `mmap()` syscalls
 - **Sparse index**: Binary search over 4KB-interval index entries for O(log n) position lookup
 - **CRC validation**: Every read validates CRC32 before deserialization
 - **Varint offset extraction**: Messages below the target offset are skipped using `postcard::take_from_bytes::<u64>()` — extracting only the 1–10 byte varint-encoded offset without allocating key, value, or headers. Full deserialization is deferred until a matching message is found
@@ -424,6 +425,10 @@ Rivven provides a portable async I/O layer with an io_uring-style API. The curre
 │            │<────│ (std::fs impl)  │<────│            │
 └────────────┘     └─────────────────┘     └────────────┘
 ```
+
+### Response Framing Optimization
+
+Consume responses use a **single-write framing strategy**: the response header and all message frames are assembled in a single buffer before writing to the socket. This avoids multiple small `write()` syscalls and reduces TCP packet fragmentation, improving consumer throughput especially under high fan-out.
 
 ### Request Pipelining (Client)
 

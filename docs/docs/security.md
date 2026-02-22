@@ -20,7 +20,7 @@ Enterprise-grade security features.
 
 ## Overview
 
-Rivven implements **31 security features** to protect your data:
+Rivven implements **31 security features** to protect your data. Authentication is **wired in by default** — all high-level clients (`Producer`, `ResilientClient`, `PipelinedClient`) perform SCRAM-SHA-256 authentication automatically when credentials are configured, including on reconnect.
 
 | Category | Features |
 |:---------|:---------|
@@ -259,6 +259,8 @@ let client = ResilientClient::new(config).await?;
 
 ### Role-Based Access Control (RBAC)
 
+RBAC is enforced on all **data-plane operations** — produce, consume, and admin requests are all subject to authorization checks. Authentication is required by default; unauthenticated requests are rejected before reaching any handler.
+
 Define roles with permissions:
 
 ```yaml
@@ -448,6 +450,28 @@ validation:
     max_key_size: 1024
     max_value_size: 32768
 ```
+
+### TLS Enforcement for CDC Connections
+
+{: .warning }
+> CDC connectors default to `tls.mode: prefer`, which silently falls back to unencrypted connections. For production deployments, set `tls.mode: verify-full` (PostgreSQL) or `tls.mode: verify-identity` (MySQL) to enforce encrypted and authenticated connections.
+
+### TLS Enforcement for Plaintext Auth
+
+{: .warning }
+> When using plaintext authentication (simple username/password), TLS is enforced. The broker rejects plaintext auth attempts over unencrypted connections to prevent credential leakage. Use SCRAM-SHA-256 or enable TLS for password-based authentication.
+
+### HTTP LLM Provider Security
+
+LLM providers (OpenAI, Bedrock) require HTTPS by default. If you need to connect to an HTTP endpoint (e.g., a local proxy or development server), set `allow_insecure: true` explicitly in the provider configuration. This opt-in prevents accidental credential transmission over unencrypted connections.
+
+### Operator Environment Variable Validation
+
+The Rivven operator validates environment variable specifications in CRDs, including `value_from` references. Dangerous environment variables (e.g., `LD_PRELOAD`, `LD_LIBRARY_PATH`) are blocked to prevent injection attacks that could compromise the container runtime.
+
+### Cluster Secret for Raft RPC
+
+Raft RPC communication between cluster nodes is authenticated using a shared cluster secret. This prevents unauthorized nodes from joining the cluster or injecting log entries. Configure the secret via `cluster.secret` or `RIVVEN_CLUSTER_SECRET` environment variable.
 
 ### CDC Identifier Validation
 

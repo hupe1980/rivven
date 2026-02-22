@@ -34,6 +34,7 @@ use aes_gcm::{
 use rand::{rngs::OsRng, RngCore};
 use rivven_core::crypto::{KeyInfo, KeyMaterial, KEY_SIZE};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -245,6 +246,11 @@ impl EncryptionKey {
     /// Whether this key is active (convenience accessor)
     pub fn active(&self) -> bool {
         self.info.active
+    }
+
+    /// Raw key material bytes (for HMAC / KDF operations).
+    pub fn material(&self) -> &[u8] {
+        self.material.as_bytes()
     }
 }
 
@@ -460,9 +466,9 @@ impl<P: KeyProvider> FieldEncryptor<P> {
 
         self.stats.record_event();
         let mut result = event.clone();
-        let fields_to_encrypt = self.config.fields_for_table(&event.table);
+        let rules = self.config.rules_for_table(&event.table);
 
-        if fields_to_encrypt.is_empty() {
+        if rules.is_empty() {
             return Ok(result);
         }
 
@@ -473,10 +479,17 @@ impl<P: KeyProvider> FieldEncryptor<P> {
         if let Some(ref mut after) = result.after {
             if let Some(obj) = after.as_object_mut() {
                 let mut encrypted_count = 0u64;
-                for field in &fields_to_encrypt {
+                for rule in &rules {
+                    let field = &rule.field_name;
                     if let Some(value) = obj.get(field) {
                         let plaintext = value.to_string();
-                        match self.encrypt_value(&cipher, &plaintext, key.id()) {
+                        match self.encrypt_value(
+                            &cipher,
+                            &plaintext,
+                            key.id(),
+                            key.material(),
+                            rule.algorithm,
+                        ) {
                             Ok(ciphertext) => {
                                 obj.insert(
                                     field.clone(),
@@ -484,6 +497,7 @@ impl<P: KeyProvider> FieldEncryptor<P> {
                                         "__encrypted": true,
                                         "__key_id": key.id(),
                                         "__key_version": key.version(),
+                                        "__algorithm": format!("{:?}", rule.algorithm),
                                         "__value": ciphertext,
                                     }),
                                 );
@@ -504,10 +518,17 @@ impl<P: KeyProvider> FieldEncryptor<P> {
         if let Some(ref mut before) = result.before {
             if let Some(obj) = before.as_object_mut() {
                 let mut encrypted_count = 0u64;
-                for field in &fields_to_encrypt {
+                for rule in &rules {
+                    let field = &rule.field_name;
                     if let Some(value) = obj.get(field) {
                         let plaintext = value.to_string();
-                        match self.encrypt_value(&cipher, &plaintext, key.id()) {
+                        match self.encrypt_value(
+                            &cipher,
+                            &plaintext,
+                            key.id(),
+                            key.material(),
+                            rule.algorithm,
+                        ) {
                             Ok(ciphertext) => {
                                 obj.insert(
                                     field.clone(),
@@ -515,6 +536,7 @@ impl<P: KeyProvider> FieldEncryptor<P> {
                                         "__encrypted": true,
                                         "__key_id": key.id(),
                                         "__key_version": key.version(),
+                                        "__algorithm": format!("{:?}", rule.algorithm),
                                         "__value": ciphertext,
                                     }),
                                 );
@@ -622,10 +644,39 @@ impl<P: KeyProvider> FieldEncryptor<P> {
     }
 
     /// Encrypt a single value.
-    fn encrypt_value(&self, cipher: &Aes256Gcm, plaintext: &str, key_id: &str) -> Result<String> {
-        // Generate random nonce
-        let mut nonce_bytes = [0u8; 12];
-        OsRng.fill_bytes(&mut nonce_bytes);
+    ///
+    /// For `Aes256Gcm` (default): generates a random 12-byte nonce per call.
+    /// For `Deterministic`: derives the nonce from `HMAC-SHA256(key_material, plaintext)`
+    /// truncated to 12 bytes.  Equal plaintexts encrypted with the same key
+    /// produce identical ciphertext — enabling equality searches but leaking
+    /// equality information to anyone with read access to the ciphertext.
+    fn encrypt_value(
+        &self,
+        cipher: &Aes256Gcm,
+        plaintext: &str,
+        key_id: &str,
+        key_material: &[u8],
+        algorithm: EncryptionAlgorithm,
+    ) -> Result<String> {
+        let nonce_bytes: [u8; 12] = match algorithm {
+            EncryptionAlgorithm::Aes256Gcm => {
+                let mut n = [0u8; 12];
+                OsRng.fill_bytes(&mut n);
+                n
+            }
+            EncryptionAlgorithm::Deterministic => {
+                // SIV-like construction: HMAC(key, plaintext) → nonce
+                use hmac::{Hmac, Mac as HmacMac};
+                type HmacSha256 = Hmac<Sha256>;
+                let mut mac = <HmacSha256 as HmacMac>::new_from_slice(key_material)
+                    .map_err(|_| CdcError::replication("HMAC key init failed"))?;
+                mac.update(plaintext.as_bytes());
+                let tag = mac.finalize().into_bytes();
+                let mut n = [0u8; 12];
+                n.copy_from_slice(&tag[..12]);
+                n
+            }
+        };
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         // AAD includes key_id for additional authentication
@@ -700,80 +751,17 @@ impl<P: KeyProvider> FieldEncryptor<P> {
     }
 }
 
-// Base64 encoding/decoding helpers
+// Base64 encoding/decoding helpers (using the `base64` crate)
 fn base64_encode(data: &[u8]) -> String {
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::new();
-
-    for chunk in data.chunks(3) {
-        let n = chunk.len();
-        let mut buf = [0u8; 3];
-        buf[..n].copy_from_slice(chunk);
-
-        let b = ((buf[0] as u32) << 16) | ((buf[1] as u32) << 8) | (buf[2] as u32);
-
-        result.push(ALPHABET[(b >> 18) as usize & 0x3F] as char);
-        result.push(ALPHABET[(b >> 12) as usize & 0x3F] as char);
-
-        if n > 1 {
-            result.push(ALPHABET[(b >> 6) as usize & 0x3F] as char);
-        } else {
-            result.push('=');
-        }
-
-        if n > 2 {
-            result.push(ALPHABET[b as usize & 0x3F] as char);
-        } else {
-            result.push('=');
-        }
-    }
-
-    result
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    STANDARD.encode(data)
 }
 
 fn base64_decode(s: &str) -> Result<Vec<u8>> {
-    const DECODE: [i8; 128] = [
-        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-        -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 62, -1, -1,
-        -1, 63, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, -1, -1, -1, -1, -1, -1, -1, 0, 1, 2, 3, 4,
-        5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, -1, -1, -1,
-        -1, -1, -1, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45,
-        46, 47, 48, 49, 50, 51, -1, -1, -1, -1, -1,
-    ];
-
-    let s = s.trim_end_matches('=');
-    let mut result = Vec::with_capacity(s.len() * 3 / 4);
-
-    let bytes: Vec<u8> = s.bytes().collect();
-    for chunk in bytes.chunks(4) {
-        let mut buf = [0u8; 4];
-        for (i, &b) in chunk.iter().enumerate() {
-            if b >= 128 {
-                return Err(CdcError::replication("Invalid base64"));
-            }
-            let val = DECODE[b as usize];
-            if val < 0 {
-                return Err(CdcError::replication("Invalid base64"));
-            }
-            buf[i] = val as u8;
-        }
-
-        let n = chunk.len();
-        let b = ((buf[0] as u32) << 18)
-            | ((buf[1] as u32) << 12)
-            | ((buf[2] as u32) << 6)
-            | (buf[3] as u32);
-
-        result.push((b >> 16) as u8);
-        if n > 2 {
-            result.push((b >> 8) as u8);
-        }
-        if n > 3 {
-            result.push(b as u8);
-        }
-    }
-
-    Ok(result)
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    STANDARD
+        .decode(s)
+        .map_err(|e| CdcError::replication(format!("Invalid base64: {}", e)))
 }
 
 #[cfg(test)]

@@ -65,7 +65,27 @@ fn validate_k8s_name(value: &str) -> Result<(), ValidationError> {
     Ok(())
 }
 
-/// Validate environment variable name (POSIX)
+/// Regex for validating POSIX environment variable names:
+/// must start with a letter or underscore, followed by letters, digits, or underscores.
+static ENV_NAME_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]*$").unwrap());
+
+/// Characters that are dangerous in shell contexts and must not appear in env var values.
+static SHELL_METACHAR_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[`$;|&<>()\\!]").unwrap());
+
+/// Maximum length for an environment variable value (32 KiB).
+const MAX_ENV_VALUE_LEN: usize = 32_768;
+
+/// Validate environment variable names and values.
+///
+/// Enforces:
+/// - Maximum 100 env vars
+/// - POSIX-compliant names (letter/underscore prefix, alphanumeric/underscore body)
+/// - Name length 1–256 chars
+/// - Value length ≤ 32 KiB
+/// - No shell metacharacters in values (backtick, `$`, `;`, `|`, `&`, `<`, `>`, `(`, `)`, `\`, `!`)
+/// - Blocklist of security-sensitive variable names
 fn validate_env_vars(vars: &[k8s_openapi::api::core::v1::EnvVar]) -> Result<(), ValidationError> {
     // Limit number of env vars to prevent resource exhaustion
     const MAX_ENV_VARS: usize = 100;
@@ -75,11 +95,51 @@ fn validate_env_vars(vars: &[k8s_openapi::api::core::v1::EnvVar]) -> Result<(), 
         ));
     }
     for var in vars {
-        // Validate env var name format
+        // Validate env var name length
         if var.name.is_empty() || var.name.len() > 256 {
             return Err(ValidationError::new("invalid_env_name")
                 .with_message("environment variable name must be 1-256 characters".into()));
         }
+
+        // Validate env var name is POSIX-compliant
+        if !ENV_NAME_REGEX.is_match(&var.name) {
+            return Err(
+                ValidationError::new("invalid_env_name_format").with_message(
+                    format!(
+                        "environment variable name '{}' is not POSIX-compliant \
+                     (must match [a-zA-Z_][a-zA-Z0-9_]*)",
+                        var.name
+                    )
+                    .into(),
+                ),
+            );
+        }
+
+        // Validate env var value if present
+        if let Some(ref value) = var.value {
+            if value.len() > MAX_ENV_VALUE_LEN {
+                return Err(ValidationError::new("env_value_too_long").with_message(
+                    format!(
+                        "environment variable '{}' value exceeds {} byte limit",
+                        var.name, MAX_ENV_VALUE_LEN
+                    )
+                    .into(),
+                ));
+            }
+            if SHELL_METACHAR_REGEX.is_match(value) {
+                return Err(
+                    ValidationError::new("env_value_shell_metachar").with_message(
+                        format!(
+                            "environment variable '{}' value contains shell metacharacters \
+                         (backtick, $, ;, |, &, <, >, (, ), \\, ! are not allowed)",
+                            var.name
+                        )
+                        .into(),
+                    ),
+                );
+            }
+        }
+
         // Check for dangerous env var names that could override security settings
         let forbidden_names = [
             "LD_PRELOAD",
@@ -88,11 +148,14 @@ fn validate_env_vars(vars: &[k8s_openapi::api::core::v1::EnvVar]) -> Result<(), 
             "DYLD_LIBRARY_PATH",
         ];
         let forbidden_prefixes = ["LD_AUDIT"];
+        // Check both `value` and `value_from` references.
+        let has_value = var.value.is_some() || var.value_from.is_some();
         for name in forbidden_names {
-            if var.name == name && var.value.is_some() {
+            if var.name == name && has_value {
                 return Err(ValidationError::new("forbidden_env_var").with_message(
                     format!(
-                        "environment variable '{}' is not allowed for security",
+                        "environment variable '{}' is not allowed for security \
+                         (blocked for both direct values and value_from references)",
                         var.name
                     )
                     .into(),
@@ -100,10 +163,11 @@ fn validate_env_vars(vars: &[k8s_openapi::api::core::v1::EnvVar]) -> Result<(), 
             }
         }
         for prefix in forbidden_prefixes {
-            if var.name.starts_with(prefix) && var.value.is_some() {
+            if var.name.starts_with(prefix) && has_value {
                 return Err(ValidationError::new("forbidden_env_var").with_message(
                     format!(
-                        "environment variable '{}' is not allowed for security",
+                        "environment variable '{}' is not allowed for security \
+                         (blocked for both direct values and value_from references)",
                         var.name
                     )
                     .into(),
@@ -522,6 +586,7 @@ impl Default for BrokerConfig {
 /// TLS configuration
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, Validate)]
 #[serde(rename_all = "camelCase")]
+#[validate(schema(function = "validate_tls_spec"))]
 pub struct TlsSpec {
     /// Enable TLS
     #[serde(default)]
@@ -540,6 +605,24 @@ pub struct TlsSpec {
     #[serde(default)]
     #[validate(custom(function = "validate_optional_k8s_name"))]
     pub ca_secret_name: Option<String>,
+}
+
+/// Structural validation for [`TlsSpec`].
+///
+/// Ensures logical consistency: `cert_secret_name` must be set when TLS is
+/// enabled, `ca_secret_name` must be set when mTLS is enabled, and mTLS
+/// cannot be enabled without TLS itself being enabled.
+fn validate_tls_spec(spec: &TlsSpec) -> Result<(), validator::ValidationError> {
+    if spec.enabled && spec.cert_secret_name.is_none() {
+        return Err(validator::ValidationError::new("tls_cert_required"));
+    }
+    if spec.mtls_enabled && !spec.enabled {
+        return Err(validator::ValidationError::new("mtls_requires_tls"));
+    }
+    if spec.mtls_enabled && spec.ca_secret_name.is_none() {
+        return Err(validator::ValidationError::new("mtls_ca_required"));
+    }
+    Ok(())
 }
 
 /// Metrics configuration
@@ -1724,10 +1807,21 @@ fn default_start_offset() -> String {
 fn validate_start_offset(offset: &str) -> Result<(), ValidationError> {
     match offset {
         "earliest" | "latest" => Ok(()),
-        s if s.contains('T') && s.contains(':') => Ok(()), // ISO 8601 timestamp
-        _ => Err(ValidationError::new("invalid_start_offset").with_message(
-            "start offset must be 'earliest', 'latest', or ISO 8601 timestamp".into(),
-        )),
+        s => {
+            // Strict RFC 3339 parsing — rejects malformed timestamps like
+            // "not-a-dateT:" that the previous heuristic accepted.
+            chrono::DateTime::parse_from_rfc3339(s).map_err(|e| {
+                ValidationError::new("invalid_start_offset").with_message(
+                    format!(
+                        "start offset must be 'earliest', 'latest', or a valid \
+                         RFC 3339 timestamp (e.g. '2024-01-01T00:00:00Z'): {}",
+                        e
+                    )
+                    .into(),
+                )
+            })?;
+            Ok(())
+        }
     }
 }
 
@@ -2053,6 +2147,16 @@ pub struct ConnectCondition {
 }
 
 /// Status of an individual connector
+///
+/// **Limitation:** When `status_source` is `"synthetic"`, this status is
+/// inferred from the CRD spec (`enabled` flag) and Deployment readiness,
+/// not queried from the actual running connector instance. Fields like
+/// `events_processed` are always zero and `state` reflects the *desired*
+/// state rather than the *observed* runtime state. A connector reported as
+/// "running" may still be initializing, failing internally, or experiencing
+/// backpressure. Check `status_source` and `last_probed` to determine
+/// whether the status reflects real health. To get true runtime health,
+/// query the Connect worker's health/metrics endpoint directly.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ConnectorStatus {
@@ -2065,8 +2169,19 @@ pub struct ConnectorStatus {
     /// Connector kind (postgres-cdc, stdout, etc.)
     pub kind: String,
 
-    /// Current state (running, stopped, failed)
+    /// Current state (running, stopped, failed, disabled, pending)
     pub state: String,
+
+    /// Origin of this status: `"synthetic"` (inferred from spec/deployment)
+    /// or `"observed"` (probed from the running connector). Consumers should
+    /// treat synthetic statuses as best-effort approximations.
+    #[serde(default = "default_status_source")]
+    pub status_source: String,
+
+    /// ISO 8601 timestamp of the last time the connector was actually probed
+    /// for health. `None` means no probe has been performed (status is purely
+    /// synthetic).
+    pub last_probed: Option<String>,
 
     /// Number of events processed
     pub events_processed: i64,
@@ -2076,6 +2191,10 @@ pub struct ConnectorStatus {
 
     /// Last successful operation time
     pub last_success_time: Option<String>,
+}
+
+fn default_status_source() -> String {
+    "synthetic".to_string()
 }
 
 impl RivvenConnectSpec {
@@ -4071,7 +4190,13 @@ mod tests {
         assert!(validate_start_offset("earliest").is_ok());
         assert!(validate_start_offset("latest").is_ok());
         assert!(validate_start_offset("2024-01-01T00:00:00Z").is_ok());
+        assert!(validate_start_offset("2024-06-15T12:30:00+02:00").is_ok());
         assert!(validate_start_offset("invalid").is_err());
+        // These inputs are correctly rejected:
+        assert!(validate_start_offset("not-a-dateT:").is_err());
+        assert!(validate_start_offset("xTy:z").is_err());
+        assert!(validate_start_offset("2024-13-01T00:00:00Z").is_err()); // invalid month
+        assert!(validate_start_offset("2024-01-32T00:00:00Z").is_err()); // invalid day
     }
 
     #[test]

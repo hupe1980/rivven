@@ -12,14 +12,11 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-/// Get system hostname via the `hostname` command, falling back to "unknown".
+/// Get system hostname via POSIX `gethostname`, falling back to "unknown".
 fn hostname() -> String {
-    std::process::Command::new("hostname")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-        .unwrap_or_else(|| "unknown".to_owned())
+    gethostname::gethostname()
+        .into_string()
+        .unwrap_or_else(|_| "unknown".to_owned())
 }
 
 /// Rivven - High-Performance Distributed Event Streaming Platform
@@ -219,6 +216,14 @@ pub struct Cli {
     /// Require client certificate verification
     #[arg(long, default_value = "false", env = "RIVVEN_TLS_VERIFY_CLIENT")]
     pub tls_verify_client: bool,
+
+    // ============ Client Authentication ============
+    /// Require client authentication for all requests.
+    /// When enabled, clients must authenticate (SASL/PLAIN, SASL/SCRAM-SHA-256,
+    /// or username/password) before issuing any non-auth request.
+    /// Enabled by default. Use `--no-require-auth` for development.
+    #[arg(long, default_value = "true", env = "RIVVEN_REQUIRE_AUTH")]
+    pub require_auth: bool,
 
     // ============ Cluster Security ============
     /// Bearer token for authenticating Raft RPCs between cluster nodes.

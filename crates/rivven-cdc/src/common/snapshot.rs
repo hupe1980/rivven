@@ -324,7 +324,14 @@ pub struct SnapshotConfig {
     pub query_timeout: Duration,
     /// Progress save interval
     pub progress_interval: Duration,
-    /// Use consistent read (snapshot isolation)
+    /// Use consistent read (snapshot isolation).
+    ///
+    /// When enabled, the snapshot queries run inside a transaction
+    /// with REPEATABLE READ isolation (or the database-specific equivalent).
+    /// The isolation level is currently hardcoded and not configurable per
+    /// snapshot. If your workload requires a different isolation level
+    /// (e.g., SERIALIZABLE or READ COMMITTED), you must override it at the
+    /// `SnapshotSource` implementation level.
     pub consistent_read: bool,
     /// Include row count estimate
     pub estimate_rows: bool,

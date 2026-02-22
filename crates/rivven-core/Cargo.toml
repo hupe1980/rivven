@@ -39,6 +39,7 @@ chrono = { workspace = true }
 futures = { workspace = true }
 async-trait = { workspace = true }
 memmap2 = "0.9"
+arc-swap = "1"
 crc32fast = "1.3"
 serde_bytes = { workspace = true }
 dashmap = "6.1"

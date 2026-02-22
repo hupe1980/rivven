@@ -712,17 +712,31 @@ impl TopicResolver {
 
         let mut result = self.pattern.clone();
 
+        // Use "_unknown_" instead of empty strings for
+        // unresolvable placeholders to avoid malformed topic names
+        // like "cdc..users".
+        let resolve_value = |value: &str| -> String {
+            if value.is_empty() {
+                tracing::warn!(
+                    "Topic placeholder resolved to empty string, using '_unknown_' fallback"
+                );
+                "_unknown_".to_string()
+            } else {
+                self.normalization.normalize_identifier(value)
+            }
+        };
+
         // Normalize and substitute placeholders
         if self.placeholders.contains("database") {
-            let normalized = self.normalization.normalize_identifier(metadata.database);
+            let normalized = resolve_value(metadata.database);
             result = result.replace("{database}", &normalized);
         }
         if self.placeholders.contains("schema") {
-            let normalized = self.normalization.normalize_identifier(metadata.schema);
+            let normalized = resolve_value(metadata.schema);
             result = result.replace("{schema}", &normalized);
         }
         if self.placeholders.contains("table") {
-            let normalized = self.normalization.normalize_identifier(metadata.table);
+            let normalized = resolve_value(metadata.table);
             result = result.replace("{table}", &normalized);
         }
 

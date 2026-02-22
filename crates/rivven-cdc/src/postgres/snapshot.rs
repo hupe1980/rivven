@@ -434,23 +434,38 @@ pub async fn discover_primary_key(
         WHERE n.nspname = $1 AND c.relname = $2
         AND i.indisprimary
         ORDER BY array_position(i.indkey, a.attnum)
-        LIMIT 1
     "#;
 
-    match client.query_opt(query, &[&schema, &table]).await {
-        Ok(Some(row)) => {
-            let pk: String = row.get(0);
-            debug!("Primary key for {}.{}: {}", schema, table, pk);
-            Ok(Some(pk))
-        }
-        Ok(None) => {
-            debug!("No primary key for {}.{}", schema, table);
-            Ok(None)
-        }
+    let rows = match client.query(query, &[&schema, &table]).await {
+        Ok(rows) => rows,
         Err(e) => {
             warn!(
                 "Failed to discover primary key for {}.{}: {}",
                 schema, table, e
+            );
+            return Ok(None);
+        }
+    };
+
+    match rows.len() {
+        0 => {
+            debug!("No primary key for {}.{}", schema, table);
+            Ok(None)
+        }
+        1 => {
+            let pk: String = rows[0].get(0);
+            debug!("Primary key for {}.{}: {}", schema, table, pk);
+            Ok(Some(pk))
+        }
+        n => {
+            let cols: Vec<String> = rows.iter().map(|r| r.get(0)).collect();
+            warn!(
+                "Table {}.{} has a composite primary key ({} columns: {}). \
+                 Keyset pagination requires a single-column key — falling back to ctid.",
+                schema,
+                table,
+                n,
+                cols.join(", ")
             );
             Ok(None)
         }
@@ -483,14 +498,14 @@ pub async fn discover_tables_with_keys(
         let query = r#"
             SELECT t.table_name,
                    COALESCE(
-                       (SELECT a.attname 
+                       (SELECT MIN(a.attname) 
                         FROM pg_index i
                         JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
                         JOIN pg_class c ON c.oid = i.indrelid
                         JOIN pg_namespace n ON n.oid = c.relnamespace
                         WHERE n.nspname = t.table_schema AND c.relname = t.table_name
                         AND i.indisprimary
-                        LIMIT 1),
+                        HAVING COUNT(*) = 1),
                        'ctid'
                    ) as key_column
             FROM information_schema.tables t
@@ -509,9 +524,9 @@ pub async fn discover_tables_with_keys(
             let key: String = row.get(1);
             if key == "ctid" {
                 tracing::warn!(
-                    "Table {}.{} has no primary key — using ctid as fallback. \
+                    "Table {}.{} has no single-column primary key — using ctid as fallback. \
                      ctid is unstable and may change during VACUUM/UPDATE. \
-                     Consider adding a primary key for reliable CDC.",
+                     Consider adding a single-column primary key for reliable CDC.",
                     schema,
                     table
                 );

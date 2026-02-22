@@ -29,6 +29,30 @@ pub struct MetricsState {
     pub broker_connection_failures: AtomicU64,
 }
 
+/// Atomic snapshot of all counter values for a single connector.
+///
+/// Collecting individual `AtomicU64` values one-by-one yields an inconsistent
+/// view when counters are being mutated concurrently.  `ConnectorMetricsSnapshot`
+/// captures every counter under a single point in time so that consumers (e.g.
+/// Prometheus rendering) see a coherent picture.
+#[derive(Debug, Clone, Default)]
+pub struct ConnectorMetricsSnapshot {
+    pub events_total: u64,
+    pub errors_total: u64,
+    pub bytes_total: u64,
+    pub is_running: bool,
+    pub rate_limited_events: u64,
+    pub rate_limit_wait_ms: u64,
+    pub pool_connections_created: u64,
+    pub pool_acquisitions: u64,
+    pub pool_reused: u64,
+    pub pool_fresh: u64,
+    pub pool_health_failures: u64,
+    pub pool_lifetime_recycled: u64,
+    pub pool_idle_recycled: u64,
+    pub pool_wait_time_us: u64,
+}
+
 /// Metrics for a single connector
 #[derive(Default)]
 pub struct ConnectorMetrics {
@@ -58,6 +82,32 @@ pub struct ConnectorMetrics {
     pub pool_idle_recycled: AtomicU64,
     /// Pool total wait time (microseconds)
     pub pool_wait_time_us: AtomicU64,
+}
+
+impl ConnectorMetrics {
+    /// Take an atomic snapshot of all counter values.
+    ///
+    /// All loads use `Ordering::SeqCst` so that the returned values form a
+    /// consistent, linearisable snapshot – no counter can appear to "travel
+    /// back in time" relative to another.
+    pub fn snapshot(&self) -> ConnectorMetricsSnapshot {
+        ConnectorMetricsSnapshot {
+            events_total: self.events_total.load(Ordering::SeqCst),
+            errors_total: self.errors_total.load(Ordering::SeqCst),
+            bytes_total: self.bytes_total.load(Ordering::SeqCst),
+            is_running: self.is_running.load(Ordering::SeqCst),
+            rate_limited_events: self.rate_limited_events.load(Ordering::SeqCst),
+            rate_limit_wait_ms: self.rate_limit_wait_ms.load(Ordering::SeqCst),
+            pool_connections_created: self.pool_connections_created.load(Ordering::SeqCst),
+            pool_acquisitions: self.pool_acquisitions.load(Ordering::SeqCst),
+            pool_reused: self.pool_reused.load(Ordering::SeqCst),
+            pool_fresh: self.pool_fresh.load(Ordering::SeqCst),
+            pool_health_failures: self.pool_health_failures.load(Ordering::SeqCst),
+            pool_lifetime_recycled: self.pool_lifetime_recycled.load(Ordering::SeqCst),
+            pool_idle_recycled: self.pool_idle_recycled.load(Ordering::SeqCst),
+            pool_wait_time_us: self.pool_wait_time_us.load(Ordering::SeqCst),
+        }
+    }
 }
 
 pub type SharedMetricsState = Arc<RwLock<MetricsState>>;
@@ -123,8 +173,29 @@ async fn handle_metrics_request(
 }
 
 /// Render metrics in Prometheus text format
+///
+/// All per-connector counters are first collected into atomic snapshots so
+/// that the rendered values form a consistent, point-in-time view.
 async fn render_metrics(state: &SharedMetricsState) -> String {
     let state = state.read().await;
+
+    // ── Phase 1: Take atomic snapshots of every connector ──────────────
+    let source_snapshots: Vec<(&String, ConnectorMetricsSnapshot)> = state
+        .sources
+        .iter()
+        .map(|(name, m)| (name, m.snapshot()))
+        .collect();
+
+    let sink_snapshots: Vec<(&String, ConnectorMetricsSnapshot)> = state
+        .sinks
+        .iter()
+        .map(|(name, m)| (name, m.snapshot()))
+        .collect();
+
+    let broker_attempts = state.broker_connection_attempts.load(Ordering::SeqCst);
+    let broker_failures = state.broker_connection_failures.load(Ordering::SeqCst);
+
+    // ── Phase 2: Render from snapshots (no more atomic loads) ──────────
     let mut output = String::new();
 
     // Uptime
@@ -138,22 +209,20 @@ async fn render_metrics(state: &SharedMetricsState) -> String {
     // Source metrics
     output.push_str("# HELP rivven_connect_source_events_total Total events processed by source\n");
     output.push_str("# TYPE rivven_connect_source_events_total counter\n");
-    for (name, metrics) in &state.sources {
+    for (name, snap) in &source_snapshots {
         output.push_str(&format!(
             "rivven_connect_source_events_total{{source=\"{}\"}} {}\n",
-            name,
-            metrics.events_total.load(Ordering::Relaxed)
+            name, snap.events_total
         ));
     }
     output.push('\n');
 
     output.push_str("# HELP rivven_connect_source_errors_total Total errors for source\n");
     output.push_str("# TYPE rivven_connect_source_errors_total counter\n");
-    for (name, metrics) in &state.sources {
+    for (name, snap) in &source_snapshots {
         output.push_str(&format!(
             "rivven_connect_source_errors_total{{source=\"{}\"}} {}\n",
-            name,
-            metrics.errors_total.load(Ordering::Relaxed)
+            name, snap.errors_total
         ));
     }
     output.push('\n');
@@ -161,12 +230,8 @@ async fn render_metrics(state: &SharedMetricsState) -> String {
     output
         .push_str("# HELP rivven_connect_source_running Whether source is running (1=yes, 0=no)\n");
     output.push_str("# TYPE rivven_connect_source_running gauge\n");
-    for (name, metrics) in &state.sources {
-        let running = if metrics.is_running.load(Ordering::Relaxed) {
-            1
-        } else {
-            0
-        };
+    for (name, snap) in &source_snapshots {
+        let running = if snap.is_running { 1 } else { 0 };
         output.push_str(&format!(
             "rivven_connect_source_running{{source=\"{}\"}} {}\n",
             name, running
@@ -177,34 +242,28 @@ async fn render_metrics(state: &SharedMetricsState) -> String {
     // Sink metrics
     output.push_str("# HELP rivven_connect_sink_events_total Total events processed by sink\n");
     output.push_str("# TYPE rivven_connect_sink_events_total counter\n");
-    for (name, metrics) in &state.sinks {
+    for (name, snap) in &sink_snapshots {
         output.push_str(&format!(
             "rivven_connect_sink_events_total{{sink=\"{}\"}} {}\n",
-            name,
-            metrics.events_total.load(Ordering::Relaxed)
+            name, snap.events_total
         ));
     }
     output.push('\n');
 
     output.push_str("# HELP rivven_connect_sink_errors_total Total errors for sink\n");
     output.push_str("# TYPE rivven_connect_sink_errors_total counter\n");
-    for (name, metrics) in &state.sinks {
+    for (name, snap) in &sink_snapshots {
         output.push_str(&format!(
             "rivven_connect_sink_errors_total{{sink=\"{}\"}} {}\n",
-            name,
-            metrics.errors_total.load(Ordering::Relaxed)
+            name, snap.errors_total
         ));
     }
     output.push('\n');
 
     output.push_str("# HELP rivven_connect_sink_running Whether sink is running (1=yes, 0=no)\n");
     output.push_str("# TYPE rivven_connect_sink_running gauge\n");
-    for (name, metrics) in &state.sinks {
-        let running = if metrics.is_running.load(Ordering::Relaxed) {
-            1
-        } else {
-            0
-        };
+    for (name, snap) in &sink_snapshots {
+        let running = if snap.is_running { 1 } else { 0 };
         output.push_str(&format!(
             "rivven_connect_sink_running{{sink=\"{}\"}} {}\n",
             name, running
@@ -217,12 +276,11 @@ async fn render_metrics(state: &SharedMetricsState) -> String {
         "# HELP rivven_connect_sink_rate_limited_events_total Events throttled by rate limiter\n",
     );
     output.push_str("# TYPE rivven_connect_sink_rate_limited_events_total counter\n");
-    for (name, metrics) in &state.sinks {
-        let rate_limited = metrics.rate_limited_events.load(Ordering::Relaxed);
-        if rate_limited > 0 {
+    for (name, snap) in &sink_snapshots {
+        if snap.rate_limited_events > 0 {
             output.push_str(&format!(
                 "rivven_connect_sink_rate_limited_events_total{{sink=\"{}\"}} {}\n",
-                name, rate_limited
+                name, snap.rate_limited_events
             ));
         }
     }
@@ -230,28 +288,31 @@ async fn render_metrics(state: &SharedMetricsState) -> String {
 
     output.push_str("# HELP rivven_connect_sink_rate_limit_wait_ms_total Total time spent waiting for rate limiter\n");
     output.push_str("# TYPE rivven_connect_sink_rate_limit_wait_ms_total counter\n");
-    for (name, metrics) in &state.sinks {
-        let wait_ms = metrics.rate_limit_wait_ms.load(Ordering::Relaxed);
-        if wait_ms > 0 {
+    for (name, snap) in &sink_snapshots {
+        if snap.rate_limit_wait_ms > 0 {
             output.push_str(&format!(
                 "rivven_connect_sink_rate_limit_wait_ms_total{{sink=\"{}\"}} {}\n",
-                name, wait_ms
+                name, snap.rate_limit_wait_ms
             ));
         }
     }
     output.push('\n');
 
     // Pool metrics for RDBC connectors
+    let all_snapshots: Vec<_> = source_snapshots
+        .iter()
+        .chain(sink_snapshots.iter())
+        .collect();
+
     output.push_str(
         "# HELP rivven_connect_pool_connections_total Total connections created by pool\n",
     );
     output.push_str("# TYPE rivven_connect_pool_connections_total counter\n");
-    for (name, metrics) in state.sources.iter().chain(state.sinks.iter()) {
-        let created = metrics.pool_connections_created.load(Ordering::Relaxed);
-        if created > 0 {
+    for (name, snap) in &all_snapshots {
+        if snap.pool_connections_created > 0 {
             output.push_str(&format!(
                 "rivven_connect_pool_connections_total{{connector=\"{}\"}} {}\n",
-                name, created
+                name, snap.pool_connections_created
             ));
         }
     }
@@ -259,12 +320,11 @@ async fn render_metrics(state: &SharedMetricsState) -> String {
 
     output.push_str("# HELP rivven_connect_pool_acquisitions_total Total pool acquisitions\n");
     output.push_str("# TYPE rivven_connect_pool_acquisitions_total counter\n");
-    for (name, metrics) in state.sources.iter().chain(state.sinks.iter()) {
-        let acquisitions = metrics.pool_acquisitions.load(Ordering::Relaxed);
-        if acquisitions > 0 {
+    for (name, snap) in &all_snapshots {
+        if snap.pool_acquisitions > 0 {
             output.push_str(&format!(
                 "rivven_connect_pool_acquisitions_total{{connector=\"{}\"}} {}\n",
-                name, acquisitions
+                name, snap.pool_acquisitions
             ));
         }
     }
@@ -272,12 +332,10 @@ async fn render_metrics(state: &SharedMetricsState) -> String {
 
     output.push_str("# HELP rivven_connect_pool_reuse_ratio Pool connection reuse ratio (0-1)\n");
     output.push_str("# TYPE rivven_connect_pool_reuse_ratio gauge\n");
-    for (name, metrics) in state.sources.iter().chain(state.sinks.iter()) {
-        let reused = metrics.pool_reused.load(Ordering::Relaxed);
-        let fresh = metrics.pool_fresh.load(Ordering::Relaxed);
-        let total = reused + fresh;
+    for (name, snap) in &all_snapshots {
+        let total = snap.pool_reused + snap.pool_fresh;
         if total > 0 {
-            let ratio = reused as f64 / total as f64;
+            let ratio = snap.pool_reused as f64 / total as f64;
             output.push_str(&format!(
                 "rivven_connect_pool_reuse_ratio{{connector=\"{}\"}} {:.4}\n",
                 name, ratio
@@ -290,11 +348,9 @@ async fn render_metrics(state: &SharedMetricsState) -> String {
         "# HELP rivven_connect_pool_avg_wait_ms Average pool acquisition wait time in milliseconds\n",
     );
     output.push_str("# TYPE rivven_connect_pool_avg_wait_ms gauge\n");
-    for (name, metrics) in state.sources.iter().chain(state.sinks.iter()) {
-        let acquisitions = metrics.pool_acquisitions.load(Ordering::Relaxed);
-        let wait_us = metrics.pool_wait_time_us.load(Ordering::Relaxed);
-        if acquisitions > 0 {
-            let avg_ms = (wait_us as f64 / 1000.0) / acquisitions as f64;
+    for (name, snap) in &all_snapshots {
+        if snap.pool_acquisitions > 0 {
+            let avg_ms = (snap.pool_wait_time_us as f64 / 1000.0) / snap.pool_acquisitions as f64;
             output.push_str(&format!(
                 "rivven_connect_pool_avg_wait_ms{{connector=\"{}\"}} {:.3}\n",
                 name, avg_ms
@@ -305,18 +361,16 @@ async fn render_metrics(state: &SharedMetricsState) -> String {
 
     output.push_str("# HELP rivven_connect_pool_recycled_total Total connections recycled\n");
     output.push_str("# TYPE rivven_connect_pool_recycled_total counter\n");
-    for (name, metrics) in state.sources.iter().chain(state.sinks.iter()) {
-        let lifetime = metrics.pool_lifetime_recycled.load(Ordering::Relaxed);
-        let idle = metrics.pool_idle_recycled.load(Ordering::Relaxed);
-        let total = lifetime + idle;
+    for (name, snap) in &all_snapshots {
+        let total = snap.pool_lifetime_recycled + snap.pool_idle_recycled;
         if total > 0 {
             output.push_str(&format!(
                 "rivven_connect_pool_recycled_total{{connector=\"{}\",reason=\"lifetime\"}} {}\n",
-                name, lifetime
+                name, snap.pool_lifetime_recycled
             ));
             output.push_str(&format!(
                 "rivven_connect_pool_recycled_total{{connector=\"{}\",reason=\"idle\"}} {}\n",
-                name, idle
+                name, snap.pool_idle_recycled
             ));
         }
     }
@@ -326,12 +380,11 @@ async fn render_metrics(state: &SharedMetricsState) -> String {
         "# HELP rivven_connect_pool_health_failures_total Total pool health check failures\n",
     );
     output.push_str("# TYPE rivven_connect_pool_health_failures_total counter\n");
-    for (name, metrics) in state.sources.iter().chain(state.sinks.iter()) {
-        let failures = metrics.pool_health_failures.load(Ordering::Relaxed);
-        if failures > 0 {
+    for (name, snap) in &all_snapshots {
+        if snap.pool_health_failures > 0 {
             output.push_str(&format!(
                 "rivven_connect_pool_health_failures_total{{connector=\"{}\"}} {}\n",
-                name, failures
+                name, snap.pool_health_failures
             ));
         }
     }
@@ -344,7 +397,7 @@ async fn render_metrics(state: &SharedMetricsState) -> String {
     output.push_str("# TYPE rivven_connect_broker_connection_attempts_total counter\n");
     output.push_str(&format!(
         "rivven_connect_broker_connection_attempts_total {}\n\n",
-        state.broker_connection_attempts.load(Ordering::Relaxed)
+        broker_attempts
     ));
 
     output.push_str(
@@ -353,7 +406,7 @@ async fn render_metrics(state: &SharedMetricsState) -> String {
     output.push_str("# TYPE rivven_connect_broker_connection_failures_total counter\n");
     output.push_str(&format!(
         "rivven_connect_broker_connection_failures_total {}\n",
-        state.broker_connection_failures.load(Ordering::Relaxed)
+        broker_failures
     ));
 
     output

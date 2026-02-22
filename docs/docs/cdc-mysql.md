@@ -27,6 +27,8 @@ Rivven CDC for MySQL/MariaDB uses **binary log replication** to stream row-level
 - Configuration options
 - GTID vs position-based replication
 - MariaDB-specific features
+- Full JSON type support
+- Automatic reconnection
 - Troubleshooting
 
 ---
@@ -412,6 +414,39 @@ SET GLOBAL binlog_checksum = 'CRC32';
 
 {: .note }
 Rivven gracefully handles servers with checksums disabled. No errors will occur if `binlog_checksum = NONE`.
+
+---
+
+## JSON Type Support
+
+Rivven includes a **full MySQL binary JSON decoder** that converts MySQL's internal `MYSQL_TYPE_JSON` representation into structured JSON values. All JSON subtypes are supported:
+
+| JSON Subtype | Decoded As |
+|:-------------|:-----------|
+| Small/large JSON object | Nested `serde_json::Value::Object` |
+| Small/large JSON array | `serde_json::Value::Array` |
+| String literal | `serde_json::Value::String` |
+| Integer (int16/32/64, uint16/32/64) | `serde_json::Value::Number` |
+| Double | `serde_json::Value::Number` |
+| Boolean (true/false literals) | `serde_json::Value::Bool` |
+| Null literal | `serde_json::Value::Null` |
+| Opaque types (date, time, datetime, decimal) | Opaque binary preserved |
+
+{: .note }
+> Rivven decodes JSON columns into structured values, enabling downstream consumers to process JSON data without additional parsing.
+
+---
+
+## Automatic Reconnection
+
+The MySQL CDC connector automatically reconnects to the binlog stream on transient failures with **exponential backoff and jitter**:
+
+- Initial backoff delay with configurable parameters
+- Exponential increase with randomized jitter to prevent thundering herd
+- Automatic GTID position recovery after reconnection
+- Connection failures are logged and exposed via Prometheus metrics
+
+This ensures CDC pipelines survive temporary network partitions, MySQL restarts, and failover events without manual intervention.
 
 ---
 

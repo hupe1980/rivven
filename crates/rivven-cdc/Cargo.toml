@@ -20,9 +20,7 @@ postgres = [
     "dep:tokio-postgres",
     "dep:postgres-protocol",
     "dep:md-5",
-    "dep:hmac",
     "dep:pbkdf2",
-    "dep:base64",
     "dep:fallible-iterator",
 ]
 # PostgreSQL with TLS support (rustls-based)
@@ -37,7 +35,6 @@ postgres-tls = [
 # MySQL CDC via binary log replication
 mysql = [
     "dep:sha1",
-    "dep:base64",
     "dep:mysql_async",
     "dep:flate2",
 ]
@@ -55,7 +52,6 @@ mariadb = ["mysql"]
 sqlserver = [
     "dep:tiberius",
     "dep:tokio-util",
-    "dep:base64",
 ]
 # SQL Server with TLS support
 sqlserver-tls = [
@@ -69,7 +65,7 @@ sqlserver-tls = [
 full = ["postgres", "postgres-tls", "mysql", "mysql-tls", "mariadb", "sqlserver", "sqlserver-tls"]
 
 # Object storage for ExternalizeBlob SMT
-cloud-storage = ["dep:object_store", "dep:base64"]
+cloud-storage = ["dep:object_store"]
 s3 = ["cloud-storage", "object_store/aws"]
 gcs = ["cloud-storage", "object_store/gcp"]
 azure = ["cloud-storage", "object_store/azure"]
@@ -108,13 +104,13 @@ tokio-rustls = { version = "0.26", optional = true }
 
 # MySQL-specific dependencies
 sha1 = { version = "0.10", optional = true }
-base64 = { version = "0.22", optional = true }
+base64 = { version = "0.22" }
 mysql_async = { version = "0.34", optional = true, default-features = false }
 # flate2 required by mysql_async for compression support
 flate2 = { version = "1.1", optional = true, default-features = false, features = ["rust_backend"] }
 
-# SCRAM authentication (PostgreSQL SCRAM-SHA-256)
-hmac = { version = "0.12", optional = true }
+# HMAC (for SCRAM auth and deterministic encryption nonce derivation)
+hmac = "0.12"
 pbkdf2 = { version = "0.12", optional = true }
 
 # SQL Server via TDS protocol

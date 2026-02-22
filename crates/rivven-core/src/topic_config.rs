@@ -167,8 +167,7 @@ impl TopicConfig {
 
     /// Get retention duration
     ///
-    /// -1 is the sentinel for infinite retention. Previously
-    /// `as u64` wrapped it to ~584 million years.
+    /// -1 is the sentinel for infinite retention.
     pub fn retention_duration(&self) -> Duration {
         if self.retention_ms < 0 {
             Duration::MAX

@@ -35,6 +35,9 @@ Modern event streaming shouldn't require a JVM, ZooKeeper, or a team of dedicate
 
 ### 🚀 High Performance
 - Lock-free architecture with zero-copy I/O
+- Lock-free mmap cache (ArcSwap) for segment reads
+- Optimized response framing (single write per response)
+- Group-commit WAL with batched fsync (10-100x throughput)
 - Batch APIs for maximum throughput  
 - LZ4/Zstd/Snappy compression
 - Sticky partitioning for optimal batching
@@ -55,7 +58,8 @@ Modern event streaming shouldn't require a JVM, ZooKeeper, or a team of dedicate
 
 ### 🔄 Change Data Capture
 - PostgreSQL CDC with logical replication
-- MySQL CDC with binlog streaming
+- MySQL CDC with binlog streaming (full JSON type support)
+- Automatic reconnection with exponential backoff
 - 17 built-in transforms (SMTs)
 - Schema inference and evolution
 
@@ -65,8 +69,10 @@ Modern event streaming shouldn't require a JVM, ZooKeeper, or a team of dedicate
 ### 📊 Schema Registry
 - Avro, Protobuf, and JSON Schema
 - Standard wire format and REST API
+- TOCTOU-safe schema registration
 - Compatibility checking and evolution
 - Multi-tenant schema contexts
+- Concurrent Bedrock embeddings for LLM-powered features
 
 </td>
 </tr>
@@ -74,12 +80,16 @@ Modern event streaming shouldn't require a JVM, ZooKeeper, or a team of dedicate
 <td width="50%" valign="top">
 
 ### 🔒 Enterprise Security
-- TLS/mTLS with automatic certificate hot-reload
+- Authentication required by default (secure-by-default)
+- Full RBAC/ACL on all data-plane operations (produce, consume, admin)
+- TLS everywhere via rustls; TLS enforced for plaintext auth
 - SCRAM-SHA-256 (600K PBKDF2 iterations), OIDC, API key auth
 - Cedar policy engine for fine-grained RBAC
 - Password complexity enforcement
 - HMAC-authenticated cluster protocol (SWIM gossip)
 - Credential isolation between components
+- Token redaction, connection string sanitization
+- SQL injection prevention with identifier validation
 
 </td>
 <td width="50%" valign="top">
@@ -220,7 +230,23 @@ rivven-connect run --config connect.yaml
 
 ---
 
-## 🖥️ Platform Support
+## 🔒 Security & Correctness
+
+Rivven enforces the following security and correctness guarantees across all **15 crates**:
+
+- **Security hardening** — Auth wired in by default, TLS warnings for CDC connections, token redaction in logs, YAML injection prevention, SQL injection validation, connection string sanitization, password masking in `Debug` output
+- **CDC reliability** — Full MySQL binary JSON decoder (emits structured values), reconnection with exponential backoff for MySQL, proactive WAL status updates for PostgreSQL, composite primary key support for PostgreSQL snapshots
+- **Storage durability** — `fsync` before rename, directory `fsync`, WAL checkpoint batching, offset batching (every 50 commits)
+- **Cluster correctness** — ISR initialized with all replicas, standalone mode uses term 0, SWIM graceful shutdown, deterministic partition selection (murmur2)
+- **Connect reliability** — Consecutive error threshold for sinks, health check before Running state, epoch fencing for failover, SQL identifier validation
+- **Client robustness** — Circuit breaker uses `compare_exchange`, handshake errors marked non-retryable, connection underflow prevention
+- **RDBC safety** — NaN/Infinity handling, SQL-standard escaping, `where_clause` validation, PostgreSQL background task error surfacing
+- **Schema registry** — Regex caching for validation rules, request body size limits
+- **Operator** — Proper YAML serialization (no string interpolation), TLS validation
+
+---
+
+## �🖥️ Platform Support
 
 | Platform | Status |
 |:---------|:-------|

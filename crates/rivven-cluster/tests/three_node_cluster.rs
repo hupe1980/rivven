@@ -55,6 +55,7 @@ impl TestNodeConfig {
             election_timeout_max_ms: 300,
             snapshot_threshold: 100,
             initial_members: vec![],
+            cluster_secret: None,
         }
     }
 
@@ -134,6 +135,7 @@ async fn create_standalone_nodes() -> Vec<Arc<RwLock<RaftNode>>> {
             election_timeout_max_ms: 300,
             snapshot_threshold: 100,
             initial_members: vec![],
+            cluster_secret: None,
         };
 
         let mut raft = RaftNode::with_config(config)
@@ -462,6 +464,7 @@ async fn test_raft_state_persistence() {
             election_timeout_max_ms: 300,
             snapshot_threshold: 5, // Low threshold to force snapshot
             initial_members: vec![],
+            cluster_secret: None,
         };
 
         let mut raft = RaftNode::with_config(config)
@@ -494,6 +497,7 @@ async fn test_raft_state_persistence() {
             election_timeout_max_ms: 300,
             snapshot_threshold: 5,
             initial_members: vec![],
+            cluster_secret: None,
         };
 
         let mut raft = RaftNode::with_config(config)
@@ -507,17 +511,20 @@ async fn test_raft_state_persistence() {
         // Verify state was persisted (topics should exist)
         let metadata_guard = raft.metadata().await;
 
-        // In current implementation, state may not persist across restarts
-        // This is a known limitation tracked in the backlog
-        if !metadata_guard.topics.is_empty() {
-            // If persistence is working, verify
+        // Standalone Raft recovery does not yet replay commands from persisted log entries.
+        // Only snapshot-based recovery is supported.
+        // TODO: Fix Raft log replay for standalone mode to enable full persistence.
+        if metadata_guard.topics.is_empty() {
+            eprintln!(
+                "WARNING: Metadata recovery returned empty topics. \
+                 Standalone Raft log replay is not yet implemented — \
+                 only snapshot-based recovery is supported."
+            );
+        } else {
             assert!(
                 metadata_guard.topics.contains_key("persist-topic-0"),
                 "Expected persist-topic-0 to exist after recovery"
             );
-        } else {
-            // Log that persistence isn't working yet
-            println!("Note: Metadata persistence across restarts not yet implemented");
         }
     }
 }
@@ -688,6 +695,7 @@ async fn test_standalone_stress() {
         election_timeout_max_ms: 300,
         snapshot_threshold: 50, // Frequent snapshots
         initial_members: vec![],
+        cluster_secret: None,
     };
 
     let mut raft = RaftNode::with_config(config)
@@ -757,6 +765,7 @@ async fn test_standalone_snapshot_recovery() {
             election_timeout_max_ms: 300,
             snapshot_threshold: 20, // Force snapshots
             initial_members: vec![],
+            cluster_secret: None,
         };
 
         let mut raft = RaftNode::with_config(config)
@@ -797,6 +806,7 @@ async fn test_standalone_snapshot_recovery() {
             election_timeout_max_ms: 300,
             snapshot_threshold: 20,
             initial_members: vec![],
+            cluster_secret: None,
         };
 
         let mut raft = RaftNode::with_config(config)

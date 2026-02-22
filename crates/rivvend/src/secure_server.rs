@@ -94,7 +94,7 @@ impl Default for SecureServerConfig {
             connection_timeout: Duration::from_secs(30),
             idle_timeout: Duration::from_secs(300),
             max_message_size: 10 * 1024 * 1024, // 10 MB
-            require_auth: false,
+            require_auth: true,
             enable_service_auth: false,
             service_auth_config: None,
         }
@@ -224,24 +224,45 @@ impl SecureServer {
                             "WAL replay: {} records recovered at startup (SecureServer)",
                             records.len()
                         );
+                        // Any failure here means the server state would be
+                        // inconsistent — abort startup rather than risk silent
+                        // data loss.
                         for record in &records {
                             if let Err(e) = topic_manager.apply_wal_record(record).await {
-                                tracing::warn!(
-                                    lsn = record.lsn,
-                                    error = %e,
-                                    "WAL replay: failed to apply record"
-                                );
+                                return Err(anyhow::anyhow!(
+                                    "WAL replay: failed to apply record (lsn={}): {}. \
+                                     Aborting startup to prevent data loss. \
+                                     Inspect the WAL files in the data directory and retry, \
+                                     or remove them to accept data loss.",
+                                    record.lsn,
+                                    e
+                                ));
                             }
+                        }
+
+                        // §3.3 / Checkpoint WAL after successful replay.
+                        // Remove replayed WAL files so a subsequent crash does not
+                        // replay the same records again, which would produce
+                        // duplicate messages.
+                        if let Err(e) = rivven_core::GroupCommitWal::checkpoint_dir(&wal_config.dir)
+                        {
+                            tracing::warn!(
+                                error = %e,
+                                "WAL post-replay checkpoint failed — duplicates possible on next crash"
+                            );
                         }
                     }
                     Ok(_) => {
                         tracing::debug!("WAL replay: no records to replay");
                     }
                     Err(e) => {
-                        tracing::error!(
-                            error = %e,
-                            "WAL replay: failed to read WAL files — starting with potential data loss!"
-                        );
+                        // Abort startup instead of silently losing data.
+                        return Err(anyhow::anyhow!(
+                            "WAL replay: failed to read WAL files: {}. \
+                             Aborting startup to prevent data loss. \
+                             Inspect or remove corrupt WAL files in the data directory to proceed.",
+                            e
+                        ));
                     }
                 }
             }
@@ -256,9 +277,7 @@ impl SecureServer {
             auth_manager.unwrap_or_else(|| Arc::new(AuthManager::new(Default::default())));
 
         // Initialize service auth if configured
-        // Pass the stored ServiceAuthConfig to the manager instead
-        // of ignoring it. Previously used ServiceAuthManager::new() (hardcoded
-        // defaults), discarding session_duration, rate limits, and service accounts.
+        // Pass the stored ServiceAuthConfig to the manager.
         let service_auth_manager = if server_config.enable_service_auth {
             if let Some(ref config) = server_config.service_auth_config {
                 Some(Arc::new(ServiceAuthManager::with_config(config)))
@@ -772,7 +791,7 @@ mod tests {
         let config = SecureServerConfig::default();
         assert_eq!(config.max_connections, 10_000);
         assert_eq!(config.max_message_size, 10 * 1024 * 1024);
-        assert!(!config.require_auth);
+        assert!(config.require_auth);
     }
 
     #[test]

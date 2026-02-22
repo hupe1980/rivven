@@ -466,9 +466,11 @@ impl SqlDialect for MySqlDialect {
     }
 
     fn escape_string(&self, value: &str) -> String {
+        // Use SQL-standard '' escaping for single quotes (safe even with
+        // NO_BACKSLASH_ESCAPES mode) plus backslash escaping for defence-in-depth.
         value
             .replace('\\', "\\\\")
-            .replace('\'', "\\'")
+            .replace('\'', "''")
             .replace('"', "\\\"")
     }
 

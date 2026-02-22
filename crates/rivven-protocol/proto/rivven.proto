@@ -196,6 +196,8 @@ message AuthenticateRequest {
 message PlainAuth {
   string username = 1;
   string password = 2;
+  // When true, server MUST reject if connection is not TLS-encrypted
+  bool require_tls = 3;
 }
 
 message ScramAuth {
@@ -333,7 +335,7 @@ message TopicMetadata {
 
 message PartitionMetadata {
   uint32 id = 1;
-  uint32 leader = 2;
+  optional uint32 leader = 2;
   repeated uint32 replicas = 3;
   repeated uint32 isr = 4;
 }

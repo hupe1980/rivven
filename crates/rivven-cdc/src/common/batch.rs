@@ -362,13 +362,28 @@ impl EventBatcher {
 }
 
 /// Estimate the size of an event in bytes.
+///
+/// This estimation is intentionally approximate. The 64-byte fixed
+/// overhead is a rough proxy for the string fields (`source_type`, `database`,
+/// `schema`, `table`) plus the `op` enum and `timestamp` — it does not account
+/// for actual string lengths or the `transaction` field. The variable-size
+/// portion converts `before`/`after` JSON values to `String` to measure length,
+/// which itself allocates and may differ from the final serialized wire size
+/// (e.g., postcard vs JSON). For byte-based batch thresholds this is sufficient
+/// as an order-of-magnitude guard; callers requiring precise accounting should
+/// serialize the event and measure the result.
 fn estimate_event_size(event: &CdcEvent) -> usize {
     let mut size = 0;
 
-    // Fixed overhead
-    size += 64; // source_type, database, schema, table, op, timestamp
+    // Fixed overhead (approximation — see doc comment above)
+    size += 64;
 
-    // Variable size
+    // Variable-size fields
+    size += event.source_type.len();
+    size += event.database.len();
+    size += event.schema.len();
+    size += event.table.len();
+
     if let Some(ref before) = event.before {
         size += before.to_string().len();
     }

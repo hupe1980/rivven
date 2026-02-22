@@ -19,6 +19,7 @@ mod protocol_tests {
     use bytes::Bytes;
 
     #[test]
+    #[allow(deprecated)]
     fn test_request_roundtrip() {
         let requests = vec![
             Request::Ping,
@@ -26,6 +27,7 @@ mod protocol_tests {
             Request::Authenticate {
                 username: "user".to_string(),
                 password: "pass".to_string(),
+                require_tls: false,
             },
             Request::Publish {
                 topic: "test-topic".to_string(),

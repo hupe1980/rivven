@@ -180,31 +180,98 @@ impl Node {
         self.last_seen = Instant::now();
     }
 
-    /// Mark as alive
-    pub fn mark_alive(&mut self, incarnation: u64) {
+    /// Mark as alive with incarnation-based CAS.
+    ///
+    /// Returns `true` if the transition was accepted.
+    ///
+    /// Enforces state machine rules:
+    /// - Unknown/Suspect → Alive: always valid with >= incarnation
+    /// - Dead → Alive: only valid with strictly higher incarnation (rejoin)
+    /// - Alive → Alive: valid with higher incarnation (state refresh)
+    pub fn mark_alive(&mut self, incarnation: u64) -> bool {
+        match self.state {
+            NodeState::Dead => {
+                // Dead → Alive requires strictly higher incarnation (rejoin)
+                if incarnation <= self.incarnation {
+                    return false;
+                }
+            }
+            NodeState::Alive => {
+                // Alive → Alive refresh: allow >= incarnation
+                if incarnation < self.incarnation {
+                    return false;
+                }
+            }
+            NodeState::Unknown | NodeState::Suspect => {
+                // Allow transition with >= incarnation
+                if incarnation < self.incarnation {
+                    return false;
+                }
+            }
+            NodeState::Leaving => {
+                // Once leaving, only a higher incarnation rejoin is valid
+                if incarnation <= self.incarnation {
+                    return false;
+                }
+            }
+        }
         self.state = NodeState::Alive;
         self.incarnation = incarnation;
         self.touch();
+        true
     }
 
-    /// Mark as suspect
-    pub fn mark_suspect(&mut self) {
+    /// Mark as suspect with state machine guard.
+    ///
+    /// Returns `true` if the transition was accepted.
+    ///
+    /// Only Alive|Unknown → Suspect is valid.
+    /// Dead → Suspect is explicitly rejected to prevent the
+    /// Suspect→Dead→Suspect race condition.
+    pub fn mark_suspect(&mut self) -> bool {
         // Allow Unknown → Suspect transition in addition to Alive → Suspect.
         // A node just discovered (Unknown) can be suspected if it misses pings
         // before ever being confirmed Alive.
-        if self.state == NodeState::Alive || self.state == NodeState::Unknown {
-            self.state = NodeState::Suspect;
+        match self.state {
+            NodeState::Alive | NodeState::Unknown => {
+                self.state = NodeState::Suspect;
+                true
+            }
+            // Already suspect, dead, or leaving — no-op
+            _ => false,
         }
     }
 
-    /// Mark as dead
-    pub fn mark_dead(&mut self) {
-        self.state = NodeState::Dead;
+    /// Mark as dead with state machine guard.
+    ///
+    /// Returns `true` if the transition was accepted.
+    ///
+    /// Only Suspect → Dead is valid in SWIM.
+    /// Direct Alive → Dead is rejected (must go through Suspect first).
+    /// Already Dead is a no-op (idempotent).
+    pub fn mark_dead(&mut self) -> bool {
+        match self.state {
+            NodeState::Suspect => {
+                self.state = NodeState::Dead;
+                true
+            }
+            NodeState::Dead => false, // Already dead, idempotent
+            _ => false,               // Invalid transition
+        }
     }
 
-    /// Mark as leaving
-    pub fn mark_leaving(&mut self) {
-        self.state = NodeState::Leaving;
+    /// Mark as leaving.
+    ///
+    /// Returns `true` if the transition was accepted.
+    /// Valid from any non-Dead state (graceful shutdown).
+    pub fn mark_leaving(&mut self) -> bool {
+        match self.state {
+            NodeState::Dead => false,
+            _ => {
+                self.state = NodeState::Leaving;
+                true
+            }
+        }
     }
 
     /// Check if node is healthy
@@ -276,18 +343,28 @@ mod tests {
         assert_eq!(node.state, NodeState::Unknown);
         assert!(!node.is_healthy());
 
-        node.mark_alive(1);
+        assert!(node.mark_alive(1));
         assert_eq!(node.state, NodeState::Alive);
         assert!(node.is_healthy());
 
-        node.mark_suspect();
+        assert!(node.mark_suspect());
         assert_eq!(node.state, NodeState::Suspect);
         assert!(!node.is_healthy());
         assert!(node.state.is_reachable());
 
-        node.mark_dead();
+        assert!(node.mark_dead());
         assert_eq!(node.state, NodeState::Dead);
         assert!(!node.state.is_reachable());
+
+        // Dead → Suspect must be rejected
+        assert!(!node.mark_suspect());
+        assert_eq!(node.state, NodeState::Dead);
+
+        // Dead → Alive requires strictly higher incarnation
+        assert!(!node.mark_alive(1));
+        assert_eq!(node.state, NodeState::Dead);
+        assert!(node.mark_alive(2));
+        assert_eq!(node.state, NodeState::Alive);
     }
 
     #[test]

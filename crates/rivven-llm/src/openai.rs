@@ -64,6 +64,9 @@ pub struct OpenAiProviderBuilder {
     embedding_model: Option<String>,
     timeout: Option<Duration>,
     organization: Option<String>,
+    /// When `false` (default), plain HTTP to non-localhost
+    /// endpoints is a hard error. Set to `true` to downgrade to a warning.
+    allow_insecure: bool,
 }
 
 impl OpenAiProviderBuilder {
@@ -117,6 +120,17 @@ impl OpenAiProviderBuilder {
         self
     }
 
+    /// Allow plain HTTP connections to non-localhost endpoints.
+    ///
+    /// By default, the builder returns an error if the base URL uses HTTP
+    /// for a non-localhost target, because the API key would be sent in
+    /// cleartext. Call `.allow_insecure(true)` to downgrade this to a
+    /// warning (e.g. for internal proxies or dev tunnels).
+    pub fn allow_insecure(mut self, allow: bool) -> Self {
+        self.allow_insecure = allow;
+        self
+    }
+
     /// Build the provider
     pub fn build(self) -> LlmResult<OpenAiProvider> {
         let api_key = self
@@ -139,11 +153,26 @@ impl OpenAiProviderBuilder {
             )));
         }
 
+        // Plain HTTP to non-localhost sends the API key in cleartext.
+        // Callers that need insecure transport (dev tunnels, internal proxies)
+        // must explicitly opt in via `.allow_insecure(true)`.
         if base_url.starts_with("http://")
             && !base_url.contains("localhost")
             && !base_url.contains("127.0.0.1")
         {
-            warn!("OpenAI base_url uses plain HTTP — API key will be sent in cleartext");
+            if self.allow_insecure {
+                warn!(
+                    "OpenAI base_url uses plain HTTP — API key will be sent in cleartext. \
+                       Use HTTPS for production deployments to prevent credential exposure."
+                );
+            } else {
+                return Err(LlmError::Config(format!(
+                    "base_url '{}' uses plain HTTP for a non-localhost endpoint, which would \
+                     send the API key in cleartext. Use HTTPS, or call \
+                     `.allow_insecure(true)` to override this check.",
+                    base_url,
+                )));
+            }
         }
 
         let timeout = self.timeout.unwrap_or(Duration::from_secs(60));
@@ -216,6 +245,12 @@ impl OpenAiProvider {
     }
 
     /// Parse an error response from the API
+    ///
+    /// Reads the error body with bounded allocation: if the server advertises
+    /// a Content-Length exceeding `MAX_ERROR_BODY_BYTES`, the body is skipped
+    /// entirely. For responses without Content-Length (chunked), the full body
+    /// is read then truncated — the HTTP client timeout provides an implicit
+    /// upper bound in that case.
     async fn parse_error_response(&self, response: reqwest::Response) -> LlmError {
         let status = response.status().as_u16();
 
@@ -226,16 +261,31 @@ impl OpenAiProvider {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<u64>().ok());
 
-        // Read body with bounded allocation
-        let body = match response.bytes().await {
-            Ok(b) => {
-                if b.len() > MAX_ERROR_BODY_BYTES {
-                    String::from_utf8_lossy(&b[..MAX_ERROR_BODY_BYTES]).to_string()
-                } else {
-                    String::from_utf8_lossy(&b).to_string()
+        // Read body with bounded allocation.
+        // Check Content-Length first to avoid allocating an arbitrarily large
+        // buffer when the server advertises an oversized error body.
+        let body = if response
+            .content_length()
+            .is_some_and(|len| len > MAX_ERROR_BODY_BYTES as u64)
+        {
+            let len = response.content_length().unwrap();
+            warn!(
+                content_length = len,
+                limit = MAX_ERROR_BODY_BYTES,
+                "Error response body exceeds limit, skipping body read"
+            );
+            format!("<error body too large: {len} bytes>")
+        } else {
+            match response.bytes().await {
+                Ok(b) => {
+                    if b.len() > MAX_ERROR_BODY_BYTES {
+                        String::from_utf8_lossy(&b[..MAX_ERROR_BODY_BYTES]).to_string()
+                    } else {
+                        String::from_utf8_lossy(&b).to_string()
+                    }
                 }
+                Err(_) => String::new(),
             }
-            Err(_) => String::new(),
         };
 
         // Try to parse structured error

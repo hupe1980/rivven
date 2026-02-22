@@ -2,6 +2,7 @@ use crate::{Error, MessageData, Request, Response, Result};
 use bytes::Bytes;
 use rivven_core::PasswordHash;
 use sha2::{Digest, Sha256};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, info};
@@ -21,6 +22,14 @@ const DEFAULT_MAX_RESPONSE_SIZE: usize = 100 * 1024 * 1024;
 // deadlocks when the server must drain an oversized body.
 const DEFAULT_MAX_REQUEST_SIZE: usize = rivven_protocol::MAX_MESSAGE_SIZE;
 
+/// Default connection timeout (10 seconds) — prevents hanging on
+/// unreachable hosts instead of relying on OS TCP timeout (~75-120s).
+const DEFAULT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Default request timeout (30 seconds) — prevents callers from
+/// blocking forever when a server stalls or stops responding.
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
 // ============================================================================
 // Stream Wrapper
 // ============================================================================
@@ -29,7 +38,7 @@ const DEFAULT_MAX_REQUEST_SIZE: usize = rivven_protocol::MAX_MESSAGE_SIZE;
 /// Note: TLS variant is significantly larger due to TLS state, but boxing
 /// would add indirection overhead for every I/O operation
 #[allow(clippy::large_enum_variant)]
-enum ClientStream {
+pub(crate) enum ClientStream {
     Plaintext(TcpStream),
     #[cfg(feature = "tls")]
     Tls(TlsClientStream<TcpStream>),
@@ -93,6 +102,8 @@ impl AsyncWrite for ClientStream {
 pub struct Client {
     stream: ClientStream,
     next_correlation_id: u32,
+    /// Per-request timeout for send_request() I/O.
+    request_timeout: Duration,
 }
 
 impl Client {
@@ -101,15 +112,28 @@ impl Client {
     /// Automatically sends a protocol handshake after connecting.
     /// The handshake validates protocol version compatibility before any
     /// application requests are sent.
+    ///
+    /// Uses a default connection timeout of 10 seconds. For a custom
+    /// timeout, use [`connect_with_timeout`](Self::connect_with_timeout).
     pub async fn connect(addr: &str) -> Result<Self> {
+        Self::connect_with_timeout(addr, DEFAULT_CONNECTION_TIMEOUT).await
+    }
+
+    /// Connect to a Rivven server with a custom connection timeout.
+    ///
+    /// Wraps the TCP connect + handshake in `tokio::time::timeout` so
+    /// callers never block longer than `timeout` on an unreachable host.
+    pub async fn connect_with_timeout(addr: &str, timeout: Duration) -> Result<Self> {
         info!("Connecting to Rivven server at {}", addr);
-        let stream = TcpStream::connect(addr)
+        let stream = tokio::time::timeout(timeout, TcpStream::connect(addr))
             .await
+            .map_err(|_| Error::TimeoutWithMessage(format!("Connection to {} timed out", addr)))?
             .map_err(|e| Error::ConnectionError(e.to_string()))?;
 
         let mut client = Self {
             stream: ClientStream::Plaintext(stream),
             next_correlation_id: 0,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
         };
 
         // auto-handshake on connect
@@ -125,6 +149,18 @@ impl Client {
         tls_config: &TlsConfig,
         server_name: &str,
     ) -> Result<Self> {
+        Self::connect_tls_with_timeout(addr, tls_config, server_name, DEFAULT_CONNECTION_TIMEOUT)
+            .await
+    }
+
+    /// Connect to a Rivven server with TLS and a custom connection timeout.
+    #[cfg(feature = "tls")]
+    pub async fn connect_tls_with_timeout(
+        addr: &str,
+        tls_config: &TlsConfig,
+        server_name: &str,
+        timeout: Duration,
+    ) -> Result<Self> {
         info!("Connecting to Rivven server at {} with TLS", addr);
 
         // Parse address
@@ -136,17 +172,21 @@ impl Client {
         let connector = TlsConnector::new(tls_config)
             .map_err(|e| Error::ConnectionError(format!("TLS config error: {}", e)))?;
 
-        // Connect with TLS
-        let tls_stream = connector
-            .connect_tcp(socket_addr, server_name)
-            .await
-            .map_err(|e| Error::ConnectionError(format!("TLS connection error: {}", e)))?;
+        // Connect with TLS (with timeout)
+        let tls_stream =
+            tokio::time::timeout(timeout, connector.connect_tcp(socket_addr, server_name))
+                .await
+                .map_err(|_| {
+                    Error::TimeoutWithMessage(format!("TLS connection to {} timed out", addr))
+                })?
+                .map_err(|e| Error::ConnectionError(format!("TLS connection error: {}", e)))?;
 
         info!("TLS connection established to {} ({})", addr, server_name);
 
         let mut client = Self {
             stream: ClientStream::Tls(tls_stream),
             next_correlation_id: 0,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
         };
 
         // auto-handshake on TLS connect
@@ -229,15 +269,38 @@ impl Client {
     ///
     /// This is used by the producer to hand off the authenticated +
     /// handshaked connection to its background sender task.
-    /// Only works for plaintext connections; TLS connections return an error.
+    /// Only works for plaintext connections; for TLS use [`into_client_stream`].
     pub fn into_stream(self) -> Result<TcpStream> {
         match self.stream {
             ClientStream::Plaintext(s) => Ok(s),
             #[cfg(feature = "tls")]
             ClientStream::Tls(_) => Err(Error::ConnectionError(
-                "Cannot extract TcpStream from TLS connection. Producer requires plaintext."
+                "Cannot extract TcpStream from TLS connection. Use into_client_stream() instead."
                     .to_string(),
             )),
+        }
+    }
+
+    /// Consume the client and return the underlying `ClientStream`.
+    ///
+    /// Works for both plaintext and TLS connections. Used by the
+    /// producer to hand off the authenticated + handshaked connection
+    /// to its background sender task.
+    pub(crate) fn into_client_stream(self) -> ClientStream {
+        self.stream
+    }
+
+    /// Set the per-request timeout for `send_request()` I/O.
+    pub fn set_request_timeout(&mut self, timeout: Duration) {
+        self.request_timeout = timeout;
+    }
+
+    /// Returns `true` when the underlying transport is TLS-encrypted.
+    pub fn is_tls(&self) -> bool {
+        match &self.stream {
+            ClientStream::Plaintext(_) => false,
+            #[cfg(feature = "tls")]
+            ClientStream::Tls(_) => true,
         }
     }
 
@@ -247,12 +310,22 @@ impl Client {
 
     /// Authenticate with simple username/password
     ///
-    /// This uses a simple plaintext password protocol. For production use over
-    /// untrusted networks, prefer `authenticate_scram()` or use TLS.
+    /// # Security — plaintext credentials
+    ///
+    /// This uses SASL/PLAIN which sends the password in **cleartext** on the
+    /// wire.  The client automatically sets `require_tls = true` when the
+    /// underlying connection is TLS-encrypted so the server will reject the
+    /// request if it somehow arrives over a non-TLS channel.  For untrusted
+    /// networks, prefer `authenticate_scram()` which never sends the password.
+    #[allow(deprecated)]
     pub async fn authenticate(&mut self, username: &str, password: &str) -> Result<AuthSession> {
+        // Tell the server whether we are on a TLS connection so it can
+        // reject the request when TLS is not active.
+        let require_tls = self.is_tls();
         let request = Request::Authenticate {
             username: username.to_string(),
             password: password.to_string(),
+            require_tls,
         };
 
         let response = self.send_request(request).await?;
@@ -405,8 +478,21 @@ impl Client {
     // Request/Response Handling
     // ========================================================================
 
-    /// Send a request and receive a response
+    /// Send a request and receive a response.
+    ///
+    /// The entire I/O round-trip (write + read) is wrapped in
+    /// `tokio::time::timeout` using the client's `request_timeout`
+    /// (default 30 s). A stalled or unresponsive server will therefore
+    /// return `Error::Timeout` instead of blocking the caller forever.
     pub(crate) async fn send_request(&mut self, request: Request) -> Result<Response> {
+        let timeout_dur = self.request_timeout;
+        tokio::time::timeout(timeout_dur, self.send_request_inner(request))
+            .await
+            .map_err(|_| Error::Timeout)?
+    }
+
+    /// Inner implementation of send_request without timeout wrapper.
+    async fn send_request_inner(&mut self, request: Request) -> Result<Response> {
         // Generate sequential correlation ID
         let correlation_id = self.next_correlation_id;
         self.next_correlation_id = self.next_correlation_id.wrapping_add(1);
@@ -449,7 +535,19 @@ impl Client {
         self.stream.read_exact(&mut response_buf).await?;
 
         // Deserialize response (auto-detects wire format)
-        let (response, _format, _correlation_id) = Response::from_wire(&response_buf)?;
+        let (response, _format, response_correlation_id) = Response::from_wire(&response_buf)?;
+
+        // Validate that the response correlation ID matches the
+        // request we sent. A mismatch indicates stream desynchronization
+        // (e.g. partial reads) or a buggy server.
+        if response_correlation_id != correlation_id {
+            return Err(Error::ProtocolError(
+                rivven_protocol::ProtocolError::InvalidFormat(format!(
+                    "Correlation ID mismatch: expected {}, got {}",
+                    correlation_id, response_correlation_id
+                )),
+            ));
+        }
 
         Ok(response)
     }

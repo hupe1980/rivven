@@ -2316,6 +2316,22 @@ sinks:
 
 ---
 
+## Sink Reliability
+
+### Consecutive Error Threshold
+
+Sinks track consecutive write failures. After a configurable number of consecutive errors (default: 10), the sink transitions to a `Failed` state and stops consuming, preventing silent data loss from persistent downstream failures.
+
+### Health Checks
+
+Before a connector transitions to `Running` state, rivven-connect performs a health check (e.g., testing database connectivity or verifying bucket access). This ensures connectors do not report as healthy before the downstream system is actually reachable.
+
+### Epoch Fencing
+
+During failover or rebalancing, sinks use epoch-based fencing to prevent stale connector instances from writing duplicate data. A new epoch is assigned on each restart, and writes from previous epochs are rejected by the coordinator.
+
+---
+
 ## Custom Connectors
 
 ### Plugin SDK

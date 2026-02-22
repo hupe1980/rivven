@@ -270,6 +270,17 @@ pub struct RaftConfig {
 
     /// Replication batch size
     pub replication_batch_size: u64,
+
+    /// Shared secret for Raft RPC authentication.
+    ///
+    /// When set, all outgoing Raft RPCs include an `X-Rivven-Cluster-Secret`
+    /// header, and all incoming RPCs are rejected unless their header matches.
+    /// This prevents unauthorized nodes from joining the Raft group or casting
+    /// votes. Use a strong random string (>= 32 bytes recommended).
+    ///
+    /// Prevents unauthenticated Raft RPC access.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_secret: Option<String>,
 }
 
 impl Default for RaftConfig {
@@ -281,6 +292,7 @@ impl Default for RaftConfig {
             snapshot_threshold: 10000,
             max_entries_per_append: 100,
             replication_batch_size: 1000,
+            cluster_secret: None,
         }
     }
 }

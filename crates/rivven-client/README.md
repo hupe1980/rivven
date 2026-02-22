@@ -11,9 +11,10 @@
 | Category | Features |
 |:---------|:---------|
 | **Connectivity** | Connection pooling, request pipelining, automatic failover |
-| **Resilience** | Circuit breaker, exponential backoff, health monitoring |
-| **Security** | TLS/mTLS, SCRAM-SHA-256 authentication |
+| **Resilience** | Circuit breaker, exponential backoff with jitter, reconnection, health monitoring |
+| **Security** | TLS/mTLS (rustls) for all clients including Producer, SCRAM-SHA-256 authentication |
 | **Semantics** | Transactions, idempotent producer, exactly-once delivery |
+| **Compression** | LZ4, Snappy, Zstd (Gzip returns an error) |
 
 ## Installation
 

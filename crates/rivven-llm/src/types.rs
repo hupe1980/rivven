@@ -3,6 +3,7 @@
 //! Provider-agnostic types for chat completions and embeddings.
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 // ============================================================================
 // Chat Types
@@ -69,6 +70,13 @@ impl ChatMessage {
 }
 
 /// Request for a chat completion
+///
+/// # Security — Prompt Injection
+///
+/// When building a `ChatRequest` from untrusted input, ensure that
+/// user-supplied text is placed exclusively in `User`-role messages and is
+/// never concatenated into `System` prompts without sanitization. See
+/// [`LlmProvider`](crate::provider::LlmProvider) for detailed guidance.
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
     /// Messages in the conversation
@@ -156,9 +164,17 @@ impl ChatRequestBuilder {
         self
     }
 
-    /// Set temperature (0.0–2.0)
+    /// Set temperature (0.0–2.0). Values outside this range are clamped.
     pub fn temperature(mut self, t: f32) -> Self {
-        self.temperature = Some(t.clamp(0.0, 2.0));
+        let clamped = t.clamp(0.0, 2.0);
+        if (clamped - t).abs() > f32::EPSILON {
+            warn!(
+                requested = t,
+                clamped = clamped,
+                "temperature value {t} out of range [0.0, 2.0], clamped to {clamped}"
+            );
+        }
+        self.temperature = Some(clamped);
         self
     }
 
@@ -168,9 +184,17 @@ impl ChatRequestBuilder {
         self
     }
 
-    /// Set top-p nucleus sampling
+    /// Set top-p nucleus sampling (0.0–1.0). Values outside this range are clamped.
     pub fn top_p(mut self, p: f32) -> Self {
-        self.top_p = Some(p.clamp(0.0, 1.0));
+        let clamped = p.clamp(0.0, 1.0);
+        if (clamped - p).abs() > f32::EPSILON {
+            warn!(
+                requested = p,
+                clamped = clamped,
+                "top_p value {p} out of range [0.0, 1.0], clamped to {clamped}"
+            );
+        }
+        self.top_p = Some(clamped);
         self
     }
 

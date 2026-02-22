@@ -44,6 +44,19 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Tracked state of a connector within a registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectorRunState {
+    /// Registered but not yet started.
+    Registered,
+    /// Currently running.
+    Running,
+    /// Stopped (graceful shutdown).
+    Stopped,
+    /// Failed with an error.
+    Failed,
+}
+
 /// Factory trait for creating source instances
 ///
 /// Implement this trait in your adapter crate to register sources.
@@ -106,8 +119,17 @@ pub trait AnySink: Send + Sync {
 ///
 /// Users create their own registry and register the sources they need.
 /// This enables custom binaries with only the required adapters.
+///
+/// Each entry tracks the connector's runtime state so callers can
+/// query which sources are running, stopped, or failed.
 pub struct SourceRegistry {
-    sources: HashMap<String, Arc<dyn SourceFactory>>,
+    sources: HashMap<String, SourceRegistryEntry>,
+}
+
+/// A source registry entry with factory and tracked state.
+pub struct SourceRegistryEntry {
+    pub factory: Arc<dyn SourceFactory>,
+    pub state: ConnectorRunState,
 }
 
 impl SourceRegistry {
@@ -120,19 +142,45 @@ impl SourceRegistry {
 
     /// Register a source factory
     pub fn register(&mut self, name: &str, factory: Arc<dyn SourceFactory>) {
-        self.sources.insert(name.to_string(), factory);
+        self.sources.insert(
+            name.to_string(),
+            SourceRegistryEntry {
+                factory,
+                state: ConnectorRunState::Registered,
+            },
+        );
     }
 
     /// Get a source factory by name
     pub fn get(&self, name: &str) -> Option<&Arc<dyn SourceFactory>> {
-        self.sources.get(name)
+        self.sources.get(name).map(|e| &e.factory)
+    }
+
+    /// Get the run-state of a registered source connector.
+    pub fn get_state(&self, name: &str) -> Option<ConnectorRunState> {
+        self.sources.get(name).map(|e| e.state)
+    }
+
+    /// Update the run-state of a registered source connector.
+    pub fn set_state(&mut self, name: &str, state: ConnectorRunState) {
+        if let Some(entry) = self.sources.get_mut(name) {
+            entry.state = state;
+        }
     }
 
     /// List available source types with their specs
     pub fn list(&self) -> Vec<(&str, ConnectorSpec)> {
         self.sources
             .iter()
-            .map(|(name, factory)| (name.as_str(), factory.spec()))
+            .map(|(name, entry)| (name.as_str(), entry.factory.spec()))
+            .collect()
+    }
+
+    /// List available sources with their specs and current state.
+    pub fn list_with_state(&self) -> Vec<(&str, ConnectorSpec, ConnectorRunState)> {
+        self.sources
+            .iter()
+            .map(|(name, entry)| (name.as_str(), entry.factory.spec(), entry.state))
             .collect()
     }
 
@@ -162,8 +210,16 @@ impl Default for SourceRegistry {
 ///
 /// Users create their own registry and register the sinks they need.
 /// This enables custom binaries with only the required adapters.
+///
+/// Sink instances created by factories are cached so that repeated
+/// lookups via [`get_or_create`](SinkRegistry::get_or_create) return
+/// the *same* `Arc<dyn AnySink>` instead of allocating a new object
+/// on each call.
 pub struct SinkRegistry {
     sinks: HashMap<String, Arc<dyn SinkFactory>>,
+    /// Cached sink instances – populated lazily on first
+    /// [`get_or_create`](SinkRegistry::get_or_create) call per name.
+    cache: HashMap<String, Arc<dyn AnySink>>,
 }
 
 impl SinkRegistry {
@@ -171,17 +227,42 @@ impl SinkRegistry {
     pub fn new() -> Self {
         Self {
             sinks: HashMap::new(),
+            cache: HashMap::new(),
         }
     }
 
     /// Register a sink factory
     pub fn register(&mut self, name: &str, factory: Arc<dyn SinkFactory>) {
         self.sinks.insert(name.to_string(), factory);
+        // Invalidate any cached instance for this name so the new
+        // factory takes effect on next lookup.
+        self.cache.remove(name);
     }
 
     /// Get a sink factory by name
     pub fn get(&self, name: &str) -> Option<&Arc<dyn SinkFactory>> {
         self.sinks.get(name)
+    }
+
+    /// Get (or create and cache) a sink instance by name.
+    ///
+    /// The first call creates the instance via the factory and caches
+    /// it.  Subsequent calls return the cached `Arc` without
+    /// allocating.
+    pub fn get_or_create(&mut self, name: &str) -> Option<Result<Arc<dyn AnySink>>> {
+        if let Some(cached) = self.cache.get(name) {
+            return Some(Ok(cached.clone()));
+        }
+
+        let factory = self.sinks.get(name)?;
+        match factory.create() {
+            Ok(sink) => {
+                let arc: Arc<dyn AnySink> = Arc::from(sink);
+                self.cache.insert(name.to_string(), arc.clone());
+                Some(Ok(arc))
+            }
+            Err(e) => Some(Err(e)),
+        }
     }
 
     /// List available sink types with their specs
