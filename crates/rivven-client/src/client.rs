@@ -269,7 +269,7 @@ impl Client {
     ///
     /// This is used by the producer to hand off the authenticated +
     /// handshaked connection to its background sender task.
-    /// Only works for plaintext connections; for TLS use [`into_client_stream`].
+    /// Only works for plaintext connections; for TLS use `into_client_stream()`.
     pub fn into_stream(self) -> Result<TcpStream> {
         match self.stream {
             ClientStream::Plaintext(s) => Ok(s),
