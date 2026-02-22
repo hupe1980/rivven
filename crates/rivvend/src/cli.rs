@@ -218,12 +218,12 @@ pub struct Cli {
     pub tls_verify_client: bool,
 
     // ============ Client Authentication ============
-    /// Require client authentication for all requests.
-    /// When enabled, clients must authenticate (SASL/PLAIN, SASL/SCRAM-SHA-256,
-    /// or username/password) before issuing any non-auth request.
-    /// Enabled by default. Use `--no-require-auth` for development.
-    #[arg(long, default_value = "true", env = "RIVVEN_REQUIRE_AUTH")]
-    pub require_auth: bool,
+    /// Disable client authentication.
+    /// By default, all requests require authentication (SASL/PLAIN,
+    /// SASL/SCRAM-SHA-256, or username/password). Pass this flag to disable
+    /// authentication for local development.
+    #[arg(long, default_value = "false", env = "RIVVEN_NO_REQUIRE_AUTH")]
+    pub no_require_auth: bool,
 
     // ============ Cluster Security ============
     /// Bearer token for authenticating Raft RPCs between cluster nodes.

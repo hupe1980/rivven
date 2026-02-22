@@ -329,12 +329,12 @@ impl ClusterServer {
         );
 
         // Create auth manager (enabled by default).
-        let auth_manager = if cli.require_auth {
-            info!("Client authentication enabled");
-            Some(Arc::new(rivven_core::AuthManager::new(Default::default())))
-        } else {
+        let auth_manager = if cli.no_require_auth {
             warn!("Client authentication DISABLED (--no-require-auth). Do not use in production.");
             None
+        } else {
+            info!("Client authentication enabled");
+            Some(Arc::new(rivven_core::AuthManager::new(Default::default())))
         };
 
         // Initialize TLS acceptor if enabled

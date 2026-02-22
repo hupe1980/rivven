@@ -10,7 +10,7 @@ use tracing::{debug, warn};
 /// Batching avoids an fsync on every single `commit_offset` call while still
 /// bounding the amount of data that could be lost on a crash to at most this
 /// many commits.
-const CHECKPOINT_INTERVAL: u32 = 50;
+pub const CHECKPOINT_INTERVAL: u32 = 50;
 
 /// Partition to offset mapping
 type PartitionOffsets = HashMap<u32, u64>;
