@@ -448,20 +448,20 @@ RDBC connectors expose pool metrics via the Prometheus endpoint (`/metrics`):
 Use the `rdbc-*` features to enable database drivers:
 
 ```toml
-rivven-connect = { version = "0.0.19", features = ["rdbc-postgres"] }       # PostgreSQL
-rivven-connect = { version = "0.0.19", features = ["rdbc-mysql"] }          # MySQL/MariaDB  
-rivven-connect = { version = "0.0.19", features = ["rdbc-sqlserver"] }      # SQL Server
-rivven-connect = { version = "0.0.19", features = ["rdbc-full"] }           # All databases
+rivven-connect = { version = "0.0.20", features = ["rdbc-postgres"] }       # PostgreSQL
+rivven-connect = { version = "0.0.20", features = ["rdbc-mysql"] }          # MySQL/MariaDB  
+rivven-connect = { version = "0.0.20", features = ["rdbc-sqlserver"] }      # SQL Server
+rivven-connect = { version = "0.0.20", features = ["rdbc-full"] }           # All databases
 ```
 
 ### Feature Bundles
 
 ```toml
 # In Cargo.toml
-rivven-connect = { version = "0.0.19", features = ["full"] }
+rivven-connect = { version = "0.0.20", features = ["full"] }
 
 # Or selective features
-rivven-connect = { version = "0.0.19", features = ["postgres", "s3"] }
+rivven-connect = { version = "0.0.20", features = ["postgres", "s3"] }
 ```
 
 | Bundle | Includes |

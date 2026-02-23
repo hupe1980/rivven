@@ -24,7 +24,7 @@ The SQS source connector consumes messages from Amazon Simple Queue Service (SQS
 ### Enable the feature
 
 ```toml
-rivven-connect = { version = "0.0.19", features = ["sqs"] }
+rivven-connect = { version = "0.0.20", features = ["sqs"] }
 ```
 
 ### Configuration
@@ -223,7 +223,7 @@ The SQS sink connector produces messages to Amazon Simple Queue Service (SQS) qu
 ### Enable the feature
 
 ```toml
-rivven-connect = { version = "0.0.19", features = ["sqs"] }
+rivven-connect = { version = "0.0.20", features = ["sqs"] }
 ```
 
 ### Configuration
