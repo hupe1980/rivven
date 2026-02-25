@@ -858,6 +858,27 @@ kubectl patch pvc data-rivven-0 -n rivven \
   -p '{"spec":{"resources":{"requests":{"storage":"200Gi"}}}}'
 ```
 
+### PVC Cleanup on Cluster Deletion
+
+When a `RivvenCluster` custom resource is deleted, the operator automatically cleans up associated PersistentVolumeClaims. This prevents storage leaks from PVCs with `Retain` reclaim policy that would otherwise persist after cluster teardown.
+
+The operator identifies PVCs by the label `app.kubernetes.io/instance={cluster-name}` and deletes them as part of the finalizer cleanup process. No manual intervention is required.
+
+```bash
+# Verify PVCs are cleaned up after cluster deletion
+kubectl delete rivvencluster my-cluster -n rivven
+kubectl get pvc -n rivven -l app.kubernetes.io/instance=my-cluster  # Should return empty
+```
+
+### Reconciliation Error Backoff
+
+The operator uses exponential backoff for reconciliation errors to avoid overwhelming the API server:
+
+- **Initial delay:** 30 seconds
+- **Maximum delay:** 600 seconds (10 minutes)
+- **Backoff multiplier:** 2×
+- **Reset:** Error count resets on successful reconciliation
+
 ---
 
 ## Monitoring

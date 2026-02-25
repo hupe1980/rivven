@@ -7394,6 +7394,7 @@ version = "0.0.20"
 dependencies = [
  "bytes",
  "chrono",
+ "crc32fast",
  "dashmap",
  "futures",
  "hashring",
@@ -7625,6 +7626,7 @@ dependencies = [
  "async-trait",
  "aws-config",
  "aws-sdk-bedrockruntime",
+ "rand 0.8.5",
  "reqwest 0.12.28",
  "secrecy",
  "serde",
@@ -7643,6 +7645,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "dashmap",
  "futures",
  "k8s-openapi",
  "kube",
@@ -7680,6 +7683,7 @@ name = "rivven-python"
 version = "0.0.20"
 dependencies = [
  "bytes",
+ "dashmap",
  "pyo3",
  "pyo3-async-runtimes",
  "rivven-client",

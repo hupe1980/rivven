@@ -395,7 +395,7 @@ committed.await?;  // Wait for fsync
 
 - **Zero-alloc serialization**: `WalRecord::write_to_buf()` serializes directly into the shared batch buffer — no per-record `BytesMut` intermediate allocation
 - **Buffer shrink**: Batch buffer re-allocates to default capacity after burst traffic when oversized (>2x max)
-- **CRC-validated recovery**: Both `find_actual_end()` and `scan_wal_file()` validate CRC32 for every record
+- **CRC-validated recovery**: Both `find_actual_end()` and `scan_wal_file()` validate CRC32 for every record. Replayed records are written via `append_replicated` to preserve original offsets. `WalRecord::from_bytes()` rejects zero-length `Full`/`First`/`Last` records to prevent phantom records from pre-allocated WAL tail. Transaction COMMIT/ABORT markers are replayed from `TxnWalPayload` records.
 - **File pre-allocation**: Background `spawn_blocking` pre-allocates the next WAL file during normal operation, enabling zero-latency rotation when the current file fills up
 - **Failure-safe stats**: Write statistics (`writes_total`, `bytes_written`, etc.) are only updated on successful writes — failed flushes are never counted
 

@@ -20,10 +20,19 @@ pub struct RegistryConfig {
     /// Schema ID generation mode
     #[serde(default)]
     pub id_generation: IdGeneration,
+
+    /// Maximum number of schemas to cache in memory (0 = unlimited).
+    /// When the limit is reached, the oldest entries are evicted.
+    #[serde(default = "default_max_cache_size")]
+    pub max_cache_size: usize,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_max_cache_size() -> usize {
+    10_000
 }
 
 impl Default for RegistryConfig {
@@ -33,6 +42,7 @@ impl Default for RegistryConfig {
             compatibility: CompatibilityLevel::default(),
             normalize_schemas: true,
             id_generation: IdGeneration::default(),
+            max_cache_size: default_max_cache_size(),
         }
     }
 }

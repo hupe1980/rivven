@@ -10,9 +10,9 @@ use crate::resources::ResourceBuilder;
 use chrono::Utc;
 use futures::StreamExt;
 use k8s_openapi::api::apps::v1::StatefulSet;
-use k8s_openapi::api::core::v1::{ConfigMap, Service};
+use k8s_openapi::api::core::v1::{ConfigMap, PersistentVolumeClaim, Service};
 use k8s_openapi::api::policy::v1::PodDisruptionBudget;
-use kube::api::{Api, Patch, PatchParams};
+use kube::api::{Api, DeleteParams, ListParams, Patch, PatchParams};
 use kube::runtime::controller::{Action, Controller};
 use kube::runtime::finalizer::{finalizer, Event as FinalizerEvent};
 use kube::runtime::watcher::Config;
@@ -28,8 +28,11 @@ pub const FINALIZER_NAME: &str = "rivven.hupe1980.github.io/cluster-finalizer";
 /// Default requeue interval for successful reconciliations
 const DEFAULT_REQUEUE_SECONDS: u64 = 300; // 5 minutes
 
-/// Requeue interval for error cases
+/// Requeue interval for error cases (base for exponential backoff)
 const ERROR_REQUEUE_SECONDS: u64 = 30;
+
+/// Maximum requeue delay for error backoff
+const MAX_ERROR_REQUEUE_SECONDS: u64 = 600;
 
 /// Context passed to the controller
 pub struct ControllerContext {
@@ -37,6 +40,8 @@ pub struct ControllerContext {
     pub client: Client,
     /// Metrics recorder (optional)
     pub metrics: Option<ControllerMetrics>,
+    /// Per-cluster error retry counts for exponential backoff
+    pub error_counts: dashmap::DashMap<String, u32>,
 }
 
 /// Metrics for the controller
@@ -77,6 +82,7 @@ pub async fn run_controller(client: Client, namespace: Option<String>) -> Result
     let ctx = Arc::new(ControllerContext {
         client: client.clone(),
         metrics: Some(ControllerMetrics::new()),
+        error_counts: dashmap::DashMap::new(),
     });
 
     info!(
@@ -129,6 +135,7 @@ async fn reconcile(cluster: Arc<RivvenCluster>, ctx: Arc<ControllerContext>) -> 
     }
 
     let namespace = cluster.namespace().unwrap_or_else(|| "default".to_string());
+    let cluster_name = cluster.name_any();
     let clusters: Api<RivvenCluster> = Api::namespaced(ctx.client.clone(), &namespace);
 
     let result = finalizer(&clusters, FINALIZER_NAME, cluster, |event| async {
@@ -141,6 +148,11 @@ async fn reconcile(cluster: Arc<RivvenCluster>, ctx: Arc<ControllerContext>) -> 
 
     if let Some(ref metrics) = ctx.metrics {
         metrics.duration.record(start.elapsed().as_secs_f64());
+    }
+
+    // Reset error backoff counter on success
+    if result.is_ok() {
+        ctx.error_counts.remove(&cluster_name);
     }
 
     result.map_err(|e| {
@@ -258,23 +270,48 @@ fn validate_cluster_security(cluster: &RivvenCluster) -> Result<()> {
 }
 
 /// Cleanup resources when cluster is deleted
-#[instrument(skip(cluster, _ctx))]
+#[instrument(skip(cluster, ctx))]
 async fn cleanup_cluster(
     cluster: Arc<RivvenCluster>,
-    _ctx: Arc<ControllerContext>,
+    ctx: Arc<ControllerContext>,
 ) -> Result<Action> {
     let name = cluster.name_any();
     let namespace = cluster.namespace().unwrap_or_else(|| "default".to_string());
 
     info!(name = %name, namespace = %namespace, "Cleaning up RivvenCluster resources");
 
-    // Resources with owner references will be garbage collected automatically
-    // Here we can add any additional cleanup logic if needed
+    // Resources with owner references (StatefulSet, Service, ConfigMap, PDB)
+    // are garbage-collected automatically by Kubernetes when the CR is deleted.
+    // PVCs created by StatefulSet volumeClaimTemplates do NOT get owner refs
+    // and must be deleted explicitly.
 
-    // For example, we might want to:
-    // 1. Wait for graceful shutdown of brokers
-    // 2. Clean up external resources (PVCs if not retained)
-    // 3. Notify external systems
+    let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), &namespace);
+    let lp = ListParams::default().labels(&format!("app.kubernetes.io/instance={}", name));
+
+    match pvcs.list(&lp).await {
+        Ok(pvc_list) => {
+            for pvc in pvc_list.items {
+                if let Some(pvc_name) = pvc.metadata.name.as_deref() {
+                    info!(name = %name, pvc = %pvc_name, "Deleting PVC");
+                    if let Err(e) = pvcs.delete(pvc_name, &DeleteParams::default()).await {
+                        warn!(
+                            name = %name,
+                            pvc = %pvc_name,
+                            error = %e,
+                            "Failed to delete PVC (may have already been removed)"
+                        );
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            warn!(
+                name = %name,
+                error = %e,
+                "Failed to list PVCs for cleanup"
+            );
+        }
+    }
 
     info!(name = %name, "Cleanup complete");
 
@@ -547,21 +584,34 @@ async fn update_status(
     Ok(())
 }
 
-/// Error policy for the controller
+/// Error policy for the controller — exponential backoff with jitter.
 fn error_policy(
-    _cluster: Arc<RivvenCluster>,
+    cluster: Arc<RivvenCluster>,
     error: &OperatorError,
-    _ctx: Arc<ControllerContext>,
+    ctx: Arc<ControllerContext>,
 ) -> Action {
+    let key = cluster.name_any();
+    let retries = {
+        let mut entry = ctx.error_counts.entry(key.clone()).or_insert(0);
+        *entry += 1;
+        *entry
+    };
+
+    // Use the error's suggested delay OR exponential backoff:
+    // 30s → 60s → 120s → 240s → 480s → 600s (capped)
+    let delay = error.requeue_delay().unwrap_or_else(|| {
+        let base = Duration::from_secs(ERROR_REQUEUE_SECONDS);
+        let backoff = base * 2u32.saturating_pow((retries - 1).min(5));
+        backoff.min(Duration::from_secs(MAX_ERROR_REQUEUE_SECONDS))
+    });
+
     warn!(
         error = %error,
-        "Reconciliation error, will retry"
+        retry = retries,
+        delay_secs = delay.as_secs(),
+        "Reconciliation error for '{}', will retry",
+        key
     );
-
-    // Use the error's suggested requeue delay, or default
-    let delay = error
-        .requeue_delay()
-        .unwrap_or_else(|| Duration::from_secs(ERROR_REQUEUE_SECONDS));
 
     Action::requeue(delay)
 }

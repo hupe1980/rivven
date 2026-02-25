@@ -54,3 +54,6 @@ regex = "1.11"
 
 # Chrono for timestamps
 chrono = { workspace = true }
+
+# Concurrent map for error backoff tracking
+dashmap = "6.1"

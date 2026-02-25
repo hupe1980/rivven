@@ -124,7 +124,8 @@ pub use vectorized::{
     BatchDecoder, BatchEncoder, BatchMessage, BatchProcessor, RecordBatch, RecordBatchIter,
 };
 pub use wal::{
-    GroupCommitWal, RecordType, SyncMode, WalConfig, WalReader, WalRecord, WalStatsSnapshot,
+    GroupCommitWal, RecordType, SyncMode, TxnWalPayload, WalConfig, WalReader, WalRecord,
+    WalStatsSnapshot,
 };
 pub use zero_copy::{
     BufferRef, BufferSlice, ConsumedMessage, SmallVec, ZeroCopyBuffer, ZeroCopyBufferPool,

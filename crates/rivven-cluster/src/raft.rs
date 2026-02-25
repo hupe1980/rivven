@@ -237,11 +237,17 @@ impl StateMachine {
             snapshot_id: snapshot_id.clone(),
         };
 
-        // Write snapshot to disk atomically: temp file → rename
+        // Write snapshot to disk atomically: temp file → rename.
+        // The file format is: [data...][crc32:4 bytes LE]
+        // The trailing CRC-32 protects against bit-rot and truncation.
         let snap_path = self.snapshot_dir.join(format!("{}.snap", snapshot_id));
         let tmp_path = self.snapshot_dir.join(format!("{}.snap.tmp", snapshot_id));
 
-        tokio::fs::write(&tmp_path, &data)
+        let crc = crc32fast::hash(&data);
+        let mut file_data = data.clone();
+        file_data.extend_from_slice(&crc.to_le_bytes());
+
+        tokio::fs::write(&tmp_path, &file_data)
             .await
             .map_err(|e| StorageError::IO {
                 source: StorageIOError::write_snapshot(Some(meta.signature()), &e),
@@ -276,12 +282,36 @@ impl StateMachine {
     /// All three fields are updated while holding all write locks
     /// simultaneously (lock ordering: metadata → last_applied → membership)
     /// so that concurrent readers never observe partially-installed state.
+    ///
+    /// The data is expected in the snapshot file format: `[payload][crc32:4 LE]`.
+    /// If the data doesn't contain a valid CRC trailer (e.g. legacy snapshots
+    /// shorter than 5 bytes), it is deserialized directly without verification.
     async fn install_snapshot_data(
         &self,
         data: &[u8],
     ) -> std::result::Result<(), StorageError<NodeId>> {
+        // Verify CRC-32 integrity if the file is large enough to contain one.
+        let payload = if data.len() > 4 {
+            let (payload, crc_bytes) = data.split_at(data.len() - 4);
+            let stored_crc = u32::from_le_bytes(crc_bytes.try_into().unwrap());
+            let actual_crc = crc32fast::hash(payload);
+            if stored_crc != actual_crc {
+                return Err(StorageError::IO {
+                    source: StorageIOError::read_state_machine(openraft::AnyError::new(
+                        &std::io::Error::other(format!(
+                            "Snapshot CRC mismatch: stored={:#010x} actual={:#010x} — file is corrupt",
+                            stored_crc, actual_crc
+                        )),
+                    )),
+                });
+            }
+            payload
+        } else {
+            data
+        };
+
         let snapshot_data: SnapshotData =
-            postcard::from_bytes(data).map_err(|e| StorageError::IO {
+            postcard::from_bytes(payload).map_err(|e| StorageError::IO {
                 source: StorageIOError::read_state_machine(openraft::AnyError::new(&e)),
             })?;
 
@@ -1536,8 +1566,8 @@ impl RaftNode {
                     *next += 1;
                     idx
                 };
-                // Use term 1 (not 0) — see propose() for rationale.
-                let log_id = LogId::new(openraft::CommittedLeaderId::new(1, self.node_id), index);
+                // Use term 0 for standalone entries — see propose() for rationale.
+                let log_id = LogId::new(openraft::CommittedLeaderId::new(0, self.node_id), index);
                 let response = self.state_machine.apply_command(&log_id, command).await;
                 responses.push(response.response);
             }

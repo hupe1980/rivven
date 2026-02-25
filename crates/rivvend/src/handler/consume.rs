@@ -75,23 +75,56 @@ impl RequestHandler {
                 }
             }
         } else {
-            // Long-polling: retry until data arrives or timeout expires
+            // Long-polling: wait for data using partition write notifications.
+            // The partition's `write_notify` is signalled on every append,
+            // so consumers wake immediately instead of polling at 50 ms.
             let deadline = tokio::time::Instant::now() + max_wait;
-            let poll_interval = std::time::Duration::from_millis(50);
+            let partition_ref = match topic.partition(partition) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Response::Error {
+                        message: e.to_string(),
+                    };
+                }
+            };
+            let notify = partition_ref.write_notify();
 
             loop {
+                // Register the notification future BEFORE reading to prevent
+                // missed wakeups: if a write occurs between read() returning
+                // empty and select! polling notified(), the notification would
+                // be lost. We create the Notified, pin it, and call enable()
+                // to register as a waiter before checking the condition.
+                // This is robust even if the partition switches from
+                // notify_waiters() to notify_one() in the future.
+                let notified = notify.notified();
+                let mut notified = std::pin::pin!(notified);
+                notified.as_mut().enable();
+
                 match topic.read(partition, offset, max_messages).await {
                     Ok(msgs) if !msgs.is_empty() => break msgs,
                     Ok(_) => {
-                        // No data yet — wait or timeout
-                        if tokio::time::Instant::now() >= deadline {
+                        // No data yet — wait for a write or timeout
+                        let remaining =
+                            deadline.saturating_duration_since(tokio::time::Instant::now());
+                        if remaining.is_zero() {
                             break Vec::new();
                         }
-                        // Sleep briefly then retry (partition notify would be better
-                        // but this provides the correct semantics without a large
-                        // architectural change — the 50ms poll interval is acceptable
-                        // for consumer workloads)
-                        tokio::time::sleep(poll_interval).await;
+                        // Race-free: notified was registered before read()
+                        tokio::select! {
+                            _ = notified => { /* retry read */ }
+                            _ = tokio::time::sleep(remaining) => {
+                                // Final attempt before returning empty
+                                match topic.read(partition, offset, max_messages).await {
+                                    Ok(msgs) => break msgs,
+                                    Err(e) => {
+                                        return Response::Error {
+                                            message: e.to_string(),
+                                        };
+                                    }
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
                         return Response::Error {

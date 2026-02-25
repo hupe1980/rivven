@@ -838,24 +838,23 @@ fn parse_filter_condition(condition: &str) -> Result<FilterCondition, String> {
 }
 
 /// Build an SMT chain from a list of transform configurations.
-pub fn build_smt_chain(transforms: &[SmtTransformConfig]) -> Option<SmtChain> {
+///
+/// Returns an error if any transform type is unrecognised or misconfigured,
+/// ensuring fail-fast at connector startup.
+pub fn build_smt_chain(
+    transforms: &[SmtTransformConfig],
+) -> std::result::Result<Option<SmtChain>, String> {
     if transforms.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let mut chain = SmtChain::new();
     for transform_config in transforms {
-        match build_smt_transform(transform_config) {
-            Ok(arc_transform) => {
-                chain = chain.add_boxed(arc_transform);
-                tracing::debug!("Added SMT transform: {:?}", transform_config.transform_type);
-            }
-            Err(e) => {
-                tracing::warn!("Failed to build SMT transform: {}", e);
-            }
-        }
+        let arc_transform = build_smt_transform(transform_config)?;
+        chain = chain.add_boxed(arc_transform);
+        tracing::debug!("Added SMT transform: {:?}", transform_config.transform_type);
     }
-    Some(chain)
+    Ok(Some(chain))
 }
 
 // ============================================================================
@@ -1064,7 +1063,7 @@ mod tests {
 
     #[test]
     fn test_build_smt_chain_empty() {
-        let chain = build_smt_chain(&[]);
+        let chain = build_smt_chain(&[]).unwrap();
         assert!(chain.is_none());
     }
 }

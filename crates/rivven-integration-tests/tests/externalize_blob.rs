@@ -1263,7 +1263,7 @@ async fn test_cdc_feature_processor_with_externalize_blob() -> Result<()> {
         config: externalize_config,
     });
 
-    let processor = CdcFeatureProcessor::new(config);
+    let processor = CdcFeatureProcessor::new(config).unwrap();
     assert!(
         processor.has_transforms(),
         "Processor should have transforms configured"
@@ -1386,7 +1386,7 @@ async fn test_postgres_to_connect_to_broker_pipeline() -> Result<()> {
         config: externalize_config,
     });
 
-    let processor = CdcFeatureProcessor::new(feature_config);
+    let processor = CdcFeatureProcessor::new(feature_config).unwrap();
     info!("CdcFeatureProcessor configured: {}", processor);
 
     // Setup broker client
@@ -1507,7 +1507,7 @@ async fn test_connect_smt_chain_mask_then_externalize() -> Result<()> {
         config: externalize_config,
     });
 
-    let processor = CdcFeatureProcessor::new(config);
+    let processor = CdcFeatureProcessor::new(config).unwrap();
     assert_eq!(processor.transform_count(), 2, "Should have 2 transforms");
 
     // Create event with sensitive data and large content
@@ -1592,7 +1592,7 @@ async fn test_per_table_smt_predicate() -> Result<()> {
         config: externalize_config,
     });
 
-    let processor = CdcFeatureProcessor::new(config);
+    let processor = CdcFeatureProcessor::new(config).unwrap();
     assert!(processor.has_transforms(), "Should have transforms");
 
     let large_content = "Large content that exceeds threshold. ".repeat(5);
@@ -1686,7 +1686,7 @@ async fn test_multiple_tables_predicate() -> Result<()> {
         config: externalize_config,
     });
 
-    let processor = CdcFeatureProcessor::new(config);
+    let processor = CdcFeatureProcessor::new(config).unwrap();
     let large_content = "Large content. ".repeat(10);
 
     // Test all three tables
@@ -1761,7 +1761,7 @@ async fn test_regex_table_predicate() -> Result<()> {
         config: externalize_config,
     });
 
-    let processor = CdcFeatureProcessor::new(config);
+    let processor = CdcFeatureProcessor::new(config).unwrap();
     let large_content = "Large content. ".repeat(10);
 
     // Test tables - some match "^doc.*", some don't
@@ -1837,7 +1837,7 @@ async fn test_negate_predicate() -> Result<()> {
         config: externalize_config,
     });
 
-    let processor = CdcFeatureProcessor::new(config);
+    let processor = CdcFeatureProcessor::new(config).unwrap();
     let large_content = "Large content. ".repeat(10);
 
     // Test tables
@@ -1910,7 +1910,7 @@ async fn test_operation_predicate() -> Result<()> {
         config: externalize_config,
     });
 
-    let processor = CdcFeatureProcessor::new(config);
+    let processor = CdcFeatureProcessor::new(config).unwrap();
     let large_content = "Large content. ".repeat(10);
 
     // Test INSERT - should externalize
@@ -2005,7 +2005,7 @@ async fn test_combined_predicates() -> Result<()> {
         config: externalize_config,
     });
 
-    let processor = CdcFeatureProcessor::new(config);
+    let processor = CdcFeatureProcessor::new(config).unwrap();
     let large_content = "Large content. ".repeat(10);
 
     // Test: documents + INSERT = MATCH -> externalize
@@ -2092,7 +2092,7 @@ async fn test_schema_predicate() -> Result<()> {
         config: externalize_config,
     });
 
-    let processor = CdcFeatureProcessor::new(config);
+    let processor = CdcFeatureProcessor::new(config).unwrap();
     let large_content = "Large content. ".repeat(10);
 
     // Test audit schema - should externalize

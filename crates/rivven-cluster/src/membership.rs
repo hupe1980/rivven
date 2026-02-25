@@ -165,7 +165,16 @@ impl Membership {
             .map(|_| config.auth_token.clone().unwrap());
 
         #[cfg(not(feature = "swim"))]
-        let hmac_key: Option<String> = None;
+        let hmac_key: Option<String> = {
+            if config.auth_token.is_some() {
+                tracing::warn!(
+                    "auth_token is configured but the 'swim' feature is disabled — \
+                     HMAC message authentication is inactive. Enable the 'swim' feature \
+                     or remove auth_token to suppress this warning."
+                );
+            }
+            None
+        };
 
         Ok(Self {
             local_node,

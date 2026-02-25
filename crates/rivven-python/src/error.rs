@@ -170,7 +170,7 @@ impl From<rivven_client::Error> for RivvenError {
             rivven_client::Error::InvalidResponse => Self::invalid_response(),
             rivven_client::Error::SerializationError(msg) => Self::serialization(msg.to_string()),
             rivven_client::Error::ProtocolError(e) => Self::serialization(e.to_string()),
-            rivven_client::Error::IoError(e) => Self::io(e.to_string()),
+            rivven_client::Error::IoError(_, e) => Self::io(e.to_string()),
             rivven_client::Error::ResponseTooLarge(size, max) => {
                 Self::server(format!("Response too large: {} bytes (max: {})", size, max))
             }

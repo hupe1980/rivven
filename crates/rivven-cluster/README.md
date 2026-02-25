@@ -16,6 +16,7 @@
 | **ISR Replication** | In-Sync Replica tracking with high watermark |
 | **Partitioning** | Consistent hashing with rack awareness |
 | **QUIC Transport** | 0-RTT, multiplexed streams, BBR congestion control |
+| **TCP Transport** | Connection pooling with configurable idle timeout and TCP keepalive |
 | **Consumer Coordination** | Consumer group management with Raft persistence |
 
 ## Why redb?
@@ -60,6 +61,8 @@ Rivven uses **redb** instead of RocksDB for Raft log storage:
 │                   │  (TCP / QUIC)       │                                  │
 │                   └─────────────────────┘                                  │
 │                                                                            │
+│  Note: TCP transport is plaintext. Use QUIC for encrypted inter-node       │
+│  communication (requires `quic` feature flag).                             │
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -153,7 +156,9 @@ let replicas = placer.assign_partition("orders", 0, 3)?;
 
 ### QUIC Transport (Optional)
 
-High-performance transport with 0-RTT and multiplexing:
+High-performance transport with 0-RTT, multiplexing, and automatic TLS 1.3 encryption.
+
+> **Note:** TCP transport is plaintext (unencrypted). For encrypted inter-node communication, enable the `quic` feature flag.
 
 ```rust
 use rivven_cluster::quic_transport::{QuicTransport, QuicConfig, TlsConfig};

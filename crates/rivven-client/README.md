@@ -153,7 +153,9 @@ let config = ResilientClientConfig::builder()
 
 ### High-Throughput Pipelined Client
 
-For maximum throughput, use `PipelinedClient` which allows multiple in-flight requests over a single connection. Supports optional **TLS** and **authentication**:
+For maximum throughput, use `PipelinedClient` which allows multiple in-flight requests over a single connection. Supports optional **TLS** and **authentication**.
+
+**Connection safety:** The pipelined client tracks wire state via a `bytes_sent` flag. If an I/O error occurs after bytes have been written (partial send, broken read), the connection is automatically poisoned to prevent TCP stream desync from stale responses. Non-pipelined requests poison on every I/O operation (write, flush, read). `ProtocolError`, `ResponseTooLarge`, and request timeouts also trigger poisoning and consumer auto-reconnect. Timeout cancellation mid-I/O poisons the stream because the dropped future may leave partial frames on the wire.
 
 ```rust
 use rivven_client::{PipelinedClient, PipelineConfig};
@@ -258,6 +260,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | **Murmur2 Hashing** | Kafka-compatible key partitioning (optimized) |
 | **Batched I/O** | Single flush per batch minimizes syscalls |
 | **Pipelined Responses** | Write-all, then read-all for throughput |
+| **Pipelined Consumer Fetch** | Sends all partition fetch requests in one flush, reads all responses |
+| **Pipelined Offset Commit** | Batch-commits all partition offsets in one flush, collects all errors |
 | **Multi-Server Failover** | Tries all bootstrap servers on connect |
 | **Flush Safety** | `pending_records` correctly decremented on batch failure; `flush()` always terminates |
 | **Completion Tracking** | `flush()` waits for all pending records |
@@ -566,6 +570,7 @@ match client.commit_transaction(txn_id, &producer).await {
 | `circuit_breaker_failure_threshold` | 5 | Failures before circuit opens |
 | `circuit_breaker_recovery_timeout` | 30s | Time before attempting recovery |
 | `max_connection_lifetime` | 300s | Maximum time a pooled connection can be reused before recycling |
+| `idle_timeout` | 60s | Maximum time a pooled connection can sit idle before eviction |
 
 ## Error Handling
 
@@ -584,6 +589,10 @@ match client.publish("topic", None, b"data").await {
     }
     Err(Error::ConnectionError(msg)) => {
         println!("Connection failed: {}", msg);
+    }
+    Err(Error::IoError(kind, msg)) => {
+        println!("I/O error ({:?}): {}", kind, msg);
+        // ErrorKind preserved for retry classification
     }
     Err(e) => println!("Other error: {}", e),
 }

@@ -39,7 +39,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tracing::{debug, error, info, warn};
@@ -180,66 +180,11 @@ impl ClusterServer {
         // Replay WAL records at startup.
         // After topic recovery (which restores partition structure), replay the
         // WAL to re-apply any committed writes that may not have been flushed
-        // to segment files before the previous shutdown. Records already
-        // reflected in segments are idempotent and safe to skip.
-        {
-            let wal_dir = std::path::PathBuf::from(&core_config.data_dir).join("wal");
-            if wal_dir.exists() {
-                let wal_config = rivven_core::WalConfig {
-                    dir: wal_dir,
-                    ..Default::default()
-                };
-                match rivven_core::GroupCommitWal::replay_all(&wal_config).await {
-                    Ok(records) if !records.is_empty() => {
-                        tracing::info!(
-                            count = records.len(),
-                            "WAL replay: {} records recovered at startup",
-                            records.len()
-                        );
-                        // Apply replayed records to the topic manager.
-                        // Any failure here means the server state would be
-                        // inconsistent — abort startup rather than risk silent
-                        // data loss.
-                        for record in &records {
-                            if let Err(e) = topic_manager.apply_wal_record(record).await {
-                                return Err(anyhow::anyhow!(
-                                    "WAL replay: failed to apply record (lsn={}): {}. \
-                                     Aborting startup to prevent data loss. \
-                                     Inspect the WAL files in the data directory and retry, \
-                                     or remove them to accept data loss.",
-                                    record.lsn,
-                                    e
-                                ));
-                            }
-                        }
-
-                        // §3.3 / Checkpoint WAL after successful replay.
-                        // Remove replayed WAL files so a subsequent crash does not
-                        // replay the same records again, which would produce
-                        // duplicate messages.
-                        if let Err(e) = rivven_core::GroupCommitWal::checkpoint_dir(&wal_config.dir)
-                        {
-                            tracing::warn!(
-                                error = %e,
-                                "WAL post-replay checkpoint failed — duplicates possible on next crash"
-                            );
-                        }
-                    }
-                    Ok(_) => {
-                        tracing::debug!("WAL replay: no records to replay");
-                    }
-                    Err(e) => {
-                        // Abort startup instead of silently losing data.
-                        return Err(anyhow::anyhow!(
-                            "WAL replay: failed to read WAL files: {}. \
-                             Aborting startup to prevent data loss. \
-                             Inspect or remove corrupt WAL files in the data directory to proceed.",
-                            e
-                        ));
-                    }
-                }
-            }
-        }
+        // to segment files before the previous shutdown.
+        topic_manager
+            .replay_wal_and_checkpoint(&core_config)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         // §3.3 Instantiate the WAL for the produce path.
         // This must happen after replay (which reads old WAL files) so that
@@ -913,6 +858,8 @@ impl ClusterServer {
                         }
                         Err(e) => {
                             error!("Error accepting connection: {}", e);
+                            // Brief backoff to avoid tight error loop on fd exhaustion
+                            tokio::time::sleep(Duration::from_millis(100)).await;
                         }
                     }
                 }
@@ -1547,32 +1494,35 @@ where
             router.route(request).await
         };
 
-        // Serialize and send response using same wire format as request
-        let response_bytes = match response.to_wire(wire_format, correlation_id) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                error!("Failed to serialize response: {}", e);
-                let error_response = Response::Error {
-                    message: format!("INTERNAL_ERROR: response serialization failed: {}", e),
-                };
-                match error_response
-                    .to_wire(wire_format, correlation_id)
-                    .or_else(|_| error_response.to_wire(WireFormat::Postcard, correlation_id))
-                {
-                    Ok(err_bytes) => err_bytes,
-                    Err(_) => {
-                        return Ok(());
-                    }
-                }
+        // Serialize and send response using same wire format as request.
+        // Use the shared framing helper for consistent length-prefixed writes.
+        if let Err(e) =
+            crate::framing::send_response(&mut stream, &response, wire_format, correlation_id).await
+        {
+            error!("Failed to send response: {}", e);
+            // Attempt to send an error response as a last resort
+            let error_response = Response::Error {
+                message: format!("INTERNAL_ERROR: response send failed: {}", e),
+            };
+            if let Err(e2) = crate::framing::send_response(
+                &mut stream,
+                &error_response,
+                wire_format,
+                correlation_id,
+            )
+            .await
+            {
+                // Final fallback: try Postcard format
+                let _ = crate::framing::send_response(
+                    &mut stream,
+                    &error_response,
+                    WireFormat::Postcard,
+                    correlation_id,
+                )
+                .await;
+                debug!("Error response also failed to send: {}", e2);
             }
-        };
-
-        let len: u32 = response_bytes.len().try_into().map_err(|_| {
-            anyhow::anyhow!("response size {} exceeds u32::MAX", response_bytes.len())
-        })?;
-        stream.write_all(&len.to_be_bytes()).await?;
-        stream.write_all(&response_bytes).await?;
-        stream.flush().await?;
+        }
     }
 }
 

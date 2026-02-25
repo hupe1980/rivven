@@ -321,7 +321,7 @@ impl LogSegment {
     fn data_ptr(&self) -> *mut u8 {
         // SAFETY: We only use the resulting pointer for offset-based reads/writes
         // coordinated by `write_pos`. We never create overlapping references.
-        (unsafe { &mut *self.data.get() }).as_mut_ptr()
+        unsafe { (*self.data.get()).as_mut_ptr() }
     }
 
     /// Try to append data to this segment

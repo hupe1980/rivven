@@ -49,8 +49,12 @@ use tracing::{debug, info, warn};
 /// Configuration for the high-level consumer.
 #[derive(Debug, Clone)]
 pub struct ConsumerConfig {
-    /// Bootstrap server address (host:port)
-    pub bootstrap_server: String,
+    /// Bootstrap server addresses (host:port).
+    ///
+    /// On initial connect and reconnect, the consumer tries each server
+    /// in round-robin order until one succeeds. Accepts a single server
+    /// or multiple for failover.
+    pub bootstrap_servers: Vec<String>,
     /// Consumer group ID for offset management
     pub group_id: String,
     /// Topics to subscribe to
@@ -86,7 +90,7 @@ pub struct ConsumerAuthConfig {
 
 /// Builder for [`ConsumerConfig`].
 pub struct ConsumerConfigBuilder {
-    bootstrap_server: Option<String>,
+    bootstrap_servers: Vec<String>,
     group_id: Option<String>,
     topics: Vec<String>,
     partitions: HashMap<String, Vec<u32>>,
@@ -103,7 +107,7 @@ pub struct ConsumerConfigBuilder {
 impl ConsumerConfigBuilder {
     pub fn new() -> Self {
         Self {
-            bootstrap_server: None,
+            bootstrap_servers: vec!["127.0.0.1:9092".to_string()],
             group_id: None,
             topics: Vec::new(),
             partitions: HashMap::new(),
@@ -118,8 +122,15 @@ impl ConsumerConfigBuilder {
         }
     }
 
+    /// Set a single bootstrap server (convenience for `bootstrap_servers`).
     pub fn bootstrap_server(mut self, server: impl Into<String>) -> Self {
-        self.bootstrap_server = Some(server.into());
+        self.bootstrap_servers = vec![server.into()];
+        self
+    }
+
+    /// Set multiple bootstrap servers for failover.
+    pub fn bootstrap_servers(mut self, servers: Vec<String>) -> Self {
+        self.bootstrap_servers = servers;
         self
     }
 
@@ -207,9 +218,7 @@ impl ConsumerConfigBuilder {
 
     pub fn build(self) -> ConsumerConfig {
         ConsumerConfig {
-            bootstrap_server: self
-                .bootstrap_server
-                .unwrap_or_else(|| "127.0.0.1:9092".into()),
+            bootstrap_servers: self.bootstrap_servers,
             group_id: self.group_id.unwrap_or_else(|| "default-group".into()),
             topics: self.topics,
             partitions: self.partitions,
@@ -274,10 +283,45 @@ pub struct Consumer {
 impl Consumer {
     /// Create and connect a new consumer.
     ///
-    /// Connects to the bootstrap server, authenticates if configured,
-    /// and discovers partition assignments for subscribed topics.
+    /// Connects to the first available bootstrap server, authenticates if
+    /// configured, and discovers partition assignments for subscribed topics.
+    ///
+    /// ## Auto-commit semantics
+    ///
+    /// When `auto_commit_interval` is set, offsets are committed periodically
+    /// at the **next-fetch** position. This provides **at-most-once** semantics:
+    /// if the application crashes between `poll()` returning and the records
+    /// being processed, those records will be skipped on restart.
+    ///
+    /// For **at-least-once** semantics, disable auto-commit and call
+    /// `commit()` explicitly after processing each batch.
     pub async fn new(config: ConsumerConfig) -> Result<Self> {
-        let mut client = Client::connect(&config.bootstrap_server).await?;
+        let servers = &config.bootstrap_servers;
+        if servers.is_empty() {
+            return Err(Error::ConnectionError(
+                "No bootstrap servers configured".to_string(),
+            ));
+        }
+
+        let mut last_error = None;
+        let mut client = None;
+        for server in servers {
+            match Client::connect(server).await {
+                Ok(c) => {
+                    client = Some(c);
+                    break;
+                }
+                Err(e) => {
+                    warn!(server = %server, error = %e, "Failed to connect to bootstrap server");
+                    last_error = Some(e);
+                }
+            }
+        }
+        let mut client = client.ok_or_else(|| {
+            last_error.unwrap_or_else(|| {
+                Error::ConnectionError("No bootstrap servers available".to_string())
+            })
+        })?;
 
         // Authenticate if credentials are provided
         if let Some(ref auth) = config.auth {
@@ -426,38 +470,64 @@ impl Consumer {
             None
         };
 
-        // Phase 1: Immediate (non-blocking) fetch from all partitions
-        for (topic, partition) in &self.assignment_list {
-            let key = (topic.clone(), *partition);
-            let offset = self.offsets.get(&key).copied().unwrap_or(0);
+        // Phase 1: Pipelined (non-blocking) fetch from all partitions.
+        // Sends all consume requests at once, then reads all responses —
+        // eliminates per-partition round-trip latency.
+        if !self.assignment_list.is_empty() {
+            let fetches: Vec<(&str, u32, u64, usize, Option<u8>)> = self
+                .assignment_list
+                .iter()
+                .map(|(topic, partition)| {
+                    let key = (topic.clone(), *partition);
+                    let offset = self.offsets.get(&key).copied().unwrap_or(0);
+                    (
+                        topic.as_str(),
+                        *partition,
+                        offset,
+                        self.config.max_poll_records,
+                        isolation_level,
+                    )
+                })
+                .collect();
 
-            let messages = self
-                .client
-                .consume_with_isolation(
-                    topic.as_str(),
-                    *partition,
-                    offset,
-                    self.config.max_poll_records,
-                    isolation_level,
-                )
-                .await?;
+            let results = self.client.consume_pipelined(&fetches).await?;
 
-            if !messages.is_empty() {
-                let max_offset = messages.iter().map(|m| m.offset).max().unwrap_or(offset);
-                self.offsets.insert(key, max_offset + 1);
+            for (i, result) in results.into_iter().enumerate() {
+                let (topic, partition) = &self.assignment_list[i];
+                match result {
+                    Ok(messages) if !messages.is_empty() => {
+                        let key = (topic.clone(), *partition);
+                        let max_offset = messages.iter().map(|m| m.offset).max().unwrap_or(0);
+                        self.offsets.insert(key, max_offset + 1);
 
-                records.extend(messages.into_iter().map(|data| ConsumerRecord {
-                    topic: topic.clone(),
-                    partition: *partition,
-                    offset: data.offset,
-                    data,
-                }));
+                        records.extend(messages.into_iter().map(|data| ConsumerRecord {
+                            topic: topic.clone(),
+                            partition: *partition,
+                            offset: data.offset,
+                            data,
+                        }));
+                    }
+                    Err(e) => {
+                        warn!(
+                            topic = %topic,
+                            partition = partition,
+                            error = %e,
+                            "Pipelined fetch error, skipping partition"
+                        );
+                    }
+                    _ => {} // empty result — no data
+                }
             }
         }
 
         // Phase 2: If nothing was returned and long-polling is enabled,
-        // issue a single long-poll on the first partition to avoid a busy loop.
+        // issue a single long-poll to avoid a busy loop. We rotate the
+        // assignment list so each call long-polls a different partition,
+        // preventing starvation where only the first partition is polled.
         if records.is_empty() && self.config.max_poll_interval_ms > 0 {
+            if !self.assignment_list.is_empty() {
+                self.assignment_list.rotate_left(1);
+            }
             if let Some((topic, partition)) = self.assignment_list.first() {
                 let key = (topic.clone(), *partition);
                 let offset = self.offsets.get(&key).copied().unwrap_or(0);
@@ -516,38 +586,70 @@ impl Consumer {
     }
 
     /// Inner commit implementation without reconnection wrapper.
+    ///
+    /// Uses request pipelining to send all offset commits at once, then
+    /// reads all responses. Collects all errors instead of only the last.
     async fn commit_inner(&mut self) -> Result<()> {
-        let mut last_error = None;
+        if self.offsets.is_empty() {
+            return Ok(());
+        }
 
-        for ((topic, partition), offset) in &self.offsets {
-            if let Err(e) = self
+        // Build commit requests
+        let commits: Vec<(String, u32, u64)> = self
+            .offsets
+            .iter()
+            .map(|((topic, partition), offset)| (topic.clone(), *partition, *offset))
+            .collect();
+
+        let mut errors = Vec::new();
+
+        // Use pipelining: send all commit requests back-to-back, then read responses
+        if self.client.is_poisoned() {
+            // Stream is desynchronized — sequential fallback would also fail.
+            // Trigger reconnect by returning connection error immediately.
+            return Err(Error::ConnectionError(
+                "Client stream is desynchronized — reconnect required".into(),
+            ));
+        }
+
+        {
+            let results = self
                 .client
-                .commit_offset(&self.config.group_id, topic, *partition, *offset)
-                .await
-            {
-                warn!(
-                    topic = %topic,
-                    partition,
-                    offset,
-                    error = %e,
-                    "Failed to commit offset"
-                );
-                last_error = Some(e);
+                .commit_offsets_pipelined(&self.config.group_id, &commits)
+                .await;
+
+            match results {
+                Ok(per_partition) => {
+                    for (i, result) in per_partition.into_iter().enumerate() {
+                        if let Err(e) = result {
+                            let (topic, partition, offset) = &commits[i];
+                            warn!(
+                                topic = %topic, partition, offset, error = %e,
+                                "Failed to commit offset"
+                            );
+                            errors.push(e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    // Transport-level failure — all commits failed
+                    errors.push(e);
+                }
             }
         }
 
         self.last_commit = Instant::now();
 
-        match last_error {
-            Some(e) => Err(e),
-            None => {
-                debug!(
-                    group_id = %self.config.group_id,
-                    partitions = self.offsets.len(),
-                    "Offsets committed"
-                );
-                Ok(())
-            }
+        if errors.is_empty() {
+            debug!(
+                group_id = %self.config.group_id,
+                partitions = self.offsets.len(),
+                "Offsets committed"
+            );
+            Ok(())
+        } else {
+            // Return the first error (all are logged above)
+            Err(errors.into_iter().next().unwrap())
         }
     }
 
@@ -586,18 +688,29 @@ impl Consumer {
     // Reconnection
     // ========================================================================
 
-    /// Attempt to reconnect to the bootstrap server with exponential backoff.
+    /// Attempt to reconnect to a bootstrap server with exponential backoff.
+    ///
+    /// Tries each configured bootstrap server in round-robin order.
     async fn reconnect(&mut self) -> Result<()> {
         let mut backoff = Duration::from_millis(self.config.reconnect_backoff_ms);
         let max_backoff = Duration::from_millis(self.config.reconnect_backoff_max_ms);
+        let servers = &self.config.bootstrap_servers;
+
+        if servers.is_empty() {
+            return Err(Error::ConnectionError(
+                "No bootstrap servers configured".to_string(),
+            ));
+        }
 
         for attempt in 1..=10u32 {
+            // Round-robin across bootstrap servers
+            let server = &servers[(attempt as usize - 1) % servers.len()];
             info!(
                 attempt,
-                server = %self.config.bootstrap_server,
+                server = %server,
                 "Attempting to reconnect"
             );
-            match Client::connect(&self.config.bootstrap_server).await {
+            match Client::connect(server).await {
                 Ok(mut new_client) => {
                     // Re-authenticate if credentials are configured
                     if let Some(ref auth) = self.config.auth {
@@ -612,19 +725,19 @@ impl Consumer {
                         }
                     }
                     self.client = new_client;
-                    info!("Consumer reconnected successfully");
+                    info!("Consumer reconnected successfully to {}", server);
                     return Ok(());
                 }
                 Err(e) => {
-                    warn!(error = %e, attempt, "Reconnect attempt failed");
+                    warn!(error = %e, attempt, server = %server, "Reconnect attempt failed");
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(max_backoff);
                 }
             }
         }
         Err(Error::ConnectionError(format!(
-            "Failed to reconnect to {} after 10 attempts",
-            self.config.bootstrap_server
+            "Failed to reconnect to any of {:?} after 10 attempts",
+            servers
         )))
     }
 
@@ -633,9 +746,11 @@ impl Consumer {
         matches!(
             e,
             Error::ConnectionError(_)
-                | Error::IoError(_)
+                | Error::IoError(_, _)
                 | Error::Timeout
                 | Error::TimeoutWithMessage(_)
+                | Error::ProtocolError(_)
+                | Error::ResponseTooLarge(_, _)
         )
     }
 

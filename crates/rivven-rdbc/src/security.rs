@@ -160,13 +160,22 @@ pub fn validate_sql_type_name(type_name: &str) -> crate::Result<()> {
 /// Validate a user-supplied WHERE clause for safe interpolation.
 ///
 /// The clause is injected as a raw SQL fragment (via `Expr::cust()`), so it
-/// **cannot** be parameterized. This function applies basic deny-list checks
+/// **cannot** be parameterized. This function applies deny-list checks
 /// to reject the most common SQL injection patterns:
 ///
 /// - Semicolons (statement terminators / stacking)
 /// - Double-dash `--` line comments
 /// - C-style `/* */` block comments
 /// - Backslash escapes (MySQL-specific injection vector)
+/// - `UNION` keyword (second-order query injection)
+/// - Subquery delimiters `SELECT` within parentheses
+/// - `EXEC`/`EXECUTE` (stored procedure invocation)
+/// - `xp_` prefixed calls (SQL Server extended procedures)
+/// - `WAITFOR` / `BENCHMARK` / `SLEEP` (timing side-channels)
+/// - `INTO OUTFILE` / `INTO DUMPFILE` (file-system writes)
+/// - `LOAD_FILE` (file-system reads)
+/// - Null bytes (string truncation)
+/// - Newlines (multi-line injection)
 ///
 /// # Security note
 ///
@@ -186,6 +195,7 @@ pub fn validate_sql_type_name(type_name: &str) -> crate::Result<()> {
 /// assert!(validate_where_clause("1=1; DROP TABLE users").is_err());
 /// assert!(validate_where_clause("1=1 -- bypass").is_err());
 /// assert!(validate_where_clause("1=1 /* comment */").is_err());
+/// assert!(validate_where_clause("1=1 UNION SELECT * FROM passwords").is_err());
 /// ```
 pub fn validate_where_clause(clause: &str) -> crate::Result<()> {
     if clause.is_empty() {
@@ -196,6 +206,22 @@ pub fn validate_where_clause(clause: &str) -> crate::Result<()> {
         return Err(Error::config(format!(
             "WHERE clause too long: {} chars (max 4096)",
             clause.len()
+        )));
+    }
+
+    // Null bytes — can truncate strings in C-backed drivers
+    if clause.contains('\0') {
+        return Err(Error::config(format!(
+            "WHERE clause contains prohibited null byte: {}",
+            clause
+        )));
+    }
+
+    // Newlines — multi-line injection
+    if clause.contains('\n') || clause.contains('\r') {
+        return Err(Error::config(format!(
+            "WHERE clause contains prohibited newline: {}",
+            clause
         )));
     }
 
@@ -227,7 +253,146 @@ pub fn validate_where_clause(clause: &str) -> crate::Result<()> {
         )));
     }
 
+    // Case-insensitive keyword checks using word-boundary matching.
+    // A "word boundary" means the character before/after the keyword is NOT
+    // alphanumeric or underscore, preventing false positives like
+    // `executor_status` matching `EXEC` or `SELECTIVITY` matching `SELECT`.
+    let upper = clause.to_uppercase();
+
+    // Single-word prohibited keywords (word-boundary matched to prevent false
+    // positives like `executor_status` matching EXEC or `selectivity` matching SELECT)
+    for keyword in &[
+        // Query manipulation
+        "UNION",
+        "SELECT",
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        // DDL
+        "DROP",
+        "ALTER",
+        "CREATE",
+        "TRUNCATE",
+        // Stored procedure / dynamic execution
+        "EXEC",
+        "EXECUTE",
+        "DECLARE",
+        "CALL",
+        // Privilege escalation
+        "GRANT",
+        "REVOKE",
+        // Timing side-channels
+        "WAITFOR",
+        "BENCHMARK",
+        "SLEEP",
+        "PG_SLEEP",
+        // PostgreSQL file-access functions (exploitable without SELECT)
+        "PG_READ_FILE",
+        "PG_LS_DIR",
+        "PG_READ_BINARY_FILE",
+    ] {
+        if contains_word(&upper, keyword) {
+            return Err(Error::config(format!(
+                "WHERE clause contains prohibited keyword '{}': {}",
+                keyword, clause
+            )));
+        }
+    }
+
+    // SQL Server extended procedures (prefix match: xp_ followed by word chars)
+    if contains_word_prefix(&upper, "XP_") {
+        return Err(Error::config(format!(
+            "WHERE clause contains prohibited pattern 'xp_': {}",
+            clause
+        )));
+    }
+
+    // Multi-word prohibited patterns (already act as their own boundary)
+    for keyword in &["INTO OUTFILE", "INTO DUMPFILE", "LOAD_FILE"] {
+        if upper.contains(keyword) {
+            return Err(Error::config(format!(
+                "WHERE clause contains prohibited keyword '{}': {}",
+                keyword, clause
+            )));
+        }
+    }
+
+    // Note: MySQL `#` line comments are NOT blocked because `#` is a valid
+    // PostgreSQL bitwise XOR operator and JSON path operator (#>, #>>).
+    // The `--` and `/* */` checks cover the common cross-dialect comment vectors.
+
     Ok(())
+}
+
+/// Check whether `haystack` contains `word` at a word boundary.
+///
+/// A word boundary is any position where the adjacent character (or
+/// start/end of string) is not ASCII alphanumeric or underscore.
+///
+/// # Safety invariant
+/// This operates on bytes, not chars. The `u8 as char` cast is safe because:
+/// - All keywords are ASCII, so byte-level comparison is correct (UTF-8
+///   guarantees ASCII bytes never appear as continuation bytes).
+/// - `is_word_boundary` only checks `is_ascii_alphanumeric()` and `!= '_'`,
+///   both of which correctly classify non-ASCII bytes as boundaries.
+/// - If `is_word_boundary` is ever extended to check Unicode letter categories
+///   (e.g., `char::is_alphabetic()`), this must be rewritten to use char offsets.
+#[inline]
+fn is_word_boundary(c: Option<char>) -> bool {
+    match c {
+        None => true,
+        Some(ch) => !ch.is_ascii_alphanumeric() && ch != '_',
+    }
+}
+
+/// Returns `true` if `haystack` contains `word` surrounded by word boundaries.
+fn contains_word(haystack: &str, word: &str) -> bool {
+    let h = haystack.as_bytes();
+    let w = word.as_bytes();
+    if w.is_empty() || w.len() > h.len() {
+        return false;
+    }
+    for start in 0..=(h.len() - w.len()) {
+        if &h[start..start + w.len()] == w {
+            let before = if start == 0 {
+                None
+            } else {
+                Some(h[start - 1] as char)
+            };
+            let after = if start + w.len() >= h.len() {
+                None
+            } else {
+                Some(h[start + w.len()] as char)
+            };
+            if is_word_boundary(before) && is_word_boundary(after) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Returns `true` if `haystack` contains `prefix` at a word boundary on the left.
+/// Used for patterns like `XP_` where only the start boundary matters.
+fn contains_word_prefix(haystack: &str, prefix: &str) -> bool {
+    let h = haystack.as_bytes();
+    let p = prefix.as_bytes();
+    if p.len() > h.len() {
+        return false;
+    }
+    for start in 0..=(h.len() - p.len()) {
+        if &h[start..start + p.len()] == p {
+            let before = if start == 0 {
+                None
+            } else {
+                Some(h[start - 1] as char)
+            };
+            if is_word_boundary(before) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -371,5 +536,144 @@ mod tests {
     fn test_type_name_too_long() {
         let long = "A".repeat(256);
         assert!(validate_sql_type_name(&long).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // validate_where_clause
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_valid_where_clauses() {
+        assert!(validate_where_clause("status = 'active'").is_ok());
+        assert!(validate_where_clause("id > 0 AND deleted = false").is_ok());
+        assert!(validate_where_clause("age BETWEEN 18 AND 65").is_ok());
+        assert!(validate_where_clause("name LIKE '%test%'").is_ok());
+        assert!(validate_where_clause("id IN (1, 2, 3)").is_ok());
+    }
+
+    #[test]
+    fn test_where_clause_injection_attacks() {
+        // Statement stacking
+        assert!(validate_where_clause("1=1; DROP TABLE users").is_err());
+        // Line comments
+        assert!(validate_where_clause("1=1 -- bypass").is_err());
+        // Block comments
+        assert!(validate_where_clause("1=1 /* comment */").is_err());
+        // Backslash escape
+        assert!(validate_where_clause("name = '\\' OR 1=1").is_err());
+        // UNION injection
+        assert!(validate_where_clause("1=1 UNION SELECT * FROM passwords").is_err());
+        assert!(validate_where_clause("1=1 union select * from passwords").is_err());
+        // Subquery
+        assert!(validate_where_clause("id = (SELECT MAX(id) FROM users)").is_err());
+        // EXEC
+        assert!(validate_where_clause("1=1; EXEC sp_help").is_err());
+        assert!(validate_where_clause("EXECUTE xp_cmdshell 'dir'").is_err());
+        // xp_ extended procedures
+        assert!(validate_where_clause("xp_cmdshell('dir')").is_err());
+        // Timing attacks
+        assert!(validate_where_clause("1=1 AND SLEEP(5)").is_err());
+        assert!(validate_where_clause("1=1 AND BENCHMARK(1000000, SHA1('test'))").is_err());
+        assert!(validate_where_clause("1=1; WAITFOR DELAY '0:0:5'").is_err());
+        assert!(validate_where_clause("1=1 AND PG_SLEEP(5)").is_err());
+        // File access
+        assert!(validate_where_clause("1=1 INTO OUTFILE '/tmp/data'").is_err());
+        assert!(validate_where_clause("1=1 INTO DUMPFILE '/tmp/data'").is_err());
+        assert!(validate_where_clause("LOAD_FILE('/etc/passwd')").is_err());
+        // Null bytes
+        assert!(validate_where_clause("name = 'test\0").is_err());
+        // Newlines
+        assert!(validate_where_clause("1=1\nDROP TABLE users").is_err());
+    }
+
+    #[test]
+    fn test_where_clause_empty() {
+        assert!(validate_where_clause("").is_err());
+    }
+
+    #[test]
+    fn test_where_clause_too_long() {
+        let long = "a".repeat(4097);
+        assert!(validate_where_clause(&long).is_err());
+    }
+
+    #[test]
+    fn test_where_clause_word_boundary_no_false_positives() {
+        // Should NOT reject: keyword is part of a larger word
+        assert!(validate_where_clause("executor_status = 'running'").is_ok());
+        assert!(validate_where_clause("execution_count > 0").is_ok());
+        assert!(validate_where_clause("selectivity > 0.5").is_ok());
+        assert!(validate_where_clause("selected = true").is_ok());
+        assert!(validate_where_clause("preselected = true").is_ok());
+        assert!(validate_where_clause("reunionist = 'alice'").is_ok());
+        assert!(validate_where_clause("asleep = false").is_ok());
+    }
+
+    #[test]
+    fn test_where_clause_word_boundary_still_catches_keywords() {
+        // Should STILL reject: keyword at word boundary
+        assert!(validate_where_clause("1=1 UNION ALL").is_err());
+        assert!(validate_where_clause("(SELECT 1)").is_err());
+        assert!(validate_where_clause("EXEC sp_help").is_err());
+        assert!(validate_where_clause("id=1 AND SLEEP(5)").is_err());
+        assert!(validate_where_clause("EXECUTE('cmd')").is_err());
+        // DDL keywords
+        assert!(validate_where_clause("1=1; DROP TABLE users").is_err()); // also blocked by ;
+        assert!(validate_where_clause("ALTER TABLE users").is_err());
+        assert!(validate_where_clause("CREATE TABLE evil").is_err());
+        assert!(validate_where_clause("TRUNCATE TABLE users").is_err());
+        // DML keywords
+        assert!(validate_where_clause("INSERT INTO users").is_err());
+        assert!(validate_where_clause("UPDATE users SET x=1").is_err());
+        assert!(validate_where_clause("DELETE FROM users").is_err());
+        // Privilege escalation
+        assert!(validate_where_clause("GRANT ALL ON users").is_err());
+        assert!(validate_where_clause("REVOKE ALL ON users").is_err());
+    }
+
+    #[test]
+    fn test_where_clause_hash_comment_allowed() {
+        // `#` is NOT blocked because it is a valid PostgreSQL operator
+        // (bitwise XOR, JSON path operators #>, #>>)
+        assert!(validate_where_clause("flags # 4 > 0").is_ok());
+        assert!(validate_where_clause("data #>> '{key}'").is_ok());
+    }
+
+    #[test]
+    fn test_where_clause_ddl_word_boundary_no_false_positives() {
+        // DDL keywords as substrings should NOT be rejected
+        assert!(validate_where_clause("droplet_count > 0").is_ok());
+        assert!(validate_where_clause("created_at > '2024-01-01'").is_ok());
+        assert!(validate_where_clause("alteration = 'none'").is_ok());
+        assert!(validate_where_clause("undeleted = true").is_ok());
+        assert!(validate_where_clause("inserted = false").is_ok());
+        assert!(validate_where_clause("updated_at IS NOT NULL").is_ok());
+        assert!(validate_where_clause("revoked = false").is_ok());
+        assert!(validate_where_clause("granted = true").is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // contains_word / contains_word_prefix
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_contains_word_boundaries() {
+        assert!(contains_word("HELLO WORLD", "HELLO"));
+        assert!(contains_word("HELLO WORLD", "WORLD"));
+        assert!(contains_word("(EXEC)", "EXEC"));
+        assert!(!contains_word("EXECUTOR", "EXEC"));
+        assert!(!contains_word("PRESELECT", "SELECT"));
+        assert!(!contains_word("SELECTIVITY", "SELECT"));
+        assert!(contains_word("SELECT", "SELECT"));
+        assert!(contains_word(" SELECT ", "SELECT"));
+        // Underscore is NOT a word boundary
+        assert!(!contains_word("A_EXEC_B", "EXEC"));
+        assert!(!contains_word("DROP_TABLE", "DROP"));
+        // Empty inputs
+        assert!(!contains_word("", "EXEC"));
+        assert!(!contains_word("EX", "EXEC")); // keyword longer than haystack
+                                               // Tab/special chars ARE word boundaries
+        assert!(contains_word("EXEC\tSOMETHING", "EXEC"));
+        assert!(contains_word("X=EXEC", "EXEC")); // = is boundary
     }
 }

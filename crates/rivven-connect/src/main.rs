@@ -228,14 +228,50 @@ async fn run_all(config: ConnectConfig) -> Result<()> {
 
         let task_name = name.clone();
         tasks.push(tokio::spawn(async move {
-            let result =
-                source_runner::run_source(&name, &source_config, &config, &mut shutdown_rx).await;
+            let mut backoff = std::time::Duration::from_secs(1);
+            const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
+
+            let final_result = loop {
+                let result =
+                    source_runner::run_source(&name, &source_config, &config, &mut shutdown_rx)
+                        .await;
+
+                match &result {
+                    Ok(()) => {
+                        break result;
+                    }
+                    Err(e) if e.is_shutdown() => {
+                        break result;
+                    }
+                    Err(e) => {
+                        error!(
+                            "Source '{}' failed: {}, restarting in {:?}",
+                            task_name, e, backoff
+                        );
+                        {
+                            let mut state = health_state.write().await;
+                            if let Some(health) = state.sources.get_mut(&name) {
+                                health.errors_count += 1;
+                                health.last_error = Some(e.to_string());
+                                health.status = ConnectorStatus::Starting;
+                            }
+                        }
+                        tokio::select! {
+                            _ = tokio::time::sleep(backoff) => {}
+                            _ = shutdown_rx.recv() => {
+                                break Ok(());
+                            }
+                        }
+                        backoff = (backoff * 2).min(MAX_BACKOFF);
+                    }
+                }
+            };
 
             // Update health state
             {
                 let mut state = health_state.write().await;
                 if let Some(health) = state.sources.get_mut(&name) {
-                    health.status = match &result {
+                    health.status = match &final_result {
                         Ok(()) => ConnectorStatus::Stopped,
                         Err(e) if e.is_shutdown() => ConnectorStatus::Stopped,
                         Err(e) => {
@@ -246,12 +282,12 @@ async fn run_all(config: ConnectConfig) -> Result<()> {
                 }
             }
 
-            if let Err(e) = &result {
+            if let Err(ref e) = final_result {
                 if !e.is_shutdown() {
-                    error!("Source '{}' failed: {}", task_name, e);
+                    error!("Source '{}' failed permanently: {}", task_name, e);
                 }
             }
-            result
+            final_result
         }));
     }
 
@@ -285,14 +321,49 @@ async fn run_all(config: ConnectConfig) -> Result<()> {
 
         let task_name = name.clone();
         tasks.push(tokio::spawn(async move {
-            let result =
-                sink_runner::run_sink(&name, &sink_config, &config, &mut shutdown_rx).await;
+            let mut backoff = std::time::Duration::from_secs(1);
+            const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
+
+            let final_result = loop {
+                let result =
+                    sink_runner::run_sink(&name, &sink_config, &config, &mut shutdown_rx).await;
+
+                match &result {
+                    Ok(()) => {
+                        break result;
+                    }
+                    Err(e) if e.is_shutdown() => {
+                        break result;
+                    }
+                    Err(e) => {
+                        error!(
+                            "Sink '{}' failed: {}, restarting in {:?}",
+                            task_name, e, backoff
+                        );
+                        {
+                            let mut state = health_state.write().await;
+                            if let Some(health) = state.sinks.get_mut(&name) {
+                                health.errors_count += 1;
+                                health.last_error = Some(e.to_string());
+                                health.status = ConnectorStatus::Starting;
+                            }
+                        }
+                        tokio::select! {
+                            _ = tokio::time::sleep(backoff) => {}
+                            _ = shutdown_rx.recv() => {
+                                break Ok(());
+                            }
+                        }
+                        backoff = (backoff * 2).min(MAX_BACKOFF);
+                    }
+                }
+            };
 
             // Update health state
             {
                 let mut state = health_state.write().await;
                 if let Some(health) = state.sinks.get_mut(&name) {
-                    health.status = match &result {
+                    health.status = match &final_result {
                         Ok(()) => ConnectorStatus::Stopped,
                         Err(e) if e.is_shutdown() => ConnectorStatus::Stopped,
                         Err(e) => {
@@ -303,12 +374,12 @@ async fn run_all(config: ConnectConfig) -> Result<()> {
                 }
             }
 
-            if let Err(e) = &result {
+            if let Err(ref e) = final_result {
                 if !e.is_shutdown() {
-                    error!("Sink '{}' failed: {}", task_name, e);
+                    error!("Sink '{}' failed permanently: {}", task_name, e);
                 }
             }
-            result
+            final_result
         }));
     }
 

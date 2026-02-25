@@ -666,23 +666,40 @@ impl MySqlBinlogClient {
         Ok((payload, sequence_id.wrapping_add(1)))
     }
 
-    /// Read a MySQL packet
+    /// Read a MySQL packet with I/O timeout.
+    ///
+    /// Uses `IO_TIMEOUT_SECS` to prevent indefinite hangs when the MySQL
+    /// server stalls or drops the connection without sending a TCP RST.
     async fn read_packet(&mut self) -> Result<Vec<u8>> {
+        use crate::common::IO_TIMEOUT_SECS;
+
         let mut header = [0u8; 4];
-        self.stream.read_exact(&mut header).await?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(IO_TIMEOUT_SECS),
+            self.stream.read_exact(&mut header),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("MySQL read timed out after {}s", IO_TIMEOUT_SECS))??;
 
         let payload_len =
             (header[0] as usize) | ((header[1] as usize) << 8) | ((header[2] as usize) << 16);
         self.sequence_id = header[3].wrapping_add(1);
 
         let mut payload = vec![0u8; payload_len];
-        self.stream.read_exact(&mut payload).await?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(IO_TIMEOUT_SECS),
+            self.stream.read_exact(&mut payload),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("MySQL read timed out after {}s", IO_TIMEOUT_SECS))??;
 
         Ok(payload)
     }
 
-    /// Write a MySQL packet
+    /// Write a MySQL packet with I/O timeout.
     async fn write_packet(&mut self, data: &[u8]) -> Result<()> {
+        use crate::common::IO_TIMEOUT_SECS;
+
         let len = data.len();
         if len > MAX_PACKET_SIZE {
             bail!("Packet too large: {} bytes", len);
@@ -695,8 +712,14 @@ impl MySqlBinlogClient {
         packet.push(self.sequence_id);
         packet.extend_from_slice(data);
 
-        self.stream.write_all(&packet).await?;
-        self.stream.flush().await?;
+        tokio::time::timeout(std::time::Duration::from_secs(IO_TIMEOUT_SECS), async {
+            self.stream.write_all(&packet).await?;
+            self.stream.flush().await?;
+            Ok::<(), std::io::Error>(())
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("MySQL write timed out after {}s", IO_TIMEOUT_SECS))??;
+
         self.sequence_id = self.sequence_id.wrapping_add(1);
 
         Ok(())

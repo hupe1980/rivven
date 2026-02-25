@@ -59,6 +59,8 @@ pub struct SchemaRegistry {
     /// Mutex to serialize schema registration (prevents TOCTOU races
     /// between fingerprint check and ID allocation/store)
     register_lock: Mutex<()>,
+    /// Maximum number of cached schemas (0 = unlimited)
+    max_cache_size: usize,
     /// Prometheus metrics (optional)
     #[cfg(feature = "metrics")]
     metrics: Option<std::sync::Arc<RegistryMetrics>>,
@@ -86,6 +88,7 @@ impl SchemaRegistry {
             contexts,
             context_subjects: DashMap::new(),
             register_lock: Mutex::new(()),
+            max_cache_size: config.max_cache_size,
             #[cfg(feature = "metrics")]
             metrics: None,
         })
@@ -107,6 +110,44 @@ impl SchemaRegistry {
     #[cfg(feature = "metrics")]
     pub fn metrics(&self) -> Option<&std::sync::Arc<RegistryMetrics>> {
         self.metrics.as_ref()
+    }
+
+    /// Evict cache entries when the cache exceeds `max_cache_size`.
+    ///
+    /// Uses a simple strategy: removes the first entries encountered by the
+    /// DashMap iterator (which is effectively random due to hash ordering).
+    /// This avoids pulling in an LRU dependency while bounding memory growth.
+    fn evict_cache_if_needed(&self) {
+        if self.max_cache_size == 0 {
+            return; // unlimited
+        }
+        let current_size = self.cache_by_id.len();
+        if current_size <= self.max_cache_size {
+            return;
+        }
+        let to_evict = current_size - self.max_cache_size;
+        let mut evicted = 0;
+        // Collect keys to evict first to avoid holding shard locks during removal
+        let keys_to_evict: Vec<u32> = self
+            .cache_by_id
+            .iter()
+            .take(to_evict)
+            .map(|entry| *entry.key())
+            .collect();
+        for key in keys_to_evict {
+            if let Some((_, schema)) = self.cache_by_id.remove(&key) {
+                if let Some(fp) = &schema.fingerprint {
+                    self.cache_by_fingerprint.remove(fp);
+                }
+                evicted += 1;
+            }
+        }
+        if evicted > 0 {
+            debug!(
+                "Evicted {} schema cache entries (limit: {})",
+                evicted, self.max_cache_size
+            );
+        }
     }
 
     // ========================================================================
@@ -353,7 +394,7 @@ impl SchemaRegistry {
 
         // Compute fingerprint for deduplication
         let fingerprint = SchemaFingerprint::compute(&normalized_schema);
-        let fp_hex = fingerprint.md5_hex();
+        let fp_hex = fingerprint.sha256_hex();
 
         // Hold the register lock for the entire read-check-allocate-store
         // sequence to prevent TOCTOU races where two concurrent registrations
@@ -419,7 +460,8 @@ impl SchemaRegistry {
         // Track subject in context
         self.add_subject_to_context(&context, &subject);
 
-        // Update cache
+        // Update cache (evict if needed to honour max_cache_size)
+        self.evict_cache_if_needed();
         self.cache_by_id.insert(id.0, schema_obj);
         self.cache_by_fingerprint.insert(fp_hex, id.0);
 
@@ -469,7 +511,8 @@ impl SchemaRegistry {
             .await?
             .ok_or_else(|| SchemaError::NotFound(format!("Schema ID {}", id)))?;
 
-        // Update cache
+        // Update cache (evict if needed to honour max_cache_size)
+        self.evict_cache_if_needed();
         self.cache_by_id.insert(id.0, schema.clone());
 
         Ok(schema)

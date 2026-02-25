@@ -35,6 +35,7 @@ tracing = { workspace = true }
 # Utilities
 secrecy = { version = "0.10", features = ["serde"], optional = true }
 uuid = { workspace = true }
+rand = { workspace = true }
 
 # AWS SDK (optional — for Bedrock)
 aws-config = { version = "1", optional = true }

@@ -57,7 +57,7 @@ impl SchemaFingerprint {
         base64::Engine::encode(&base64::engine::general_purpose::STANDARD, self.md5)
     }
 
-    /// Create from hex-encoded MD5
+    /// Create from hex-encoded MD5 (Confluent compatibility)
     pub fn from_md5_hex(hex_str: &str) -> Option<Self> {
         let md5_bytes = hex::decode(hex_str).ok()?;
         if md5_bytes.len() != 16 {
@@ -69,6 +69,21 @@ impl SchemaFingerprint {
         Some(Self {
             md5,
             sha256: [0u8; 32], // Unknown
+        })
+    }
+
+    /// Create from hex-encoded SHA-256
+    pub fn from_sha256_hex(hex_str: &str) -> Option<Self> {
+        let sha256_bytes = hex::decode(hex_str).ok()?;
+        if sha256_bytes.len() != 32 {
+            return None;
+        }
+        let mut sha256 = [0u8; 32];
+        sha256.copy_from_slice(&sha256_bytes);
+
+        Some(Self {
+            md5: [0u8; 16], // Unknown
+            sha256,
         })
     }
 }

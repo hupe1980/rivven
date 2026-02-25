@@ -360,7 +360,7 @@ impl Cli {
                 hostname(),
                 self.cluster_bind
                     .map(|a| a.port())
-                    .unwrap_or(self.bind.port() + 1)
+                    .unwrap_or(self.bind.port().saturating_add(1))
             )
         })
     }

@@ -21,7 +21,7 @@ SQL database connectivity layer for the Rivven event streaming platform.
 | **Type System** | 25+ value types with Debezium parity |
 | **SQL Injection Prevention** | Identifier validation, type name validation, SQL-standard string literal escaping on all DDL/introspection paths |
 | **NaN/Infinity Handling** | `Float32` and `Float64` values of NaN, +Infinity, and -Infinity are detected and converted to `NULL` before binding, preventing database driver errors |
-| **Where Clause Validation** | User-supplied `where_clause` values are validated to reject unsafe patterns (semicolons, comments, stacked queries) before inclusion in generated SQL |
+| **Where Clause Validation** | User-supplied `where_clause` values are validated against a comprehensive deny-list with word-boundary matching (null bytes, newlines, semicolons, `--` comments, `/* */` comments, stacked queries, UNION, SELECT, INSERT, UPDATE, DELETE, DROP, ALTER, CREATE, TRUNCATE, GRANT, REVOKE, EXEC, EXECUTE, DECLARE, CALL, xp_, WAITFOR, BENCHMARK, SLEEP, PG_SLEEP, PG_READ_FILE, PG_LS_DIR, PG_READ_BINARY_FILE, INTO OUTFILE/DUMPFILE, LOAD_FILE) before inclusion in generated SQL. Word-boundary matching prevents false positives (e.g., `executor_status` is allowed, `EXEC` alone is rejected). PostgreSQL-compatible: `#` is not blocked since it is a valid operator (`#`, `#>`, `#>>`). |
 
 ## Quick Start
 

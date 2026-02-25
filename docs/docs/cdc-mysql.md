@@ -347,6 +347,10 @@ config:
   binlog_position: 4
 ```
 
+**Position Tracking**: In position-based mode, the binlog position is advanced after every decoded event (using `EventHeader.next_position`) rather than only on Rotate events. The committed position is only updated after a full transaction (Xid event) is successfully delivered to the channel, providing at-least-once delivery at the transaction level. On reconnect, replay starts from the last committed transaction boundary.
+
+> **Note**: Binlog positions exceeding 4 GB (u32::MAX) are clamped with a warning. This is a MySQL protocol limitation — `EventHeader.next_position` is a 32-bit field.
+
 **Finding Current Position:**
 ```sql
 SHOW MASTER STATUS;

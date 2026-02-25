@@ -294,6 +294,9 @@ struct PipelinedClientInner {
     stats: Arc<PipelineStats>,
     /// Shutdown signal for background tasks
     shutdown: tokio::sync::watch::Sender<bool>,
+    /// Pending response channels — shared with reader/writer tasks.
+    /// Exposed here so `send_request` can clean up entries on timeout.
+    pending_responses: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Response>>>>>,
 }
 
 impl Clone for PipelinedClient {
@@ -311,8 +314,10 @@ impl PipelinedClient {
     /// immediately after establishing the pipeline, before returning the client.
     pub async fn connect(addr: &str, config: PipelineConfig) -> Result<Self> {
         let auth_config = config.auth.clone();
-        let stream = TcpStream::connect(addr)
+        let connect_timeout = config.request_timeout;
+        let stream = tokio::time::timeout(connect_timeout, TcpStream::connect(addr))
             .await
+            .map_err(|_| Error::Timeout)?
             .map_err(|e| Error::ConnectionError(e.to_string()))?;
 
         // Set TCP_NODELAY for low latency
@@ -408,6 +413,7 @@ impl PipelinedClient {
                 config,
                 stats,
                 shutdown: shutdown_tx,
+                pending_responses,
             }),
         })
     }
@@ -597,6 +603,12 @@ impl PipelinedClient {
             }
             Ok(Err(_)) => Err(Error::ConnectionError("Response channel dropped".into())),
             Err(_) => {
+                // Remove the stale pending_responses entry so it doesn't
+                // leak memory if the server never responds.
+                {
+                    let mut pending = self.inner.pending_responses.lock().await;
+                    pending.remove(&request_id);
+                }
                 self.inner.stats.timeouts.fetch_add(1, Ordering::Relaxed);
                 Err(Error::Timeout)
             }
@@ -828,8 +840,11 @@ async fn reader_task<R: tokio::io::AsyncRead + Unpin>(
         }
 
         if msg_len < 8 {
-            warn!("Invalid response length: {}", msg_len);
-            continue;
+            warn!(
+                "Invalid response length: {} — stream desynchronized, closing connection",
+                msg_len
+            );
+            break;
         }
 
         // Read request ID

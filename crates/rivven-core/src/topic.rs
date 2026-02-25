@@ -656,14 +656,228 @@ impl TopicManager {
         Ok(buf.freeze())
     }
 
+    /// Replay WAL records at startup and checkpoint afterwards.
+    ///
+    /// This is the single entry point for WAL replay, used by both
+    /// `ClusterServer` and `SecureServer`. It:
+    ///
+    /// 1. Filters out non-data records (transaction control, checkpoints)
+    /// 2. Skips already-replayed records via a persisted LSN marker
+    ///    (prevents duplicates if the post-replay checkpoint fails)
+    /// 3. Applies remaining data records to partitions
+    /// 4. Persists the max replayed LSN marker
+    /// 5. Checkpoints (deletes) WAL files
+    pub async fn replay_wal_and_checkpoint(&self, core_config: &crate::Config) -> Result<()> {
+        let wal_dir = std::path::PathBuf::from(&core_config.data_dir).join("wal");
+        if !wal_dir.exists() {
+            return Ok(());
+        }
+
+        let wal_config = crate::WalConfig {
+            dir: wal_dir.clone(),
+            ..Default::default()
+        };
+
+        // Load the last successfully replayed LSN from the marker file.
+        // This prevents duplicate replay when checkpoint_dir() fails.
+        let marker_path = wal_dir.join(".last_replayed_lsn");
+        let last_replayed_lsn: u64 = if marker_path.exists() {
+            std::fs::read_to_string(&marker_path)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
+        match crate::GroupCommitWal::replay_all(&wal_config).await {
+            Ok(records) if !records.is_empty() => {
+                // Split into data records and transaction control records.
+                // Data records (Full/First/Middle/Last) are replayed into
+                // partitions. TxnCommit/TxnAbort records carry the list of
+                // affected partitions and trigger COMMIT/ABORT marker writes.
+                let data_records: Vec<_> = records
+                    .iter()
+                    .filter(|r| {
+                        matches!(
+                            r.record_type,
+                            crate::RecordType::Full
+                                | crate::RecordType::First
+                                | crate::RecordType::Middle
+                                | crate::RecordType::Last
+                        )
+                    })
+                    .filter(|r| r.lsn > last_replayed_lsn)
+                    .collect();
+
+                let txn_control_records: Vec<_> = records
+                    .iter()
+                    .filter(|r| {
+                        matches!(
+                            r.record_type,
+                            crate::RecordType::TxnCommit | crate::RecordType::TxnAbort
+                        )
+                    })
+                    .filter(|r| r.lsn > last_replayed_lsn)
+                    .collect();
+
+                // Phase 1: Replay data records into partitions.
+                if data_records.is_empty() {
+                    tracing::debug!(
+                        total = records.len(),
+                        "WAL replay: all data records already replayed or non-data, skipping"
+                    );
+                } else {
+                    tracing::info!(
+                        total = records.len(),
+                        data = data_records.len(),
+                        txn_control = txn_control_records.len(),
+                        skipped = records.len() - data_records.len() - txn_control_records.len(),
+                        "WAL replay: applying {} data records at startup",
+                        data_records.len()
+                    );
+                    for record in &data_records {
+                        if let Err(e) = self.apply_wal_record(record).await {
+                            return Err(Error::Other(format!(
+                                "WAL replay: failed to apply record (lsn={}): {}. \
+                                 Aborting startup to prevent data loss. \
+                                 Inspect the WAL files in {} and retry, \
+                                 or remove them to accept data loss.",
+                                record.lsn,
+                                e,
+                                wal_dir.display()
+                            )));
+                        }
+                    }
+                }
+
+                // Phase 2 (WAL-002): Replay TxnCommit/TxnAbort records.
+                // Re-write COMMIT/ABORT markers to the partitions listed
+                // in the TxnWalPayload. Without this, read_committed
+                // consumers would see replayed data as uncommitted.
+                for record in &txn_control_records {
+                    match postcard::from_bytes::<crate::TxnWalPayload>(&record.data) {
+                        Ok(payload) => {
+                            let marker_kind = if record.record_type == crate::RecordType::TxnCommit
+                            {
+                                crate::TransactionMarker::Commit
+                            } else {
+                                crate::TransactionMarker::Abort
+                            };
+                            let marker_label = if marker_kind == crate::TransactionMarker::Commit {
+                                "COMMIT"
+                            } else {
+                                "ABORT"
+                            };
+
+                            for (topic_name, partition_id) in &payload.partitions {
+                                match self.get_topic(topic_name).await {
+                                    Ok(topic_obj) => match topic_obj.partition(*partition_id) {
+                                        Ok(partition) => {
+                                            let marker = Message {
+                                                producer_id: Some(payload.producer_id),
+                                                transaction_marker: Some(marker_kind),
+                                                is_transactional: true,
+                                                ..Message::new(bytes::Bytes::new())
+                                            };
+                                            if let Err(e) = partition.append(marker).await {
+                                                tracing::warn!(
+                                                    txn_id = %payload.txn_id,
+                                                    topic = %topic_name,
+                                                    partition = partition_id,
+                                                    error = %e,
+                                                    "WAL replay: failed to write {} marker — \
+                                                     read_committed consumers may see stale state",
+                                                    marker_label
+                                                );
+                                            } else {
+                                                tracing::trace!(
+                                                    txn_id = %payload.txn_id,
+                                                    topic = %topic_name,
+                                                    partition = partition_id,
+                                                    "WAL replay: wrote {} marker",
+                                                    marker_label
+                                                );
+                                            }
+                                        }
+                                        Err(_) => {
+                                            tracing::debug!(
+                                                txn_id = %payload.txn_id,
+                                                topic = %topic_name,
+                                                partition = partition_id,
+                                                "WAL replay: partition not found for {} marker, skipping",
+                                                marker_label
+                                            );
+                                        }
+                                    },
+                                    Err(_) => {
+                                        tracing::debug!(
+                                            txn_id = %payload.txn_id,
+                                            topic = %topic_name,
+                                            "WAL replay: topic not found for {} marker, skipping",
+                                            marker_label
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                lsn = record.lsn,
+                                error = %e,
+                                "WAL replay: failed to deserialise TxnWalPayload — \
+                                 skipping transaction control record"
+                            );
+                        }
+                    }
+                }
+
+                // Persist the max LSN marker BEFORE checkpoint so a failed
+                // checkpoint doesn't cause duplicate replay on next startup.
+                let max_lsn = records.iter().map(|r| r.lsn).max().unwrap_or(0);
+                if max_lsn > last_replayed_lsn {
+                    if let Err(e) = std::fs::write(&marker_path, max_lsn.to_string()) {
+                        tracing::warn!(error = %e, "Failed to write WAL replay LSN marker");
+                    }
+                }
+
+                // Checkpoint: delete WAL files.
+                if let Err(e) = crate::GroupCommitWal::checkpoint_dir(&wal_config.dir) {
+                    tracing::warn!(
+                        error = %e,
+                        "WAL post-replay checkpoint failed — \
+                         duplicate replay prevented by LSN marker"
+                    );
+                }
+            }
+            Ok(_) => {
+                tracing::debug!("WAL replay: no records to replay");
+            }
+            Err(e) => {
+                return Err(Error::Other(format!(
+                    "WAL replay: failed to read WAL files: {}. \
+                     Check WAL files in {} and retry, or remove them to accept data loss.",
+                    e,
+                    wal_dir.display()
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
     /// §3.3: Apply a single WAL record during startup replay.
     ///
     /// WAL records encode a topic write as:
     ///   `[topic_name_len:u32][topic_name:bytes][partition_id:u32][message_data:remaining]`
     ///
     /// Records whose topic or partition don't exist are silently skipped (the
-    /// topic was deleted after the WAL entry was written). Records whose offset
-    /// is already present in the partition are idempotent and cause no harm.
+    /// topic was deleted after the WAL entry was written).
+    ///
+    /// **Important:** This function always appends; deduplication is handled
+    /// by the caller (`replay_wal_and_checkpoint`) via an LSN marker.
+    /// Non-data records (TxnCommit, TxnAbort, etc.) must be filtered out
+    /// before calling this function.
     pub async fn apply_wal_record(&self, record: &crate::WalRecord) -> Result<()> {
         use bytes::Buf;
 
@@ -705,24 +919,26 @@ impl TopicManager {
         };
 
         // Deserialise the full Message (key, headers, producer metadata, etc.)
-        // from postcard encoding. Fall back to raw-value Message for legacy WAL
-        // records written before build_wal_record() encoded the full struct.
-        // Log when falling back so operators can detect corrupt records.
-        let message = match Message::from_bytes(&msg_data) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!(
-                    topic = %topic_name,
-                    partition = partition_id,
-                    lsn = record.lsn,
-                    error = %e,
-                    "WAL replay: Message::from_bytes failed, using raw value fallback — \
-                     record may be a legacy format or corrupt"
-                );
-                Message::new(msg_data)
-            }
-        };
-        match topic.append(partition_id, message).await {
+        // from postcard encoding.  No backward-compatible fallback — corrupt
+        // or legacy records are treated as errors because a raw-value Message
+        // would have offset=0, causing all records to overwrite each other
+        // when replayed via append_replicated().
+        let message = Message::from_bytes(&msg_data).map_err(|e| {
+            Error::Other(format!(
+                "WAL replay: Message::from_bytes failed for topic={} partition={} lsn={}: {}. \
+                 The WAL record may be corrupt or written by an incompatible version. \
+                 Inspect the WAL files and retry, or remove them to accept data loss.",
+                topic_name, partition_id, record.lsn, e
+            ))
+        })?;
+        // WAL-001: Use append_replicated() instead of append().
+        // topic.append() allocates a NEW offset via next_offset.fetch_add(1),
+        // discarding the original leader-assigned offset stored in the message.
+        // append_replicated() uses fetch_max to preserve the original offset,
+        // which is critical for WAL replay correctness — replayed records must
+        // land at the same offsets they had before the crash.
+        let partition = topic.partition(partition_id)?;
+        match partition.append_replicated(message).await {
             Ok(offset) => {
                 tracing::trace!(
                     topic = %topic_name,

@@ -78,6 +78,10 @@ All HTTP-based LLM providers (OpenAI) require HTTPS by default. To connect to an
 All errors return `LlmError` with helpful classification:
 
 ```rust
+// Option 1: Built-in retry with exponential backoff + jitter
+let response = provider.send_with_retry(&request).await?;
+
+// Option 2: Manual error handling
 match provider.chat(&request).await {
     Ok(response) => println!("{}", response.content()),
     Err(e) if e.is_retryable() => {
@@ -90,6 +94,8 @@ match provider.chat(&request).await {
     Err(e) => eprintln!("permanent error: {e}"),
 }
 ```
+
+`send_with_retry()` automatically handles rate limiting (429) and transient errors with full-jitter exponential backoff (uniform random `[0, base]` to de-correlate concurrent retriers), `Retry-After` header support, and a configurable `MAX_BACKOFF` cap (30s).
 
 **Error variants:** `Config`, `Auth`, `RateLimited` (with optional `retry_after_secs`), `Timeout`, `ModelNotFound`, `ContentFiltered`, `TokenLimitExceeded`, `Provider`, `Connection`, `Serialization`, `Transient`, `Internal`.
 

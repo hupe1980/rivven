@@ -324,14 +324,15 @@ impl fmt::Display for CdcFeatureStats {
 
 impl CdcFeatureProcessor {
     /// Create a new feature processor with the given configuration.
-    #[must_use]
-    pub fn new(config: CdcFeatureConfig) -> Self {
+    pub fn new(config: CdcFeatureConfig) -> crate::error::Result<Self> {
         Self::with_connector_name(config, "rivven-cdc")
     }
 
     /// Create a new feature processor with a custom connector name (for heartbeat identification).
-    #[must_use]
-    pub fn with_connector_name(config: CdcFeatureConfig, connector_name: &str) -> Self {
+    pub fn with_connector_name(
+        config: CdcFeatureConfig,
+        connector_name: &str,
+    ) -> crate::error::Result<Self> {
         let mut processor = Self {
             deduplicator: None,
             signal_processor: None,
@@ -384,25 +385,17 @@ impl CdcFeatureProcessor {
             info!("CDC signal processing enabled");
         }
 
-        // Initialize SMT chain
+        // Initialize SMT chain (fail-fast on unknown transform types)
         if !config.transforms.is_empty() {
-            let mut chain = SmtChain::new();
-            for transform_config in &config.transforms {
-                match super::common::build_smt_transform(transform_config) {
-                    Ok(transform) => {
-                        chain = chain.add_boxed(transform);
-                        debug!("Added SMT transform: {:?}", transform_config.transform_type);
-                    }
-                    Err(e) => {
-                        warn!("Failed to build SMT transform: {}", e);
-                    }
-                }
+            let chain = super::common::build_smt_chain(&config.transforms)
+                .map_err(|e| crate::error::ConnectError::config(format!("SMT chain: {}", e)))?;
+            if let Some(chain) = chain {
+                processor.smt_chain = Some(Arc::new(chain));
+                info!(
+                    "CDC SMT chain initialized with {} transforms",
+                    config.transforms.len()
+                );
             }
-            processor.smt_chain = Some(Arc::new(chain));
-            info!(
-                "CDC SMT chain initialized with {} transforms",
-                config.transforms.len()
-            );
         }
 
         // Initialize transaction topic emitter
@@ -617,7 +610,7 @@ impl CdcFeatureProcessor {
             }
         }
 
-        processor
+        Ok(processor)
     }
 
     /// Process a CDC event through all enabled features.
@@ -1914,7 +1907,7 @@ mod tests {
     #[tokio::test]
     async fn test_processor_creation() {
         let config = CdcFeatureConfig::default();
-        let processor = CdcFeatureProcessor::new(config);
+        let processor = CdcFeatureProcessor::new(config).unwrap();
 
         assert!(!processor.has_deduplication());
         assert!(!processor.has_signal_processing());
@@ -1932,14 +1925,14 @@ mod tests {
         config.deduplication.window_secs = 60;
         config.deduplication.bloom_expected_insertions = 10000;
 
-        let processor = CdcFeatureProcessor::new(config);
+        let processor = CdcFeatureProcessor::new(config).unwrap();
         assert!(processor.has_deduplication());
     }
 
     #[tokio::test]
     async fn test_processor_stats() {
         let config = CdcFeatureConfig::default();
-        let processor = CdcFeatureProcessor::new(config);
+        let processor = CdcFeatureProcessor::new(config).unwrap();
 
         let stats = processor.stats().await;
         assert_eq!(stats.events_processed, 0);
@@ -1951,7 +1944,7 @@ mod tests {
     #[tokio::test]
     async fn test_process_basic_event() {
         let config = CdcFeatureConfig::default();
-        let processor = CdcFeatureProcessor::new(config);
+        let processor = CdcFeatureProcessor::new(config).unwrap();
 
         let event = create_test_event();
         let result = processor.process(event).await;
@@ -1971,7 +1964,7 @@ mod tests {
         config.tombstone.enabled = true;
         config.tombstone.after_delete = true;
 
-        let processor = CdcFeatureProcessor::new(config);
+        let processor = CdcFeatureProcessor::new(config).unwrap();
 
         let mut event = create_test_event();
         event.op = CdcOp::Delete;
@@ -2000,7 +1993,7 @@ mod tests {
             },
         );
 
-        let processor = CdcFeatureProcessor::new(config);
+        let processor = CdcFeatureProcessor::new(config).unwrap();
 
         let event = create_test_event();
         let result = processor.process(event).await;
@@ -2030,7 +2023,7 @@ mod tests {
             predicate: None,
         });
 
-        let processor = CdcFeatureProcessor::new(config);
+        let processor = CdcFeatureProcessor::new(config).unwrap();
 
         let event = create_test_event();
         let result = processor.process(event).await;
@@ -2092,7 +2085,7 @@ mod tests {
         config.tombstone.enabled = true;
         config.read_only.enabled = true;
 
-        let processor = CdcFeatureProcessor::new(config);
+        let processor = CdcFeatureProcessor::new(config).unwrap();
 
         assert!(processor.has_deduplication());
         assert!(processor.has_signal_processing());
@@ -2104,7 +2097,7 @@ mod tests {
     #[tokio::test]
     async fn test_reset_stats() {
         let config = CdcFeatureConfig::default();
-        let processor = CdcFeatureProcessor::new(config);
+        let processor = CdcFeatureProcessor::new(config).unwrap();
 
         // Process an event to increment stats
         let event = create_test_event();
@@ -2132,7 +2125,7 @@ mod tests {
         config.tombstone.enabled = true;
         config.read_only.enabled = true;
 
-        let processor = CdcFeatureProcessor::new(config);
+        let processor = CdcFeatureProcessor::new(config).unwrap();
         let features = processor.enabled_features();
 
         assert!(features.contains(&"deduplication"));
@@ -2146,7 +2139,7 @@ mod tests {
     fn test_column_filter_helpers() {
         let mut config = CdcFeatureConfig::default();
 
-        let processor = CdcFeatureProcessor::new(config.clone());
+        let processor = CdcFeatureProcessor::new(config.clone()).unwrap();
         assert!(!processor.has_column_filters());
         assert_eq!(processor.column_filter_count(), 0);
 
@@ -2165,7 +2158,7 @@ mod tests {
             },
         );
 
-        let processor = CdcFeatureProcessor::new(config);
+        let processor = CdcFeatureProcessor::new(config).unwrap();
         assert!(processor.has_column_filters());
         assert_eq!(processor.column_filter_count(), 2);
     }
@@ -2180,7 +2173,7 @@ mod tests {
             "password".to_string(),
         ];
 
-        let processor = CdcFeatureProcessor::new(config);
+        let processor = CdcFeatureProcessor::new(config).unwrap();
 
         assert!(processor.has_encryption());
         assert_eq!(processor.encrypted_fields().len(), 3);
@@ -2194,18 +2187,18 @@ mod tests {
     fn test_has_transforms() {
         let mut config = CdcFeatureConfig::default();
 
-        let processor = CdcFeatureProcessor::new(config.clone());
+        let processor = CdcFeatureProcessor::new(config.clone()).unwrap();
         assert!(!processor.has_transforms());
 
         // Add a transform
         config.transforms.push(SmtTransformConfig {
             transform_type: SmtTransformType::MaskField,
             name: Some("mask_pii".to_string()),
-            config: HashMap::new(),
+            config: HashMap::from([("fields".to_string(), serde_json::json!(["ssn", "email"]))]),
             predicate: None,
         });
 
-        let processor = CdcFeatureProcessor::new(config);
+        let processor = CdcFeatureProcessor::new(config).unwrap();
         assert!(processor.has_transforms());
     }
 
@@ -2391,7 +2384,7 @@ mod tests {
     #[test]
     fn test_processor_health_monitoring_disabled() {
         let config = CdcFeatureConfig::default();
-        let processor = CdcFeatureProcessor::new(config);
+        let processor = CdcFeatureProcessor::new(config).unwrap();
 
         assert!(!processor.has_health_monitor());
         assert!(processor.health_monitor().is_none());
@@ -2405,7 +2398,7 @@ mod tests {
     fn test_processor_health_monitoring_enabled() {
         let config = CdcFeatureConfig::builder().with_health_monitoring().build();
 
-        let processor = CdcFeatureProcessor::new(config);
+        let processor = CdcFeatureProcessor::new(config).unwrap();
 
         assert!(processor.has_health_monitor());
         assert!(processor.health_monitor().is_some());
@@ -2418,7 +2411,7 @@ mod tests {
     async fn test_health_monitoring_mark_connected() {
         let config = CdcFeatureConfig::builder().with_health_monitoring().build();
 
-        let processor = CdcFeatureProcessor::new(config);
+        let processor = CdcFeatureProcessor::new(config).unwrap();
         assert!(!processor.is_healthy());
 
         processor.mark_connected();
@@ -2430,7 +2423,7 @@ mod tests {
     async fn test_health_monitoring_mark_disconnected() {
         let config = CdcFeatureConfig::builder().with_health_monitoring().build();
 
-        let processor = CdcFeatureProcessor::new(config);
+        let processor = CdcFeatureProcessor::new(config).unwrap();
         processor.mark_connected();
         assert!(processor.is_healthy());
 
@@ -2448,7 +2441,7 @@ mod tests {
             })
             .build();
 
-        let processor = CdcFeatureProcessor::new(config);
+        let processor = CdcFeatureProcessor::new(config).unwrap();
         processor.mark_connected();
 
         // Set acceptable lag
@@ -2465,7 +2458,7 @@ mod tests {
     async fn test_health_monitoring_probes() {
         let config = CdcFeatureConfig::builder().with_health_monitoring().build();
 
-        let processor = CdcFeatureProcessor::new(config);
+        let processor = CdcFeatureProcessor::new(config).unwrap();
 
         // Initially not ready
         let (code, _) = processor.readiness_probe().await;
@@ -2487,7 +2480,7 @@ mod tests {
     async fn test_health_monitoring_json() {
         let config = CdcFeatureConfig::builder().with_health_monitoring().build();
 
-        let processor = CdcFeatureProcessor::new(config);
+        let processor = CdcFeatureProcessor::new(config).unwrap();
         processor.mark_connected();
 
         let json = processor.health_json().await;
@@ -2499,7 +2492,7 @@ mod tests {
     async fn test_health_monitoring_custom_check() {
         let config = CdcFeatureConfig::builder().with_health_monitoring().build();
 
-        let processor = CdcFeatureProcessor::new(config);
+        let processor = CdcFeatureProcessor::new(config).unwrap();
 
         // Register a custom health check
         processor
@@ -2516,7 +2509,7 @@ mod tests {
     #[tokio::test]
     async fn test_recovery_not_in_progress_when_disabled() {
         let config = CdcFeatureConfig::default();
-        let processor = CdcFeatureProcessor::new(config);
+        let processor = CdcFeatureProcessor::new(config).unwrap();
 
         assert!(!processor.is_recovery_in_progress());
     }
@@ -2532,7 +2525,7 @@ mod tests {
             })
             .build();
 
-        let processor = CdcFeatureProcessor::new(config);
+        let processor = CdcFeatureProcessor::new(config).unwrap();
         processor.mark_disconnected();
 
         // Attempt recovery with a successful recovery function
@@ -2545,7 +2538,7 @@ mod tests {
     fn test_enabled_features_includes_health_monitor() {
         let config = CdcFeatureConfig::builder().with_health_monitoring().build();
 
-        let processor = CdcFeatureProcessor::new(config);
+        let processor = CdcFeatureProcessor::new(config).unwrap();
         let features = processor.enabled_features();
 
         assert!(features.contains(&"health_monitor"));
@@ -2554,7 +2547,7 @@ mod tests {
     #[tokio::test]
     async fn test_unregister_health_check() {
         let config = CdcFeatureConfig::builder().with_health_monitoring().build();
-        let processor = CdcFeatureProcessor::new(config);
+        let processor = CdcFeatureProcessor::new(config).unwrap();
 
         // Register a health check
         processor

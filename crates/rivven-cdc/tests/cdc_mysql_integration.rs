@@ -217,7 +217,7 @@ mod binlog_tests {
         match timeout {
             Ok(Ok(Some(event_data))) => {
                 let mut decoder = BinlogDecoder::new();
-                let event = decoder.decode(&event_data).expect("Failed to decode event");
+                let (event, _header) = decoder.decode(&event_data).expect("Failed to decode event");
 
                 match event {
                     BinlogEvent::FormatDescription(fde) => {
@@ -564,7 +564,7 @@ mod mariadb_tests {
             Ok(Ok(Some(event_data))) => {
                 let mut decoder = BinlogDecoder::new();
                 match decoder.decode(&event_data) {
-                    Ok(event) => {
+                    Ok((event, _header)) => {
                         info!("MariaDB binlog event: {:?}", event);
                     }
                     Err(e) => {

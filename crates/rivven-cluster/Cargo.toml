@@ -47,6 +47,9 @@ reqwest = { workspace = true, optional = true }
 # Consistent hashing
 hashring = "0.3"
 
+# Snapshot integrity
+crc32fast = "1.3"
+
 # QUIC transport
 quinn = { version = "0.11", optional = true }
 rustls = { workspace = true, optional = true }

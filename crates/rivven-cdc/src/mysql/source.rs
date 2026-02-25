@@ -13,6 +13,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc;
+
+/// Tracks the last successfully committed binlog position.
+///
+/// Updated after each transaction commit (Xid event). On reconnect,
+/// the CDC loop resumes from this position instead of a stale config
+/// value, preventing data loss and duplicate processing.
+type CommittedPosition = Arc<tokio::sync::Mutex<Option<(String, u32)>>>;
 use tracing::{debug, error, info, trace, warn};
 
 use super::decoder::{BinlogDecoder, BinlogEvent, ColumnValue, RowsEvent, TableMapEvent};
@@ -301,6 +308,8 @@ pub struct MySqlCdc {
     running: Arc<AtomicBool>,
     event_sender: Option<mpsc::Sender<CdcEvent>>,
     schema_cache: Arc<RwLock<SchemaCache>>,
+    /// Handle for the spawned CDC task; awaited/aborted in `stop()`.
+    task_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl MySqlCdc {
@@ -310,6 +319,7 @@ impl MySqlCdc {
             running: Arc::new(AtomicBool::new(false)),
             event_sender: None,
             schema_cache: Arc::new(RwLock::new(SchemaCache::new())),
+            task_handle: None,
         }
     }
 
@@ -343,15 +353,29 @@ impl CdcSource for MySqlCdc {
         let running = self.running.clone();
         let event_sender = self.event_sender.clone();
         let schema_cache = self.schema_cache.clone();
+        let committed_position: CommittedPosition = Arc::new(tokio::sync::Mutex::new(None));
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut reconnect_delay = Duration::from_secs(1);
             while running.load(Ordering::Acquire) {
+                // On reconnect, use the last committed position if available.
+                // This prevents both data loss (from skipping events) and
+                // duplicate processing (from replaying from a stale position).
+                let mut loop_config = config.clone();
+                if let Some((ref file, pos)) = *committed_position.lock().await {
+                    loop_config.binlog_filename = file.clone();
+                    loop_config.binlog_position = pos;
+                    info!(
+                        "Reconnecting from committed binlog position: {}:{}",
+                        file, pos
+                    );
+                }
                 match run_mysql_cdc_loop(
-                    config.clone(),
+                    loop_config,
                     running.clone(),
                     event_sender.clone(),
                     schema_cache.clone(),
+                    committed_position.clone(),
                 )
                 .await
                 {
@@ -372,12 +396,18 @@ impl CdcSource for MySqlCdc {
             running.store(false, Ordering::Release);
         });
 
+        self.task_handle = Some(handle);
+
         Ok(())
     }
 
     async fn stop(&mut self) -> Result<()> {
         info!("Stopping MySQL CDC");
         self.running.store(false, Ordering::Release);
+        if let Some(handle) = self.task_handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
         Ok(())
     }
 
@@ -392,6 +422,7 @@ async fn run_mysql_cdc_loop(
     running: Arc<AtomicBool>,
     event_sender: Option<mpsc::Sender<CdcEvent>>,
     schema_cache: Arc<RwLock<SchemaCache>>,
+    committed_position: CommittedPosition,
 ) -> anyhow::Result<()> {
     // Create metadata connection URL for schema queries (URL-encode credentials)
     let encoded_user =
@@ -594,13 +625,21 @@ async fn run_mysql_cdc_loop(
             }
         };
 
-        let event = match decoder.decode(&event_data) {
+        let (event, event_header) = match decoder.decode(&event_data) {
             Ok(ev) => ev,
             Err(e) => {
                 warn!("Failed to decode binlog event: {:?}", e);
                 continue;
             }
         };
+
+        // STOR-003-A: Advance binlog position after every event.
+        // Previously, current_binlog_pos was only updated on Rotate events,
+        // so a crash mid-file would replay from the start of the file.
+        // next_position == 0 occurs in fake/rotate events; skip those.
+        if event_header.next_position > 0 {
+            current_binlog_pos = event_header.next_position;
+        }
 
         match event {
             BinlogEvent::FormatDescription(fde) => {
@@ -616,7 +655,16 @@ async fn run_mysql_cdc_loop(
                     rotate.next_binlog, rotate.position
                 );
                 current_binlog_file = rotate.next_binlog;
-                current_binlog_pos = rotate.position as u32;
+                current_binlog_pos = match u32::try_from(rotate.position) {
+                    Ok(pos) => pos,
+                    Err(_) => {
+                        warn!(
+                            "Binlog position {} exceeds u32::MAX — clamping to u32::MAX",
+                            rotate.position
+                        );
+                        u32::MAX
+                    }
+                };
             }
 
             BinlogEvent::Gtid(gtid) => {
@@ -750,17 +798,33 @@ async fn run_mysql_cdc_loop(
                     // Send to event channel
                     if let Some(sender) = &event_sender {
                         debug!("Sending {} events to channel", event_buffer.len());
+                        let mut send_failed = false;
                         for event in event_buffer.drain(..) {
                             if sender.send(event).await.is_err() {
                                 warn!("Event channel closed");
+                                send_failed = true;
                                 break;
                             }
+                        }
+                        // M6: Only update committed_position if ALL events in
+                        // the batch were sent. A partial send means the consumer
+                        // may have missed events — on reconnect we must re-send
+                        // from the last fully-committed position.
+                        if send_failed {
+                            event_buffer.clear();
+                            continue;
                         }
                     } else {
                         debug!("No event sender, clearing buffer");
                         event_buffer.clear();
                     }
                 }
+
+                // Update committed binlog position after successful event
+                // delivery. On reconnect, we resume from this position
+                // instead of the original config position.
+                *committed_position.lock().await =
+                    Some((current_binlog_file.clone(), current_binlog_pos));
 
                 current_gtid = None;
             }

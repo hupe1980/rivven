@@ -297,8 +297,9 @@ impl RedbLogStore {
 
     /// Delete log entries in range [start, end)
     ///
-    /// Propagate errors instead of silently swallowing them
-    /// with `let _ = table.remove(index)`.
+    /// Uses redb's `retain_in()` for efficient batch deletion instead
+    /// of per-key `remove()` calls. This performs a single B-tree
+    /// traversal over the range.
     fn delete_logs_range(
         &self,
         start: u64,
@@ -314,12 +315,12 @@ impl RedbLogStore {
                     source: StorageIOError::write_logs(openraft::AnyError::new(&e)),
                 })?;
 
-            // Use drain_filter/retain pattern with error propagation
-            for index in start..end {
-                table.remove(index).map_err(|e| StorageError::IO {
+            // Batch-remove all entries in [start, end) with a single B-tree pass
+            table
+                .retain_in(start..end, |_, _| false)
+                .map_err(|e| StorageError::IO {
                     source: StorageIOError::write_logs(openraft::AnyError::new(&e)),
                 })?;
-            }
         }
         write_txn.commit().map_err(|e| StorageError::IO {
             source: StorageIOError::write_logs(openraft::AnyError::new(&e)),

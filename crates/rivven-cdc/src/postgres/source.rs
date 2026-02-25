@@ -361,6 +361,8 @@ pub struct PostgresCdc {
     signal_processor: Arc<SignalProcessor>,
     /// Signal state shared with CDC loop
     signal_state: SignalTableState,
+    /// Handle for the spawned CDC task; awaited/aborted in `stop()`.
+    task_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl PostgresCdc {
@@ -375,6 +377,7 @@ impl PostgresCdc {
             event_rx: Some(rx),
             signal_processor: Arc::new(SignalProcessor::new()),
             signal_state,
+            task_handle: None,
         }
     }
 
@@ -423,13 +426,14 @@ impl CdcSource for PostgresCdc {
         let signal_processor = Arc::clone(&self.signal_processor);
 
         // Spawn the CDC loop
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             match run_cdc_loop(&config, event_tx, signal_state, signal_processor).await {
                 Ok(_) => info!("PostgreSQL CDC loop finished gracefully"),
                 Err(e) => error!("PostgreSQL CDC loop failed: {:?}", e),
             }
         });
 
+        self.task_handle = Some(handle);
         self.active = true;
         Ok(())
     }
@@ -439,6 +443,10 @@ impl CdcSource for PostgresCdc {
         self.active = false;
         // Drop the sender to signal the loop to stop
         self.event_tx = None;
+        if let Some(handle) = self.task_handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
         Ok(())
     }
 
@@ -499,6 +507,12 @@ async fn run_cdc_loop(
     let mut relations: HashMap<u32, RelationBody> = HashMap::new();
     let mut event_buffer: Vec<CdcEvent> = Vec::new();
     let mut last_wal_end: u64 = config.start_lsn;
+    // Track the WAL position of the last event confirmed delivered downstream.
+    // Only acknowledge up to this position to PostgreSQL, preventing data loss
+    // if we crash between receiving events and the downstream processing them.
+    let mut confirmed_wal_end: u64 = config.start_lsn;
+
+    let mut consecutive_decode_errors: u32 = 0;
 
     loop {
         // Process any pending signals from the CDC stream
@@ -529,10 +543,15 @@ async fn run_cdc_loop(
             match tokio::time::timeout(Duration::from_secs(10), stream.next_message()).await {
                 Ok(result) => result?,
                 Err(_) => {
-                    // Timeout — send proactive status update to prevent WAL accumulation
-                    if last_wal_end > 0 {
-                        debug!("Sending proactive status update for LSN {}", last_wal_end);
-                        stream.send_status_update(last_wal_end).await?;
+                    // Timeout — send proactive status update to prevent WAL accumulation.
+                    // Use confirmed_wal_end (not last_wal_end) to only acknowledge
+                    // positions that were successfully delivered downstream.
+                    if confirmed_wal_end > 0 {
+                        debug!(
+                            "Sending proactive status update for confirmed LSN {}",
+                            confirmed_wal_end
+                        );
+                        stream.send_status_update(confirmed_wal_end).await?;
                     }
                     continue;
                 }
@@ -554,91 +573,116 @@ async fn run_cdc_loop(
                         last_wal_end = last_wal_end.max(wal_end);
 
                         match PgOutputDecoder::decode(&mut bytes) {
-                            Ok(msg) => match msg {
-                                ReplicationMessage::Relation(rel) => {
-                                    relations.insert(rel.id, rel);
-                                }
-                                ReplicationMessage::Insert(ins) => {
-                                    if let Some(rel) = relations.get(&ins.relation_id) {
-                                        let json = tuple_to_json(&ins.tuple, rel);
-
-                                        // Check if this is a signal table INSERT
-                                        if signal_state.is_signal_table(&rel.namespace, &rel.name) {
-                                            signal_state.handle_signal_insert(&json).await;
-                                            // Don't emit signal table changes as CDC events
-                                            continue;
-                                        }
-
-                                        let event = CdcEvent::insert(
-                                            "postgres",
-                                            database,
-                                            &rel.namespace,
-                                            &rel.name,
-                                            json,
-                                            current_timestamp(),
-                                        );
-                                        event_buffer.push(event);
+                            Ok(msg) => {
+                                // Reset consecutive error counter on successful decode
+                                consecutive_decode_errors = 0;
+                                match msg {
+                                    ReplicationMessage::Relation(rel) => {
+                                        relations.insert(rel.id, rel);
                                     }
-                                }
-                                ReplicationMessage::Update(upd) => {
-                                    if let Some(rel) = relations.get(&upd.relation_id) {
-                                        // Skip signal table updates
-                                        if signal_state.is_signal_table(&rel.namespace, &rel.name) {
-                                            continue;
-                                        }
+                                    ReplicationMessage::Insert(ins) => {
+                                        if let Some(rel) = relations.get(&ins.relation_id) {
+                                            let json = tuple_to_json(&ins.tuple, rel);
 
-                                        let after = tuple_to_json(&upd.new_tuple, rel);
-                                        let before =
-                                            upd.key_tuple.as_ref().map(|t| tuple_to_json(t, rel));
-                                        let event = CdcEvent::update(
-                                            "postgres",
-                                            database,
-                                            &rel.namespace,
-                                            &rel.name,
-                                            before,
-                                            after,
-                                            current_timestamp(),
-                                        );
-                                        event_buffer.push(event);
-                                    }
-                                }
-                                ReplicationMessage::Delete(del) => {
-                                    if let Some(rel) = relations.get(&del.relation_id) {
-                                        // Skip signal table deletes
-                                        if signal_state.is_signal_table(&rel.namespace, &rel.name) {
-                                            continue;
-                                        }
+                                            // Check if this is a signal table INSERT
+                                            if signal_state
+                                                .is_signal_table(&rel.namespace, &rel.name)
+                                            {
+                                                signal_state.handle_signal_insert(&json).await;
+                                                // Don't emit signal table changes as CDC events
+                                                continue;
+                                            }
 
-                                        if let Some(key_tuple) = &del.key_tuple {
-                                            let before = tuple_to_json(key_tuple, rel);
-                                            let event = CdcEvent::delete(
+                                            let event = CdcEvent::insert(
                                                 "postgres",
                                                 database,
                                                 &rel.namespace,
                                                 &rel.name,
-                                                before,
+                                                json,
                                                 current_timestamp(),
                                             );
                                             event_buffer.push(event);
                                         }
                                     }
-                                }
-                                ReplicationMessage::Commit(_) => {
-                                    // Flush buffer on commit
-                                    for event in event_buffer.drain(..) {
-                                        if event_tx.send(event).await.is_err() {
-                                            info!("Event receiver dropped, stopping");
-                                            return Ok(());
+                                    ReplicationMessage::Update(upd) => {
+                                        if let Some(rel) = relations.get(&upd.relation_id) {
+                                            // Skip signal table updates
+                                            if signal_state
+                                                .is_signal_table(&rel.namespace, &rel.name)
+                                            {
+                                                continue;
+                                            }
+
+                                            let after = tuple_to_json(&upd.new_tuple, rel);
+                                            let before = upd
+                                                .key_tuple
+                                                .as_ref()
+                                                .map(|t| tuple_to_json(t, rel));
+                                            let event = CdcEvent::update(
+                                                "postgres",
+                                                database,
+                                                &rel.namespace,
+                                                &rel.name,
+                                                before,
+                                                after,
+                                                current_timestamp(),
+                                            );
+                                            event_buffer.push(event);
                                         }
                                     }
+                                    ReplicationMessage::Delete(del) => {
+                                        if let Some(rel) = relations.get(&del.relation_id) {
+                                            // Skip signal table deletes
+                                            if signal_state
+                                                .is_signal_table(&rel.namespace, &rel.name)
+                                            {
+                                                continue;
+                                            }
+
+                                            if let Some(key_tuple) = &del.key_tuple {
+                                                let before = tuple_to_json(key_tuple, rel);
+                                                let event = CdcEvent::delete(
+                                                    "postgres",
+                                                    database,
+                                                    &rel.namespace,
+                                                    &rel.name,
+                                                    before,
+                                                    current_timestamp(),
+                                                );
+                                                event_buffer.push(event);
+                                            }
+                                        }
+                                    }
+                                    ReplicationMessage::Commit(_) => {
+                                        // Flush buffer on commit — only update confirmed
+                                        // WAL position after all events are successfully
+                                        // sent downstream, providing at-least-once delivery.
+                                        for event in event_buffer.drain(..) {
+                                            if event_tx.send(event).await.is_err() {
+                                                info!("Event receiver dropped, stopping");
+                                                return Ok(());
+                                            }
+                                        }
+                                        // All events in this transaction were delivered;
+                                        // it is now safe to acknowledge up to last_wal_end.
+                                        confirmed_wal_end = last_wal_end;
+                                    }
+                                    ReplicationMessage::Begin(_) => {
+                                        event_buffer.clear();
+                                    }
+                                    _ => {}
                                 }
-                                ReplicationMessage::Begin(_) => {
-                                    event_buffer.clear();
-                                }
-                                _ => {}
-                            },
+                            }
                             Err(e) => {
-                                warn!("Decoder error: {}", e);
+                                consecutive_decode_errors += 1;
+                                if consecutive_decode_errors >= 100 {
+                                    error!(
+                                        "Too many consecutive decoder errors ({}), aborting CDC loop",
+                                        consecutive_decode_errors
+                                    );
+                                    return Err(e.into());
+                                }
+                                warn!("Decoder error ({}/100): {}", consecutive_decode_errors, e);
                             }
                         }
                     }
@@ -650,8 +694,13 @@ async fn run_cdc_loop(
                         last_wal_end = last_wal_end.max(wal_end);
 
                         if reply_requested == 1 {
-                            debug!("Sending KeepAlive response for LSN {}", wal_end);
-                            stream.send_status_update(wal_end).await?;
+                            // Acknowledge only confirmed (delivered) LSN, not
+                            // the server's wal_end, to prevent data loss on crash.
+                            debug!(
+                                "Sending KeepAlive response for confirmed LSN {}",
+                                confirmed_wal_end
+                            );
+                            stream.send_status_update(confirmed_wal_end).await?;
                         }
                     }
                     _ => {
@@ -731,17 +780,14 @@ fn pg_text_to_typed_json(text: &str, type_oid: i32) -> serde_json::Value {
             }
         }
 
-        // Numeric/decimal — preserve precision by keeping as string, but wrap in
-        // Number if it fits without loss
+        // Numeric/decimal — always preserve as string to avoid f64 precision loss
+        // for values with >15 significant digits. Integer-representable values
+        // are kept as JSON Number for downstream compatibility.
         NUMERIC_OID => {
             if let Ok(n) = text.parse::<i64>() {
                 serde_json::Value::Number(n.into())
-            } else if let Ok(f) = text.parse::<f64>() {
-                serde_json::Number::from_f64(f)
-                    .map(serde_json::Value::Number)
-                    .unwrap_or(serde_json::Value::String(text.to_string()))
             } else {
-                // "NaN" or extreme precision — keep as string
+                // Keep as string to preserve full decimal precision
                 serde_json::Value::String(text.to_string())
             }
         }

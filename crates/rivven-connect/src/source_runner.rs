@@ -67,7 +67,7 @@ impl SourceRunner {
         global_topic_settings: TopicSettings,
         broker: SharedBrokerClient,
         source_registry: Arc<SourceRegistry>,
-    ) -> Self {
+    ) -> Result<Self> {
         // Extract topic_routing from connector-specific config for CDC connectors
         let topic_routing_pattern = Self::extract_topic_routing(&config);
 
@@ -121,7 +121,14 @@ impl SourceRunner {
 
         let transforms = config.transforms.clone();
 
-        Self {
+        // Fail-fast: validate transform types at startup
+        for step in &transforms {
+            step.validate().map_err(|e| {
+                ConnectError::config(format!("Source '{}': invalid transform: {}", name, e,))
+            })?;
+        }
+
+        Ok(Self {
             name,
             config,
             global_topic_settings,
@@ -135,7 +142,7 @@ impl SourceRunner {
             schema_registry,
             transforms,
             source_registry,
-        }
+        })
     }
 
     /// Extract topic_routing from CDC connector config
@@ -409,10 +416,10 @@ impl SourceRunner {
                     }
                 }
                 other => {
-                    debug!(
-                        "Source '{}': unknown transform type '{}', skipping",
+                    return Err(ConnectError::config(format!(
+                        "Source '{}': unknown transform type '{}'",
                         self.name, other
-                    );
+                    )));
                 }
             }
         }
@@ -869,7 +876,7 @@ pub async fn run_source(
         config.settings.topic.clone(),
         broker.clone(),
         source_registry,
-    );
+    )?;
 
     runner.run(shutdown_rx.resubscribe()).await
 }

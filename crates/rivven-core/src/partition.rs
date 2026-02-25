@@ -4,7 +4,7 @@ use crate::{Config, Error, Message, Result};
 use bytes::Bytes;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 use tracing::{debug, info, warn};
 
 /// Execute deferred fsync via `spawn_blocking`.
@@ -45,6 +45,13 @@ pub struct Partition {
     /// Low watermark: records before this offset are logically deleted.
     /// Set via `set_low_watermark()` (e.g., from DeleteRecords API).
     low_watermark: AtomicU64,
+
+    /// Notifies waiting consumers when new data is appended.
+    ///
+    /// Used by the long-poll consume path to avoid 50 ms sleep-polling.
+    /// Append operations call `notify_waiters()` so all waiting fetches
+    /// are woken immediately.
+    write_notify: Arc<Notify>,
 }
 
 impl Partition {
@@ -87,6 +94,7 @@ impl Partition {
             tiered_storage,
             next_offset,
             low_watermark: AtomicU64::new(0),
+            write_notify: Arc::new(Notify::new()),
         })
     }
 
@@ -170,6 +178,9 @@ impl Partition {
         // Record metrics
         CoreMetrics::increment_messages_appended();
         CoreMetrics::record_append_latency_us(timer.elapsed_us());
+
+        // Wake any consumers long-polling on this partition
+        self.write_notify.notify_waiters();
 
         debug!(
             "Appended message at offset {} to partition {}",
@@ -361,6 +372,9 @@ impl Partition {
         CoreMetrics::add_messages_appended(batch_size as u64);
         CoreMetrics::record_batch_append_latency_us(timer.elapsed_us());
 
+        // Wake any consumers long-polling on this partition
+        self.write_notify.notify_waiters();
+
         debug!(
             "Batch appended {} messages to partition {} (offsets {}-{})",
             batch_size,
@@ -400,6 +414,9 @@ impl Partition {
         // leader promotion allocates offsets beyond what was replicated.
         self.next_offset.fetch_max(offset + 1, Ordering::Release);
 
+        // Wake any consumers long-polling on this partition
+        self.write_notify.notify_waiters();
+
         Ok(offset)
     }
 
@@ -437,7 +454,19 @@ impl Partition {
         self.next_offset
             .fetch_max(max_offset + 1, Ordering::Release);
 
+        // Wake any consumers long-polling on this partition
+        self.write_notify.notify_waiters();
+
         Ok(positions)
+    }
+
+    /// Returns a handle to wait for new writes on this partition.
+    ///
+    /// Call `.notified().await` on the returned `Notify` to sleep until the
+    /// next append completes. This is used by the long-poll consume handler
+    /// to avoid CPU-wasting sleep-based polling.
+    pub fn write_notify(&self) -> Arc<Notify> {
+        Arc::clone(&self.write_notify)
     }
 
     /// Flush partition data to disk ensuring durability

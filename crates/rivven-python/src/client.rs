@@ -8,6 +8,7 @@
 use crate::consumer::Consumer;
 use crate::error::IntoPyErr;
 use crate::producer::Producer;
+use dashmap::DashMap;
 use pyo3::prelude::*;
 use rivven_client::Client;
 use std::sync::Arc;
@@ -54,6 +55,9 @@ pub struct RivvenClient {
     addr: Option<String>,
     /// TLS parameters for dedicated connections (None = plaintext)
     tls_params: Option<TlsParams>,
+    /// Per-transactional-id mutex to prevent concurrent interleaving of
+    /// begin/commit/abort calls for the same transactional_id.
+    txn_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl RivvenClient {
@@ -63,6 +67,7 @@ impl RivvenClient {
             client: Arc::new(Mutex::new(client)),
             addr: None,
             tls_params: None,
+            txn_locks: Arc::new(DashMap::new()),
         }
     }
 
@@ -72,6 +77,7 @@ impl RivvenClient {
             client: Arc::new(Mutex::new(client)),
             addr: Some(addr),
             tls_params: None,
+            txn_locks: Arc::new(DashMap::new()),
         }
     }
 
@@ -81,7 +87,16 @@ impl RivvenClient {
             client: Arc::new(Mutex::new(client)),
             addr: Some(addr),
             tls_params: Some(tls_params),
+            txn_locks: Arc::new(DashMap::new()),
         }
+    }
+
+    /// Get or create the per-transactional-id lock
+    fn txn_lock(&self, transactional_id: &str) -> Arc<Mutex<()>> {
+        self.txn_locks
+            .entry(transactional_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 }
 
@@ -902,16 +917,9 @@ impl RivvenClient {
     ///
     /// # Concurrency safety
     ///
-    /// Transaction methods (`begin_transaction`, `commit_transaction`,
-    /// `abort_transaction`, `add_partitions_to_txn`) acquire the inner
-    /// client `Mutex` for each RPC call individually. They are **not**
-    /// safe to call concurrently from multiple tasks with the **same**
-    /// `transactional_id` — doing so can interleave begin/commit/abort
-    /// calls and corrupt transaction state on the broker. Callers must
-    /// serialize transaction lifecycle calls for a given
-    /// `transactional_id` (e.g. by owning the id in a single task).
-    /// Different `transactional_id` values may safely be used from
-    /// separate tasks.
+    /// Transaction methods are serialized per `transactional_id` via an
+    /// internal per-id lock. Concurrent calls with the **same** id will
+    /// queue; different ids can proceed in parallel.
     ///
     /// Args:
     ///     transactional_id (str): Unique transaction identifier
@@ -933,7 +941,9 @@ impl RivvenClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = Arc::clone(&self.client);
         let state_inner = Arc::clone(&producer_state.inner);
+        let txn_lock = self.txn_lock(&transactional_id);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let _txn_guard = txn_lock.lock().await;
             let mut guard = client.lock().await;
             let state_guard = state_inner.lock().await;
             guard
@@ -963,14 +973,27 @@ impl RivvenClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = Arc::clone(&self.client);
         let state_inner = Arc::clone(&producer_state.inner);
+        let txn_lock = self.txn_lock(&transactional_id);
+        let txn_locks = Arc::clone(&self.txn_locks);
+        let txn_id = transactional_id.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut guard = client.lock().await;
-            let state_guard = state_inner.lock().await;
-            guard
-                .commit_transaction(&transactional_id, &state_guard)
-                .await
-                .into_py_err()?;
-            Ok(())
+            let result = {
+                let _txn_guard = txn_lock.lock().await;
+                let mut guard = client.lock().await;
+                let state_guard = state_inner.lock().await;
+                guard
+                    .commit_transaction(&transactional_id, &state_guard)
+                    .await
+                    .into_py_err()
+            };
+            // Drop our Arc reference so strong_count drops to 1 (DashMap only)
+            // before checking. Without this, our local clone keeps count >= 2.
+            drop(txn_lock);
+            // Clean up lock entry after commit — safe if another task grabbed
+            // a new reference between drop and remove_if, because DashMap's
+            // shard lock serializes and the count will be > 1.
+            txn_locks.remove_if(&txn_id, |_, v| Arc::strong_count(v) == 1);
+            result
         })
     }
 
@@ -997,14 +1020,24 @@ impl RivvenClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = Arc::clone(&self.client);
         let state_inner = Arc::clone(&producer_state.inner);
+        let txn_lock = self.txn_lock(&transactional_id);
+        let txn_locks = Arc::clone(&self.txn_locks);
+        let txn_id = transactional_id.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let mut guard = client.lock().await;
-            let state_guard = state_inner.lock().await;
-            guard
-                .abort_transaction(&transactional_id, &state_guard)
-                .await
-                .into_py_err()?;
-            Ok(())
+            let result = {
+                let _txn_guard = txn_lock.lock().await;
+                let mut guard = client.lock().await;
+                let state_guard = state_inner.lock().await;
+                guard
+                    .abort_transaction(&transactional_id, &state_guard)
+                    .await
+                    .into_py_err()
+            };
+            // Drop our Arc reference so strong_count drops to 1 (DashMap only)
+            drop(txn_lock);
+            // Clean up lock entry after abort
+            txn_locks.remove_if(&txn_id, |_, v| Arc::strong_count(v) == 1);
+            result
         })
     }
 
@@ -1034,7 +1067,9 @@ impl RivvenClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = Arc::clone(&self.client);
         let state_inner = Arc::clone(&producer_state.inner);
+        let txn_lock = self.txn_lock(&transactional_id);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let _txn_guard = txn_lock.lock().await;
             let mut guard = client.lock().await;
             let state_guard = state_inner.lock().await;
             let partition_refs: Vec<(&str, u32)> =

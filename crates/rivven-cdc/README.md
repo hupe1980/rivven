@@ -144,7 +144,7 @@ Internal/advanced types for custom implementations:
 | Logical Replication | ✅ | pgoutput plugin |
 | Binlog Streaming | ✅ | MySQL/MariaDB GTID |
 | CDC Table Polling | ✅ | SQL Server CDC tables |
-| Binlog Checksum (CRC32) | ✅ | Auto-negotiation, MySQL 8+/MariaDB 10+ |
+| Binlog Checksum (CRC32) | ✅ | FDE checksum byte parsing per MySQL internals, auto-negotiation |
 | Schema Metadata | ✅ | Real column names from INFORMATION_SCHEMA |
 | Initial Snapshot | ✅ | Parallel, resumable |
 | TLS/SSL | ✅ | rustls-based |
@@ -152,7 +152,7 @@ Internal/advanced types for custom implementations:
 | Column Masking | ✅ | Redacted |
 | Heartbeats | ✅ | WAL acknowledgment |
 | Heartbeat Action Query | ✅ | Multi-database support |
-| Checkpointing | ✅ | LSN/binlog position |
+| Checkpointing | ✅ | LSN/binlog position (SQL Server: deferred to next poll cycle for at-least-once delivery) |
 | Schema Inference | ✅ | Via rivven-connect |
 | **Tombstone Events** | ✅ | `TombstoneEmitter` for log compaction |
 | **REPLICA IDENTITY** | ✅ | `ReplicaIdentityEnforcer` with warn/skip/fail |

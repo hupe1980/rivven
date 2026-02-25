@@ -470,7 +470,7 @@ impl Source for SqlServerCdcSource {
         let feature_processor = std::sync::Arc::new(CdcFeatureProcessor::with_connector_name(
             feature_config,
             &connector_name,
-        ));
+        )?);
 
         // Log enabled features
         if feature_processor.has_deduplication() {

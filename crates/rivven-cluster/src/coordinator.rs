@@ -18,6 +18,7 @@ use crate::raft::RaftNode;
 use crate::replication::ReplicationManager;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, info, warn};
 
@@ -82,6 +83,13 @@ pub struct ClusterCoordinator {
 
     /// Shutdown signal
     shutdown_tx: broadcast::Sender<()>,
+
+    /// Pending suspicion timers: node_id → cancel handle.
+    ///
+    /// When NodeSuspected fires, a grace period timer (15s) is started
+    /// before reassigning partitions. If NodeRecovered fires before
+    /// the timer expires, the pending reassignment is cancelled.
+    pending_suspicions: Arc<dashmap::DashMap<String, tokio::sync::oneshot::Sender<()>>>,
 }
 
 impl ClusterCoordinator {
@@ -121,6 +129,7 @@ impl ClusterCoordinator {
             is_leader_flag: RwLock::new(false),
             round_robin_counter: AtomicUsize::new(0),
             shutdown_tx,
+            pending_suspicions: Arc::new(dashmap::DashMap::new()),
         })
     }
 
@@ -216,11 +225,19 @@ impl ClusterCoordinator {
         let metadata = self.metadata.clone();
         let node_id = self.config.node_id.clone();
         let raft_node = self.raft_node.clone();
+        let pending_suspicions = self.pending_suspicions.clone();
 
         // Spawn membership event handler
         tokio::spawn(async move {
             while let Ok(event) = events.recv().await {
-                Self::handle_membership_event(&metadata, &node_id, event, &raft_node).await;
+                Self::handle_membership_event(
+                    &metadata,
+                    &node_id,
+                    event,
+                    &raft_node,
+                    &pending_suspicions,
+                )
+                .await;
             }
         });
 
@@ -281,44 +298,76 @@ impl ClusterCoordinator {
         metadata: &MetadataStore,
         _local_node_id: &str,
         event: MembershipEvent,
-        raft_node: &RwLock<Option<Arc<RwLock<RaftNode>>>>,
+        raft_node: &Arc<RwLock<Option<Arc<RwLock<RaftNode>>>>>,
+        pending_suspicions: &Arc<dashmap::DashMap<String, tokio::sync::oneshot::Sender<()>>>,
     ) {
         match event {
             MembershipEvent::NodeJoined(info) => {
                 info!(node_id = %info.id, "Node joined cluster");
                 let cmd = MetadataCommand::RegisterNode { info };
-                Self::apply_membership_command(metadata, cmd, raft_node).await;
+                Self::apply_membership_command(metadata, cmd, raft_node.as_ref()).await;
             }
             MembershipEvent::NodeLeft(node_id) => {
                 info!(node_id = %node_id, "Node left cluster gracefully");
+                // Cancel any pending suspicion timer for this node
+                pending_suspicions.remove(&node_id);
                 let cmd = MetadataCommand::DeregisterNode { node_id };
-                Self::apply_membership_command(metadata, cmd, raft_node).await;
+                Self::apply_membership_command(metadata, cmd, raft_node.as_ref()).await;
             }
             MembershipEvent::NodeFailed(node_id) => {
                 warn!(node_id = %node_id, "Node failed");
+                // Cancel any pending suspicion timer — the node is confirmed dead
+                pending_suspicions.remove(&node_id);
                 let cmd = MetadataCommand::DeregisterNode {
                     node_id: node_id.clone(),
                 };
-                Self::apply_membership_command(metadata, cmd, raft_node).await;
+                Self::apply_membership_command(metadata, cmd, raft_node.as_ref()).await;
 
                 // Automatically reassign partitions led by the dead node.
                 // Only the Raft leader should trigger reassignment to avoid duplicate
                 // proposals from multiple nodes.
-                Self::reassign_dead_node_partitions(&node_id, raft_node).await;
+                Self::reassign_dead_node_partitions(&node_id, raft_node.as_ref()).await;
             }
             MembershipEvent::NodeSuspected(node_id) => {
-                warn!(node_id = %node_id, "Node suspected — fencing partitions");
-                // Bridge SWIM suspect events into Raft.
-                // When a node is suspected, we don't immediately deregister it (SWIM
-                // may refute the suspicion). Instead, we fence its partitions by
-                // proposing leader election for all partitions it leads, transferring
-                // leadership to healthy ISR members. This prevents writes to a
-                // potentially-dead node while allowing it to recover without full
-                // re-registration.
-                Self::reassign_dead_node_partitions(&node_id, raft_node).await;
+                warn!(node_id = %node_id, "Node suspected — starting grace period (15s)");
+                // Instead of immediately reassigning partitions, start a grace
+                // period timer. SWIM suspicion is provisional; the node may
+                // recover in seconds. If NodeRecovered fires before the timer
+                // expires, we cancel the pending reassignment.
+                if pending_suspicions.contains_key(&node_id) {
+                    debug!(node_id = %node_id, "Suspicion timer already pending, skipping");
+                    return;
+                }
+
+                let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+                pending_suspicions.insert(node_id.clone(), cancel_tx);
+
+                // Spawn a deferred reassignment task
+                let raft_node = raft_node.clone();
+                let suspicions = pending_suspicions.clone();
+                let nid = node_id.clone();
+                tokio::spawn(async move {
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_secs(15)) => {
+                            // Grace period expired — node is still suspected, proceed
+                            // with partition reassignment.
+                            warn!(node_id = %nid, "Suspicion grace period expired — reassigning partitions");
+                            suspicions.remove(&nid);
+                            Self::reassign_dead_node_partitions(&nid, &raft_node).await;
+                        }
+                        _ = cancel_rx => {
+                            // NodeRecovered or NodeFailed fired — cancel the timer
+                            debug!(node_id = %nid, "Suspicion timer cancelled (node recovered or failed)");
+                        }
+                    }
+                });
             }
             MembershipEvent::NodeRecovered(node_id) => {
                 info!(node_id = %node_id, "Node recovered");
+                // Cancel pending suspicion timer if any
+                if pending_suspicions.remove(&node_id).is_some() {
+                    info!(node_id = %node_id, "Cancelled pending partition reassignment");
+                }
             }
             MembershipEvent::NodeStateChanged { node_id, old, new } => {
                 debug!(node_id = %node_id, ?old, ?new, "Node state changed");

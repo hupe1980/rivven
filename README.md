@@ -41,6 +41,8 @@ Modern event streaming shouldn't require a JVM, ZooKeeper, or a team of dedicate
 - Batch APIs for maximum throughput  
 - LZ4/Zstd/Snappy compression
 - Sticky partitioning for optimal batching
+- Notify-based long poll (zero-latency wakeup, no polling)
+- Pipelined consumer fetch & offset commit
 
 </td>
 <td width="50%" valign="top">
@@ -89,7 +91,7 @@ Modern event streaming shouldn't require a JVM, ZooKeeper, or a team of dedicate
 - HMAC-authenticated cluster protocol (SWIM gossip)
 - Credential isolation between components
 - Token redaction, connection string sanitization
-- SQL injection prevention with identifier validation
+- SQL injection prevention with identifier validation and comprehensive deny-list
 
 </td>
 <td width="50%" valign="top">
@@ -234,12 +236,12 @@ rivven-connect run --config connect.yaml
 
 Rivven enforces the following security and correctness guarantees across all **15 crates**:
 
-- **Security hardening** — Auth wired in by default, TLS warnings for CDC connections, token redaction in logs, YAML injection prevention, SQL injection validation, connection string sanitization, password masking in `Debug` output
+- **Security hardening** — Auth wired in by default, TLS warnings for CDC connections, token redaction in logs, YAML injection prevention, SQL injection validation with comprehensive deny-list, connection string sanitization, password masking in `Debug` output, SHA-256 primary schema fingerprint, pool permit RAII safety
 - **CDC reliability** — Full MySQL binary JSON decoder (emits structured values), reconnection with exponential backoff for MySQL, proactive WAL status updates for PostgreSQL, composite primary key support for PostgreSQL snapshots
 - **Storage durability** — `fsync` before rename, directory `fsync`, WAL checkpoint batching, offset batching (every 50 commits)
 - **Cluster correctness** — ISR initialized with all replicas, standalone mode uses term 0, SWIM graceful shutdown, deterministic partition selection (murmur2)
 - **Connect reliability** — Consecutive error threshold for sinks, health check before Running state, epoch fencing for failover, SQL identifier validation
-- **Client robustness** — Circuit breaker uses `compare_exchange`, handshake errors marked non-retryable, connection underflow prevention
+- **Client robustness** — Circuit breaker uses `compare_exchange`, handshake errors marked non-retryable, connection underflow prevention, IoError preserves ErrorKind for retry classification, pipelined partition fetch & offset commit
 - **RDBC safety** — NaN/Infinity handling, SQL-standard escaping, `where_clause` validation, PostgreSQL background task error surfacing
 - **Schema registry** — Regex caching for validation rules, request body size limits
 - **Operator** — Proper YAML serialization (no string interpolation), TLS validation

@@ -159,6 +159,9 @@ impl ValidationEngine {
     }
 
     /// Get a compiled regex from the cache, or compile and cache it.
+    ///
+    /// The cache is bounded to 1 000 entries; when full the cache is cleared
+    /// to prevent unbounded memory growth from attacker-chosen patterns.
     fn get_or_compile_regex(&self, pattern: &str) -> SchemaResult<regex::Regex> {
         let mut cache = self.regex_cache.lock().unwrap();
         if let Some(re) = cache.get(pattern) {
@@ -168,6 +171,11 @@ impl ValidationEngine {
             .size_limit(1_000_000)
             .build()
             .map_err(|e| SchemaError::Validation(format!("Invalid regex pattern: {}", e)))?;
+        // Evict all entries when the cache is full to avoid unbounded growth
+        const MAX_REGEX_CACHE: usize = 1_000;
+        if cache.len() >= MAX_REGEX_CACHE {
+            cache.clear();
+        }
         cache.insert(pattern.to_string(), re.clone());
         Ok(re)
     }

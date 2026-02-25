@@ -30,6 +30,9 @@ tracing = { workspace = true }
 rivven-client = { workspace = true }
 rivven-core = { workspace = true }
 
+# Concurrent per-transactional-id lock map
+dashmap = "6.1"
+
 # Serialization for message conversion
 bytes = { workspace = true }
 

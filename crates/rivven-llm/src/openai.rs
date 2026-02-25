@@ -21,6 +21,7 @@ use crate::error::{LlmError, LlmResult};
 use crate::provider::{LlmProvider, ProviderCapabilities};
 use crate::types::*;
 use async_trait::async_trait;
+use rand::Rng;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -37,6 +38,15 @@ const DEFAULT_EMBEDDING_MODEL: &str = "text-embedding-3-small";
 
 /// Maximum error body bytes to read (prevent unbounded allocation)
 const MAX_ERROR_BODY_BYTES: usize = 4096;
+
+/// Maximum number of retries for transient/rate-limited errors
+const MAX_RETRIES: u32 = 3;
+
+/// Initial backoff delay for retries
+const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
+
+/// Maximum backoff delay (cap exponential growth)
+const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 /// OpenAI provider configuration
 #[derive(Debug, Clone)]
@@ -328,6 +338,72 @@ impl OpenAiProvider {
             _ => LlmError::Provider { status, message },
         }
     }
+    /// Send an HTTP request with automatic retry for transient and rate-limited errors.
+    ///
+    /// Uses exponential backoff with jitter. For 429 responses, respects the
+    /// `Retry-After` header when present.
+    async fn send_with_retry(
+        &self,
+        build_request: impl Fn() -> reqwest::RequestBuilder,
+    ) -> LlmResult<reqwest::Response> {
+        let mut last_err = None;
+        for attempt in 0..=MAX_RETRIES {
+            let resp = build_request().send().await;
+
+            match resp {
+                Ok(r) if r.status().is_success() => return Ok(r),
+                Ok(r) => {
+                    let err = self.parse_error_response(r).await;
+                    if !err.is_retryable() || attempt == MAX_RETRIES {
+                        return Err(err);
+                    }
+                    // Respect Retry-After header or use exponential backoff with jitter
+                    let delay = if let Some(secs) = err.retry_after_secs() {
+                        Duration::from_secs(secs.min(MAX_BACKOFF.as_secs()))
+                    } else {
+                        let base =
+                            (INITIAL_BACKOFF * 2u32.saturating_pow(attempt)).min(MAX_BACKOFF);
+                        // Full jitter: uniform [0, base] — de-correlates concurrent retriers
+                        let jitter_ms = rand::thread_rng().gen_range(0..=base.as_millis() as u64);
+                        Duration::from_millis(jitter_ms)
+                    };
+                    warn!(
+                        attempt = attempt + 1,
+                        max_retries = MAX_RETRIES,
+                        delay_ms = delay.as_millis() as u64,
+                        error = %err,
+                        "Retrying after transient error"
+                    );
+                    tokio::time::sleep(delay).await;
+                    last_err = Some(err);
+                }
+                Err(e) => {
+                    let err = if e.is_timeout() {
+                        LlmError::Timeout(e.to_string())
+                    } else {
+                        LlmError::Connection(e.to_string())
+                    };
+                    if !err.is_retryable() || attempt == MAX_RETRIES {
+                        return Err(err);
+                    }
+                    // Apply jitter to connection errors too to avoid thundering herd
+                    let base = (INITIAL_BACKOFF * 2u32.saturating_pow(attempt)).min(MAX_BACKOFF);
+                    let delay_ms = rand::thread_rng().gen_range(0..=base.as_millis() as u64);
+                    let delay = Duration::from_millis(delay_ms);
+                    warn!(
+                        attempt = attempt + 1,
+                        max_retries = MAX_RETRIES,
+                        delay_ms = delay.as_millis() as u64,
+                        error = %err,
+                        "Retrying after connection error"
+                    );
+                    tokio::time::sleep(delay).await;
+                    last_err = Some(err);
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| LlmError::Transient("max retries exceeded".into())))
+    }
 }
 
 #[async_trait]
@@ -374,14 +450,8 @@ impl LlmProvider for OpenAiProvider {
         debug!(url = %url, model = %model, messages = request.messages.len(), "OpenAI chat request");
 
         let resp = self
-            .auth_headers(self.client.post(&url))
-            .json(&api_request)
-            .send()
+            .send_with_retry(|| self.auth_headers(self.client.post(&url)).json(&api_request))
             .await?;
-
-        if !resp.status().is_success() {
-            return Err(self.parse_error_response(resp).await);
-        }
 
         let api_resp: OpenAiChatResponse = resp
             .json()
@@ -434,14 +504,8 @@ impl LlmProvider for OpenAiProvider {
         debug!(url = %url, model = %model, inputs = request.input.len(), "OpenAI embedding request");
 
         let resp = self
-            .auth_headers(self.client.post(&url))
-            .json(&api_request)
-            .send()
+            .send_with_retry(|| self.auth_headers(self.client.post(&url)).json(&api_request))
             .await?;
-
-        if !resp.status().is_success() {
-            return Err(self.parse_error_response(resp).await);
-        }
 
         let api_resp: OpenAiEmbeddingResponse = resp.json().await.map_err(|e| {
             LlmError::Serialization(format!("failed to parse embedding response: {e}"))

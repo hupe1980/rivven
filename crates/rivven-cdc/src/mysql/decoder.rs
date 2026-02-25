@@ -407,8 +407,13 @@ impl BinlogDecoder {
         }
     }
 
-    /// Decode a binlog event
-    pub fn decode(&mut self, data: &Bytes) -> Result<BinlogEvent> {
+    /// Decode a binlog event.
+    ///
+    /// Returns the decoded event along with the event header, which
+    /// contains `next_position` — the byte offset of the next event in the
+    /// current binlog file.  Callers should use this to advance their
+    /// binlog position after every event (STOR-003-A).
+    pub fn decode(&mut self, data: &Bytes) -> Result<(BinlogEvent, EventHeader)> {
         if data.len() < EventHeader::SIZE {
             bail!("Event data too short: {} bytes", data.len());
         }
@@ -418,13 +423,36 @@ impl BinlogDecoder {
         // Determine if we need to strip the CRC32 checksum (4 bytes)
         // checksum_type: 0 = NONE, 1 = CRC32
         //
-        // For FDE: We assume checksums are enabled for MySQL 5.6.4+ and strip 4 bytes.
-        //          The FDE parsing will determine the actual checksum_type for future events.
+        // For FDE: Parse the checksum algorithm byte from the payload.
+        //          The FDE fixed fields are: binlog_version(2) + server_version(50)
+        //          + create_timestamp(4) + header_length(1) = 57 bytes. After the
+        //          variable post_header_lengths array, the last 1 byte (before the
+        //          optional 4-byte CRC32) is the checksum_alg byte. If the FDE has
+        //          a checksum, checksum_alg is at data[data.len()-5].
+        //          If no checksum, checksum_alg is at data[data.len()-1].
+        //          We read the server version to detect checksum support, then
+        //          verify by reading the candidate checksum_alg byte.
         // For other events: Use the checksum_type from the parsed FDE.
         let has_checksum = if header.event_type == EventType::FormatDescriptionEvent {
-            // Assume MySQL 8 with checksums enabled - strip the CRC32
-            // The FDE is large enough that this is safe
-            data.len() > EventHeader::SIZE + 60
+            let payload = &data[EventHeader::SIZE..];
+            // Minimum FDE payload: 57 bytes fixed + at least 1 byte post_header_lengths
+            if payload.len() >= 58 {
+                // Read server version at payload offset 2..52 to check checksum support
+                let version_str = std::str::from_utf8(&payload[2..52])
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                let version_supports = Self::mysql_version_has_checksum(version_str);
+
+                if version_supports && payload.len() >= 5 {
+                    // checksum_alg byte is at payload[len-5] (before 4-byte CRC32)
+                    let checksum_alg = payload[payload.len() - 5];
+                    checksum_alg == 1
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
         } else {
             self.format
                 .as_ref()
@@ -452,12 +480,12 @@ impl BinlogDecoder {
             EventType::FormatDescriptionEvent => {
                 let event = self.decode_format_description(payload)?;
                 self.format = Some(event.clone());
-                Ok(BinlogEvent::FormatDescription(event))
+                Ok((BinlogEvent::FormatDescription(event), header))
             }
             EventType::TableMapEvent => {
                 let event = self.decode_table_map(payload)?;
                 self.table_cache.insert(event.table_id, event.clone());
-                Ok(BinlogEvent::TableMap(event))
+                Ok((BinlogEvent::TableMap(event), header))
             }
             EventType::WriteRowsEventV1 | EventType::WriteRowsEventV2 => {
                 debug!("Decoding WriteRows event, payload {} bytes", payload.len());
@@ -467,36 +495,36 @@ impl BinlogDecoder {
                     event.table_id,
                     event.rows.len()
                 );
-                Ok(BinlogEvent::WriteRows(event))
+                Ok((BinlogEvent::WriteRows(event), header))
             }
             EventType::UpdateRowsEventV1 | EventType::UpdateRowsEventV2 => {
                 let event = self.decode_rows_event(payload, true, header.event_type)?;
-                Ok(BinlogEvent::UpdateRows(event))
+                Ok((BinlogEvent::UpdateRows(event), header))
             }
             EventType::DeleteRowsEventV1 | EventType::DeleteRowsEventV2 => {
                 let event = self.decode_rows_event(payload, false, header.event_type)?;
-                Ok(BinlogEvent::DeleteRows(event))
+                Ok((BinlogEvent::DeleteRows(event), header))
             }
             EventType::XidEvent => {
                 let event = self.decode_xid(payload)?;
-                Ok(BinlogEvent::Xid(event))
+                Ok((BinlogEvent::Xid(event), header))
             }
             EventType::QueryEvent => {
                 let event = self.decode_query(payload)?;
-                Ok(BinlogEvent::Query(event))
+                Ok((BinlogEvent::Query(event), header))
             }
             EventType::RotateEvent => {
                 let event = self.decode_rotate(payload)?;
-                Ok(BinlogEvent::Rotate(event))
+                Ok((BinlogEvent::Rotate(event), header))
             }
             EventType::GtidLogEvent | EventType::AnonymousGtidLogEvent => {
                 let event = self.decode_gtid(payload)?;
-                Ok(BinlogEvent::Gtid(event))
+                Ok((BinlogEvent::Gtid(event), header))
             }
-            EventType::HeartbeatLogEvent => Ok(BinlogEvent::Heartbeat),
+            EventType::HeartbeatLogEvent => Ok((BinlogEvent::Heartbeat, header)),
             other => {
                 debug!("Unhandled event type: {:?}", other);
-                Ok(BinlogEvent::Unknown(other))
+                Ok((BinlogEvent::Unknown(other), header))
             }
         }
     }

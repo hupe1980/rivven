@@ -5,11 +5,18 @@
 //! - Partition replication (fetch/append)
 //! - Metadata queries
 //!
+//! # Security
+//!
+//! **TCP transport is plaintext.** For encrypted inter-node communication
+//! enable the `quic` feature, which uses QUIC+TLS 1.3 as the transport
+//! layer. The TLS configuration fields (`tls_config`, `tls_server_config`)
+//! are only available with the `quic` feature flag.
+//!
 //! Features:
 //! - Connection pooling with health checks
 //! - Automatic reconnection
 //! - Multiplexing over single connection
-//! - TLS support (optional, via `rustls`)
+//! - TLS/encryption via QUIC transport (requires `quic` feature)
 //! - TCP keepalive (§2.6 fix — prevents silent half-open connections)
 
 use crate::error::{ClusterError, Result};
@@ -50,6 +57,9 @@ pub struct TransportConfig {
     pub keepalive_time: Duration,
     /// TCP keepalive probe interval
     pub keepalive_interval: Duration,
+    /// Idle connection timeout — pooled connections unused longer than this
+    /// are discarded on next `get()`. Default 60 s.
+    pub idle_connection_timeout: Duration,
     /// TLS configuration for inter-node encryption (§1.2)
     ///
     /// When set, all cluster connections use TLS. Both sides must present valid
@@ -73,6 +83,7 @@ impl Default for TransportConfig {
             send_buffer_size: 256 * 1024,
             keepalive_time: Duration::from_secs(60),
             keepalive_interval: Duration::from_secs(10),
+            idle_connection_timeout: Duration::from_secs(60),
             #[cfg(feature = "quic")]
             tls_config: None,
             #[cfg(feature = "quic")]
@@ -405,7 +416,12 @@ impl Transport {
     async fn return_connection(&self, node_id: &NodeId, stream: TcpStream) {
         self.connections
             .entry(node_id.clone())
-            .or_insert_with(|| ConnectionPool::new(self.config.max_connections_per_peer))
+            .or_insert_with(|| {
+                ConnectionPool::new(
+                    self.config.max_connections_per_peer,
+                    self.config.idle_connection_timeout,
+                )
+            })
             .put(stream)
             .await;
     }
@@ -428,28 +444,38 @@ impl Transport {
     }
 }
 
-/// Simple connection pool
+/// Connection pool with idle timeout and connection age tracking.
 struct ConnectionPool {
-    connections: Mutex<Vec<TcpStream>>,
+    connections: Mutex<Vec<(TcpStream, std::time::Instant)>>,
     max_size: usize,
+    /// Connections idle longer than this are discarded on `get()`.
+    idle_timeout: std::time::Duration,
 }
 
 impl ConnectionPool {
-    fn new(max_size: usize) -> Self {
+    fn new(max_size: usize, idle_timeout: std::time::Duration) -> Self {
         Self {
             connections: Mutex::new(Vec::with_capacity(max_size)),
             max_size,
+            idle_timeout,
         }
     }
 
     async fn get(&self) -> Option<TcpStream> {
-        self.connections.lock().await.pop()
+        let mut conns = self.connections.lock().await;
+        while let Some((stream, returned_at)) = conns.pop() {
+            if returned_at.elapsed() < self.idle_timeout {
+                return Some(stream);
+            }
+            // Connection is stale — drop it and try the next one
+        }
+        None
     }
 
     async fn put(&self, stream: TcpStream) {
         let mut conns = self.connections.lock().await;
         if conns.len() < self.max_size {
-            conns.push(stream);
+            conns.push((stream, std::time::Instant::now()));
         }
         // Drop stream if pool is full
     }

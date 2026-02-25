@@ -8,8 +8,8 @@ pub enum Error {
     #[error("Configuration error: {0}")]
     ConfigError(String),
 
-    #[error("IO error: {0}")]
-    IoError(String),
+    #[error("IO error ({0:?}): {1}")]
+    IoError(std::io::ErrorKind, String),
 
     #[error("Serialization error: {0}")]
     SerializationError(#[from] postcard::Error),
@@ -53,7 +53,7 @@ pub enum Error {
 
 impl From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
-        Error::IoError(err.to_string())
+        Error::IoError(err.kind(), err.to_string())
     }
 }
 
@@ -121,8 +121,13 @@ mod tests {
     fn test_io_error_from() {
         let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file not found");
         let err: Error = io_err.into();
-        assert!(matches!(err, Error::IoError(_)));
-        assert!(err.to_string().contains("file not found"));
+        match &err {
+            Error::IoError(kind, msg) => {
+                assert_eq!(*kind, std::io::ErrorKind::NotFound);
+                assert!(msg.contains("file not found"));
+            }
+            _ => panic!("Expected IoError"),
+        }
     }
 
     #[test]

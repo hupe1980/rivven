@@ -71,7 +71,7 @@ Rivven follows a **schema-agnostic broker** architecture where the broker handle
 │                   rivven-schema (Schema Registry)                │
 │  ├── Types: SchemaId, SchemaType, Subject, SchemaVersion        │
 │  ├── Compatibility: CompatibilityLevel, CompatibilityChecker    │
-│  ├── Fingerprinting: MD5, SHA-256 for deduplication             │
+│  ├── Fingerprinting: SHA-256 (primary), MD5 for deduplication   │
 │  ├── Storage: MemoryStorage                                     │
 │  └── Server: Industry-standard REST API                        │
 ├─────────────────────────────────────────────────────────────────┤
@@ -101,7 +101,7 @@ The schema registry provides:
 - **Schema Evolution** — Track schema versions with compatibility checking
 - **Multiple Formats** — Native support for JSON Schema, Avro, and Protobuf
 - **Industry-Standard API** — Wire format and REST API compatibility
-- **Schema Fingerprinting** — MD5 and SHA-256 fingerprints for caching and deduplication
+- **Schema Fingerprinting** — SHA-256 (primary) and MD5 fingerprints for caching and deduplication
 
 ## Standalone Registry (rivven-schema)
 
@@ -642,13 +642,13 @@ Schema fingerprints are useful for caching and identifying schema versions:
 ```rust
 let schema = AvroSchema::parse("...")?;
 
-// MD5 fingerprint (16 bytes)
-let md5 = schema.fingerprint_md5();
-println!("MD5: {:02x?}", md5);
-
-// SHA-256 fingerprint (32 bytes)
+// SHA-256 fingerprint (32 bytes) — used as primary for dedup lookup
 let sha256 = schema.fingerprint_sha256();
 println!("SHA-256: {:02x?}", sha256);
+
+// MD5 fingerprint (16 bytes) — available for Confluent compatibility
+let md5 = schema.fingerprint_md5();
+println!("MD5: {:02x?}", md5);
 ```
 
 ### Compatibility Checking
@@ -978,6 +978,23 @@ connectors:
 ---
 
 ## Advanced Features
+
+### Cache Configuration
+
+The schema registry maintains in-memory caches for fast schema lookups. Caches are bounded to prevent unbounded memory growth:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `max_cache_size` | 10,000 | Maximum number of schemas cached in memory |
+
+When the cache exceeds the configured limit, entries are evicted to make room for new schemas.
+
+```yaml
+schema_registry:
+  max_cache_size: 10000    # Maximum cached schemas (default: 10,000)
+```
+
+The validation regex cache is independently bounded to 1,000 compiled patterns.
 
 ### Schema Contexts (Multi-Tenancy)
 

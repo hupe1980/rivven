@@ -237,6 +237,7 @@ The Write-Ahead Log validates CRC32 checksums consistently across all scan paths
 - **`find_actual_end()`** (WAL open): Validates CRC to find the true end of valid data, preventing new writes from landing after corrupted records
 - **`timestamp_bounds()`** (segment scan): Skips CRC-invalid records to prevent corrupted timestamps from skewing min/max bounds
 - **`find_offset_for_timestamp()`** (consumer seek): Validates CRC per record during timestamp-based lookups
+- **`WalRecord::from_bytes()`** (deserialization): Rejects zero-length `Full`, `First`, and `Last` records as invalid, preventing phantom records from pre-allocated WAL tail space from entering the replay loop
 
 WAL file pre-allocation uses `tokio::task::spawn_blocking` to avoid creating unbounded OS threads during rapid rotation.
 
@@ -383,7 +384,7 @@ Accelerated batch operations (delegates to `crc32fast`/`memchr` for SIMD when av
 
 Every produce is WAL-first — the message is written to the Group Commit WAL before appending to the topic partition. This applies to all three publish handlers (`handle_publish`, `handle_idempotent_publish`, `handle_transactional_publish`). WAL failures are hard errors; the publish is rejected with `WAL_ERROR`, not silently dropped. WAL initialisation failure is also a hard error — the server refuses to start rather than risk silent data loss.
 
-Transaction commit and abort decisions are also WAL-protected: a `TxnCommit` or `TxnAbort` record is written to the WAL **before** individual partition markers, ensuring the transaction decision survives a crash during partial marker writes.
+Transaction commit and abort decisions are also WAL-protected: a `TxnCommit` or `TxnAbort` record is written to the WAL **before** individual partition markers, ensuring the transaction decision survives a crash during partial marker writes. On startup, WAL replay reconstructs these records by writing COMMIT/ABORT markers to the affected partition logs, ensuring `read_committed` consumers see consistent state after recovery.
 
 Write batching for 10-100x throughput improvement with batched fsync:
 
@@ -392,7 +393,7 @@ Write batching for 10-100x throughput improvement with batched fsync:
 - **Pending Writes**: Flush after N writes (default: 1000)
 - **Zero-alloc serialization**: `WalRecord::write_to_buf()` serializes header + CRC + data directly into the shared batch buffer — no per-record `BytesMut` intermediate allocation. `TopicManager::build_wal_record()` encodes the full `Message` via postcard, preserving key, headers, and producer metadata.
 - **Buffer shrink**: After burst traffic, batch buffer re-allocates to default capacity when oversized (>2x max)
-- **CRC-validated recovery**: Both `find_actual_end()` and `scan_wal_file()` validate CRC32 for every record. Replay uses `Message::from_bytes()` to restore full message fidelity (falls back to `Message::new()` for legacy records).
+- **CRC-validated recovery**: Both `find_actual_end()` and `scan_wal_file()` validate CRC32 for every record. Replay uses `Message::from_bytes()` to restore full message fidelity (falls back to `Message::new()` for legacy records). Replayed messages are written via `append_replicated` to preserve original offsets rather than allocating new ones. `WalRecord::from_bytes()` additionally rejects zero-length `Full`/`First`/`Last` records as invalid, preventing phantom records from pre-allocated WAL tail space.
 - **Lifecycle management**: Both `ClusterServer` and `SecureServer` replay WAL records at startup (after topic recovery), instantiate the WAL, wire it to `RequestHandler` via `set_wal()`, and shut it down before topic flush during graceful shutdown to ensure all pending batches are persisted
 - **Error resilience**: `write_to_buf()` returns `io::Result` rather than panicking on oversized data, propagating errors to individual request completion channels without crashing the background group-commit worker
 
@@ -437,6 +438,7 @@ The Rivven client supports **HTTP/2-style request pipelining**:
 - Multiple in-flight requests over single TCP connection
 - Automatic batching with configurable flush intervals
 - Backpressure via semaphores to prevent memory exhaustion
+- **Connection safety:** `bytes_sent` tracking poisons the client on partial I/O failures, preventing TCP stream desync from stale responses. Serialization, deserialization, and `ResponseTooLarge` errors after bytes are on the wire also poison the stream. Non-pipelined `send_request_inner` poisons on every I/O operation (write, flush, read). Timeout cancellation mid-I/O also poisons the stream. Poisoned clients fail fast — no sequential fallback is attempted. `ProtocolError` and `ResponseTooLarge` trigger automatic consumer reconnect.
 
 ```rust
 use rivven_client::{PipelinedClient, PipelineConfig};

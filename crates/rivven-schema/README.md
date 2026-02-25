@@ -15,6 +15,7 @@
 | **Storage** | In-memory, broker-backed, AWS Glue |
 | **API** | Industry-standard REST API |
 | **Auth** | Basic, Bearer, JWT/OIDC, API Keys |
+| **Cache** | Bounded in-memory cache (configurable max 10K entries, auto-eviction) |
 | **K8s** | Health checks (`/health`, `/health/live`, `/health/ready`) |
 
 > **Note**: The Schema Registry stores, versions, and validates schemas. It does **not**

@@ -380,16 +380,37 @@ pub enum StartOffset {
     Timestamp(String),
 }
 
+/// Known generic transform types for source/sink pipelines.
+const KNOWN_TRANSFORM_TYPES: &[&str] = &["rename_field", "remove_field", "add_field", "filter"];
+
 /// A single transform step in a pipeline
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TransformStepConfig {
-    /// Transform type (e.g., "rename_field", "filter", "add_field", "remove_field")
+    /// Transform type: `rename_field`, `remove_field`, `add_field`, or `filter`.
     #[serde(rename = "type")]
     pub transform_type: String,
 
     /// Transform-specific configuration
     #[serde(default)]
     pub config: serde_yaml::Value,
+}
+
+impl TransformStepConfig {
+    /// Validate that the transform type is known.
+    ///
+    /// Returns an error listing accepted types when the configured type is not
+    /// recognised, enabling fail-fast at connector startup rather than silent
+    /// skipping at runtime.
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if !KNOWN_TRANSFORM_TYPES.contains(&self.transform_type.as_str()) {
+            return Err(format!(
+                "unknown transform type '{}'; supported types: {}",
+                self.transform_type,
+                KNOWN_TRANSFORM_TYPES.join(", "),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Global settings

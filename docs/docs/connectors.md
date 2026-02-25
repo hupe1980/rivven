@@ -2138,7 +2138,7 @@ sinks:
 
 ## Transforms
 
-Apply transformations between source and sink.
+Apply transformations between source and sink. Transforms are validated at connector startup — invalid transform types or configurations cause immediate startup failure rather than silent runtime errors.
 
 ### Chain Multiple Transforms
 
@@ -2329,6 +2329,17 @@ Before a connector transitions to `Running` state, rivven-connect performs a hea
 ### Epoch Fencing
 
 During failover or rebalancing, sinks use epoch-based fencing to prevent stale connector instances from writing duplicate data. A new epoch is assigned on each restart, and writes from previous epochs are rejected by the coordinator.
+
+### Automatic Runner Restart
+
+Source and sink runner tasks automatically restart on failure with exponential backoff. If a connector crashes or encounters a fatal error, the framework restarts it without manual intervention:
+
+- **Initial delay:** 1 second
+- **Maximum delay:** 60 seconds
+- **Backoff multiplier:** 2×
+- **Shutdown-aware:** Restart loops respect shutdown signals — no restarts during graceful shutdown
+
+The connector transitions to `Failed` state only if shutdown is explicitly requested or recovery is impossible. Health state is updated on each restart attempt for monitoring visibility.
 
 ---
 

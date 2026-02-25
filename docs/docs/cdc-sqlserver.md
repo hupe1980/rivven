@@ -28,6 +28,12 @@ SQL Server CDC uses a **poll-based** approach, unlike PostgreSQL and MySQL which
 | Connection | Persistent replication | Query-based polling |
 | Real-time | Sub-second | Configurable polling interval |
 | Complexity | Protocol parsing | SQL queries |
+
+### Checkpoint Strategy
+
+SQL Server CDC defers LSN checkpoint commits to the **next poll cycle** rather than checkpointing immediately after processing events. This ensures events are fully delivered to downstream consumers before the position is advanced, providing **at-least-once delivery semantics** — on crash, at most one batch of events may be re-sent, but events are never lost.
+
+An **initial checkpoint** is written with the starting position before the first poll, preventing data loss if a crash occurs during the first poll cycle. All checkpoint writes use an atomic write→`fsync`→rename pattern for crash durability — without `fsync`, the kernel could reorder operations on power loss, leaving a valid filename pointing at an empty file.
 | Dependencies | None | SQL Server Agent |
 
 ## Prerequisites

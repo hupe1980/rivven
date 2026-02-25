@@ -118,13 +118,13 @@ All transaction state transitions are persisted to a **CRC32-protected write-ahe
 
 **On WAL write failure**, in-memory state is never modified — the coordinator returns `TransactionResult::LogWriteError` to the caller, keeping WAL and in-memory state consistent. For multi-partition `AddPartition` writes, if any partition's WAL entry fails, none are added to in-memory state (all-or-nothing).
 
-**On startup**, `TransactionCoordinator::recover(path)` replays the WAL sequentially. Entries after the first CRC mismatch are truncated (Kafka-style). In-doubt transactions (state = `PrepareCommit` or `PrepareAbort`) are left for the operator to resolve, with a warning logged. Completed or aborted transactions are replayed into the `AbortedTransactionIndex` for correct `read_committed` filtering.
+**On startup**, `TransactionCoordinator::recover(path)` replays the WAL sequentially. Entries after the first CRC mismatch are truncated (Kafka-style). In-doubt transactions (state = `PrepareCommit` or `PrepareAbort`) are left for the operator to resolve, with a warning logged. Completed or aborted transactions are replayed into the `AbortedTransactionIndex` for correct `read_committed` filtering. The broker's group-commit WAL replay also handles `TxnCommit` and `TxnAbort` records: each record carries the list of affected partitions (serialised with postcard via `TxnWalPayload`), and the replay loop writes COMMIT/ABORT markers to those partition logs so that `read_committed` filtering is correct even after a crash during marker writes.
 
 ### Data Integrity Guarantees
 
 1. **Validate-before-write**: `TransactionalPublish` validates partition membership in the transaction BEFORE appending data to the partition log. This prevents orphaned records if the partition wasn't added via `AddPartitionsToTxn`.
 
-2. **Atomic COMMIT markers**: If any COMMIT marker write fails, compensating ABORT markers are written to all partitions that already received COMMIT markers, then the transaction is aborted. This prevents `read_committed` consumers from seeing partial commits.
+2. **Atomic COMMIT markers**: If any COMMIT marker write fails, a compensating `TxnAbort` WAL record is written (to prevent crash recovery from re-committing the aborted transaction), then compensating ABORT markers are written to all partitions that already received COMMIT markers, and the transaction is aborted. This prevents `read_committed` consumers from seeing partial commits and ensures crash recovery honours the abort decision.
 
 3. **ABORT marker failure returns error**: When any ABORT marker write fails, the broker returns an `ABORT_PARTIAL_FAILURE` error to the client instead of a success response. The error includes the affected partition list so clients know which partitions may expose uncommitted data under `read_committed` isolation.
 

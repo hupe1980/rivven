@@ -77,7 +77,7 @@ impl SinkRunner {
         config: SinkConfig,
         broker: SharedBrokerClient,
         sink_registry: Arc<SinkRegistry>,
-    ) -> Self {
+    ) -> Result<Self> {
         // Create rate limiter from config
         let rate_limiter_config = config.rate_limit.to_rate_limiter_config();
         let rate_limiter = TokenBucketRateLimiter::new(rate_limiter_config);
@@ -91,7 +91,14 @@ impl SinkRunner {
 
         let transforms = config.transforms.clone();
 
-        Self {
+        // Fail-fast: validate transform types at startup
+        for step in &transforms {
+            step.validate().map_err(|e| {
+                ConnectError::config(format!("Sink '{}': invalid transform: {}", name, e,))
+            })?;
+        }
+
+        Ok(Self {
             name,
             config,
             broker,
@@ -103,7 +110,7 @@ impl SinkRunner {
             rate_limiter,
             transforms,
             sink_registry,
-        }
+        })
     }
 
     /// Get events consumed count
@@ -681,16 +688,23 @@ impl SinkRunner {
 
                         if !resp.status().is_success() {
                             warn!(
-                                "HTTP sink '{}' received status {} from {}",
+                                "HTTP sink '{}' received non-success status {} from {}",
                                 self.name,
                                 resp.status(),
                                 url
                             );
+                            self.errors_count
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            // Do NOT advance the offset on non-success HTTP status.
+                            // Treat non-2xx as a retriable error to prevent silent data loss.
+                            continue;
                         }
 
-                        // Update offset
+                        // Update offset only after successful delivery
                         self.offsets.write().await.insert(key, last_offset + 1);
                         self.events_consumed
+                            .fetch_add(count as u64, std::sync::atomic::Ordering::Relaxed);
+                        self.events_written
                             .fetch_add(count as u64, std::sync::atomic::Ordering::Relaxed);
 
                         // Periodic offset commit
@@ -854,10 +868,14 @@ impl SinkRunner {
                                         ),
                                     ));
                                 }
+                                // Do NOT advance the offset on write failure.
+                                // The same records will be re-consumed on the next
+                                // iteration, providing at-least-once delivery.
+                                continue;
                             }
                         }
 
-                        // Update offset
+                        // Update offset only after successful write
                         let next_offset = max_offset + 1;
                         {
                             let mut offsets = self.offsets.write().await;
@@ -946,7 +964,7 @@ pub async fn run_sink(
         sink_config.clone(),
         broker.clone(),
         sink_registry,
-    );
+    )?;
 
     runner.run(shutdown_rx.resubscribe()).await
 }

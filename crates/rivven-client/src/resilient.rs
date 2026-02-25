@@ -71,11 +71,29 @@ pub struct ResilientClientConfig {
     pub health_check_enabled: bool,
     /// Maximum connection lifetime before recycling (default: 300s)
     pub max_connection_lifetime: Duration,
+    /// Idle timeout — connections unused longer than this are discarded (default: 60s)
+    pub idle_timeout: Duration,
     /// Optional authentication credentials
     ///
     /// When set, every new connection created by the pool will automatically
     /// authenticate using SCRAM-SHA-256 before being returned to the caller.
     pub auth: Option<ResilientAuthConfig>,
+    /// Optional TLS configuration.
+    ///
+    /// When set, all connections use TLS encryption via `Client::connect_tls()`.
+    /// Both client and mTLS are supported via the `TlsConfig` type.
+    #[cfg(feature = "tls")]
+    pub tls: Option<ResilientTlsConfig>,
+}
+
+/// TLS configuration for resilient client
+#[cfg(feature = "tls")]
+#[derive(Debug, Clone)]
+pub struct ResilientTlsConfig {
+    /// TLS configuration (certificates, CA, etc.)
+    pub tls_config: rivven_core::tls::TlsConfig,
+    /// Server name for SNI verification
+    pub server_name: String,
 }
 
 /// Authentication configuration for resilient client
@@ -104,7 +122,10 @@ impl Default for ResilientClientConfig {
             health_check_interval: Duration::from_secs(30),
             health_check_enabled: true,
             max_connection_lifetime: Duration::from_secs(300),
+            idle_timeout: Duration::from_secs(60),
             auth: None,
+            #[cfg(feature = "tls")]
+            tls: None,
         }
     }
 }
@@ -209,6 +230,22 @@ impl ResilientClientConfigBuilder {
         self.config.auth = Some(ResilientAuthConfig {
             username: username.into(),
             password: password.into(),
+        });
+        self
+    }
+
+    /// Set TLS configuration for encrypted connections.
+    ///
+    /// When set, all connections created by the pool will use TLS.
+    #[cfg(feature = "tls")]
+    pub fn tls(
+        mut self,
+        tls_config: rivven_core::tls::TlsConfig,
+        server_name: impl Into<String>,
+    ) -> Self {
+        self.config.tls = Some(ResilientTlsConfig {
+            tls_config,
+            server_name: server_name.into(),
         });
         self
     }
@@ -367,17 +404,51 @@ impl ConnectionPool {
             let mut connections = self.connections.lock().await;
             while let Some(conn) = connections.pop() {
                 // Discard connections idle for too long (server may have closed them)
-                if conn.last_used.elapsed() < Duration::from_secs(60) {
-                    let mut conn = conn;
-                    conn.last_used = Instant::now();
-                    conn._permit = permit;
-                    return Ok(conn);
+                if conn.last_used.elapsed() >= self.config.idle_timeout {
+                    continue; // Drop stale connection, try next one in pool
                 }
-                // Drop stale connection, try next one in pool
+                // Discard connections that have exceeded their maximum lifetime
+                if conn.created_at.elapsed() >= self.config.max_connection_lifetime {
+                    continue;
+                }
+                let mut conn = conn;
+                conn.last_used = Instant::now();
+                conn._permit = permit;
+                return Ok(conn);
             }
         }
 
-        // Create new connection with timeout
+        // Create new connection with timeout (TLS or plaintext)
+        #[cfg(feature = "tls")]
+        let mut client = if let Some(ref tls) = self.config.tls {
+            timeout(
+                self.config.connection_timeout,
+                Client::connect_tls_with_timeout(
+                    &self.addr,
+                    &tls.tls_config,
+                    &tls.server_name,
+                    self.config.connection_timeout,
+                ),
+            )
+            .await
+            .map_err(|_| {
+                Error::ConnectionError(format!("TLS connection timeout to {}", self.addr))
+            })?
+            .map_err(|e| {
+                Error::ConnectionError(format!("Failed TLS connect to {}: {}", self.addr, e))
+            })?
+        } else {
+            timeout(self.config.connection_timeout, Client::connect(&self.addr))
+                .await
+                .map_err(|_| {
+                    Error::ConnectionError(format!("Connection timeout to {}", self.addr))
+                })?
+                .map_err(|e| {
+                    Error::ConnectionError(format!("Failed to connect to {}: {}", self.addr, e))
+                })?
+        };
+
+        #[cfg(not(feature = "tls"))]
         let mut client = timeout(self.config.connection_timeout, Client::connect(&self.addr))
             .await
             .map_err(|_| Error::ConnectionError(format!("Connection timeout to {}", self.addr)))?
@@ -417,6 +488,54 @@ impl ConnectionPool {
                 connections.push(conn);
             }
         }
+    }
+
+    /// Get a connection for health checking, bypassing the circuit breaker.
+    ///
+    /// When the circuit breaker is open, normal `get()` calls are blocked,
+    /// which would prevent health checks from ever running to re-close the
+    /// breaker. This method allows health probes to bypass that check.
+    async fn get_for_health_check(&self) -> Result<PooledConnection> {
+        // Skip circuit breaker — the whole point is to probe a possibly-down server
+        let permit = self
+            .semaphore
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| Error::ConnectionError("Pool exhausted".to_string()))?;
+
+        // Try existing connection first
+        {
+            let mut connections = self.connections.lock().await;
+            while let Some(conn) = connections.pop() {
+                if conn.last_used.elapsed() < self.config.idle_timeout
+                    && conn.created_at.elapsed() < self.config.max_connection_lifetime
+                {
+                    let mut conn = conn;
+                    conn.last_used = Instant::now();
+                    conn._permit = permit;
+                    return Ok(conn);
+                }
+            }
+        }
+
+        // Create new connection for health check
+        let mut client = timeout(self.config.connection_timeout, Client::connect(&self.addr))
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map_err(|e| Error::ConnectionError(e.to_string()))?;
+
+        // Authenticate if needed
+        if let Some(ref auth) = self.config.auth {
+            client.authenticate(&auth.username, &auth.password).await?;
+        }
+
+        Ok(PooledConnection {
+            client,
+            created_at: Instant::now(),
+            last_used: Instant::now(),
+            _permit: permit,
+        })
     }
 
     async fn record_success(&self) {
@@ -491,7 +610,10 @@ impl ResilientClient {
                 loop {
                     sleep(interval).await;
                     for (addr, pool) in &pools_clone {
-                        if let Ok(mut conn) = pool.get().await {
+                        // Use get_for_health_check() which bypasses the circuit
+                        // breaker — otherwise, when the circuit is open, health
+                        // checks are blocked and the breaker never recovers.
+                        if let Ok(mut conn) = pool.get_for_health_check().await {
                             match conn.client.ping().await {
                                 Ok(()) => {
                                     pool.record_success().await;
@@ -937,7 +1059,7 @@ pub struct ServerStats {
 fn is_retryable_error(error: &Error) -> bool {
     match error {
         Error::AuthenticationFailed(_) => false,
-        Error::ConnectionError(_) | Error::IoError(_) | Error::CircuitBreakerOpen(_) => true,
+        Error::ConnectionError(_) | Error::IoError(_, _) | Error::CircuitBreakerOpen(_) => true,
         _ => false,
     }
 }
@@ -1010,7 +1132,10 @@ mod tests {
     #[test]
     fn test_is_retryable_error() {
         assert!(is_retryable_error(&Error::ConnectionError("test".into())));
-        assert!(is_retryable_error(&Error::IoError("test".into())));
+        assert!(is_retryable_error(&Error::IoError(
+            std::io::ErrorKind::ConnectionReset,
+            "test".into()
+        )));
         assert!(is_retryable_error(&Error::CircuitBreakerOpen(
             "test".into()
         )));

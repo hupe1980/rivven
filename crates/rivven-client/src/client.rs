@@ -8,9 +8,6 @@ use tokio::net::TcpStream;
 use tracing::{debug, info};
 
 #[cfg(feature = "tls")]
-use std::net::SocketAddr;
-
-#[cfg(feature = "tls")]
 use rivven_core::tls::{TlsClientStream, TlsConfig, TlsConnector};
 
 // Default maximum response size (100 MB) - prevents malicious server from exhausting client memory
@@ -104,6 +101,10 @@ pub struct Client {
     next_correlation_id: u32,
     /// Per-request timeout for send_request() I/O.
     request_timeout: Duration,
+    /// Set to true when the stream is desynchronized (e.g. correlation ID
+    /// mismatch). All subsequent requests immediately return an error,
+    /// forcing the caller to reconnect.
+    poisoned: bool,
 }
 
 impl Client {
@@ -134,6 +135,7 @@ impl Client {
             stream: ClientStream::Plaintext(stream),
             next_correlation_id: 0,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            poisoned: false,
         };
 
         // auto-handshake on connect
@@ -163,23 +165,24 @@ impl Client {
     ) -> Result<Self> {
         info!("Connecting to Rivven server at {} with TLS", addr);
 
-        // Parse address
-        let socket_addr: SocketAddr = addr
-            .parse()
-            .map_err(|e| Error::ConnectionError(format!("Invalid address: {}", e)))?;
+        // Resolve address — supports both IP:port and DNS hostname:port,
+        // unlike the old SocketAddr::parse() which rejected DNS names.
+        let tcp_stream = tokio::time::timeout(timeout, TcpStream::connect(addr))
+            .await
+            .map_err(|_| {
+                Error::TimeoutWithMessage(format!("TLS connection to {} timed out", addr))
+            })?
+            .map_err(|e| Error::ConnectionError(format!("TCP connection error: {}", e)))?;
 
         // Create TLS connector
         let connector = TlsConnector::new(tls_config)
             .map_err(|e| Error::ConnectionError(format!("TLS config error: {}", e)))?;
 
-        // Connect with TLS (with timeout)
-        let tls_stream =
-            tokio::time::timeout(timeout, connector.connect_tcp(socket_addr, server_name))
-                .await
-                .map_err(|_| {
-                    Error::TimeoutWithMessage(format!("TLS connection to {} timed out", addr))
-                })?
-                .map_err(|e| Error::ConnectionError(format!("TLS connection error: {}", e)))?;
+        // Wrap the TCP stream in TLS
+        let tls_stream = connector
+            .connect(tcp_stream, server_name)
+            .await
+            .map_err(|e| Error::ConnectionError(format!("TLS handshake error: {}", e)))?;
 
         info!("TLS connection established to {} ({})", addr, server_name);
 
@@ -187,6 +190,7 @@ impl Client {
             stream: ClientStream::Tls(tls_stream),
             next_correlation_id: 0,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            poisoned: false,
         };
 
         // auto-handshake on TLS connect
@@ -486,13 +490,27 @@ impl Client {
     /// return `Error::Timeout` instead of blocking the caller forever.
     pub(crate) async fn send_request(&mut self, request: Request) -> Result<Response> {
         let timeout_dur = self.request_timeout;
-        tokio::time::timeout(timeout_dur, self.send_request_inner(request))
-            .await
-            .map_err(|_| Error::Timeout)?
+        match tokio::time::timeout(timeout_dur, self.send_request_inner(request)).await {
+            Ok(result) => result,
+            Err(_elapsed) => {
+                // Timeout may have cancelled mid-I/O — stream is potentially
+                // desynchronized. Poison so the next call reconnects.
+                self.poisoned = true;
+                Err(Error::Timeout)
+            }
+        }
     }
 
     /// Inner implementation of send_request without timeout wrapper.
     async fn send_request_inner(&mut self, request: Request) -> Result<Response> {
+        // Fail immediately if the stream is desynchronized. The caller must
+        // reconnect to get a new, clean Client instance.
+        if self.poisoned {
+            return Err(Error::ConnectionError(
+                "Client stream is desynchronized — reconnect required".into(),
+            ));
+        }
+
         // Generate sequential correlation ID
         let correlation_id = self.next_correlation_id;
         self.next_correlation_id = self.next_correlation_id.wrapping_add(1);
@@ -511,36 +529,66 @@ impl Client {
             ));
         }
 
-        // Write length prefix + request
+        // Write length prefix + request.
+        // After the first write_all succeeds, bytes may be on the wire.
+        // Any subsequent I/O failure desynchronizes the TCP stream, so we
+        // must poison the client to prevent silent corruption.
         let len: u32 = request_bytes
             .len()
             .try_into()
             .map_err(|_| Error::RequestTooLarge(request_bytes.len(), u32::MAX as usize))?;
-        self.stream.write_all(&len.to_be_bytes()).await?;
-        self.stream.write_all(&request_bytes).await?;
-        self.stream.flush().await?;
+        self.stream
+            .write_all(&len.to_be_bytes())
+            .await
+            .map_err(|e| {
+                self.poisoned = true;
+                Error::from(e)
+            })?;
+        self.stream.write_all(&request_bytes).await.map_err(|e| {
+            self.poisoned = true;
+            Error::from(e)
+        })?;
+        self.stream.flush().await.map_err(|e| {
+            self.poisoned = true;
+            Error::from(e)
+        })?;
 
-        // Read length prefix
+        // Read length prefix — request was sent, so read failure desynchronizes
         let mut len_buf = [0u8; 4];
-        self.stream.read_exact(&mut len_buf).await?;
+        self.stream.read_exact(&mut len_buf).await.map_err(|e| {
+            self.poisoned = true;
+            Error::from(e)
+        })?;
         let msg_len = u32::from_be_bytes(len_buf) as usize;
 
         // Validate response size to prevent memory exhaustion from malicious server
         if msg_len > DEFAULT_MAX_RESPONSE_SIZE {
+            self.poisoned = true;
             return Err(Error::ResponseTooLarge(msg_len, DEFAULT_MAX_RESPONSE_SIZE));
         }
 
-        // Read response
+        // Read response — partial read desynchronizes
         let mut response_buf = vec![0u8; msg_len];
-        self.stream.read_exact(&mut response_buf).await?;
+        self.stream
+            .read_exact(&mut response_buf)
+            .await
+            .map_err(|e| {
+                self.poisoned = true;
+                Error::from(e)
+            })?;
 
-        // Deserialize response (auto-detects wire format)
+        // Deserialize response (auto-detects wire format).
+        // The full response was consumed from the wire, so framing is intact
+        // regardless of deserialization outcome — no need to poison here.
         let (response, _format, response_correlation_id) = Response::from_wire(&response_buf)?;
 
         // Validate that the response correlation ID matches the
         // request we sent. A mismatch indicates stream desynchronization
         // (e.g. partial reads) or a buggy server.
         if response_correlation_id != correlation_id {
+            // Mark the client as poisoned — the stream is no longer usable
+            // because subsequent reads would parse at wrong byte boundaries.
+            self.poisoned = true;
             return Err(Error::ProtocolError(
                 rivven_protocol::ProtocolError::InvalidFormat(format!(
                     "Correlation ID mismatch: expected {}, got {}",
@@ -550,6 +598,153 @@ impl Client {
         }
 
         Ok(response)
+    }
+
+    /// Consume from multiple partitions using request pipelining.
+    ///
+    /// Sends all `Consume` requests back-to-back on the wire *before*
+    /// reading any response. This eliminates per-partition round-trip
+    /// latency and avoids head-of-line blocking when fetching from many
+    /// partitions over a single connection.
+    ///
+    /// The returned `Vec` has one entry per input partition in the same
+    /// order. Each entry is `Ok(messages)` or `Err(Error)`.
+    pub async fn consume_pipelined(
+        &mut self,
+        fetches: &[(&str, u32, u64, usize, Option<u8>)],
+    ) -> Result<Vec<Result<Vec<MessageData>>>> {
+        if fetches.is_empty() {
+            return Ok(Vec::new());
+        }
+        if self.poisoned {
+            return Err(Error::ConnectionError(
+                "Client stream is desynchronized — reconnect required".into(),
+            ));
+        }
+
+        let timeout_dur = self.request_timeout;
+        match tokio::time::timeout(timeout_dur, self.consume_pipelined_inner(fetches)).await {
+            Ok(result) => result,
+            Err(_elapsed) => {
+                self.poisoned = true;
+                Err(Error::Timeout)
+            }
+        }
+    }
+
+    async fn consume_pipelined_inner(
+        &mut self,
+        fetches: &[(&str, u32, u64, usize, Option<u8>)],
+    ) -> Result<Vec<Result<Vec<MessageData>>>> {
+        let mut correlation_ids = Vec::with_capacity(fetches.len());
+        let mut bytes_sent = false;
+
+        // Phase 1: Send all requests without waiting for responses.
+        for &(topic, partition, offset, max_messages, isolation_level) in fetches {
+            let correlation_id = self.next_correlation_id;
+            self.next_correlation_id = self.next_correlation_id.wrapping_add(1);
+            correlation_ids.push(correlation_id);
+
+            let request = Request::Consume {
+                topic: topic.to_string(),
+                partition,
+                offset,
+                max_messages,
+                isolation_level,
+                max_wait_ms: None,
+            };
+
+            let request_bytes = request
+                .to_wire(rivven_protocol::WireFormat::Postcard, correlation_id)
+                .inspect_err(|_| {
+                    if bytes_sent {
+                        self.poisoned = true;
+                    }
+                })?;
+
+            if request_bytes.len() > DEFAULT_MAX_REQUEST_SIZE {
+                if bytes_sent {
+                    self.poisoned = true;
+                }
+                return Err(Error::RequestTooLarge(
+                    request_bytes.len(),
+                    DEFAULT_MAX_REQUEST_SIZE,
+                ));
+            }
+
+            let len: u32 = request_bytes.len().try_into().map_err(|_| {
+                if bytes_sent {
+                    self.poisoned = true;
+                }
+                Error::RequestTooLarge(request_bytes.len(), u32::MAX as usize)
+            })?;
+            self.stream
+                .write_all(&len.to_be_bytes())
+                .await
+                .map_err(|e| {
+                    if bytes_sent {
+                        self.poisoned = true;
+                    }
+                    Error::from(e)
+                })?;
+            self.stream.write_all(&request_bytes).await.map_err(|e| {
+                self.poisoned = true; // At least length prefix was sent
+                Error::from(e)
+            })?;
+            bytes_sent = true;
+        }
+        self.stream.flush().await.map_err(|e| {
+            self.poisoned = true;
+            Error::from(e)
+        })?;
+
+        // Phase 2: Read all responses in-order.
+        let mut results = Vec::with_capacity(fetches.len());
+        for &expected_cid in &correlation_ids {
+            let mut len_buf = [0u8; 4];
+            self.stream.read_exact(&mut len_buf).await.map_err(|e| {
+                self.poisoned = true;
+                Error::from(e)
+            })?;
+            let msg_len = u32::from_be_bytes(len_buf) as usize;
+
+            if msg_len > DEFAULT_MAX_RESPONSE_SIZE {
+                self.poisoned = true;
+                return Err(Error::ResponseTooLarge(msg_len, DEFAULT_MAX_RESPONSE_SIZE));
+            }
+
+            let mut response_buf = vec![0u8; msg_len];
+            self.stream
+                .read_exact(&mut response_buf)
+                .await
+                .map_err(|e| {
+                    self.poisoned = true;
+                    Error::from(e)
+                })?;
+            let (response, _format, response_cid) = Response::from_wire(&response_buf)
+                .inspect_err(|_| {
+                    self.poisoned = true;
+                })?;
+
+            if response_cid != expected_cid {
+                self.poisoned = true;
+                return Err(Error::ProtocolError(
+                    rivven_protocol::ProtocolError::InvalidFormat(format!(
+                        "Correlation ID mismatch: expected {}, got {}",
+                        expected_cid, response_cid
+                    )),
+                ));
+            }
+
+            let result = match response {
+                Response::Messages { messages } => Ok(messages),
+                Response::Error { message } => Err(Error::ServerError(message)),
+                _ => Err(Error::InvalidResponse),
+            };
+            results.push(result);
+        }
+
+        Ok(results)
     }
 
     /// Publish a message to a topic
@@ -789,6 +984,158 @@ impl Client {
             Response::Error { message } => Err(Error::ServerError(message)),
             _ => Err(Error::InvalidResponse),
         }
+    }
+
+    /// Commit offsets for multiple partitions using request pipelining.
+    ///
+    /// Sends all `CommitOffset` requests at once, then reads all responses.
+    /// Returns per-partition results in the same order as `offsets`.
+    pub async fn commit_offsets_pipelined(
+        &mut self,
+        consumer_group: &str,
+        offsets: &[(String, u32, u64)],
+    ) -> Result<Vec<Result<()>>> {
+        if offsets.is_empty() {
+            return Ok(Vec::new());
+        }
+        if self.poisoned {
+            return Err(Error::ConnectionError(
+                "Client stream is desynchronized — reconnect required".into(),
+            ));
+        }
+
+        let timeout_dur = self.request_timeout;
+        match tokio::time::timeout(
+            timeout_dur,
+            self.commit_offsets_pipelined_inner(consumer_group, offsets),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_elapsed) => {
+                self.poisoned = true;
+                Err(Error::Timeout)
+            }
+        }
+    }
+
+    async fn commit_offsets_pipelined_inner(
+        &mut self,
+        consumer_group: &str,
+        offsets: &[(String, u32, u64)],
+    ) -> Result<Vec<Result<()>>> {
+        let mut correlation_ids = Vec::with_capacity(offsets.len());
+        let mut bytes_sent = false;
+
+        // Phase 1: Send all commit requests.
+        for (topic, partition, offset) in offsets {
+            let correlation_id = self.next_correlation_id;
+            self.next_correlation_id = self.next_correlation_id.wrapping_add(1);
+            correlation_ids.push(correlation_id);
+
+            let request = Request::CommitOffset {
+                consumer_group: consumer_group.to_string(),
+                topic: topic.clone(),
+                partition: *partition,
+                offset: *offset,
+            };
+
+            let request_bytes = request
+                .to_wire(rivven_protocol::WireFormat::Postcard, correlation_id)
+                .inspect_err(|_| {
+                    if bytes_sent {
+                        self.poisoned = true;
+                    }
+                })?;
+
+            if request_bytes.len() > DEFAULT_MAX_REQUEST_SIZE {
+                if bytes_sent {
+                    self.poisoned = true;
+                }
+                return Err(Error::RequestTooLarge(
+                    request_bytes.len(),
+                    DEFAULT_MAX_REQUEST_SIZE,
+                ));
+            }
+
+            let len: u32 = request_bytes.len().try_into().map_err(|_| {
+                if bytes_sent {
+                    self.poisoned = true;
+                }
+                Error::RequestTooLarge(request_bytes.len(), u32::MAX as usize)
+            })?;
+            self.stream
+                .write_all(&len.to_be_bytes())
+                .await
+                .map_err(|e| {
+                    if bytes_sent {
+                        self.poisoned = true;
+                    }
+                    Error::from(e)
+                })?;
+            self.stream.write_all(&request_bytes).await.map_err(|e| {
+                self.poisoned = true;
+                Error::from(e)
+            })?;
+            bytes_sent = true;
+        }
+        self.stream.flush().await.map_err(|e| {
+            self.poisoned = true;
+            Error::from(e)
+        })?;
+
+        // Phase 2: Read all responses in-order.
+        let mut results = Vec::with_capacity(offsets.len());
+        for &expected_cid in &correlation_ids {
+            let mut len_buf = [0u8; 4];
+            self.stream.read_exact(&mut len_buf).await.map_err(|e| {
+                self.poisoned = true;
+                Error::from(e)
+            })?;
+            let msg_len = u32::from_be_bytes(len_buf) as usize;
+
+            if msg_len > DEFAULT_MAX_RESPONSE_SIZE {
+                self.poisoned = true;
+                return Err(Error::ResponseTooLarge(msg_len, DEFAULT_MAX_RESPONSE_SIZE));
+            }
+
+            let mut response_buf = vec![0u8; msg_len];
+            self.stream
+                .read_exact(&mut response_buf)
+                .await
+                .map_err(|e| {
+                    self.poisoned = true;
+                    Error::from(e)
+                })?;
+            let (response, _format, response_cid) = Response::from_wire(&response_buf)
+                .inspect_err(|_| {
+                    self.poisoned = true;
+                })?;
+
+            if response_cid != expected_cid {
+                self.poisoned = true;
+                return Err(Error::ProtocolError(
+                    rivven_protocol::ProtocolError::InvalidFormat(format!(
+                        "Correlation ID mismatch: expected {}, got {}",
+                        expected_cid, response_cid
+                    )),
+                ));
+            }
+
+            let result = match response {
+                Response::OffsetCommitted => Ok(()),
+                Response::Error { message } => Err(Error::ServerError(message)),
+                _ => Err(Error::InvalidResponse),
+            };
+            results.push(result);
+        }
+
+        Ok(results)
+    }
+
+    /// Returns `true` if the client stream is desynchronized and unusable.
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
     }
 
     /// Get consumer offset

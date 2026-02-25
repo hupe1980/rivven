@@ -469,12 +469,50 @@ impl RequestHandler {
         // WAL-write the commit decision BEFORE writing partition markers.
         // On crash-recovery, this TxnCommit record tells the recovery logic
         // that the commit decision was durable even if individual partition
-        // markers were only partially written.
+        // markers were only partially written.  The payload includes the
+        // list of affected partitions so WAL replay can re-write COMMIT
+        // markers without consulting the TransactionLog.
         if let Some(ref wal) = self.wal {
-            let commit_record = format!("txn_commit:{}:{}:{}", txn_id, producer_id, producer_epoch);
+            let payload = rivven_core::TxnWalPayload {
+                txn_id: txn_id.clone(),
+                producer_id,
+                producer_epoch,
+                partitions: txn
+                    .partitions
+                    .iter()
+                    .map(|tp| (tp.topic.clone(), tp.partition))
+                    .collect(),
+            };
+            let commit_bytes = match postcard::to_allocvec(&payload) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    error!(
+                        "Failed to serialise TxnCommit payload for txn {}: {}",
+                        txn_id, e
+                    );
+                    match self
+                        .transaction_coordinator
+                        .complete_abort(&txn_id, producer_id)
+                    {
+                        TransactionResult::Ok => {}
+                        other => {
+                            error!(
+                                "Failed to abort txn '{}' after serialisation failure: {:?}",
+                                txn_id, other
+                            );
+                        }
+                    }
+                    return Response::Error {
+                        message: format!(
+                            "INTERNAL_ERROR: failed to serialise commit payload for txn '{}': {}",
+                            txn_id, e
+                        ),
+                    };
+                }
+            };
             if let Err(e) = wal
                 .write_with_type(
-                    bytes::Bytes::from(commit_record),
+                    bytes::Bytes::from(commit_bytes),
                     rivven_core::RecordType::TxnCommit,
                 )
                 .await
@@ -544,6 +582,50 @@ impl RequestHandler {
         }
 
         if marker_failed {
+            // WAL 2.6: Write a compensating TxnAbort WAL record BEFORE writing
+            // ABORT markers.  The original TxnCommit record is already durable,
+            // so without an explicit TxnAbort, crash-recovery would re-commit
+            // this transaction — reversing the abort decision.
+            if let Some(ref wal) = self.wal {
+                let abort_payload = rivven_core::TxnWalPayload {
+                    txn_id: txn_id.clone(),
+                    producer_id,
+                    producer_epoch,
+                    // Include ALL registered partitions: both those that
+                    // already got COMMIT markers (need ABORT to fix) and
+                    // those that didn't (need ABORT for completeness).
+                    partitions: txn
+                        .partitions
+                        .iter()
+                        .map(|tp| (tp.topic.clone(), tp.partition))
+                        .collect(),
+                };
+                match postcard::to_allocvec(&abort_payload) {
+                    Ok(abort_bytes) => {
+                        if let Err(e) = wal
+                            .write_with_type(
+                                bytes::Bytes::from(abort_bytes),
+                                rivven_core::RecordType::TxnAbort,
+                            )
+                            .await
+                        {
+                            error!(
+                                "WAL write failed for compensating TxnAbort of txn {}: {} — \
+                                 crash recovery may re-commit this aborted transaction",
+                                txn_id, e
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            "Failed to serialise compensating TxnAbort for txn {}: {} — \
+                             crash recovery may re-commit this aborted transaction",
+                            txn_id, e
+                        );
+                    }
+                }
+            }
+
             // Write ABORT markers to partitions that already received
             // COMMIT markers, so consumers with read_committed isolation don't
             // see partial commits.
@@ -663,21 +745,44 @@ impl RequestHandler {
         //
         // WAL-write the abort decision BEFORE writing partition markers.
         if let Some(ref wal) = self.wal {
-            let abort_record = format!("txn_abort:{}:{}:{}", txn_id, producer_id, producer_epoch);
-            if let Err(e) = wal
-                .write_with_type(
-                    bytes::Bytes::from(abort_record),
-                    rivven_core::RecordType::TxnAbort,
-                )
-                .await
-            {
-                warn!(
-                    "WAL write failed for TxnAbort record of txn {}: {} — proceeding with abort anyway",
-                    txn_id, e
-                );
-                // Abort must proceed even if WAL fails: not persisting the abort
-                // decision is acceptable because the data writes are uncommitted
-                // and will be filtered by read_committed consumers.
+            // Build the set of partitions that actually received writes BEFORE
+            // the WAL record, so we can include them in the payload for
+            // self-contained replay.
+            let written_partitions_for_wal: Vec<(String, u32)> = txn
+                .pending_writes
+                .iter()
+                .map(|w| (w.partition.topic.clone(), w.partition.partition))
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+
+            let payload = rivven_core::TxnWalPayload {
+                txn_id: txn_id.clone(),
+                producer_id,
+                producer_epoch,
+                partitions: written_partitions_for_wal,
+            };
+            match postcard::to_allocvec(&payload) {
+                Ok(abort_bytes) => {
+                    if let Err(e) = wal
+                        .write_with_type(
+                            bytes::Bytes::from(abort_bytes),
+                            rivven_core::RecordType::TxnAbort,
+                        )
+                        .await
+                    {
+                        warn!(
+                            "WAL write failed for TxnAbort record of txn {}: {} — proceeding with abort anyway",
+                            txn_id, e
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to serialise TxnAbort payload for txn {}: {} — proceeding with abort anyway",
+                        txn_id, e
+                    );
+                }
             }
         }
 

@@ -33,6 +33,8 @@ Rivven provides **native CDC support** for PostgreSQL, MySQL/MariaDB, and SQL Se
 | **Production Ready** | TLS/mTLS, SCRAM-SHA-256, circuit breakers, rate limiting |
 | **Full Observability** | Comprehensive Prometheus metrics |
 | **Health Monitoring** | Auto-recovery, liveness probes, lag monitoring |
+| **Task Lifecycle** | JoinHandle tracking for all CDC source tasks — panics propagated, graceful shutdown |
+| **I/O Timeouts** | All CDC protocol I/O wrapped in timeouts to prevent hung connections |
 | **Notifications** | Snapshot progress, streaming status, webhook alerts |
 | **Automatic Reconnection** | Exponential backoff with jitter for MySQL binlog reconnection |
 | **Proactive WAL Keepalives** | PostgreSQL sends periodic standby status updates to prevent slot timeout |

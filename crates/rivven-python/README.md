@@ -181,10 +181,11 @@ async def transactional():
     
     # Initialize transactional producer - returns a ProducerState object
     producer_state = await client.init_producer_id()
-    print(f"Producer ID: {await producer_state.producer_id}, Epoch: {await producer_state.producer_epoch}")
+    print(f"Producer ID: {producer_state.producer_id}, Epoch: {producer_state.producer_epoch}")
     
     try:
-        # Begin transaction
+        # Begin transaction (thread-safe: per-transactional-id lock prevents races;
+        # lock entries are cleaned up after commit/abort to prevent unbounded growth)
         await client.begin_transaction("my-txn-id", producer_state)
         
         # Add partitions to transaction

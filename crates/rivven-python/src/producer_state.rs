@@ -44,32 +44,35 @@ impl ProducerState {
 impl ProducerState {
     /// Get the producer ID assigned by the broker
     #[getter]
-    pub fn producer_id<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
-            Ok(guard.producer_id)
-        })
+    pub fn producer_id(&self) -> PyResult<u64> {
+        let guard = self.inner.try_lock().map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "ProducerState is currently locked by another operation",
+            )
+        })?;
+        Ok(guard.producer_id)
     }
 
     /// Get the current producer epoch
     #[getter]
-    pub fn producer_epoch<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
-            Ok(guard.producer_epoch)
-        })
+    pub fn producer_epoch(&self) -> PyResult<u16> {
+        let guard = self.inner.try_lock().map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "ProducerState is currently locked by another operation",
+            )
+        })?;
+        Ok(guard.producer_epoch)
     }
 
     /// Get the next sequence number
     #[getter]
-    pub fn next_sequence<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let inner = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let guard = inner.lock().await;
-            Ok(guard.next_sequence)
-        })
+    pub fn next_sequence(&self) -> PyResult<i32> {
+        let guard = self.inner.try_lock().map_err(|_| {
+            pyo3::exceptions::PyRuntimeError::new_err(
+                "ProducerState is currently locked by another operation",
+            )
+        })?;
+        Ok(guard.next_sequence)
     }
 
     fn __repr__(&self) -> String {

@@ -294,7 +294,7 @@ Main client class for interacting with Rivven.
 
 - `producer(topic)` - Get a producer for the topic
 - `consumer(topic, group_id=None, auto_commit=True, isolation_level=None)` - Get a consumer
-- Async iteration: `async for msg in consumer` — poll-retries transparently on empty fetch; auto-commit fires per batch (not per message)
+- Async iteration: `async for msg in consumer` — poll-retries with exponential backoff on empty fetch (100ms → 2s); auto-commit fires per batch (not per message)
 
 #### Consumer Groups
 

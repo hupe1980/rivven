@@ -1113,25 +1113,13 @@ async fn init_producer_id<W: AsyncWrite + Unpin, R: AsyncRead + Unpin>(
         .len()
         .try_into()
         .map_err(|_| Error::RequestTooLarge(request_bytes.len(), u32::MAX as usize))?;
-    writer
-        .write_all(&len.to_be_bytes())
-        .await
-        .map_err(|e| Error::IoError(e.to_string()))?;
-    writer
-        .write_all(&request_bytes)
-        .await
-        .map_err(|e| Error::IoError(e.to_string()))?;
-    writer
-        .flush()
-        .await
-        .map_err(|e| Error::IoError(e.to_string()))?;
+    writer.write_all(&len.to_be_bytes()).await?;
+    writer.write_all(&request_bytes).await?;
+    writer.flush().await?;
 
     // Read response
     let mut len_buf = [0u8; 4];
-    reader
-        .read_exact(&mut len_buf)
-        .await
-        .map_err(|e| Error::IoError(e.to_string()))?;
+    reader.read_exact(&mut len_buf).await?;
     let response_len = u32::from_be_bytes(len_buf) as usize;
 
     // validate response size to prevent OOM from malicious/buggy servers
@@ -1141,10 +1129,7 @@ async fn init_producer_id<W: AsyncWrite + Unpin, R: AsyncRead + Unpin>(
     }
 
     let mut response_buf = vec![0u8; response_len];
-    reader
-        .read_exact(&mut response_buf)
-        .await
-        .map_err(|e| Error::IoError(e.to_string()))?;
+    reader.read_exact(&mut response_buf).await?;
 
     let (response, _format, _correlation_id) =
         Response::from_wire(&response_buf).map_err(Error::ProtocolError)?;
@@ -1251,6 +1236,8 @@ async fn reconnect_producer_stream(
             "All bootstrap servers unreachable, retrying in {:?}",
             sleep_duration
         );
+
+        inner.stats.retries.fetch_add(1, Ordering::Relaxed);
 
         // Wait with shutdown awareness
         tokio::select! {
@@ -1441,9 +1428,32 @@ async fn sender_task(
         }) || (inner.config.linger_ms == 0 && !batches.is_empty());
 
         if should_flush {
-            // Flush all ready batches
-            for ((topic, partition), batch) in batches.drain() {
+            // Collect all batches to flush. We use a separate Vec so that
+            // if send_batch fails, we can notify remaining batches with errors
+            // instead of silently dropping them.
+            let flush_batches: Vec<_> = batches.drain().collect();
+            let mut failed = false;
+
+            for ((topic, partition), batch) in flush_batches {
                 if batch.is_empty() {
+                    continue;
+                }
+
+                if failed {
+                    // Connection broken — notify all remaining batches with error
+                    // instead of silently dropping their response channels.
+                    let batch_record_count = batch.len() as u64;
+                    for (_value, _key, response_tx) in batch.records {
+                        let _ = response_tx.send(Err(Error::ConnectionError(
+                            "Connection lost during batch flush".to_string(),
+                        )));
+                    }
+                    let prev = inner
+                        .pending_records
+                        .fetch_sub(batch_record_count, Ordering::Release);
+                    if prev <= batch_record_count {
+                        inner.flush_notify.notify_waiters();
+                    }
                     continue;
                 }
 
@@ -1475,7 +1485,7 @@ async fn sender_task(
                     // Mark connection as broken so we reconnect before
                     // the next send attempt.
                     needs_reconnect = true;
-                    break;
+                    failed = true;
                 }
             }
 
@@ -1609,21 +1619,12 @@ async fn send_batch<W: AsyncWrite + Unpin, R: AsyncRead + Unpin>(
             .len()
             .try_into()
             .map_err(|_| Error::RequestTooLarge(request_bytes.len(), u32::MAX as usize))?;
-        writer
-            .write_all(&len.to_be_bytes())
-            .await
-            .map_err(|e| Error::IoError(e.to_string()))?;
-        writer
-            .write_all(&request_bytes)
-            .await
-            .map_err(|e| Error::IoError(e.to_string()))?;
+        writer.write_all(&len.to_be_bytes()).await?;
+        writer.write_all(&request_bytes).await?;
     }
 
     // Single flush for entire batch (minimizes syscalls)
-    writer
-        .flush()
-        .await
-        .map_err(|e| Error::IoError(e.to_string()))?;
+    writer.flush().await?;
 
     // acks=0 (fire-and-forget) — skip reading responses.
     // The broker still processes the writes, but the producer does not
@@ -1656,10 +1657,7 @@ async fn send_batch<W: AsyncWrite + Unpin, R: AsyncRead + Unpin>(
     let mut len_buf = [0u8; 4];
     for response_tx in response_channels {
         // Read response length
-        reader
-            .read_exact(&mut len_buf)
-            .await
-            .map_err(|e| Error::IoError(e.to_string()))?;
+        reader.read_exact(&mut len_buf).await?;
         let response_len = u32::from_be_bytes(len_buf) as usize;
 
         // validate response size to prevent OOM from malicious/buggy servers
@@ -1670,10 +1668,7 @@ async fn send_batch<W: AsyncWrite + Unpin, R: AsyncRead + Unpin>(
 
         // Read response body
         let mut response_buf = vec![0u8; response_len];
-        reader
-            .read_exact(&mut response_buf)
-            .await
-            .map_err(|e| Error::IoError(e.to_string()))?;
+        reader.read_exact(&mut response_buf).await?;
 
         let (response, _format, _correlation_id) =
             Response::from_wire(&response_buf).map_err(Error::ProtocolError)?;

@@ -42,6 +42,20 @@ const DEFAULT_MAX_BATCH_SIZE: usize = 4 * 1024 * 1024; // 4 MB
 /// Default max pending writes before forcing flush
 const DEFAULT_MAX_PENDING_WRITES: usize = 1000;
 
+/// Structured payload for TxnCommit/TxnAbort WAL records.
+///
+/// Includes the full list of affected partitions so that WAL replay can
+/// re-write COMMIT/ABORT markers without consulting the TransactionLog.
+/// Serialised with postcard for compact binary encoding.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TxnWalPayload {
+    pub txn_id: String,
+    pub producer_id: u64,
+    pub producer_epoch: u16,
+    /// (topic_name, partition_id) pairs affected by the transaction.
+    pub partitions: Vec<(String, u32)>,
+}
+
 /// WAL record types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -228,6 +242,26 @@ impl WalRecord {
 
         if computed_crc != stored_crc {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "CRC mismatch"));
+        }
+
+        // WAL-003: Reject zero-length data records.
+        // A pre-allocated WAL file may have had only the magic bytes flushed
+        // before a crash. The remaining header bytes are zero-filled:
+        //   stored_crc = 0, data_len = 0, record_type = 0 (Full), flags = 0
+        // CRC-32 of empty data is also 0x00000000, so the CRC check passes.
+        // A valid data record always contains at least
+        // topic_name_len(4) + topic_name(1+) + partition_id(4) = 9 bytes,
+        // so zero-length is physically impossible for any data-carrying type.
+        if data_len == 0
+            && matches!(
+                record_type,
+                RecordType::Full | RecordType::First | RecordType::Middle | RecordType::Last
+            )
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Zero-length data record — likely partial write artifact from crash",
+            ));
         }
 
         Ok(Self {
@@ -574,6 +608,22 @@ impl GroupCommitWal {
                     expected_crc = stored_crc,
                     computed_crc = computed_crc,
                     "WAL record CRC mismatch during recovery — stopping scan"
+                );
+                break;
+            }
+
+            // WAL-003: Reject zero-length data records in scan_wal_file()
+            // (mirrors the check in WalRecord::from_bytes).  Without this,
+            // scan_wal_file would count phantom records, inflating
+            // record_count and causing an LSN/record-count divergence
+            // with read_all() / replay_all().
+            let record_type_byte = data[offset + 12];
+            if data_len == 0 && record_type_byte <= 3 {
+                // RecordType::Full(0), First(1), Middle(2), Last(3)
+                tracing::warn!(
+                    path = ?path,
+                    offset = offset,
+                    "WAL scan: zero-length data record — likely partial write artifact, stopping"
                 );
                 break;
             }

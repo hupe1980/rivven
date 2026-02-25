@@ -929,6 +929,15 @@ impl Request {
     /// - correlation_id: 4-byte big-endian u32 for request-response matching
     /// - payload: serialized message
     ///
+    /// ## Correlation ID sizing
+    ///
+    /// The wire protocol uses `u32` for correlation IDs (4 bytes), which is
+    /// the Kafka-compatible choice and sufficient for client-server RPCs
+    /// (4 billion in-flight requests before wrap-around). The cluster-internal
+    /// protocol (`rivven-cluster`) uses `u64` for its own RPC correlation to
+    /// avoid any wrap-around concern on high-throughput inter-node links.
+    /// The two namespaces are independent and never cross boundaries.
+    ///
     /// Note: Length prefix is NOT included (handled by transport layer)
     ///
     /// # Errors

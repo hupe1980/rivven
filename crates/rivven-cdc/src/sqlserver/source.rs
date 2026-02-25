@@ -151,6 +151,11 @@ pub struct SqlServerCdcConfig {
     pub encrypt: bool,
     /// Snapshot mode (Initial, Always, Never, WhenNeeded)
     pub snapshot_mode: crate::common::SnapshotMode,
+    /// Path for persisting the CDC position checkpoint.
+    /// When set, the last committed LSN is written to this file after
+    /// each poll cycle, enabling at-least-once delivery across restarts.
+    /// When empty (default), positions are tracked in-memory only.
+    pub checkpoint_path: String,
     /// Cached redacted connection string for trait compliance
     redacted_conn_str: String,
 }
@@ -198,6 +203,7 @@ impl Default for SqlServerCdcConfig {
             trust_server_certificate: false,
             encrypt: true,
             snapshot_mode: crate::common::SnapshotMode::Initial,
+            checkpoint_path: String::new(),
             redacted_conn_str: String::new(),
         }
     }
@@ -422,6 +428,15 @@ impl SqlServerCdcConfigBuilder {
         self
     }
 
+    /// Set the checkpoint file path for persisting CDC position across restarts.
+    ///
+    /// When set, the last committed LSN is atomically written to this file
+    /// after each poll cycle, enabling at-least-once delivery across restarts.
+    pub fn checkpoint_path(mut self, path: impl Into<String>) -> Self {
+        self.config.checkpoint_path = path.into();
+        self
+    }
+
     /// Build the configuration
     pub fn build(self) -> Result<SqlServerCdcConfig> {
         let mut config = self.config;
@@ -568,6 +583,48 @@ impl std::cmp::Ord for CdcPosition {
     }
 }
 
+/// Save CDC position checkpoint to a file.
+///
+/// Uses atomic write→fsync→rename for crash-durable persistence.
+/// Without fsync before rename, the kernel may reorder the operations
+/// on power loss, resulting in a valid filename pointing at an empty
+/// or garbage file.
+fn save_checkpoint(path: &str, position: &CdcPosition) {
+    use std::io::Write;
+    let content = position.to_string();
+    let tmp_path = format!("{}.tmp", path);
+    let res = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp_path)?;
+        f.write_all(content.as_bytes())?;
+        f.sync_all()?; // fsync before rename for crash durability
+        Ok(())
+    })();
+    if let Err(e) = res {
+        warn!("Failed to write checkpoint file {}: {}", tmp_path, e);
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        warn!(
+            "Failed to rename checkpoint file {} → {}: {}",
+            tmp_path, path, e
+        );
+    }
+}
+
+/// Load CDC position checkpoint from a file.
+fn load_checkpoint(path: &str) -> Option<CdcPosition> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => match CdcPosition::from_string(content.trim()) {
+            Ok(pos) => Some(pos),
+            Err(e) => {
+                warn!("Failed to parse checkpoint file {}: {}", path, e);
+                None
+            }
+        },
+        Err(_) => None, // File doesn't exist yet
+    }
+}
+
 /// Capture instance information from sys.sp_cdc_help_change_data_capture
 #[derive(Debug, Clone)]
 pub struct CaptureInstance {
@@ -601,6 +658,8 @@ pub struct SqlServerCdc {
     capture_instances: Vec<CaptureInstance>,
     /// Metrics
     metrics: Arc<SqlServerMetrics>,
+    /// Handle for the spawned CDC task; awaited/aborted in `stop()`.
+    task_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl SqlServerCdc {
@@ -615,6 +674,7 @@ impl SqlServerCdc {
             current_position: None,
             capture_instances: Vec::new(),
             metrics: SqlServerMetrics::new(),
+            task_handle: None,
         }
     }
 
@@ -694,7 +754,7 @@ impl CdcSource for SqlServerCdc {
         let include_tables = self.config.include_tables.clone();
         let exclude_tables = self.config.exclude_tables.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             if let Err(e) = run_cdc_poll_loop(
                 config,
                 active,
@@ -710,12 +770,18 @@ impl CdcSource for SqlServerCdc {
             }
         });
 
+        self.task_handle = Some(handle);
+
         Ok(())
     }
 
     async fn stop(&mut self) -> Result<()> {
         info!("Stopping SQL Server CDC");
         self.active.store(false, Ordering::Release);
+        if let Some(handle) = self.task_handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
         Ok(())
     }
 
@@ -783,8 +849,31 @@ async fn run_cdc_poll_loop(
             .collect::<Vec<_>>()
     );
 
-    // Initialize position
-    let mut current_position = if start_lsn.is_empty() {
+    // Initialize position:
+    // 1. Try checkpoint file first (persisted from previous run)
+    // 2. Fall back to configured start_lsn
+    // 3. Fall back to current max LSN
+    let mut current_position = if !config.checkpoint_path.is_empty() {
+        match load_checkpoint(&config.checkpoint_path) {
+            Some(pos) => {
+                info!("Restored CDC position from checkpoint: {}", pos.commit_lsn);
+                pos
+            }
+            None => {
+                if start_lsn.is_empty() {
+                    let max_lsn = client.get_max_lsn().await?;
+                    info!(
+                        "No checkpoint found, starting from current max LSN: {}",
+                        max_lsn
+                    );
+                    CdcPosition::new(max_lsn.clone(), max_lsn)
+                } else {
+                    CdcPosition::from_string(&start_lsn)
+                        .map_err(|e| CdcError::config(e.to_string()))?
+                }
+            }
+        }
+    } else if start_lsn.is_empty() {
         let max_lsn = client.get_max_lsn().await?;
         info!("Starting from current max LSN: {}", max_lsn);
         CdcPosition::new(max_lsn.clone(), max_lsn)
@@ -793,6 +882,22 @@ async fn run_cdc_poll_loop(
     };
 
     let poll_interval = Duration::from_millis(config.poll_interval_ms);
+
+    // STOR-004-A: Track the previous cycle's position for deferred
+    // checkpointing.  We only persist the checkpoint for batch N after
+    // batch N+1's events have been successfully sent to the channel.
+    // This gives at-least-once delivery: on crash we re-send at most
+    // one batch, but never lose events.
+    let mut pending_checkpoint: Option<CdcPosition> = None;
+
+    // S2: Write an initial checkpoint with the starting position BEFORE the
+    // first poll.  Without this, a crash after events are sent to the channel
+    // but before the second poll cycle flushes the deferred checkpoint loses
+    // the first batch — the process would restart from get_max_lsn() which
+    // has already advanced past those events.
+    if !config.checkpoint_path.is_empty() {
+        save_checkpoint(&config.checkpoint_path, &current_position);
+    }
 
     // Main polling loop
     while active.load(Ordering::Acquire) {
@@ -806,6 +911,13 @@ async fn run_cdc_poll_loop(
 
         // Skip if no new changes
         if max_lsn <= current_position.commit_lsn {
+            // No new work — safe to flush any pending checkpoint now since
+            // the previous batch's channel sends already succeeded.
+            if let Some(pos) = pending_checkpoint.take() {
+                if !config.checkpoint_path.is_empty() {
+                    save_checkpoint(&config.checkpoint_path, &pos);
+                }
+            }
             metrics.record_poll(poll_start.elapsed(), 0);
             trace!("No new changes, sleeping...");
             tokio::time::sleep(poll_interval).await;
@@ -875,11 +987,29 @@ async fn run_cdc_poll_loop(
             );
         }
 
-        // Update position
+        // STOR-004-A: Flush the PREVIOUS cycle's checkpoint now that
+        // this cycle's channel sends have all succeeded, proving the
+        // downstream saw the previous batch.  Then stage the current
+        // position as the next pending checkpoint.
+        if let Some(prev_pos) = pending_checkpoint.take() {
+            if !config.checkpoint_path.is_empty() {
+                save_checkpoint(&config.checkpoint_path, &prev_pos);
+            }
+        }
+
+        // Stage current position for deferred checkpoint
         current_position = CdcPosition::new(max_lsn.clone(), max_lsn);
+        pending_checkpoint = Some(current_position.clone());
 
         // Sleep before next poll
         tokio::time::sleep(poll_interval).await;
+    }
+
+    // Shutdown: flush any remaining pending checkpoint
+    if let Some(pos) = pending_checkpoint {
+        if !config.checkpoint_path.is_empty() {
+            save_checkpoint(&config.checkpoint_path, &pos);
+        }
     }
 
     info!("CDC poll loop stopped");

@@ -429,9 +429,11 @@ println!("Error events: {}", metrics.errored_events());
 
 **Solutions:**
 
+> **Note:** PostgreSQL NUMERIC values are now automatically preserved as strings (no intermediate f64 conversion), maintaining full decimal precision.
+
 ```yaml
 config:
-  # Preserve decimal precision
+  # Preserve decimal precision (default for PostgreSQL NUMERIC)
   decimal_handling: string  # or: precise, double
   
   # Timestamp handling

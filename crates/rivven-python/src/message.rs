@@ -89,7 +89,8 @@ impl Message {
     /// Raises:
     ///     UnicodeDecodeError: If value is not valid UTF-8
     pub fn value_str(&self) -> PyResult<String> {
-        String::from_utf8(self.value_bytes.clone())
+        std::str::from_utf8(&self.value_bytes)
+            .map(|s| s.to_string())
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyUnicodeDecodeError, _>(e.to_string()))
     }
 

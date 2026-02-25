@@ -481,6 +481,7 @@ rivven-connect = { version = "0.0.20", features = ["postgres", "s3"] }
 
 CDC connectors support 17 built-in transforms applied via YAML configuration.
 No code required - fully configurable at deployment time.
+Unknown transform types are rejected at startup with a clear error message. Both source and sink connectors validate transforms before processing any events.
 
 | Transform | Description |
 |-----------|-------------|

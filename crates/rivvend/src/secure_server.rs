@@ -32,7 +32,6 @@ use std::time::Duration;
 use bytes::BytesMut;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
 use rivven_core::{
@@ -47,6 +46,7 @@ use rivven_core::{
 
 use crate::auth_handler::{AuthenticatedHandler, ConnectionAuth};
 use crate::handler::RequestHandler;
+use crate::protocol::Response;
 
 // ============================================================================
 // Configuration
@@ -64,6 +64,12 @@ pub struct SecureServerConfig {
 
     /// Maximum concurrent connections
     pub max_connections: usize,
+
+    /// Maximum connections per IP address
+    pub max_connections_per_ip: u32,
+
+    /// Requests per second limit per IP (0 = unlimited)
+    pub rate_limit_per_ip: u32,
 
     /// Connection timeout
     pub connection_timeout: Duration,
@@ -91,6 +97,8 @@ impl Default for SecureServerConfig {
             #[cfg(feature = "tls")]
             tls_config: None,
             max_connections: 10_000,
+            max_connections_per_ip: 100,
+            rate_limit_per_ip: 10_000,
             connection_timeout: Duration::from_secs(30),
             idle_timeout: Duration::from_secs(300),
             max_message_size: 10 * 1024 * 1024, // 10 MB
@@ -176,10 +184,12 @@ pub struct SecureServer {
     #[cfg(feature = "tls")]
     tls_acceptor: Option<TlsAcceptor>,
 
-    /// Connection limiter
-    connection_semaphore: Arc<Semaphore>,
+    /// Per-IP rate limiter (mirrors ClusterServer's DoS protection)
+    rate_limiter: Arc<crate::rate_limiter::RateLimiter>,
     /// §3.3: Write-ahead log for crash-safe durability on the produce path.
     wal: Option<Arc<rivven_core::GroupCommitWal>>,
+    /// Shutdown signal (mirrors ClusterServer pattern)
+    shutdown_tx: tokio::sync::broadcast::Sender<()>,
 }
 
 impl SecureServer {
@@ -207,66 +217,11 @@ impl SecureServer {
             tracing::warn!("Failed to recover topics from disk: {}", e);
         }
 
-        // §3.3 Replay WAL records at startup, identical to ClusterServer.
-        // Without this, writes committed to WAL but not flushed to segment
-        // files are silently lost when using SecureServer.
-        {
-            let wal_dir = std::path::PathBuf::from(&core_config.data_dir).join("wal");
-            if wal_dir.exists() {
-                let wal_config = rivven_core::WalConfig {
-                    dir: wal_dir,
-                    ..Default::default()
-                };
-                match rivven_core::GroupCommitWal::replay_all(&wal_config).await {
-                    Ok(records) if !records.is_empty() => {
-                        tracing::info!(
-                            count = records.len(),
-                            "WAL replay: {} records recovered at startup (SecureServer)",
-                            records.len()
-                        );
-                        // Any failure here means the server state would be
-                        // inconsistent — abort startup rather than risk silent
-                        // data loss.
-                        for record in &records {
-                            if let Err(e) = topic_manager.apply_wal_record(record).await {
-                                return Err(anyhow::anyhow!(
-                                    "WAL replay: failed to apply record (lsn={}): {}. \
-                                     Aborting startup to prevent data loss. \
-                                     Inspect the WAL files in the data directory and retry, \
-                                     or remove them to accept data loss.",
-                                    record.lsn,
-                                    e
-                                ));
-                            }
-                        }
-
-                        // §3.3 / Checkpoint WAL after successful replay.
-                        // Remove replayed WAL files so a subsequent crash does not
-                        // replay the same records again, which would produce
-                        // duplicate messages.
-                        if let Err(e) = rivven_core::GroupCommitWal::checkpoint_dir(&wal_config.dir)
-                        {
-                            tracing::warn!(
-                                error = %e,
-                                "WAL post-replay checkpoint failed — duplicates possible on next crash"
-                            );
-                        }
-                    }
-                    Ok(_) => {
-                        tracing::debug!("WAL replay: no records to replay");
-                    }
-                    Err(e) => {
-                        // Abort startup instead of silently losing data.
-                        return Err(anyhow::anyhow!(
-                            "WAL replay: failed to read WAL files: {}. \
-                             Aborting startup to prevent data loss. \
-                             Inspect or remove corrupt WAL files in the data directory to proceed.",
-                            e
-                        ));
-                    }
-                }
-            }
-        }
+        // §3.3 Replay WAL records at startup (shared with ClusterServer).
+        topic_manager
+            .replay_wal_and_checkpoint(&core_config)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         let offset_manager = OffsetManager::with_persistence(
             std::path::PathBuf::from(&core_config.data_dir).join("offsets"),
@@ -300,7 +255,14 @@ impl SecureServer {
             None
         };
 
-        let connection_semaphore = Arc::new(Semaphore::new(server_config.max_connections));
+        let rate_limit_config = crate::rate_limiter::RateLimitConfig {
+            max_connections_per_ip: server_config.max_connections_per_ip,
+            max_total_connections: server_config.max_connections as u32,
+            rate_limit_per_ip: server_config.rate_limit_per_ip,
+            max_request_size: server_config.max_message_size,
+            idle_timeout: server_config.idle_timeout,
+        };
+        let rate_limiter = Arc::new(crate::rate_limiter::RateLimiter::new(rate_limit_config));
 
         // §3.3 Instantiate WAL for produce-path durability.
         // WAL init failure is a hard error — running without WAL risks data loss.
@@ -316,6 +278,8 @@ impl SecureServer {
             Some(w)
         };
 
+        let (shutdown_tx, _) = tokio::sync::broadcast::channel(1);
+
         Ok(Self {
             config: server_config,
             topic_manager,
@@ -324,8 +288,9 @@ impl SecureServer {
             service_auth_manager,
             #[cfg(feature = "tls")]
             tls_acceptor,
-            connection_semaphore,
+            rate_limiter,
             wal,
+            shutdown_tx,
         })
     }
 
@@ -386,22 +351,30 @@ impl SecureServer {
             let reload_interval = tls_acceptor.cert_reload_interval();
             if reload_interval > Duration::ZERO {
                 let server_ref = server.clone();
+                let mut shutdown_rx = server.shutdown_tx.subscribe();
                 tokio::spawn(async move {
                     let mut ticker = tokio::time::interval(reload_interval);
                     ticker.tick().await; // skip first immediate tick
                     loop {
-                        ticker.tick().await;
-                        if let Some(ref acceptor) = server_ref.tls_acceptor {
-                            match acceptor.reload() {
-                                Ok(()) => {
-                                    info!("TLS certificates reloaded successfully");
+                        tokio::select! {
+                            _ = ticker.tick() => {
+                                if let Some(ref acceptor) = server_ref.tls_acceptor {
+                                    match acceptor.reload() {
+                                        Ok(()) => {
+                                            info!("TLS certificates reloaded successfully");
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                "TLS certificate reload failed (keeping existing): {}",
+                                                e
+                                            );
+                                        }
+                                    }
                                 }
-                                Err(e) => {
-                                    warn!(
-                                        "TLS certificate reload failed (keeping existing): {}",
-                                        e
-                                    );
-                                }
+                            }
+                            _ = shutdown_rx.recv() => {
+                                info!("TLS reload task shutting down");
+                                break;
                             }
                         }
                     }
@@ -409,45 +382,66 @@ impl SecureServer {
             }
         }
 
+        let mut shutdown_rx = server.shutdown_tx.subscribe();
         loop {
-            // Acquire connection permit
-            let permit = match server.connection_semaphore.clone().try_acquire_owned() {
-                Ok(permit) => permit,
-                Err(_) => {
-                    warn!(
-                        "Max connections reached ({}), rejecting",
-                        server.config.max_connections
-                    );
-                    // Accept and immediately close to avoid kernel backlog
-                    if let Ok((stream, _)) = listener.accept().await {
-                        drop(stream);
-                    }
-                    continue;
-                }
-            };
+            tokio::select! {
+                result = listener.accept() => {
+                    match result {
+                        Ok((tcp_stream, client_addr)) => {
+                            let client_ip = client_addr.ip();
 
-            match listener.accept().await {
-                Ok((tcp_stream, client_addr)) => {
-                    let server = server.clone();
-                    let auth_handler = auth_handler.clone();
+                            // Check per-IP rate limiter before accepting connection
+                            match server.rate_limiter.try_connection(client_ip).await {
+                                Ok(conn_guard) => {
+                                    let server = server.clone();
+                                    let auth_handler = auth_handler.clone();
 
-                    tokio::spawn(async move {
-                        // Permit is dropped when task completes
-                        let _permit = permit;
+                                    tokio::spawn(async move {
+                                        // conn_guard is dropped when task completes,
+                                        // releasing the rate limiter slot
+                                        let _conn_guard = conn_guard;
 
-                        if let Err(e) = server
-                            .handle_connection(tcp_stream, client_addr, auth_handler)
-                            .await
-                        {
-                            debug!("Connection error from {}: {}", client_addr, e);
+                                        if let Err(e) = server
+                                            .handle_connection(tcp_stream, client_addr, auth_handler)
+                                            .await
+                                        {
+                                            debug!("Connection error from {}: {}", client_addr, e);
+                                        }
+                                    });
+                                }
+                                Err(crate::rate_limiter::ConnectionResult::TooManyConnectionsFromIp) => {
+                                    warn!("Connection from {} rejected: too many connections from IP", client_addr);
+                                    drop(tcp_stream);
+                                }
+                                Err(crate::rate_limiter::ConnectionResult::TooManyTotalConnections) => {
+                                    warn!("Connection from {} rejected: global limit reached", client_addr);
+                                    drop(tcp_stream);
+                                }
+                                Err(_) => {
+                                    drop(tcp_stream);
+                                }
+                            }
                         }
-                    });
+                        Err(e) => {
+                            error!("Accept error: {}", e);
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
+                    }
                 }
-                Err(e) => {
-                    error!("Accept error: {}", e);
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                _ = shutdown_rx.recv() => {
+                    info!("SecureServer shutdown signal received, stopping accept loop");
+                    break;
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    /// Returns a handle that can be used to trigger graceful shutdown.
+    pub fn get_shutdown_handle(&self) -> SecureServerShutdownHandle {
+        SecureServerShutdownHandle {
+            shutdown_tx: self.shutdown_tx.clone(),
         }
     }
 
@@ -691,6 +685,33 @@ impl SecureServer {
 
             let (request, wire_format, correlation_id) = frame;
 
+            // Per-request rate limiting (mirrors ClusterServer behaviour)
+            match self
+                .rate_limiter
+                .check_request(&security_ctx.client_addr.ip(), 1)
+                .await
+            {
+                crate::rate_limiter::RequestResult::Allowed => {}
+                crate::rate_limiter::RequestResult::RateLimited => {
+                    debug!("Rate limited request from {}", client_addr);
+                    let error_response = Response::Error {
+                        message: "RATE_LIMIT_EXCEEDED: Too many requests".to_string(),
+                    };
+                    crate::framing::send_response(
+                        &mut stream,
+                        &error_response,
+                        wire_format,
+                        correlation_id,
+                    )
+                    .await?;
+                    tokio::time::sleep(Duration::from_millis(1000)).await;
+                    return Ok(());
+                }
+                crate::rate_limiter::RequestResult::RequestTooLarge => {
+                    return Ok(());
+                }
+            }
+
             // Handle request with auth
             let response = auth_handler
                 .handle(request, &mut security_ctx.auth_state, &client_ip, has_tls)
@@ -775,6 +796,18 @@ impl SecureServerBuilder {
     /// Build and start the server
     pub async fn build(self) -> anyhow::Result<SecureServer> {
         SecureServer::new(self.core_config, self.server_config).await
+    }
+}
+
+/// Handle for triggering graceful shutdown of a `SecureServer`.
+pub struct SecureServerShutdownHandle {
+    shutdown_tx: tokio::sync::broadcast::Sender<()>,
+}
+
+impl SecureServerShutdownHandle {
+    /// Signal the server to stop accepting new connections and shut down.
+    pub fn shutdown(&self) {
+        let _ = self.shutdown_tx.send(());
     }
 }
 

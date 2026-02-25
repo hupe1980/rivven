@@ -386,7 +386,9 @@ impl Consumer {
                 }
             }
 
-            // Poll with backoff until data arrives
+            // Poll with exponential backoff until data arrives
+            let mut backoff = poll_interval;
+            const MAX_BACKOFF: Duration = Duration::from_secs(2);
             loop {
                 // Check for cancellation on each iteration
                 if closed.load(Ordering::Acquire) {
@@ -407,8 +409,9 @@ impl Consumer {
                 };
 
                 if messages.is_empty() {
-                    // No data yet — sleep and retry (keeps async for loop alive)
-                    tokio::time::sleep(poll_interval).await;
+                    // No data yet — sleep with exponential backoff and retry
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(MAX_BACKOFF);
                     continue;
                 }
 

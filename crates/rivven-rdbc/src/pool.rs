@@ -94,35 +94,35 @@ pub trait ConnectionPool: Send + Sync {
 pub struct PooledConnection {
     /// The underlying connection
     conn: Option<Box<dyn Connection>>,
-    /// Reference to the pool for return
-    pool: Arc<dyn ConnectionPool>,
+    /// Channel to return the connection to the pool without spawning a task.
+    /// The pool drains this channel in a background task.
+    return_tx: tokio::sync::mpsc::UnboundedSender<ReturnedConn>,
+    /// Direct semaphore reference for synchronous permit release in Drop.
+    semaphore: Arc<Semaphore>,
     /// When the connection was originally created (for proper lifecycle tracking)
     created_at: Instant,
     /// When this connection was borrowed from the pool
     borrowed_at: Instant,
 }
 
-impl PooledConnection {
-    /// Create a new pooled connection wrapper
-    pub fn new(conn: Box<dyn Connection>, pool: Arc<dyn ConnectionPool>) -> Self {
-        let now = Instant::now();
-        Self {
-            conn: Some(conn),
-            pool,
-            created_at: now,
-            borrowed_at: now,
-        }
-    }
+/// A connection being returned to the pool via channel (avoids tokio::spawn in Drop).
+pub(crate) struct ReturnedConn {
+    conn: Box<dyn Connection>,
+    created_at: Instant,
+}
 
+impl PooledConnection {
     /// Create a new pooled connection wrapper with a specific creation time
-    pub fn with_created_at(
+    pub(crate) fn with_created_at(
         conn: Box<dyn Connection>,
-        pool: Arc<dyn ConnectionPool>,
+        return_tx: tokio::sync::mpsc::UnboundedSender<ReturnedConn>,
+        semaphore: Arc<Semaphore>,
         created_at: Instant,
     ) -> Self {
         Self {
             conn: Some(conn),
-            pool,
+            return_tx,
+            semaphore,
             created_at,
             borrowed_at: Instant::now(),
         }
@@ -203,26 +203,18 @@ impl std::ops::DerefMut for PooledConnection {
 impl Drop for PooledConnection {
     fn drop(&mut self) {
         if let Some(conn) = self.conn.take() {
-            let pool = self.pool.clone();
-            let created_at = self.created_at;
-            // Only spawn if a tokio runtime is still available.
-            // During shutdown the runtime may already be gone, in which
-            // case the connection is dropped without being returned to the
-            // pool. This leaks the semaphore permit, effectively reducing
-            // the pool's capacity by one. Because this only occurs during
-            // runtime shutdown (after which no new `get()` calls will
-            // succeed), the leak is harmless in practice.
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(async move {
-                    pool.return_connection(conn, created_at).await;
-                });
-            } else {
-                tracing::warn!(
-                    "Tokio runtime unavailable during PooledConnection drop; \
-                     connection dropped without being returned to pool \
-                     (semaphore permit leaked — only expected during shutdown)"
-                );
-            }
+            // Restore the semaphore permit immediately — this is synchronous
+            // and works even without a tokio runtime, so permits are NEVER
+            // leaked regardless of shutdown ordering.
+            self.semaphore.add_permits(1);
+
+            // Send the connection back for async processing (validation,
+            // idle-push). If the receiver is dropped (pool shut down), the
+            // connection is silently dropped — which is correct.
+            let _ = self.return_tx.send(ReturnedConn {
+                conn,
+                created_at: self.created_at,
+            });
         }
     }
 }
@@ -581,16 +573,16 @@ pub struct SimpleConnectionPool {
     factory: Arc<dyn ConnectionFactory>,
     /// Idle connections (LIFO for better cache locality)
     idle: Mutex<Vec<PoolEntry>>,
-    /// Semaphore to limit total connections
-    semaphore: Semaphore,
+    /// Semaphore to limit total connections (wrapped in Arc for PooledConnection)
+    semaphore: Arc<Semaphore>,
     /// Current total connection count
     total_connections: AtomicUsize,
     /// Statistics
     stats: Arc<AtomicPoolStats>,
     /// Shutdown flag
     shutdown: std::sync::atomic::AtomicBool,
-    /// Self reference for creating PooledConnections
-    self_ref: tokio::sync::OnceCell<std::sync::Weak<Self>>,
+    /// Channel sender for returning connections from PooledConnection::drop()
+    return_tx: tokio::sync::mpsc::UnboundedSender<ReturnedConn>,
 }
 
 /// Reason for connection recycling
@@ -617,19 +609,37 @@ impl SimpleConnectionPool {
     ///
     /// Initializes with `min_size` connections eagerly.
     pub async fn new(config: PoolConfig, factory: Arc<dyn ConnectionFactory>) -> Result<Arc<Self>> {
+        let (return_tx, mut return_rx) = tokio::sync::mpsc::unbounded_channel::<ReturnedConn>();
+
         let pool = Arc::new(Self {
-            semaphore: Semaphore::new(config.max_size),
+            semaphore: Arc::new(Semaphore::new(config.max_size)),
             config: config.clone(),
             factory,
             idle: Mutex::new(Vec::with_capacity(config.max_size)),
             total_connections: AtomicUsize::new(0),
             stats: Arc::new(AtomicPoolStats::new()),
             shutdown: std::sync::atomic::AtomicBool::new(false),
-            self_ref: tokio::sync::OnceCell::new(),
+            return_tx,
         });
 
-        // Store weak self-reference
-        let _ = pool.self_ref.set(Arc::downgrade(&pool));
+        // Spawn a background drainer that processes returned connections.
+        // Holds a Weak<Self> so it doesn't prevent pool destruction.
+        // When the pool is dropped, the Weak fails to upgrade and the
+        // drainer exits naturally once the channel is drained.
+        let weak = Arc::downgrade(&pool);
+        tokio::spawn(async move {
+            while let Some(returned) = return_rx.recv().await {
+                if let Some(pool) = weak.upgrade() {
+                    pool.handle_returned_connection(returned.conn, returned.created_at)
+                        .await;
+                } else {
+                    // Pool is gone — close the connection properly so TCP
+                    // sockets and database sessions are released, not just
+                    // silently dropped.
+                    let _ = returned.conn.close().await;
+                }
+            }
+        });
 
         // Pre-populate with min_size connections
         for _ in 0..config.min_size {
@@ -649,13 +659,6 @@ impl SimpleConnectionPool {
     /// Create a new connection pool with a builder pattern.
     pub fn builder(url: impl Into<String>) -> PoolBuilder {
         PoolBuilder::new(url)
-    }
-
-    /// Get the pool as an Arc.
-    ///
-    /// Returns None if the pool has been dropped (should never happen in practice).
-    fn get_self_arc(&self) -> Option<Arc<Self>> {
-        self.self_ref.get().and_then(|w| w.upgrade())
     }
 
     /// Create a new connection using the factory
@@ -690,6 +693,41 @@ impl SimpleConnectionPool {
     /// Get pool configuration
     pub fn config(&self) -> &PoolConfig {
         &self.config
+    }
+
+    /// Process a returned connection WITHOUT releasing a semaphore permit.
+    ///
+    /// Called by the background drainer task after `PooledConnection::Drop`
+    /// already released the permit synchronously. This avoids the
+    /// double-release that would occur if the trait's `return_connection()`
+    /// (which also calls `add_permits`) were used from the drainer.
+    async fn handle_returned_connection(&self, conn: Box<dyn Connection>, created_at: Instant) {
+        if self.shutdown.load(Ordering::Acquire) {
+            // Pool is shutting down, close connection
+            let _ = conn.close().await;
+            self.total_connections.fetch_sub(1, Ordering::Release);
+            self.stats.record_closed();
+            return;
+        }
+
+        // Optionally validate on return
+        if self.config.test_on_return {
+            self.stats.record_health_check();
+            if !conn.is_valid().await {
+                self.total_connections.fetch_sub(1, Ordering::Release);
+                self.stats.record_closed();
+                self.stats.record_health_check_failure();
+                return;
+            }
+        }
+
+        // Return to idle pool with original creation time preserved
+        let mut idle = self.idle.lock().await;
+        idle.push(PoolEntry {
+            conn,
+            created_at,
+            last_used: Instant::now(),
+        });
     }
 }
 
@@ -803,49 +841,25 @@ impl ConnectionPool for SimpleConnectionPool {
         );
         let _ = was_reused; // Suppress unused warning when pool-trace is disabled
 
-        // Forget permit - it will be released when connection is returned
+        // Permit is now consumed by the PooledConnection — its Drop impl
+        // synchronously calls semaphore.add_permits(1), so permits are
+        // NEVER leaked even during runtime shutdown.
         std::mem::forget(permit);
 
-        // Get Arc reference for PooledConnection
-        let pool_arc = self.get_self_arc().ok_or_else(|| Error::PoolExhausted {
-            message: "Pool has been dropped".to_string(),
-        })?;
-
         Ok(PooledConnection::with_created_at(
-            conn, pool_arc, created_at,
+            conn,
+            self.return_tx.clone(),
+            self.semaphore.clone(),
+            created_at,
         ))
     }
 
     async fn return_connection(&self, conn: Box<dyn Connection>, created_at: Instant) {
-        // Release a semaphore permit
+        // Trait-mandated entry point.  When called directly (not via
+        // PooledConnection::Drop), the semaphore permit has NOT been
+        // released yet, so we must release it here.
         self.semaphore.add_permits(1);
-
-        if self.shutdown.load(Ordering::Acquire) {
-            // Pool is shutting down, close connection
-            let _ = conn.close().await;
-            self.total_connections.fetch_sub(1, Ordering::Release);
-            self.stats.record_closed();
-            return;
-        }
-
-        // Optionally validate on return
-        if self.config.test_on_return {
-            self.stats.record_health_check();
-            if !conn.is_valid().await {
-                self.total_connections.fetch_sub(1, Ordering::Release);
-                self.stats.record_closed();
-                self.stats.record_health_check_failure();
-                return;
-            }
-        }
-
-        // Return to idle pool with original creation time preserved
-        let mut idle = self.idle.lock().await;
-        idle.push(PoolEntry {
-            conn,
-            created_at,
-            last_used: Instant::now(),
-        });
+        self.handle_returned_connection(conn, created_at).await;
     }
 
     fn size(&self) -> usize {

@@ -109,13 +109,20 @@ let config = ResilientClientConfig::builder()
 let client = ResilientClient::new(config).await?;
 ```
 
-### QUIC Transport
+### Cluster Transport
 
-Inter-node communication uses QUIC with automatic encryption:
+Inter-node communication supports two transport modes:
+
+| Transport | Encryption | Feature Flag |
+|-----------|-----------|---------------|
+| `quic` | ✅ Automatic TLS 1.3 | `quic` |
+| `tcp` | ❌ Plaintext | (default) |
+
+> **Warning:** TCP transport is **plaintext**. For encrypted inter-node communication, use `transport: quic` which requires the `quic` feature flag.
 
 ```yaml
 cluster:
-  transport: quic  # or tcp
+  transport: quic  # or tcp (plaintext)
   quic:
     keep_alive_interval_secs: 15
     max_idle_timeout_secs: 30
@@ -600,9 +607,12 @@ security:
 limits:
   max_connections: 10000
   max_connections_per_ip: 100
+  rate_limit_per_ip: 1000        # Max requests per second per IP
   connection_timeout_secs: 30
   idle_timeout_secs: 300
 ```
+
+Rate limiting is enforced on both the cluster server (inter-node) and the secure server (client-facing TLS). When a client exceeds the per-IP rate limit, requests are rejected with a `RATE_LIMIT_EXCEEDED` error. Connections from IPs exceeding `max_connections_per_ip` are refused at the accept level.
 
 ---
 
