@@ -379,7 +379,7 @@ The Delta Lake connector is optional. Enable it via Cargo features:
 
 ```toml
 [dependencies]
-rivven-connect = { version = "0.0.20", features = ["delta-lake-s3"] }
+rivven-connect = { version = "0.0.21", features = ["delta-lake-s3"] }
 ```
 
 ---

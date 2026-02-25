@@ -37,7 +37,7 @@
 //! Enable with the `mqtt` feature:
 //!
 //! ```toml
-//! rivven-connect = { version = "0.0.20", features = ["mqtt"] }
+//! rivven-connect = { version = "0.0.21", features = ["mqtt"] }
 //! ```
 //!
 //! # Example Configuration
