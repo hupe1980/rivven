@@ -22,6 +22,7 @@ Additional capabilities:
 - Secure credential handling for sources and sinks
 - Environment variable validation including `value_from` references — blocks dangerous variables (e.g., `LD_PRELOAD`) to prevent injection attacks
 - Prometheus-compatible operator metrics
+- Lease-loss detection — both the leader-election and renewal tasks check for lost leases and exit immediately rather than running with stale state
 
 ## Quick Start
 

@@ -66,9 +66,13 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
+#[cfg(not(unix))]
+use bytes::BytesMut;
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+#[cfg(not(unix))]
+use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::Mutex as TokioMutex;
 
 // ============================================================================
@@ -258,8 +262,19 @@ impl AsyncIo {
 /// High-level async file handle
 ///
 /// Provides async read/write operations with automatic statistics tracking.
+///
+/// # Positioned I/O
+///
+/// `read_at` uses positioned I/O (`pread` on Unix, `seek_read` on Windows)
+/// via `spawn_blocking` to allow concurrent reads without mutex serialization.
+/// `write_at` and sequential writes still serialize through the `TokioMutex`
+/// to prevent interleaved writes.
 pub struct AsyncFile {
     file: TokioMutex<File>,
+    /// Standard file handle for positioned reads (pread) — shared via `Arc`
+    /// to avoid per-read `try_clone()` (which calls `fcntl(F_DUPFD_CLOEXEC)`).
+    #[cfg(unix)]
+    std_file: Arc<std::fs::File>,
     io: Arc<AsyncIo>,
     position: AtomicU64,
 }
@@ -267,16 +282,30 @@ pub struct AsyncFile {
 impl AsyncFile {
     /// Open a file for reading and writing (creates if not exists)
     pub async fn open<P: AsRef<Path>>(path: P, io: Arc<AsyncIo>) -> io::Result<Self> {
+        let path_ref = path.as_ref().to_path_buf();
+
+        #[cfg(unix)]
+        let std_file = Arc::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path_ref)?,
+        );
+
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false) // Preserve existing data
-            .open(path)
+            .open(&path_ref)
             .await?;
 
         Ok(Self {
             file: TokioMutex::new(file),
+            #[cfg(unix)]
+            std_file,
             io,
             position: AtomicU64::new(0),
         })
@@ -284,19 +313,45 @@ impl AsyncFile {
 
     /// Open a file read-only
     pub async fn open_read<P: AsRef<Path>>(path: P, io: Arc<AsyncIo>) -> io::Result<Self> {
-        let file = OpenOptions::new().read(true).open(path).await?;
+        let path_ref = path.as_ref().to_path_buf();
+
+        #[cfg(unix)]
+        let std_file = Arc::new(std::fs::OpenOptions::new().read(true).open(&path_ref)?);
+
+        let file = OpenOptions::new().read(true).open(&path_ref).await?;
 
         Ok(Self {
             file: TokioMutex::new(file),
+            #[cfg(unix)]
+            std_file,
             io,
             position: AtomicU64::new(0),
         })
     }
 
     /// Async read at a specific offset
+    ///
+    /// On Unix, uses positioned I/O (`pread`) via `spawn_blocking` to avoid
+    /// serializing reads through the file mutex. Multiple `read_at` calls
+    /// can proceed concurrently.
     pub async fn read_at(&self, offset: u64, len: usize) -> io::Result<Bytes> {
         self.io.stats.inflight.fetch_add(1, Ordering::Relaxed);
 
+        #[cfg(unix)]
+        let result = {
+            use std::os::unix::fs::FileExt;
+            let std_file = Arc::clone(&self.std_file);
+            tokio::task::spawn_blocking(move || {
+                let mut buf = vec![0u8; len];
+                let bytes_read = std_file.read_at(&mut buf, offset)?;
+                buf.truncate(bytes_read);
+                Ok::<_, io::Error>(Bytes::from(buf))
+            })
+            .await
+            .map_err(io::Error::other)?
+        };
+
+        #[cfg(not(unix))]
         let result = async {
             let mut file = self.file.lock().await;
             file.seek(io::SeekFrom::Start(offset)).await?;

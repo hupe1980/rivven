@@ -150,7 +150,13 @@ impl StateMachine {
     /// Create new state machine with a snapshot directory
     pub fn new(snapshot_dir: impl Into<PathBuf>) -> Self {
         let dir = snapshot_dir.into();
-        std::fs::create_dir_all(&dir).ok();
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            warn!(
+                path = %dir.display(),
+                error = %e,
+                "Failed to create snapshot directory; snapshots may not persist"
+            );
+        }
         Self {
             metadata: RwLock::new(ClusterMetadata::new()),
             last_applied: RwLock::new(None),
@@ -1814,16 +1820,17 @@ impl RaftNode {
             ));
         };
 
-        // Constant-time comparison to prevent timing attacks
+        // Constant-time comparison to prevent timing attacks.
+        // Pad shorter secret to the longer length so the length is never
+        // leaked via an early-return timing side-channel.
         let expected_bytes = expected.as_bytes();
         let provided_bytes = provided.as_bytes();
-        if expected_bytes.len() != provided_bytes.len() {
-            return Err(ClusterError::Unauthorized(
-                "Invalid cluster secret".to_string(),
-            ));
-        }
-        let mut diff = 0u8;
-        for (a, b) in expected_bytes.iter().zip(provided_bytes.iter()) {
+        let max_len = expected_bytes.len().max(provided_bytes.len());
+        // Length mismatch contributes to `diff` but does NOT short-circuit.
+        let mut diff = (expected_bytes.len() != provided_bytes.len()) as u8;
+        for i in 0..max_len {
+            let a = expected_bytes.get(i).copied().unwrap_or(0);
+            let b = provided_bytes.get(i).copied().unwrap_or(0);
             diff |= a ^ b;
         }
         if diff != 0 {

@@ -79,8 +79,9 @@ pub mod duration {
     where
         S: Serializer,
     {
-        // safe u128→u64 (consistent with  SystemTime fix)
-        let millis = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX);
+        // consistent with SystemTime — error on overflow instead of silent saturation
+        let millis = u64::try_from(duration.as_millis())
+            .map_err(|_| serde::ser::Error::custom("Duration too large for u64 millis"))?;
         serializer.serialize_u64(millis)
     }
 
@@ -164,5 +165,33 @@ mod tests {
         let deserialized: TestStruct = postcard::from_bytes(&bytes).unwrap();
 
         assert_eq!(original, deserialized);
+    }
+
+    #[derive(Serialize, Debug)]
+    struct TestDuration {
+        #[serde(with = "duration")]
+        dur: std::time::Duration,
+    }
+
+    #[test]
+    fn test_duration_normal_roundtrip() {
+        let original = TestDuration {
+            dur: std::time::Duration::from_secs(60),
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        assert_eq!(json, r#"{"dur":60000}"#);
+    }
+
+    #[test]
+    fn test_duration_overflow_returns_error() {
+        // Duration::MAX has ~584 billion years of seconds, which overflows u64 millis
+        let large = TestDuration {
+            dur: std::time::Duration::from_secs(u64::MAX),
+        };
+        let result = serde_json::to_string(&large);
+        assert!(
+            result.is_err(),
+            "Overflowing duration should fail, not saturate"
+        );
     }
 }

@@ -691,7 +691,7 @@ async fn test_connector_batching() -> Result<()> {
         if messages.is_empty() {
             break;
         }
-        consumed += messages.len();
+        consumed += messages.len() as u32;
         offset = messages.last().unwrap().offset + 1;
     }
 

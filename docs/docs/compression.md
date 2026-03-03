@@ -359,6 +359,6 @@ All decompression algorithms enforce a **256 MiB output size limit** (`MAX_DECOM
 
 - **LZ4**: The 4-byte prepended uncompressed size header is validated before allocation
 - **Snappy**: `decompress_len()` is called to validate the header before decompression
-- **Zstd**: The `original_size` parameter is capped at 256 MiB; unknown-size payloads fall back to a 16 MiB limit
+- **Zstd**: When `original_size` is provided, it is capped at 256 MiB. When unknown, the decompressor first tries to read the content size from the Zstd frame header; if present and within limits, it pre-allocates exactly that size. If the frame header lacks a content size, it falls back to streaming decompression with a 256 MiB read limit — no hard ceiling below the safety limit.
 
 Payloads exceeding the limit are rejected with a `DecompressionBomb` error. This protects against crafted payloads that claim gigabytes of output from a few bytes of input.

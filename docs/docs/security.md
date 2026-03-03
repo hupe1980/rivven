@@ -109,6 +109,24 @@ let config = ResilientClientConfig::builder()
 let client = ResilientClient::new(config).await?;
 ```
 
+### Consumer Connection with TLS
+
+```rust
+use rivven_client::{Consumer, ConsumerConfig, TlsConfig};
+
+let tls = TlsConfig::builder()
+    .ca_cert_path("/path/to/ca.crt")
+    .build()?;
+
+let config = ConsumerConfig::builder()
+    .bootstrap_servers(vec!["rivven.example.com:9292".into()])
+    .group_id("my-group")
+    .tls(tls, None)
+    .build()?;
+
+let mut consumer = Consumer::new(config).await?;
+```
+
 ### Cluster Transport
 
 Inter-node communication supports two transport modes:
@@ -216,11 +234,13 @@ users:
 #### Security Features
 
 - **PBKDF2-HMAC-SHA256**: 600,000 iterations for key derivation (OWASP recommendation)
+- **Client-side iteration guard**: The client rejects servers advertising fewer than 4,096 PBKDF2 iterations (per RFC 7677) to prevent downgrade attacks
 - **32-byte random salt**: Per-user unique salt prevents rainbow tables
-- **Constant-time comparison**: Prevents timing attacks
+- **Constant-time comparison**: Prevents timing attacks; secret length is never leaked via early-return timing side-channels
 - **User enumeration prevention**: Fake salt/iterations for unknown users
 - **Mutual authentication**: Server proves it knows the password too
 - **Password complexity**: Minimum 8 characters, must include uppercase, lowercase, digit, and special character
+- **Health-check connections**: Connection pool health checks are authenticated with TLS and SCRAM-SHA-256, matching production connections (no plaintext bypass)
 
 #### Client Example
 
@@ -267,6 +287,8 @@ let client = ResilientClient::new(config).await?;
 ### Role-Based Access Control (RBAC)
 
 RBAC is enforced on all **data-plane operations** — produce, consume, and admin requests are all subject to authorization checks. Authentication is required by default; unauthenticated requests are rejected before reaching any handler.
+
+**Single source of truth:** The broker uses a centralized `resolve_permission()` function to map every `Request` variant to the required `Permission`. This eliminates duplicate permission logic across handlers and ensures consistent authorization checks throughout the codebase.
 
 Define roles with permissions:
 
@@ -466,7 +488,7 @@ validation:
 ### TLS Enforcement for Plaintext Auth
 
 {: .warning }
-> When using plaintext authentication (simple username/password), TLS is enforced. The broker rejects plaintext auth attempts over unencrypted connections to prevent credential leakage. Use SCRAM-SHA-256 or enable TLS for password-based authentication.
+> When using plaintext authentication (simple username/password), TLS is enforced on **both sides**. The broker rejects plaintext auth attempts over unencrypted connections, and the client (`SASL/PLAIN`) refuses to send credentials over non-TLS connections. This dual guard prevents credential leakage even if one side is misconfigured. Use SCRAM-SHA-256 or enable TLS for password-based authentication.
 
 ### HTTP LLM Provider Security
 
@@ -479,6 +501,19 @@ The Rivven operator validates environment variable specifications in CRDs, inclu
 ### Cluster Secret for Raft RPC
 
 Raft RPC communication between cluster nodes is authenticated using a shared cluster secret. This prevents unauthorized nodes from joining the cluster or injecting log entries. Configure the secret via `cluster.secret` or `RIVVEN_CLUSTER_SECRET` environment variable.
+
+The cluster secret comparison is constant-time and does not leak the secret length via timing side-channels.
+
+### SWIM Gossip Protocol Security
+
+The SWIM membership protocol uses HMAC-SHA256 message authentication with timestamp-based replay protection:
+
+- Every gossip message includes an 8-byte millisecond timestamp
+- The HMAC covers `[timestamp || payload]`
+- Recipients reject messages with timestamps that drift more than 60 seconds from local time
+- This prevents replayed gossip messages from causing false membership state changes
+- HMAC key material is wrapped in `Zeroizing<String>` (from the `zeroize` crate) and scrubbed from memory on drop
+- Both instance-method and static (spawned-task) signing paths produce identical wire formats with replay protection
 
 ### CDC Identifier Validation
 
@@ -507,7 +542,7 @@ Wire protocol conversions use validated and saturating casts to prevent silent t
 | Field | Conversion | Safety |
 |-------|-----------|--------|
 | `producer_epoch` | `u32 → u16` | `safe_producer_epoch()` — returns `ProtocolError` on overflow |
-| `max_messages` | `usize → u32` | `u32::try_from().unwrap_or(u32::MAX)` — saturates instead of truncating |
+| `max_messages` | native `u32` | Wire type is `uint32`; no cross-platform truncation risk |
 | `expires_in` | `u64 → u32` | `u32::try_from().unwrap_or(u32::MAX)` — saturates instead of truncating |
 | `port` | `u32 → u16` | `u16::try_from()` — logs warning and uses 0 on overflow |
 
@@ -612,7 +647,7 @@ limits:
   idle_timeout_secs: 300
 ```
 
-Rate limiting is enforced on both the cluster server (inter-node) and the secure server (client-facing TLS). When a client exceeds the per-IP rate limit, requests are rejected with a `RATE_LIMIT_EXCEEDED` error. Connections from IPs exceeding `max_connections_per_ip` are refused at the accept level.
+Rate limiting is enforced on both the cluster server (inter-node) and the secure server (client-facing TLS). The rate limiter uses the actual frame size for size-based quota checking. When a client exceeds the per-IP rate limit, requests are rejected with a `RATE_LIMIT_EXCEEDED` error. Connections from IPs exceeding `max_connections_per_ip` are refused at the accept level.
 
 ---
 

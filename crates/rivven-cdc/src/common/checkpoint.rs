@@ -264,6 +264,31 @@ impl CheckpointStore {
             .await
             .map_err(CdcError::Io)?;
 
+        // Fsync the parent directory so the rename is durable on crash
+        // (CDC-01). Without this, the directory entry may be lost.
+        if self.fsync {
+            if let Some(parent) = file_path.parent() {
+                match fs::File::open(parent).await {
+                    Ok(dir) => {
+                        if let Err(e) = dir.sync_all().await {
+                            tracing::warn!(
+                                path = %parent.display(),
+                                error = %e,
+                                "Directory fsync failed after checkpoint rename"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %parent.display(),
+                            error = %e,
+                            "Failed to open parent directory for fsync"
+                        );
+                    }
+                }
+            }
+        }
+
         // Update cache
         {
             let mut cache = self.cache.write().await;

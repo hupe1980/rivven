@@ -95,6 +95,27 @@ pub trait StorageBackend: Send + Sync {
 
     /// Undelete a soft-deleted subject
     async fn undelete_subject(&self, subject: &Subject) -> SchemaResult<Vec<u32>>;
+
+    /// Atomically register a schema under a subject in a single write.
+    ///
+    /// Combines ID allocation, schema storage, and subject-version registration
+    /// into one durable write to prevent partial state from crashes between
+    /// separate writes. Default implementation allocates an ID via
+    /// `next_schema_id`, then stores the schema and registers the version
+    /// (suitable for in-memory backends where atomicity is guaranteed).
+    async fn register_schema_atomic(
+        &self,
+        schema: Schema,
+        subject: &Subject,
+    ) -> SchemaResult<(SchemaId, SchemaVersion)> {
+        // Default: allocate ID + non-atomic fallback (3 separate writes)
+        let id = self.next_schema_id().await?;
+        let mut schema_with_id = schema;
+        schema_with_id.id = id;
+        let stored_id = self.store_schema(schema_with_id).await?;
+        let version = self.register_subject_version(subject, stored_id).await?;
+        Ok((stored_id, version))
+    }
 }
 
 /// Type alias for storage backend

@@ -15,7 +15,8 @@
 | **Storage** | Append-only log, tiered storage, log compaction |
 | **Clustering** | Raft consensus, multi-node replication |
 | **Security** | SCRAM-SHA-256 (600K PBKDF2), mTLS, API keys, Cedar RBAC, password complexity enforcement |
-| **Transactions** | Validate-before-write, atomic COMMIT/ABORT markers, WAL-first state transitions, epoch-fenced publish, pending-bytes backpressure on all publish paths |
+| **Transactions** | Validate-before-write, atomic COMMIT markers with retry, WAL-first state transitions, epoch-fenced publish, pending-bytes backpressure on all publish paths |
+| **Consumer Groups** | Server-side GroupCoordinator (JoinGroup/SyncGroup/Heartbeat/LeaveGroup), range-based assignment, heartbeat-based failure detection, SyncGroup follower barrier (followers block until leader applies assignments; `Notified` future registered before lock acquisition to eliminate notify-before-await race), cooperative rebalance generation correctness, hot-path `&str` heartbeat API |
 | **Observability** | Prometheus metrics, web dashboard |
 
 ## Quick Start

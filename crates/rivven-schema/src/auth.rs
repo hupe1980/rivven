@@ -74,22 +74,19 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 
-#[cfg(feature = "auth")]
 use axum::{
     http::{header::AUTHORIZATION, StatusCode},
     response::IntoResponse,
     Json,
 };
-#[cfg(feature = "auth")]
 use base64::Engine;
-#[cfg(feature = "auth")]
 use tracing::{debug, warn};
 
-#[cfg(all(feature = "auth", not(feature = "cedar")))]
+#[cfg(not(feature = "cedar"))]
 use rivven_core::{AuthManager, AuthSession, Permission, ResourceType};
 
 #[cfg(feature = "cedar")]
-use rivven_core::{AuthManager, AuthSession, Permission};
+use rivven_core::{AuthManager, AuthSession, Permission, ResourceType};
 
 // Cedar authorization support
 #[cfg(feature = "cedar")]
@@ -309,10 +306,7 @@ impl AuthConfig {
 /// Authentication state for extracting in handlers
 #[derive(Debug, Clone)]
 pub struct AuthState {
-    #[cfg(feature = "auth")]
     pub session: Option<AuthSession>,
-    #[cfg(not(feature = "auth"))]
-    pub session: Option<()>,
     pub authenticated: bool,
 }
 
@@ -325,7 +319,6 @@ impl AuthState {
         }
     }
 
-    #[cfg(feature = "auth")]
     /// Authenticated state with session
     pub fn authenticated(session: AuthSession) -> Self {
         Self {
@@ -336,19 +329,12 @@ impl AuthState {
 
     /// Get the principal name if authenticated
     pub fn principal(&self) -> Option<&str> {
-        #[cfg(feature = "auth")]
-        {
-            self.session.as_ref().map(|s| s.principal_name.as_str())
-        }
-        #[cfg(not(feature = "auth"))]
-        {
-            None
-        }
+        self.session.as_ref().map(|s| s.principal_name.as_str())
     }
 }
 
 /// Shared authentication state for the server
-#[cfg(all(feature = "auth", not(feature = "cedar")))]
+#[cfg(not(feature = "cedar"))]
 pub struct ServerAuthState {
     pub auth_manager: Arc<AuthManager>,
     pub config: AuthConfig,
@@ -359,11 +345,6 @@ pub struct ServerAuthState {
 pub struct ServerAuthState {
     pub auth_manager: Arc<AuthManager>,
     pub cedar_authorizer: Option<Arc<CedarAuthorizer>>,
-    pub config: AuthConfig,
-}
-
-#[cfg(not(feature = "auth"))]
-pub struct ServerAuthState {
     pub config: AuthConfig,
 }
 
@@ -397,7 +378,6 @@ pub struct AuthErrorResponse {
 /// 2. JWT/OIDC (Bearer token with JWT validation)
 /// 3. Bearer Token (session ID lookup)
 /// 4. Basic Auth (username:password)
-#[cfg(feature = "auth")]
 pub async fn auth_middleware(
     State(auth_state): State<Arc<ServerAuthState>>,
     mut request: Request<Body>,
@@ -504,7 +484,6 @@ pub async fn auth_middleware(
 }
 
 /// Build unauthorized response with WWW-Authenticate header
-#[cfg(feature = "auth")]
 fn unauthorized_response(realm: &str, error: AuthErrorResponse) -> Response {
     (
         StatusCode::UNAUTHORIZED,
@@ -517,25 +496,12 @@ fn unauthorized_response(realm: &str, error: AuthErrorResponse) -> Response {
         .into_response()
 }
 
-/// Authentication middleware when auth feature is disabled (passthrough)
-#[cfg(not(feature = "auth"))]
-pub async fn auth_middleware(
-    State(_auth_state): State<Arc<ServerAuthState>>,
-    mut request: Request<Body>,
-    next: Next,
-) -> Response {
-    // Without auth feature, always allow anonymous
-    request.extensions_mut().insert(AuthState::anonymous());
-    next.run(request).await
-}
-
 /// Validate API Key (timing-safe).
 ///
 /// Standard HashMap::get short-circuits on key mismatch, creating
 /// a timing side-channel that enables brute-force key enumeration. Instead,
 /// we iterate all stored keys and use constant-time byte comparison so that
 /// the response time does not leak which keys exist.
-#[cfg(feature = "auth")]
 fn validate_api_key(
     api_key: &str,
     config: &AuthConfig,
@@ -562,7 +528,12 @@ fn validate_api_key(
         if let Some(session) = auth_manager.get_session_by_principal(&entry.principal) {
             Ok(AuthState::authenticated(session))
         } else {
-            let session = auth_manager.create_api_key_session(&entry.principal, &entry.roles);
+            let session = auth_manager
+                .create_api_key_session(&entry.principal, &entry.roles)
+                .map_err(|e| AuthErrorResponse {
+                    error_code: 50001,
+                    message: format!("Internal error: {e}"),
+                })?;
             Ok(AuthState::authenticated(session))
         }
     } else {
@@ -677,12 +648,16 @@ fn validate_jwt_token(
     );
 
     // Create session for this JWT user
-    let session = auth_manager.create_jwt_session(&principal, &roles);
+    let session = auth_manager
+        .create_jwt_session(&principal, &roles)
+        .map_err(|e| AuthErrorResponse {
+            error_code: 50001,
+            message: format!("Internal error: {e}"),
+        })?;
     Ok(AuthState::authenticated(session))
 }
 
 /// Parse Basic Auth header
-#[cfg(feature = "auth")]
 async fn parse_basic_auth(
     header: &str,
     auth_manager: &AuthManager,
@@ -726,7 +701,6 @@ async fn parse_basic_auth(
 
 /// Parse Bearer token header
 /// Bearer tokens are treated as session IDs
-#[cfg(feature = "auth")]
 async fn parse_bearer_token(
     header: &str,
     auth_manager: &AuthManager,
@@ -753,7 +727,6 @@ async fn parse_bearer_token(
 }
 
 /// Check if request is a read-only operation
-#[cfg(feature = "auth")]
 fn is_read_request(request: &Request<Body>) -> bool {
     matches!(request.method().as_str(), "GET" | "HEAD" | "OPTIONS")
 }
@@ -773,7 +746,6 @@ pub enum SchemaPermission {
 
 impl SchemaPermission {
     /// Get the corresponding rivven-core Permission
-    #[cfg(feature = "auth")]
     pub fn to_core_permission(self) -> Permission {
         match self {
             SchemaPermission::Describe => Permission::Describe,
@@ -796,7 +768,6 @@ impl SchemaPermission {
 }
 
 /// Check if the current session has permission on a subject (Simple RBAC)
-#[cfg(all(feature = "auth", not(feature = "cedar")))]
 pub fn check_subject_permission(
     auth_state: &AuthState,
     subject: &str,
@@ -881,17 +852,7 @@ pub fn check_subject_permission_cedar(
     }
 }
 
-/// Check permission without auth feature (always succeeds)
-#[cfg(not(feature = "auth"))]
-pub fn check_subject_permission(
-    _auth_state: &AuthState,
-    _subject: &str,
-    _permission: SchemaPermission,
-) -> Result<(), AuthErrorResponse> {
-    Ok(())
-}
-
-#[cfg(all(test, feature = "auth"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

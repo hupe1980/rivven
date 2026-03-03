@@ -7,6 +7,9 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Partition assignments for SyncGroup: Vec<(member_id, Vec<(topic, Vec<partition>)>)>
+pub type SyncGroupAssignments = Vec<(String, Vec<(String, Vec<u32>)>)>;
+
 /// Quota alteration request
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuotaAlteration {
@@ -71,6 +74,18 @@ pub struct DeleteRecordsResult {
     pub low_watermark: u64,
     /// Error message if deletion failed for this partition
     pub error: Option<String>,
+}
+
+/// A single record within a [`Request::PublishBatch`].
+///
+/// Carries only the key and value — the topic, partition, and
+/// leader_epoch are shared across the entire batch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchRecord {
+    #[serde(with = "crate::serde_utils::option_bytes_serde")]
+    pub key: Option<Bytes>,
+    #[serde(with = "crate::serde_utils::bytes_serde")]
+    pub value: Bytes,
 }
 
 /// Protocol request messages
@@ -148,7 +163,7 @@ pub enum Request {
         topic: String,
         partition: u32,
         offset: u64,
-        max_messages: usize,
+        max_messages: u32,
         /// Isolation level for transactional reads
         /// None = read_uncommitted (default, backward compatible)
         /// Some(0) = read_uncommitted
@@ -401,6 +416,98 @@ pub enum Request {
         protocol_version: u32,
         /// Optional client identifier for diagnostics
         client_id: String,
+    },
+
+    // =========================================================================
+    // Consumer Group Coordination (Kafka-compatible protocol)
+    // =========================================================================
+    /// Join a consumer group. The coordinator assigns a member ID and,
+    /// once all members have joined, elects a leader and triggers a
+    /// rebalance. Returns the generation ID, member ID, and leader info.
+    JoinGroup {
+        /// Consumer group ID
+        group_id: String,
+        /// Member ID (empty string for first join; server assigns one)
+        member_id: String,
+        /// Session timeout in milliseconds — if no heartbeat is received
+        /// within this period, the member is considered dead and a
+        /// rebalance is triggered.
+        session_timeout_ms: u32,
+        /// Rebalance timeout in milliseconds — maximum time the
+        /// coordinator waits for all members to join during a rebalance.
+        rebalance_timeout_ms: u32,
+        /// Protocol type (e.g. "consumer")
+        protocol_type: String,
+        /// Topics this member wants to consume
+        subscriptions: Vec<String>,
+    },
+
+    /// Sync a consumer group — the leader sends partition assignments
+    /// to the coordinator, and all members (including the leader)
+    /// receive their individual assignments.
+    SyncGroup {
+        /// Consumer group ID
+        group_id: String,
+        /// Generation ID from JoinGroup response
+        generation_id: u32,
+        /// This member's ID
+        member_id: String,
+        /// Assignments (only sent by leader; empty for followers).
+        /// Each entry is (member_id, Vec<(topic, Vec<partition>)>).
+        assignments: SyncGroupAssignments,
+    },
+
+    /// Heartbeat — sent periodically by group members to keep their
+    /// session alive. The response tells the member whether a
+    /// rebalance is needed.
+    Heartbeat {
+        /// Consumer group ID
+        group_id: String,
+        /// Generation ID
+        generation_id: u32,
+        /// This member's ID
+        member_id: String,
+    },
+
+    /// Leave a consumer group gracefully. Triggers an immediate
+    /// rebalance for the remaining members.
+    LeaveGroup {
+        /// Consumer group ID
+        group_id: String,
+        /// This member's ID
+        member_id: String,
+    },
+
+    // =========================================================================
+    // Batch Publish (hot-path optimization)
+    // =========================================================================
+
+    /// Publish a batch of records to a single (topic, partition) in one
+    /// wire message — eliminates per-record topic cloning and serialization
+    /// overhead compared to sending N individual `Publish` requests.
+    PublishBatch {
+        topic: String,
+        partition: Option<u32>,
+        records: Vec<BatchRecord>,
+        /// Leader epoch for data-path fencing (§2.4).
+        #[serde(default)]
+        leader_epoch: Option<u64>,
+    },
+
+    /// Idempotent batch publish — combines [`IdempotentPublish`] semantics
+    /// with the batching efficiency of [`PublishBatch`].
+    ///
+    /// Records are assigned sequence numbers `base_sequence..base_sequence + N - 1`.
+    IdempotentPublishBatch {
+        topic: String,
+        partition: Option<u32>,
+        records: Vec<BatchRecord>,
+        producer_id: u64,
+        producer_epoch: u16,
+        /// First sequence number in the batch
+        base_sequence: i32,
+        #[serde(default)]
+        leader_epoch: Option<u64>,
     },
 }
 
@@ -664,6 +771,74 @@ impl std::fmt::Debug for Request {
                 .field("protocol_version", protocol_version)
                 .field("client_id", client_id)
                 .finish(),
+            Self::JoinGroup {
+                group_id,
+                member_id,
+                ..
+            } => f
+                .debug_struct("JoinGroup")
+                .field("group_id", group_id)
+                .field("member_id", member_id)
+                .finish(),
+            Self::SyncGroup {
+                group_id,
+                generation_id,
+                member_id,
+                ..
+            } => f
+                .debug_struct("SyncGroup")
+                .field("group_id", group_id)
+                .field("generation_id", generation_id)
+                .field("member_id", member_id)
+                .finish(),
+            Self::Heartbeat {
+                group_id,
+                generation_id,
+                member_id,
+            } => f
+                .debug_struct("Heartbeat")
+                .field("group_id", group_id)
+                .field("generation_id", generation_id)
+                .field("member_id", member_id)
+                .finish(),
+            Self::LeaveGroup {
+                group_id,
+                member_id,
+            } => f
+                .debug_struct("LeaveGroup")
+                .field("group_id", group_id)
+                .field("member_id", member_id)
+                .finish(),
+            Self::PublishBatch {
+                topic,
+                partition,
+                records,
+                leader_epoch,
+            } => f
+                .debug_struct("PublishBatch")
+                .field("topic", topic)
+                .field("partition", partition)
+                .field("record_count", &records.len())
+                .field("leader_epoch", leader_epoch)
+                .finish(),
+            Self::IdempotentPublishBatch {
+                topic,
+                partition,
+                records,
+                producer_id,
+                producer_epoch,
+                base_sequence,
+                leader_epoch,
+            } => f
+                .debug_struct("IdempotentPublishBatch")
+                .field("topic", topic)
+                .field("partition", partition)
+                .field("record_count", &records.len())
+                .field("producer_id", producer_id)
+                .field("producer_epoch", producer_epoch)
+                .field("base_sequence", base_sequence)
+                .field("leader_epoch", leader_epoch)
+                .finish(),
         }
     }
 }
@@ -901,6 +1076,68 @@ pub enum Response {
         /// Human-readable message (e.g. reason for incompatibility)
         message: String,
     },
+
+    // =========================================================================
+    // Consumer Group Coordination
+    // =========================================================================
+    /// JoinGroup response — returned to each member after all members
+    /// have joined (or the rebalance timeout expires).
+    JoinGroupResult {
+        /// Generation ID (monotonically increasing; bumped on each rebalance)
+        generation_id: u32,
+        /// Protocol type (e.g. "consumer")
+        protocol_type: String,
+        /// This member's assigned member ID
+        member_id: String,
+        /// The leader's member ID (if member_id == leader_id, this member is leader)
+        leader_id: String,
+        /// All members in the group (only populated for the leader)
+        /// Each entry is (member_id, subscriptions)
+        members: Vec<(String, Vec<String>)>,
+    },
+
+    /// SyncGroup response — partition assignments for this member.
+    SyncGroupResult {
+        /// This member's partition assignments: Vec<(topic, Vec<partition>)>
+        assignments: Vec<(String, Vec<u32>)>,
+    },
+
+    /// Heartbeat response — signals whether the member should rejoin.
+    HeartbeatResult {
+        /// Error code: 0 = OK, 27 = REBALANCE_IN_PROGRESS (rejoin needed)
+        error_code: i32,
+    },
+
+    /// LeaveGroup response
+    LeaveGroupResult,
+
+    // =========================================================================
+    // Batch Publish Responses
+    // =========================================================================
+
+    /// Result of a [`Request::PublishBatch`].
+    ///
+    /// All records are written to contiguous offsets starting at `base_offset`.
+    PublishedBatch {
+        /// Offset of the first record in the batch
+        base_offset: u64,
+        /// Partition the records were written to
+        partition: u32,
+        /// Number of records successfully written
+        record_count: u32,
+    },
+
+    /// Result of a [`Request::IdempotentPublishBatch`].
+    IdempotentPublishedBatch {
+        /// Offset of the first record in the batch
+        base_offset: u64,
+        /// Partition the records were written to
+        partition: u32,
+        /// Number of records successfully written
+        record_count: u32,
+        /// Whether this was a duplicate batch
+        duplicate: bool,
+    },
 }
 
 impl Request {
@@ -919,7 +1156,220 @@ impl Request {
     /// Use `from_wire()` for wire transmission with format detection support.
     #[inline]
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        Ok(postcard::from_bytes(data)?)
+        let request: Self = postcard::from_bytes(data)?;
+        request.validate()?;
+        Ok(request)
+    }
+
+    /// Post-deserialization bounds validation.
+    ///
+    /// Prevents crafted payloads with oversized strings / vecs from being
+    /// accepted. Must be called after every `from_bytes` / `from_wire`.
+    #[allow(deprecated)]
+    pub fn validate(&self) -> Result<()> {
+        use crate::{MAX_AUTH_PAYLOAD, MAX_LIST_LEN, MAX_NAME_LEN};
+
+        let check_name = |s: &str, field: &str| -> Result<()> {
+            if s.len() > MAX_NAME_LEN {
+                return Err(crate::ProtocolError::InvalidFormat(format!(
+                    "{field} exceeds max length ({} > {MAX_NAME_LEN})",
+                    s.len()
+                )));
+            }
+            Ok(())
+        };
+        let check_list = |len: usize, field: &str| -> Result<()> {
+            if len > MAX_LIST_LEN {
+                return Err(crate::ProtocolError::InvalidFormat(format!(
+                    "{field} list exceeds max length ({len} > {MAX_LIST_LEN})"
+                )));
+            }
+            Ok(())
+        };
+
+        match self {
+            Request::Authenticate {
+                username, password, ..
+            } => {
+                check_name(username, "username")?;
+                if password.len() > MAX_AUTH_PAYLOAD {
+                    return Err(crate::ProtocolError::InvalidFormat(
+                        "password exceeds max auth payload".into(),
+                    ));
+                }
+            }
+            Request::SaslAuthenticate {
+                mechanism,
+                auth_bytes,
+            } => {
+                if mechanism.len() > MAX_NAME_LEN {
+                    return Err(crate::ProtocolError::InvalidFormat(
+                        "SASL mechanism name too long".into(),
+                    ));
+                }
+                if auth_bytes.len() > MAX_AUTH_PAYLOAD {
+                    return Err(crate::ProtocolError::InvalidFormat(
+                        "SASL auth bytes exceed max auth payload".into(),
+                    ));
+                }
+            }
+            Request::ScramClientFirst { message } | Request::ScramClientFinal { message } => {
+                if message.len() > MAX_AUTH_PAYLOAD {
+                    return Err(crate::ProtocolError::InvalidFormat(
+                        "SCRAM message exceeds max auth payload".into(),
+                    ));
+                }
+            }
+            Request::Publish { topic, .. } => check_name(topic, "topic")?,
+            Request::Consume { topic, .. } => check_name(topic, "topic")?,
+            Request::CreateTopic { name, .. } => check_name(name, "topic")?,
+            Request::DeleteTopic { name } => check_name(name, "topic")?,
+            Request::CommitOffset {
+                consumer_group,
+                topic,
+                ..
+            } => {
+                check_name(consumer_group, "consumer_group")?;
+                check_name(topic, "topic")?;
+            }
+            Request::GetOffset {
+                consumer_group,
+                topic,
+                ..
+            } => {
+                check_name(consumer_group, "consumer_group")?;
+                check_name(topic, "topic")?;
+            }
+            Request::GetMetadata { topic } => check_name(topic, "topic")?,
+            Request::GetClusterMetadata { topics, .. } => {
+                check_list(topics.len(), "topics")?;
+                for t in topics {
+                    check_name(t, "topic")?;
+                }
+            }
+            Request::DescribeGroup { consumer_group } | Request::DeleteGroup { consumer_group } => {
+                check_name(consumer_group, "consumer_group")?;
+            }
+            Request::GetOffsetForTimestamp { topic, .. } => check_name(topic, "topic")?,
+            Request::InitProducerId { .. } => {}
+            Request::IdempotentPublish { topic, .. } => check_name(topic, "topic")?,
+            Request::BeginTransaction { txn_id, .. } => check_name(txn_id, "txn_id")?,
+            Request::AddPartitionsToTxn {
+                txn_id, partitions, ..
+            } => {
+                check_name(txn_id, "txn_id")?;
+                check_list(partitions.len(), "partitions")?;
+            }
+            Request::TransactionalPublish { txn_id, topic, .. } => {
+                check_name(txn_id, "txn_id")?;
+                check_name(topic, "topic")?;
+            }
+            Request::AddOffsetsToTxn {
+                txn_id, offsets, ..
+            } => {
+                check_name(txn_id, "txn_id")?;
+                check_list(offsets.len(), "offsets")?;
+            }
+            Request::CommitTransaction { txn_id, .. }
+            | Request::AbortTransaction { txn_id, .. } => {
+                check_name(txn_id, "txn_id")?;
+            }
+            Request::DescribeQuotas { entities } => {
+                check_list(entities.len(), "entities")?;
+            }
+            Request::AlterQuotas { alterations, .. } => {
+                check_list(alterations.len(), "alterations")?;
+            }
+            Request::AlterTopicConfig { topic, configs, .. } => {
+                check_name(topic, "topic")?;
+                check_list(configs.len(), "configs")?;
+            }
+            Request::CreatePartitions {
+                topic, assignments, ..
+            } => {
+                check_name(topic, "topic")?;
+                check_list(assignments.len(), "assignments")?;
+            }
+            Request::DeleteRecords {
+                topic,
+                partition_offsets,
+            } => {
+                check_name(topic, "topic")?;
+                check_list(partition_offsets.len(), "partition_offsets")?;
+            }
+            Request::DescribeTopicConfigs { topics } => {
+                check_list(topics.len(), "topics")?;
+                for t in topics {
+                    check_name(t, "topic")?;
+                }
+            }
+            Request::Handshake { client_id, .. } => {
+                check_name(client_id, "client_id")?;
+            }
+            Request::JoinGroup {
+                group_id,
+                member_id,
+                protocol_type,
+                subscriptions,
+                ..
+            } => {
+                check_name(group_id, "group_id")?;
+                check_name(member_id, "member_id")?;
+                check_name(protocol_type, "protocol_type")?;
+                check_list(subscriptions.len(), "subscriptions")?;
+                for t in subscriptions {
+                    check_name(t, "subscription_topic")?;
+                }
+            }
+            Request::SyncGroup {
+                group_id,
+                member_id,
+                assignments,
+                ..
+            } => {
+                check_name(group_id, "group_id")?;
+                check_name(member_id, "member_id")?;
+                check_list(assignments.len(), "assignments")?;
+                for (mid, topic_parts) in assignments {
+                    check_name(mid, "assignment_member_id")?;
+                    check_list(topic_parts.len(), "topic_partitions")?;
+                    for (topic, parts) in topic_parts {
+                        check_name(topic, "assignment_topic")?;
+                        check_list(parts.len(), "partitions")?;
+                    }
+                }
+            }
+            Request::Heartbeat {
+                group_id,
+                member_id,
+                ..
+            } => {
+                check_name(group_id, "group_id")?;
+                check_name(member_id, "member_id")?;
+            }
+            Request::LeaveGroup {
+                group_id,
+                member_id,
+            } => {
+                check_name(group_id, "group_id")?;
+                check_name(member_id, "member_id")?;
+            }
+            Request::PublishBatch {
+                topic, records, ..
+            } => {
+                check_name(topic, "topic")?;
+                check_list(records.len(), "records")?;
+            }
+            Request::IdempotentPublishBatch {
+                topic, records, ..
+            } => {
+                check_name(topic, "topic")?;
+                check_list(records.len(), "records")?;
+            }
+            // Enum variants with no string/vec payload need no validation.
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Serialize request with wire format prefix
@@ -1012,7 +1462,8 @@ impl Request {
 
         match format {
             crate::WireFormat::Postcard => {
-                let request = postcard::from_bytes(payload)?;
+                let request: Self = postcard::from_bytes(payload)?;
+                request.validate()?;
                 Ok((request, format, correlation_id))
             }
             crate::WireFormat::Protobuf => {
@@ -1042,7 +1493,71 @@ impl Response {
     /// Deserialize response from bytes (postcard format)
     #[inline]
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        Ok(postcard::from_bytes(data)?)
+        let response: Self = postcard::from_bytes(data)?;
+        response.validate()?;
+        Ok(response)
+    }
+
+    /// Post-deserialization bounds validation for responses.
+    pub fn validate(&self) -> Result<()> {
+        use crate::{MAX_LIST_LEN, MAX_MESSAGES_PER_RESPONSE, MAX_NAME_LEN};
+
+        match self {
+            Response::Messages { messages } => {
+                if messages.len() > MAX_MESSAGES_PER_RESPONSE {
+                    return Err(crate::ProtocolError::InvalidFormat(format!(
+                        "messages batch size {} exceeds max {MAX_MESSAGES_PER_RESPONSE}",
+                        messages.len()
+                    )));
+                }
+            }
+            Response::Topics { topics } | Response::Groups { groups: topics } => {
+                if topics.len() > MAX_LIST_LEN {
+                    return Err(crate::ProtocolError::InvalidFormat(format!(
+                        "list length {} exceeds max {MAX_LIST_LEN}",
+                        topics.len()
+                    )));
+                }
+                for t in topics {
+                    if t.len() > MAX_NAME_LEN {
+                        return Err(crate::ProtocolError::InvalidFormat(format!(
+                            "name length {} exceeds max {MAX_NAME_LEN}",
+                            t.len()
+                        )));
+                    }
+                }
+            }
+            Response::ClusterMetadata {
+                brokers, topics, ..
+            } => {
+                if brokers.len() > MAX_LIST_LEN {
+                    return Err(crate::ProtocolError::InvalidFormat(
+                        "brokers list too large".into(),
+                    ));
+                }
+                if topics.len() > MAX_LIST_LEN {
+                    return Err(crate::ProtocolError::InvalidFormat(
+                        "topics list too large".into(),
+                    ));
+                }
+            }
+            Response::RecordsDeleted { results, .. } => {
+                if results.len() > MAX_LIST_LEN {
+                    return Err(crate::ProtocolError::InvalidFormat(
+                        "delete results list too large".into(),
+                    ));
+                }
+            }
+            Response::Error { message } => {
+                if message.len() > crate::MAX_MESSAGE_SIZE {
+                    return Err(crate::ProtocolError::InvalidFormat(
+                        "error message exceeds max message size".into(),
+                    ));
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Serialize response with wire format prefix
@@ -1120,7 +1635,8 @@ impl Response {
 
         match format {
             crate::WireFormat::Postcard => {
-                let response = postcard::from_bytes(payload)?;
+                let response: Self = postcard::from_bytes(payload)?;
+                response.validate()?;
                 Ok((response, format, correlation_id))
             }
             crate::WireFormat::Protobuf => {
@@ -1546,6 +2062,68 @@ mod tests {
                 },
                 33,
             ),
+            // variant 34: JoinGroup
+            (
+                Request::JoinGroup {
+                    group_id: "g".into(),
+                    member_id: String::new(),
+                    session_timeout_ms: 10000,
+                    rebalance_timeout_ms: 30000,
+                    protocol_type: "consumer".into(),
+                    subscriptions: vec![],
+                },
+                34,
+            ),
+            // variant 35: SyncGroup
+            (
+                Request::SyncGroup {
+                    group_id: "g".into(),
+                    generation_id: 1,
+                    member_id: "m".into(),
+                    assignments: vec![],
+                },
+                35,
+            ),
+            // variant 36: Heartbeat
+            (
+                Request::Heartbeat {
+                    group_id: "g".into(),
+                    generation_id: 1,
+                    member_id: "m".into(),
+                },
+                36,
+            ),
+            // variant 37: LeaveGroup
+            (
+                Request::LeaveGroup {
+                    group_id: "g".into(),
+                    member_id: "m".into(),
+                },
+                37,
+            ),
+            // variant 38: PublishBatch
+            (
+                Request::PublishBatch {
+                    topic: "t".into(),
+                    partition: Some(0),
+                    records: vec![],
+                    leader_epoch: None,
+                },
+                38,
+            ),
+            // variant 39: IdempotentPublishBatch
+            (
+                Request::IdempotentPublishBatch {
+                    topic: "t".into(),
+                    partition: Some(0),
+                    records: vec![],
+                    producer_id: 1,
+                    producer_epoch: 0,
+                    base_sequence: 0,
+                    leader_epoch: None,
+                },
+                39,
+            ),
         ];
 
         for (request, expected_discriminant) in test_cases {
@@ -1774,6 +2352,47 @@ mod tests {
                 },
                 35,
             ),
+            // variant 36: JoinGroupResult
+            (
+                Response::JoinGroupResult {
+                    generation_id: 1,
+                    protocol_type: "consumer".into(),
+                    member_id: "m".into(),
+                    leader_id: "l".into(),
+                    members: vec![],
+                },
+                36,
+            ),
+            // variant 37: SyncGroupResult
+            (
+                Response::SyncGroupResult {
+                    assignments: vec![],
+                },
+                37,
+            ),
+            // variant 38: HeartbeatResult
+            (Response::HeartbeatResult { error_code: 0 }, 38),
+            // variant 39: LeaveGroupResult
+            (Response::LeaveGroupResult, 39),
+            // variant 40: PublishedBatch
+            (
+                Response::PublishedBatch {
+                    base_offset: 0,
+                    partition: 0,
+                    record_count: 0,
+                },
+                40,
+            ),
+            // variant 41: IdempotentPublishedBatch
+            (
+                Response::IdempotentPublishedBatch {
+                    base_offset: 0,
+                    partition: 0,
+                    record_count: 0,
+                    duplicate: false,
+                },
+                41,
+            ),
         ];
 
         for (response, expected_discriminant) in test_cases {
@@ -1823,6 +2442,156 @@ mod tests {
         assert!(
             matches!(result, Err(crate::ProtocolError::MessageTooLarge(_, _))),
             "Expected MessageTooLarge error for oversized response"
+        );
+    }
+
+    /// Guard against accidental reordering/removal of enum variants.
+    ///
+    /// Postcard uses discriminant indices as wire tags — reordering or deleting
+    /// a variant silently breaks all existing clients. This test serialises
+    /// one instance of every variant and asserts the discriminant byte matches
+    /// the expected index. Adding new variants at the END is safe — just
+    /// extend the list. Removing or reordering variants will make this test
+    /// fail.
+    #[test]
+    #[allow(deprecated)]
+    fn request_discriminant_stability() {
+        // Each tuple: (expected discriminant, instance of the variant)
+        let cases: Vec<(u8, Request)> = vec![
+            (
+                0,
+                Request::Authenticate {
+                    username: String::new(),
+                    password: String::new(),
+                    require_tls: false,
+                },
+            ),
+            (
+                1,
+                Request::SaslAuthenticate {
+                    mechanism: Bytes::new(),
+                    auth_bytes: Bytes::new(),
+                },
+            ),
+            (
+                2,
+                Request::ScramClientFirst {
+                    message: Bytes::new(),
+                },
+            ),
+            (
+                3,
+                Request::ScramClientFinal {
+                    message: Bytes::new(),
+                },
+            ),
+            (
+                4,
+                Request::Publish {
+                    topic: String::new(),
+                    partition: None,
+                    key: None,
+                    value: Bytes::new(),
+                    leader_epoch: None,
+                },
+            ),
+            (
+                5,
+                Request::Consume {
+                    topic: String::new(),
+                    partition: 0,
+                    offset: 0,
+                    max_messages: 1,
+                    isolation_level: None,
+                    max_wait_ms: None,
+                },
+            ),
+            (
+                6,
+                Request::CreateTopic {
+                    name: String::new(),
+                    partitions: None,
+                },
+            ),
+            (7, Request::ListTopics),
+            (
+                8,
+                Request::DeleteTopic {
+                    name: String::new(),
+                },
+            ),
+            (
+                9,
+                Request::CommitOffset {
+                    consumer_group: String::new(),
+                    topic: String::new(),
+                    partition: 0,
+                    offset: 0,
+                },
+            ),
+            (
+                10,
+                Request::GetOffset {
+                    consumer_group: String::new(),
+                    topic: String::new(),
+                    partition: 0,
+                },
+            ),
+            (
+                11,
+                Request::GetMetadata {
+                    topic: String::new(),
+                },
+            ),
+            (12, Request::GetClusterMetadata { topics: Vec::new() }),
+            (13, Request::Ping),
+            (
+                14,
+                Request::GetOffsetBounds {
+                    topic: String::new(),
+                    partition: 0,
+                },
+            ),
+            (15, Request::ListGroups),
+            (
+                16,
+                Request::DescribeGroup {
+                    consumer_group: String::new(),
+                },
+            ),
+            (
+                17,
+                Request::DeleteGroup {
+                    consumer_group: String::new(),
+                },
+            ),
+            (
+                18,
+                Request::GetOffsetForTimestamp {
+                    topic: String::new(),
+                    partition: 0,
+                    timestamp_ms: 0,
+                },
+            ),
+        ];
+
+        for (expected_disc, req) in &cases {
+            let bytes = req.to_bytes().unwrap();
+            assert_eq!(
+                bytes[0], *expected_disc,
+                "Request variant at discriminant {expected_disc} moved! This breaks wire compatibility."
+            );
+        }
+
+        // Last variant (LeaveGroup = 37) sentinel
+        let last = Request::LeaveGroup {
+            group_id: String::new(),
+            member_id: String::new(),
+        };
+        let last_bytes = last.to_bytes().unwrap();
+        assert_eq!(
+            last_bytes[0], 37,
+            "LeaveGroup must remain discriminant 37 (last variant)"
         );
     }
 }

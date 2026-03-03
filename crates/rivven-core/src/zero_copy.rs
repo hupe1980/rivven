@@ -209,13 +209,35 @@ impl ZeroCopyBuffer {
 
     /// Reset buffer for reuse.
     ///
-    /// Resets the write position to 0. The caller must ensure exclusive ownership
-    /// (e.g. `Arc::strong_count() == 1`) before calling.
+    /// Resets the write position to 0.
     ///
-    /// restricted to `pub(crate)` — callers outside the crate should
-    /// go through the `BufferPool` recycling path which enforces the
-    /// single-owner invariant.
+    /// # Safety contract
+    ///
+    /// The caller must ensure exclusive ownership — no outstanding `BufferSlice`
+    /// references may exist. In debug builds, this is enforced via an assertion
+    /// when called through `BufferPool::release()`. Direct calls from within
+    /// the crate must guarantee the same invariant.
+    ///
+    /// Restricted to `pub(crate)` — external callers should go through the
+    /// `BufferPool` recycling path which enforces the single-owner invariant.
     pub(crate) fn reset(&self) -> bool {
+        self.write_pos.store(0, Ordering::Release);
+        true
+    }
+
+    /// Resets the buffer only if this `Arc` is the sole owner.
+    ///
+    /// Returns `true` if the buffer was reset, `false` if outstanding
+    /// `BufferSlice` references still exist (the buffer is NOT reset).
+    pub(crate) fn try_reset(self: &std::sync::Arc<Self>) -> bool {
+        if std::sync::Arc::strong_count(self) != 1 {
+            tracing::debug!(
+                buffer_id = self.id(),
+                refs = std::sync::Arc::strong_count(self),
+                "Buffer has outstanding references — skipping reset"
+            );
+            return false;
+        }
         self.write_pos.store(0, Ordering::Release);
         true
     }
@@ -497,9 +519,8 @@ impl ZeroCopyBufferPool {
     pub fn release(&self, buffer: Arc<ZeroCopyBuffer>) {
         self.in_use.fetch_sub(1, Ordering::Relaxed);
 
-        // Only return to pool if we're the sole holder
-        if Arc::strong_count(&buffer) == 1 {
-            buffer.reset();
+        // Only return to pool if we're the sole holder (no outstanding BufferSlice refs)
+        if buffer.try_reset() {
             let _ = self.free_buffers.try_send(buffer);
         }
     }
@@ -560,7 +581,8 @@ impl BufferRef {
     /// Create from bytes
     pub fn from_bytes(data: &[u8]) -> Self {
         if data.len() <= 64 {
-            BufferRef::Inline(SmallVec::from_slice(data))
+            // SAFETY: length checked above
+            BufferRef::Inline(SmallVec::from_slice(data).expect("len <= 64"))
         } else {
             BufferRef::External(Bytes::copy_from_slice(data))
         }
@@ -569,7 +591,8 @@ impl BufferRef {
     /// Create from Bytes (zero-copy)
     pub fn from_external(data: Bytes) -> Self {
         if data.len() <= 64 {
-            BufferRef::Inline(SmallVec::from_slice(&data))
+            // SAFETY: length checked above
+            BufferRef::Inline(SmallVec::from_slice(&data).expect("len <= 64"))
         } else {
             BufferRef::External(data)
         }
@@ -579,7 +602,8 @@ impl BufferRef {
     pub fn from_slice(buffer: Arc<ZeroCopyBuffer>, offset: usize, len: usize) -> Self {
         if len <= 64 {
             let data = buffer.get_slice(offset, len);
-            BufferRef::Inline(SmallVec::from_slice(data))
+            // SAFETY: length checked above
+            BufferRef::Inline(SmallVec::from_slice(data).expect("len <= 64"))
         } else {
             BufferRef::Slice {
                 buffer,
@@ -651,12 +675,18 @@ impl SmallVec {
         }
     }
 
-    pub fn from_slice(slice: &[u8]) -> Self {
-        let len = slice.len().min(64);
+    /// Create from a byte slice.
+    ///
+    /// Returns `None` if `slice.len() > 64`. Use [`BufferRef::from_bytes`]
+    /// for an infallible alternative that falls back to heap allocation.
+    pub fn from_slice(slice: &[u8]) -> Option<Self> {
+        if slice.len() > 64 {
+            return None;
+        }
         let mut sv = Self::new();
-        sv.data[..len].copy_from_slice(&slice[..len]);
-        sv.len = len as u8;
-        sv
+        sv.data[..slice.len()].copy_from_slice(slice);
+        sv.len = slice.len() as u8;
+        Some(sv)
     }
 
     pub fn as_slice(&self) -> &[u8] {
@@ -1099,9 +1129,13 @@ mod tests {
 
     #[test]
     fn test_small_vec() {
-        let sv = SmallVec::from_slice(b"test data");
+        let sv = SmallVec::from_slice(b"test data").expect("fits in 64 bytes");
         assert_eq!(sv.as_slice(), b"test data");
         assert_eq!(sv.len(), 9);
+
+        // Oversized slice returns None
+        let big = [0u8; 65];
+        assert!(SmallVec::from_slice(&big).is_none());
     }
 
     #[test]
@@ -1116,5 +1150,35 @@ mod tests {
         assert!(Arc::ptr_eq(&msg1.topic, &msg2.topic));
         // Different topics should not
         assert!(!Arc::ptr_eq(&msg1.topic, &msg3.topic));
+    }
+
+    #[test]
+    fn test_try_reset_sole_owner() {
+        let buffer = Arc::new(ZeroCopyBuffer::new(1024));
+
+        // Write some data
+        buffer.reserve(100).unwrap();
+        assert_eq!(buffer.len(), 100);
+
+        // Sole owner — try_reset should succeed
+        assert!(buffer.try_reset());
+        assert_eq!(buffer.len(), 0);
+    }
+
+    #[test]
+    fn test_try_reset_with_outstanding_refs() {
+        let buffer = Arc::new(ZeroCopyBuffer::new(1024));
+
+        // Write some data
+        buffer.reserve(100).unwrap();
+        assert_eq!(buffer.len(), 100);
+
+        // Create an additional reference
+        let _clone = Arc::clone(&buffer);
+
+        // Outstanding refs — try_reset should fail
+        assert!(!buffer.try_reset());
+        // Buffer should NOT have been reset
+        assert_eq!(buffer.len(), 100);
     }
 }

@@ -69,7 +69,7 @@ import rivven
 
 async def produce():
     client = await rivven.connect("localhost:9092")
-    producer = client.producer("my-topic")
+    producer = await client.producer("my-topic")
     
     # Send a single message
     offset = await producer.send(b"Hello, Rivven!")
@@ -81,9 +81,14 @@ async def produce():
     # Send to a specific partition
     await producer.send_to_partition(b"value", partition=0)
     
-    # Batch send for better throughput
+    # Batch send — messages are enqueued concurrently and
+    # batched automatically on the wire
     messages = [b"msg1", b"msg2", b"msg3"]
     offsets = await producer.send_batch(messages)
+    
+    # Flush and close
+    await producer.flush()
+    await producer.close()
 
 asyncio.run(produce())
 ```
@@ -292,7 +297,7 @@ Main client class for interacting with Rivven.
 
 #### Producer/Consumer
 
-- `producer(topic)` - Get a producer for the topic
+- `await producer(topic, batch_size=16384, linger_ms=5)` - Get a batching producer for the topic
 - `consumer(topic, group_id=None, auto_commit=True, isolation_level=None)` - Get a consumer
 - Async iteration: `async for msg in consumer` — poll-retries with exponential backoff on empty fetch (100ms → 2s); auto-commit fires per batch (not per message)
 
@@ -323,11 +328,14 @@ Main client class for interacting with Rivven.
 
 ### Producer
 
-Producer for publishing messages to a topic.
+Producer for publishing messages to a topic. Uses internal batching
+for maximum throughput.
 
 - `send(value, key=None)` - Send a single message
 - `send_to_partition(value, partition, key=None)` - Send to specific partition
-- `send_batch(values, keys=None)` - Send multiple messages
+- `send_batch(messages)` - Send multiple `(value, key)` messages concurrently
+- `flush()` - Flush pending records and wait for delivery
+- `close()` - Close the producer, flushing first
 
 ### Consumer
 

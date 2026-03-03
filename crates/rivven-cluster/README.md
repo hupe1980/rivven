@@ -12,7 +12,7 @@
 |:--------|:------------|
 | **Raft Consensus** | Authenticated leader election and log replication using OpenRaft |
 | **redb Storage** | Pure Rust persistent storage (zero C dependencies) |
-| **SWIM Gossip** | HMAC-authenticated failure detection and membership management |
+| **SWIM Gossip** | HMAC-authenticated failure detection and membership management (key material zeroized on drop) |
 | **ISR Replication** | In-Sync Replica tracking with high watermark |
 | **Partitioning** | Consistent hashing with rack awareness |
 | **QUIC Transport** | 0-RTT, multiplexed streams, BBR congestion control |

@@ -187,7 +187,6 @@ async fn serve(
     let server_config = ServerConfig {
         host: host.clone(),
         port,
-        #[cfg(feature = "auth")]
         auth: None, // Authentication disabled by default
     };
 

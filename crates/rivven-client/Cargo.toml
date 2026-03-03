@@ -26,6 +26,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"
 base64 = "0.22"
+dashmap = "6.1"
+async-trait = { workspace = true }
 reqwest = { workspace = true, optional = true }
 
 [dev-dependencies]

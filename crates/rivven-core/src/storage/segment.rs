@@ -682,10 +682,16 @@ impl Segment {
             let computed_crc = hasher.finalize();
 
             if computed_crc != stored_crc {
-                return Err(Error::Other(format!(
-                    "CRC mismatch at position {}",
-                    current_pos
-                )));
+                // CRC mismatch: return valid messages read so far instead of
+                // aborting the entire read. This matches Kafka's behavior of
+                // serving data up to the corruption point (CORE-H3 fix).
+                tracing::warn!(
+                    segment = self.base_offset,
+                    position = current_pos,
+                    "CRC mismatch — returning {} valid messages read before corruption",
+                    messages.len()
+                );
+                break;
             }
 
             // Extract offset varint (first field in postcard encoding)

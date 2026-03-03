@@ -283,13 +283,17 @@ impl std::fmt::Debug for PasswordHash {
 }
 
 impl PasswordHash {
-    /// Create a new password hash from plaintext
-    pub fn new(password: &str) -> Self {
+    /// Create a new password hash from plaintext.
+    ///
+    /// Returns `Err(AuthError::Internal)` if the OS entropy source is
+    /// unavailable (e.g. early boot in sandboxed containers).
+    pub fn new(password: &str) -> AuthResult<Self> {
         let rng = SystemRandom::new();
         let mut salt = vec![0u8; 32];
-        rng.fill(&mut salt).expect("Failed to generate salt");
+        rng.fill(&mut salt)
+            .map_err(|_| AuthError::Internal("OS entropy source unavailable — cannot generate salt".into()))?;
 
-        Self::with_salt(password, &salt, 600_000)
+        Ok(Self::with_salt(password, &salt, 600_000))
     }
 
     /// Create a password hash with a specific salt (for testing/migration)
@@ -324,7 +328,7 @@ impl PasswordHash {
 
     /// Async version of `new` — runs PBKDF2 (600k iterations) in a blocking
     /// thread pool so the tokio runtime is not blocked.
-    pub async fn new_async(password: &str) -> Self {
+    pub async fn new_async(password: &str) -> AuthResult<Self> {
         let password = password.to_string();
         tokio::task::spawn_blocking(move || Self::new(&password))
             .await
@@ -978,7 +982,7 @@ impl AuthManager {
         let principal = Principal {
             name: name.to_string(),
             principal_type,
-            password_hash: PasswordHash::new(password),
+            password_hash: PasswordHash::new(password)?,
             roles,
             enabled: true,
             metadata: HashMap::new(),
@@ -1034,7 +1038,7 @@ impl AuthManager {
             .get_mut(name)
             .ok_or_else(|| AuthError::PrincipalNotFound(name.to_string()))?;
 
-        principal.password_hash = PasswordHash::new(new_password);
+        principal.password_hash = PasswordHash::new(new_password)?;
 
         // Invalidate sessions
         let mut sessions = self.sessions.write();
@@ -1071,7 +1075,7 @@ impl AuthManager {
         }
 
         // Run expensive PBKDF2 off the tokio thread
-        let password_hash = PasswordHash::new_async(password).await;
+        let password_hash = PasswordHash::new_async(password).await?;
 
         let mut principals = self.principals.write();
         // Re-check after async gap
@@ -1108,7 +1112,7 @@ impl AuthManager {
         }
 
         // Run expensive PBKDF2 off the tokio thread
-        let password_hash = PasswordHash::new_async(new_password).await;
+        let password_hash = PasswordHash::new_async(new_password).await?;
 
         let mut principals = self.principals.write();
         let principal = principals
@@ -1285,7 +1289,7 @@ impl AuthManager {
             None => {
                 // Unknown principal - still do constant-time password check
                 // to prevent timing attacks that enumerate users
-                let dummy = PasswordHash::new("dummy");
+                let dummy = PasswordHash::new("dummy").unwrap_or_else(|_| PasswordHash::with_salt("dummy", &[0u8; 32], 600_000));
                 let _ = dummy.verify(password);
                 self.record_auth_failure(username, client_ip);
                 return Err(AuthError::AuthenticationFailed);
@@ -1299,8 +1303,11 @@ impl AuthManager {
         }
 
         // Clear any failed attempt tracking
-        self.failed_attempts.write().clear_failures(username);
-        self.failed_attempts.write().clear_failures(client_ip);
+        {
+            let mut tracker = self.failed_attempts.write();
+            tracker.clear_failures(username);
+            tracker.clear_failures(client_ip);
+        }
 
         // Build session with resolved permissions
         let permissions = self.resolve_permissions(&principal);
@@ -1375,11 +1382,13 @@ impl AuthManager {
     }
 
     /// Create a session for a principal (used by SCRAM after successful auth)
-    pub fn create_session(&self, principal: &Principal) -> AuthSession {
+    pub fn create_session(&self, principal: &Principal) -> AuthResult<AuthSession> {
         let permissions = self.resolve_permissions(principal);
 
         let mut session_id = vec![0u8; 32];
-        self.rng.fill(&mut session_id).expect("RNG failed");
+        self.rng
+            .fill(&mut session_id)
+            .map_err(|_| AuthError::Internal("OS entropy source unavailable".into()))?;
         let session_id = hex::encode(&session_id);
 
         let now = Instant::now();
@@ -1394,14 +1403,18 @@ impl AuthManager {
         };
 
         self.sessions.write().insert(session_id, session.clone());
-        session
+        Ok(session)
     }
 
     /// Create a session for an API key authentication
     ///
     /// Creates a synthetic session for API key-based authentication.
     /// The session inherits permissions from the specified roles.
-    pub fn create_api_key_session(&self, principal_name: &str, roles: &[String]) -> AuthSession {
+    pub fn create_api_key_session(
+        &self,
+        principal_name: &str,
+        roles: &[String],
+    ) -> AuthResult<AuthSession> {
         // Resolve permissions from roles
         let mut permissions = HashSet::new();
         {
@@ -1414,7 +1427,9 @@ impl AuthManager {
         }
 
         let mut session_id = vec![0u8; 32];
-        self.rng.fill(&mut session_id).expect("RNG failed");
+        self.rng
+            .fill(&mut session_id)
+            .map_err(|_| AuthError::Internal("OS entropy source unavailable".into()))?;
         let session_id = hex::encode(&session_id);
 
         let now = Instant::now();
@@ -1430,14 +1445,18 @@ impl AuthManager {
 
         self.sessions.write().insert(session_id, session.clone());
         debug!(principal = %principal_name, "Created API key session");
-        session
+        Ok(session)
     }
 
     /// Create a session for JWT/OIDC authentication
     ///
     /// Creates a synthetic session for JWT-authenticated users.
     /// The session inherits permissions from the specified groups/roles.
-    pub fn create_jwt_session(&self, principal_name: &str, groups: &[String]) -> AuthSession {
+    pub fn create_jwt_session(
+        &self,
+        principal_name: &str,
+        groups: &[String],
+    ) -> AuthResult<AuthSession> {
         // Resolve permissions from groups (treated as roles)
         let mut permissions = HashSet::new();
         {
@@ -1450,7 +1469,9 @@ impl AuthManager {
         }
 
         let mut session_id = vec![0u8; 32];
-        self.rng.fill(&mut session_id).expect("RNG failed");
+        self.rng
+            .fill(&mut session_id)
+            .map_err(|_| AuthError::Internal("OS entropy source unavailable".into()))?;
         let session_id = hex::encode(&session_id);
 
         let now = Instant::now();
@@ -1466,7 +1487,7 @@ impl AuthManager {
 
         self.sessions.write().insert(session_id, session.clone());
         debug!(principal = %principal_name, groups = ?groups, "Created JWT session");
-        session
+        Ok(session)
     }
 
     /// Get a session by principal name (for API key validation)
@@ -1741,7 +1762,8 @@ impl SaslScramAuth {
                 );
                 let rng = SystemRandom::new();
                 let mut fake_salt = vec![0u8; 32];
-                rng.fill(&mut fake_salt).expect("Failed to generate salt");
+                rng.fill(&mut fake_salt)
+                    .map_err(|_| AuthError::Internal("OS entropy source unavailable — cannot generate salt".into()))?;
                 // Use the same iteration count as real users (600000)
                 // to prevent leaking user existence via timing differences.
                 (fake_salt, 600_000)
@@ -1752,7 +1774,7 @@ impl SaslScramAuth {
         let rng = SystemRandom::new();
         let mut server_nonce_bytes = vec![0u8; 24];
         rng.fill(&mut server_nonce_bytes)
-            .expect("Failed to generate nonce");
+            .map_err(|_| AuthError::Internal("OS entropy source unavailable — cannot generate nonce".into()))?;
         let server_nonce = base64_encode(&server_nonce_bytes);
         let combined_nonce = format!("{}{}", client_nonce, server_nonce);
 
@@ -1876,7 +1898,7 @@ impl SaslScramAuth {
         let server_final = format!("v={}", base64_encode(&server_signature));
 
         // Create session
-        let session = self.auth_manager.create_session(&principal);
+        let session = self.auth_manager.create_session(&principal)?;
         debug!(
             "SCRAM authentication successful for '{}' from {}",
             username, client_ip
@@ -1913,7 +1935,7 @@ mod tests {
 
     #[test]
     fn test_password_hash_verify() {
-        let hash = PasswordHash::new("Test@Pass123");
+        let hash = PasswordHash::new("Test@Pass123").unwrap();
         assert!(hash.verify("Test@Pass123"));
         assert!(!hash.verify("Wrong@Pass1"));
         assert!(!hash.verify(""));
@@ -1924,7 +1946,7 @@ mod tests {
     fn test_password_hash_timing_attack_resistant() {
         // Both wrong passwords should take similar time
         // (This is more of a design assertion than a precise timing test)
-        let hash = PasswordHash::new("Correct@Pass1");
+        let hash = PasswordHash::new("Correct@Pass1").unwrap();
 
         // Wrong but similar length
         assert!(!hash.verify("Wrong@Pass1"));
@@ -2241,7 +2263,7 @@ mod tests {
 
     #[test]
     fn test_password_hash_debug_redacts_sensitive_data() {
-        let hash = PasswordHash::new("super_secret_password");
+        let hash = PasswordHash::new("super_secret_password").unwrap();
         let debug_output = format!("{:?}", hash);
 
         // Should contain REDACTED markers
@@ -2269,7 +2291,7 @@ mod tests {
         let principal = Principal {
             name: "test_user".to_string(),
             principal_type: PrincipalType::User,
-            password_hash: PasswordHash::new("secret_password"),
+            password_hash: PasswordHash::new("secret_password").unwrap(),
             roles: HashSet::from(["admin".to_string()]),
             enabled: true,
             metadata: HashMap::new(),

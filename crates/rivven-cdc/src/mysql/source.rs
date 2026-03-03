@@ -10,7 +10,10 @@ use async_trait::async_trait;
 use mysql_async::prelude::*;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+// Use parking_lot::RwLock instead of std::sync::RwLock to avoid
+// lock poisoning and get better performance (CDC-02).
+use parking_lot::RwLock;
 use std::time::{Duration, SystemTime};
 use tokio::sync::mpsc;
 
@@ -551,6 +554,36 @@ async fn run_mysql_cdc_loop(
         }
     }
 
+    // ── Pre-flight: validate binlog_format = ROW ────────────────────────
+    // Statement-based or MIXED replication produces events the row-level
+    // decoder cannot handle, leading to silent data loss.
+    {
+        let mut meta_conn = metadata_pool.get_conn().await?;
+        let rows: Vec<mysql_async::Row> = meta_conn
+            .query("SELECT @@binlog_format AS fmt")
+            .await
+            .context("Failed to query binlog_format")?;
+        let row = rows.first().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Failed to determine binlog_format — \
+                 empty result from SELECT @@binlog_format"
+            )
+        })?;
+        let format: String = row
+            .get::<String, _>("fmt")
+            .unwrap_or_default()
+            .to_uppercase();
+        if format != "ROW" {
+            anyhow::bail!(
+                "MySQL binlog_format is '{}', but ROW is required for CDC. \
+                 Set binlog_format=ROW in my.cnf or run \
+                 SET GLOBAL binlog_format='ROW'",
+                format
+            );
+        }
+        debug!("Validated binlog_format=ROW");
+    }
+
     // Get binlog position if not specified
     let (binlog_file, binlog_pos) = if config.binlog_filename.is_empty() {
         let (file, pos) = get_current_binlog_position(&config).await?;
@@ -684,11 +717,7 @@ async fn run_mysql_cdc_loop(
                 let schema = table_map.schema_name.clone();
                 let table = table_map.table_name.clone();
 
-                if !schema_cache
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .has_table(&schema, &table)
-                {
+                if !schema_cache.read().has_table(&schema, &table) {
                     let query = r#"
                         SELECT COLUMN_NAME 
                         FROM INFORMATION_SCHEMA.COLUMNS 
@@ -710,10 +739,7 @@ async fn run_mysql_cdc_loop(
                                         table,
                                         columns
                                     );
-                                    schema_cache
-                                        .write()
-                                        .unwrap_or_else(|e| e.into_inner())
-                                        .set_columns(&schema, &table, columns);
+                                    schema_cache.write().set_columns(&schema, &table, columns);
                                 }
                                 Err(e) => {
                                     warn!(
@@ -971,7 +997,6 @@ fn process_row_event(
     // Get column names from cache
     let column_names = schema_cache
         .read()
-        .unwrap_or_else(|e| e.into_inner())
         .get_columns(&table_map.schema_name, &table_map.table_name);
 
     for row in &rows.rows {

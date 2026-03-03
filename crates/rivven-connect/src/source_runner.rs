@@ -21,6 +21,28 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock, Semaphore};
 use tracing::{debug, error, info, warn};
 
+/// Dead letter envelope wrapping a failed event with error context.
+///
+/// Published as JSON to the configured `dead_letter_topic` when a source
+/// event cannot be delivered after all retry attempts. Preserves the
+/// original payload and captures enough metadata for operators to
+/// diagnose and replay the event.
+#[derive(Debug, serde::Serialize)]
+pub struct DlqEnvelope {
+    /// Original destination topic
+    pub original_topic: String,
+    /// Source connector name
+    pub connector_name: String,
+    /// Original event payload (base64-encoded for binary safety)
+    pub payload_b64: String,
+    /// Error message from the last failed attempt
+    pub error: String,
+    /// Number of delivery attempts made
+    pub retry_count: u32,
+    /// ISO-8601 timestamp when the event was dead-lettered
+    pub timestamp: String,
+}
+
 /// Source runner state
 pub struct SourceRunner {
     name: String,
@@ -43,6 +65,10 @@ pub struct SourceRunner {
     transforms: Vec<TransformStepConfig>,
     /// Source connector registry for dynamic dispatch (registry-based connectors)
     source_registry: Arc<SourceRegistry>,
+    /// Dead letter topic for events that fail to publish after all retries
+    dead_letter_topic: Option<String>,
+    /// Counter for events routed to DLQ
+    events_dead_lettered: AtomicU64,
 }
 
 // Methods for health monitoring
@@ -128,6 +154,11 @@ impl SourceRunner {
             })?;
         }
 
+        let dead_letter_topic = config.dead_letter_topic.clone();
+        if let Some(ref dlq) = dead_letter_topic {
+            info!("Source '{}': dead letter topic configured: {}", name, dlq);
+        }
+
         Ok(Self {
             name,
             config,
@@ -142,6 +173,8 @@ impl SourceRunner {
             schema_registry,
             transforms,
             source_registry,
+            dead_letter_topic,
+            events_dead_lettered: AtomicU64::new(0),
         })
     }
 
@@ -178,6 +211,74 @@ impl SourceRunner {
     /// Get events published count
     pub fn events_published(&self) -> u64 {
         self.events_published.load(Ordering::Relaxed)
+    }
+
+    /// Get events dead-lettered count
+    pub fn events_dead_lettered(&self) -> u64 {
+        self.events_dead_lettered.load(Ordering::Relaxed)
+    }
+
+    /// Publish a failed event to the dead letter topic.
+    ///
+    /// Wraps the original payload in a [`DlqEnvelope`] with error context
+    /// and publishes it with a short retry budget (3 attempts). If even
+    /// the DLQ publish fails, returns an error — the pipeline should halt
+    /// because data would be irretrievably lost.
+    async fn publish_to_dlq(
+        &self,
+        dlq_topic: &str,
+        original_topic: &str,
+        payload: &[u8],
+        error_msg: &str,
+        retry_count: u32,
+    ) -> Result<()> {
+        use base64::Engine;
+
+        let envelope = DlqEnvelope {
+            original_topic: original_topic.to_string(),
+            connector_name: self.name.clone(),
+            payload_b64: base64::engine::general_purpose::STANDARD.encode(payload),
+            error: error_msg.to_string(),
+            retry_count,
+            timestamp: chrono::Utc::now().to_rfc3339(),
+        };
+
+        let json = serde_json::to_vec(&envelope)
+            .map_err(|e| ConnectError::Serialization(format!("DLQ envelope serialize: {}", e)))?;
+
+        // Short retry budget for the DLQ publish itself
+        let mut last_err = None;
+        for attempt in 0..3u32 {
+            match self.broker.publish(dlq_topic, json.clone()).await {
+                Ok(_) => {
+                    self.events_dead_lettered.fetch_add(1, Ordering::Relaxed);
+                    warn!(
+                        "Source '{}': event dead-lettered to '{}' (original topic: '{}', retries: {})",
+                        self.name, dlq_topic, original_topic, retry_count
+                    );
+                    return Ok(());
+                }
+                Err(e) => {
+                    let backoff_ms = 100 * 2u64.pow(attempt);
+                    warn!(
+                        "Source '{}': DLQ publish attempt {}/3 to '{}' failed: {}",
+                        self.name,
+                        attempt + 1,
+                        dlq_topic,
+                        e
+                    );
+                    last_err = Some(e);
+                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                }
+            }
+        }
+
+        Err(ConnectError::Permanent(format!(
+            "DLQ publish to '{}' failed after 3 attempts: {}. Original event from topic '{}' is LOST.",
+            dlq_topic,
+            last_err.map(|e| e.to_string()).unwrap_or_default(),
+            original_topic,
+        )))
     }
 
     /// Run the source connector
@@ -289,10 +390,38 @@ impl SourceRunner {
                         self.name, e
                     );
                     // Don't fail - topic might exist, we'll find out when we publish
-                    Ok(())
+                    Ok::<(), ConnectError>(())
+                }
+            }
+        }?;
+
+        // Also auto-create the dead letter topic if configured
+        if let Some(ref dlq_topic) = self.dead_letter_topic {
+            match self.broker.create_topic(dlq_topic, partitions).await {
+                Ok(_) => {
+                    info!(
+                        "Source '{}': created DLQ topic '{}' with {} partition(s)",
+                        self.name, dlq_topic, partitions
+                    );
+                }
+                Err(e) => {
+                    let err_str = e.to_string().to_lowercase();
+                    if err_str.contains("already exists") || err_str.contains("exists") {
+                        debug!(
+                            "Source '{}': DLQ topic '{}' already exists",
+                            self.name, dlq_topic
+                        );
+                    } else {
+                        warn!(
+                            "Source '{}': DLQ topic creation returned: {} (may already exist)",
+                            self.name, e
+                        );
+                    }
                 }
             }
         }
+
+        Ok(())
     }
 
     /// Publish an event to the broker
@@ -564,13 +693,28 @@ impl SourceRunner {
                             }
 
                             if let Some(e) = last_err {
-                                // Return error to stop the CDC pipeline cleanly rather than
-                                // silently continuing with missing events. The reconnection
-                                // logic in the outer loop will restart from a safe position.
-                                return Err(ConnectError::Permanent(format!(
-                                    "CDC event permanently lost after {} retries: {}",
-                                    max_retries, e
-                                )));
+                                // DLQ fallback: if configured, route the failed event to the
+                                // dead letter topic so the CDC pipeline can continue without
+                                // data loss. The original event is preserved for later replay.
+                                if let Some(ref dlq_topic) = self.dead_letter_topic {
+                                    self.publish_to_dlq(
+                                        dlq_topic,
+                                        &target_topic,
+                                        &data,
+                                        &e.to_string(),
+                                        max_retries,
+                                    )
+                                    .await?;
+                                    // Continue processing — event is safely in the DLQ
+                                } else {
+                                    // No DLQ configured — halt the pipeline to prevent
+                                    // silent data loss
+                                    return Err(ConnectError::Permanent(format!(
+                                        "CDC event permanently lost after {} retries \
+                                         (no dead_letter_topic configured): {}",
+                                        max_retries, e
+                                    )));
+                                }
                             }
 
                             let count = self.events_published();
@@ -653,13 +797,52 @@ impl SourceRunner {
                     if resp.status().is_success() {
                         match resp.bytes().await {
                             Ok(body) if !body.is_empty() => {
-                                match self.broker.publish(&self.config.topic, body.to_vec()).await {
-                                    Ok(_offset) => {
-                                        self.events_published
-                                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                let payload = body.clone();
+                                let mut published = false;
+                                for attempt in 0..3u32 {
+                                    match self
+                                        .broker
+                                        .publish(&self.config.topic, body.to_vec())
+                                        .await
+                                    {
+                                        Ok(_offset) => {
+                                            self.events_published
+                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                            published = true;
+                                            break;
+                                        }
+                                        Err(e) => {
+                                            let backoff_ms = 100 * 2u64.pow(attempt);
+                                            warn!(
+                                                "HTTP source '{}' publish attempt {}/3 failed: {} (retrying in {}ms)",
+                                                self.name, attempt + 1, e, backoff_ms
+                                            );
+                                            tokio::time::sleep(std::time::Duration::from_millis(
+                                                backoff_ms,
+                                            ))
+                                            .await;
+                                        }
                                     }
-                                    Err(e) => {
-                                        warn!("HTTP source '{}' publish error: {}", self.name, e);
+                                }
+                                if !published {
+                                    if self.dead_letter_topic.is_some() {
+                                        let dlq_topic =
+                                            self.dead_letter_topic.as_ref().unwrap().clone();
+                                        warn!(
+                                            "HTTP source '{}' routing failed event to DLQ topic '{}'",
+                                            self.name, dlq_topic
+                                        );
+                                        self.publish_to_dlq(
+                                            &dlq_topic,
+                                            &self.config.topic,
+                                            &payload,
+                                            "publish failed after 3 retries",
+                                            3,
+                                        )
+                                        .await?;
+                                    } else {
+                                        error!("HTTP source '{}' publish failed after 3 attempts (no DLQ configured)", self.name);
+                                        self.errors_count.fetch_add(1, Ordering::Relaxed);
                                     }
                                 }
                             }
@@ -728,9 +911,39 @@ impl SourceRunner {
                             let json = serde_json::to_vec(&source_event)
                                 .map_err(|e| ConnectError::Serialization(e.to_string()))?;
 
-                            if let Err(e) = self.publish(Bytes::from(json)).await {
-                                error!("Source '{}' publish error: {}", self.name, e);
-                                *self.status.write().await = ConnectorStatus::Unhealthy;
+                            let payload = Bytes::from(json);
+                            let mut published = false;
+                            for attempt in 0..3u32 {
+                                match self.publish(payload.clone()).await {
+                                    Ok(()) => { published = true; break; }
+                                    Err(e) => {
+                                        let backoff_ms = 100 * 2u64.pow(attempt);
+                                        warn!(
+                                            "Source '{}' publish attempt {}/3 failed: {} (retrying in {}ms)",
+                                            self.name, attempt + 1, e, backoff_ms
+                                        );
+                                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                                    }
+                                }
+                            }
+                            if !published {
+                                if let Some(ref dlq_topic) = self.dead_letter_topic {
+                                    self.publish_to_dlq(
+                                        dlq_topic,
+                                        &self.config.topic,
+                                        &payload,
+                                        "publish failed after 3 retries",
+                                        3,
+                                    )
+                                    .await?;
+                                } else {
+                                    error!("Source '{}' publish failed after 3 attempts", self.name);
+                                    *self.status.write().await = ConnectorStatus::Unhealthy;
+                                    return Err(ConnectError::Source {
+                                        name: self.name.clone(),
+                                        message: "publish failed after 3 retries".into(),
+                                    });
+                                }
                             }
 
                             let count = self.events_published();
@@ -815,9 +1028,43 @@ impl SourceRunner {
                             let json = serde_json::to_vec(&source_event)
                                 .map_err(|e| ConnectError::Serialization(e.to_string()))?;
 
-                            if let Err(e) = self.publish(Bytes::from(json)).await {
-                                error!("Source '{}' publish error: {}", self.name, e);
-                                *self.status.write().await = ConnectorStatus::Unhealthy;
+                            let payload = Bytes::from(json);
+                            let mut published = false;
+                            for attempt in 0..3u32 {
+                                match self.publish(payload.clone()).await {
+                                    Ok(()) => { published = true; break; }
+                                    Err(e) => {
+                                        let backoff_ms = 100 * 2u64.pow(attempt);
+                                        warn!(
+                                            "Source '{}' publish attempt {}/3 failed: {} (retrying in {}ms)",
+                                            self.name, attempt + 1, e, backoff_ms
+                                        );
+                                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                                    }
+                                }
+                            }
+                            if !published {
+                                if self.dead_letter_topic.is_some() {
+                                    let dlq_topic = self.dead_letter_topic.as_ref().unwrap().clone();
+                                    warn!(
+                                        "Source '{}' routing failed event to DLQ topic '{}'",
+                                        self.name, dlq_topic
+                                    );
+                                    self.publish_to_dlq(
+                                        &dlq_topic,
+                                        &self.config.topic,
+                                        &payload,
+                                        "publish failed after 3 retries",
+                                        3,
+                                    ).await?;
+                                } else {
+                                    error!("Source '{}' publish failed after 3 attempts (no DLQ configured)", self.name);
+                                    *self.status.write().await = ConnectorStatus::Unhealthy;
+                                    return Err(ConnectError::Source {
+                                        name: self.name.clone(),
+                                        message: "publish failed after 3 retries".into(),
+                                    });
+                                }
                             }
 
                             let count = self.events_published();

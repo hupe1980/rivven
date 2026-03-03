@@ -198,33 +198,71 @@ impl RivvenClient {
 
     /// Create a producer for a topic
     ///
-    /// If the client was created with `connect()`, the producer gets
-    /// its own dedicated connection so it doesn't contend with admin operations
-    /// or other producers on the main client Mutex.
+    /// Uses the high-level batching [`rivven_client::Producer`] internally.
+    /// Multiple `send()` calls are coalesced into minimal wire-level batches
+    /// for maximum throughput.
     ///
     /// Args:
     ///     topic (str): Topic to produce to
+    ///     batch_size (int): Batch size in bytes (default: 16384)
+    ///     linger_ms (int): Time to wait for more messages before flushing (default: 5)
     ///
     /// Returns:
     ///     Producer: A producer instance bound to the topic
     ///
     /// Example:
-    ///     >>> producer = client.producer("events")
+    ///     >>> producer = await client.producer("events")
     ///     >>> await producer.send(b"Hello!")
-    pub fn producer<'py>(&self, py: Python<'py>, topic: String) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (topic, batch_size=16384, linger_ms=5))]
+    pub fn producer<'py>(
+        &self,
+        py: Python<'py>,
+        topic: String,
+        batch_size: usize,
+        linger_ms: u64,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let addr = self.addr.clone();
+        #[allow(unused_variables)]
         let tls_params = self.tls_params.clone();
-        let fallback_client = Arc::clone(&self.client);
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let client = match addr {
-                Some(a) => {
-                    let dedicated = connect_dedicated(&a, tls_params.as_ref()).await?;
-                    Arc::new(Mutex::new(dedicated))
-                }
-                None => fallback_client,
-            };
-            Ok(Producer::new(client, topic))
+            let bootstrap = addr.ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(
+                    "Cannot create producer without a server address. Use rivven.connect().",
+                )
+            })?;
+
+            #[allow(unused_mut)]
+            let mut config_builder = rivven_client::ProducerConfig::builder()
+                .bootstrap_servers(vec![bootstrap])
+                .batch_size(batch_size)
+                .linger_ms(linger_ms);
+
+            #[cfg(feature = "tls")]
+            if let Some(ref tls) = tls_params {
+                use rivven_client::TlsConfig;
+                use rivven_core::tls::CertificateSource;
+
+                let tls_config = match (&tls.client_cert_path, &tls.client_key_path) {
+                    (Some(cert), Some(key)) => {
+                        TlsConfig::mtls_from_pem_files(cert.clone(), key.clone(), &tls.ca_cert_path)
+                    }
+                    _ => TlsConfig {
+                        enabled: true,
+                        root_ca: Some(CertificateSource::File {
+                            path: tls.ca_cert_path.clone().into(),
+                        }),
+                        ..Default::default()
+                    },
+                };
+                config_builder = config_builder.tls(tls_config, tls.server_name.clone());
+            }
+
+            let config = config_builder.build().into_py_err()?;
+
+            let rust_producer = rivven_client::Producer::new(config).await.into_py_err()?;
+
+            Ok(Producer::new(Arc::new(rust_producer), topic))
         })
     }
 
@@ -258,7 +296,7 @@ impl RivvenClient {
         partition: u32,
         group: Option<String>,
         start_offset: Option<u64>,
-        batch_size: usize,
+        batch_size: u32,
         auto_commit: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let main_client = Arc::clone(&self.client);
@@ -565,7 +603,7 @@ impl RivvenClient {
         topic: String,
         partition: u32,
         offset: u64,
-        max_messages: usize,
+        max_messages: u32,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = Arc::clone(&self.client);
         let topic_clone = topic.clone();

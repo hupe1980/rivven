@@ -6,8 +6,8 @@
 
 pub use rivven_protocol::{
     BrokerInfo, DeleteRecordsResult, MessageData, PartitionMetadata, QuotaAlteration, QuotaEntry,
-    Request, Response, TopicConfigDescription, TopicConfigEntry, TopicConfigValue, TopicMetadata,
-    WireFormat, MAX_MESSAGE_SIZE, PROTOCOL_VERSION,
+    Request, Response, SyncGroupAssignments, TopicConfigDescription, TopicConfigEntry,
+    TopicConfigValue, TopicMetadata, WireFormat, MAX_MESSAGE_SIZE, PROTOCOL_VERSION,
 };
 
 // Re-export error types for convenience
@@ -119,9 +119,10 @@ mod protocol_tests {
 
     #[test]
     fn test_large_string_handling() {
-        let large_topic = "a".repeat(1000);
+        // Names within the 256-char limit should round-trip
+        let valid_topic = "a".repeat(256);
         let request = Request::CreateTopic {
-            name: large_topic.clone(),
+            name: valid_topic.clone(),
             partitions: Some(1),
         };
 
@@ -129,11 +130,23 @@ mod protocol_tests {
         let decoded = Request::from_bytes(&bytes).unwrap();
 
         if let Request::CreateTopic { name, partitions } = decoded {
-            assert_eq!(name, large_topic);
+            assert_eq!(name, valid_topic);
             assert_eq!(partitions, Some(1));
         } else {
             panic!("Expected CreateTopic");
         }
+
+        // Names exceeding MAX_NAME_LEN (256) must be rejected
+        let oversized_topic = "a".repeat(1000);
+        let bad_request = Request::CreateTopic {
+            name: oversized_topic,
+            partitions: Some(1),
+        };
+        let bad_bytes = bad_request.to_bytes().unwrap();
+        assert!(
+            Request::from_bytes(&bad_bytes).is_err(),
+            "topic name exceeding MAX_NAME_LEN must be rejected"
+        );
     }
 
     #[test]

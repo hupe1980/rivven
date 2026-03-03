@@ -167,6 +167,22 @@ auth:
 
 The Rivven Operator provides **declarative management** via Custom Resource Definitions.
 
+### Leader Election
+
+When deployed with multiple replicas, the operator uses **Kubernetes Lease-based leader election** to ensure only one instance actively reconciles resources. Enable it with `--leader-election`:
+
+```yaml
+args:
+  - --leader-election
+```
+
+- Lease duration: 15 seconds
+- Renewal interval: 10 seconds
+- Lease resource: `rivven-operator-leader` in the operator's namespace (or `kube-system`)
+- Non-leader replicas wait passively until they acquire the lease
+- When running a single replica, omit `--leader-election` (a warning is logged)
+- **Lease-loss detection**: The operator tracks consecutive lease renewal failures. After exceeding the threshold (`ceil(lease_duration / renew_interval)`), the process exits to allow Kubernetes to restart it with a clean state — preventing split-brain scenarios where a stale leader continues reconciling
+
 ### Install the Operator
 
 ```bash

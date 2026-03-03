@@ -130,9 +130,16 @@ impl Partition {
 
         // Pre-serialize for tiered storage BEFORE consuming the message,
         // avoiding a full clone. Only serialize if tiered storage is enabled.
+        // Uses 4-byte big-endian length prefix framing so the reader can
+        // split concatenated blobs (CORE-C1 fix).
         let tiered_bytes = if self.tiered_storage.is_some() {
             match message.to_bytes() {
-                Ok(data) => Some(Bytes::from(data)),
+                Ok(data) => {
+                    let mut framed = Vec::with_capacity(4 + data.len());
+                    framed.extend_from_slice(&(data.len() as u32).to_be_bytes());
+                    framed.extend_from_slice(&data);
+                    Some(Bytes::from(framed))
+                }
                 Err(e) => {
                     warn!("Failed to serialize for tiered storage: {} (continuing)", e);
                     None
@@ -311,10 +318,16 @@ impl Partition {
                 let offset = start_offset + i as u64;
                 message.offset = offset;
 
-                // Collect data for tiered storage
+                // Collect data for tiered storage with length-prefix framing.
+                // Each message is preceded by a 4-byte big-endian length so the
+                // tiered storage reader can split the concatenated blob back
+                // into individual messages (CORE-C1 fix).
                 if self.tiered_storage.is_some() {
                     match message.to_bytes() {
-                        Ok(data) => local_batch_data.extend_from_slice(&data),
+                        Ok(data) => {
+                            local_batch_data.extend_from_slice(&(data.len() as u32).to_be_bytes());
+                            local_batch_data.extend_from_slice(&data);
+                        }
                         Err(e) => tracing::warn!(
                             offset = offset,
                             error = %e,

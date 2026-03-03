@@ -193,7 +193,7 @@ The protobuf schema defines 31+ message types covering all major protocol operat
 | **Core** | `Request`, `Response`, `Record`, `ErrorCode` |
 | **Publish/Consume** | `PublishRequest`, `BatchPublishRequest`, `ConsumeResponse` |
 | **Metadata** | `GetMetadataResponse`, `GetClusterMetadataResponse`, `GetOffsetBoundsResponse` |
-| **Consumer Groups** | `ListGroupsResponse`, `DescribeGroupResponse`, `DeleteGroupResponse` |
+| **Consumer Groups** | `ListGroupsResponse`, `DescribeGroupResponse`, `DeleteGroupResponse`, `JoinGroupRequest/Result`, `SyncGroupRequest/Result`, `HeartbeatRequest/Result`, `LeaveGroupRequest/Result` |
 | **Transactions** | `BeginTransactionResponse`, `CommitTransactionResponse`, `AbortTransactionResponse` |
 | **Idempotent** | `InitProducerIdResponse`, `IdempotentPublishResponse` |
 | **Admin** | `AlterTopicConfigRequest`, `DescribeTopicConfigsResponse`, `CreatePartitionsRequest`, `DeleteRecordsRequest` |
@@ -207,6 +207,8 @@ Wire protocol conversions use validated and saturating casts to prevent silent t
 - **Saturating casts**: `max_messages` (`usize → u32`), `expires_in` (`u64 → u32`), and `port` (`u32 → u16`) use `try_from().unwrap_or(T::MAX)` for safe saturation
 - **Credential redaction**: Custom `Debug` impl redacts `password` and `auth_bytes` fields in log output
 - **Variant stability**: Enum discriminant order is tested to ensure backward compatibility across protocol versions
+- **Node ID mapping**: Proto `ClusterMetadata` maps string node IDs (e.g., `"node-1"`) to deterministic `u32` values via FNV-1a hashing (`node_id_to_u32`) when `parse::<u32>()` fails — the same mapping is used for both `BrokerInfo.id` and partition `leader`/`replicas`/`isr` fields, ensuring consistency. FNV-1a is stable across Rust toolchain versions and platforms (unlike `DefaultHasher`).
+- **Post-deserialization validation**: All `from_bytes()`, `from_wire()`, and `from_proto_bytes()` methods perform bounds validation on deserialized `Request` and `Response` fields (string lengths, list sizes, auth payload limits) immediately after parsing, rejecting malformed payloads with `ProtocolError` before any handler logic executes
 
 ## License
 

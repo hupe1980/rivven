@@ -21,10 +21,10 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use rivven_core::io_uring::{IoUringConfig, AsyncWriter};
+//! use rivven_core::io_uring::{IoUringConfig, BlockingWriter};
 //!
 //! let config = IoUringConfig::default();
-//! let writer = AsyncWriter::new("/data/segment.log", config)?;
+//! let writer = BlockingWriter::new("/data/segment.log", config)?;
 //!
 //! writer.write(b"entry data")?;
 //! writer.flush()?;
@@ -230,12 +230,19 @@ impl IoUringStatsSnapshot {
 // Portable I/O Implementation
 // ============================================================================
 
-/// Async-compatible writer using mutex-guarded file I/O
+/// Blocking writer using mutex-guarded file I/O
 ///
 /// This is the portable implementation using `parking_lot::Mutex<std::fs::File>`.
 /// It provides the same API that a future io_uring backend would expose,
 /// allowing transparent upgrades on Linux 5.6+.
-pub struct AsyncWriter {
+///
+/// # ⚠️ Blocking I/O
+///
+/// All methods (`write`, `flush`, `sync`) perform **synchronous** file I/O
+/// under a blocking mutex. **Do not call from async contexts** (tokio worker
+/// threads) — use `tokio::task::spawn_blocking` to wrap calls, or use the
+/// async `AsyncFile` from `async_io.rs` instead.
+pub struct BlockingWriter {
     file: Mutex<File>,
     offset: AtomicU64,
     stats: Arc<IoUringStats>,
@@ -243,8 +250,8 @@ pub struct AsyncWriter {
     config: IoUringConfig,
 }
 
-impl AsyncWriter {
-    /// Create a new async writer
+impl BlockingWriter {
+    /// Create a new blocking writer
     pub fn new(path: impl AsRef<Path>, config: IoUringConfig) -> io::Result<Self> {
         let file = std::fs::OpenOptions::new()
             .create(true)
@@ -533,14 +540,14 @@ pub struct BatchReadResult {
 /// io_uring backend would submit all operations via the kernel submission
 /// queue for true async batched I/O.
 pub struct BatchExecutor {
-    writer: Option<AsyncWriter>,
+    writer: Option<BlockingWriter>,
     reader: Option<AsyncReader>,
     stats: Arc<IoUringStats>,
 }
 
 impl BatchExecutor {
     /// Create a new batch executor for writing
-    pub fn for_writer(writer: AsyncWriter) -> Self {
+    pub fn for_writer(writer: BlockingWriter) -> Self {
         Self {
             stats: writer.stats.clone(),
             writer: Some(writer),
@@ -635,7 +642,7 @@ impl BatchExecutor {
 /// wal.flush_batch()?; // Execute all batched writes
 /// ```
 pub struct PortableWalWriter {
-    writer: AsyncWriter,
+    writer: BlockingWriter,
     batch: Mutex<IoBatch>,
     pending_bytes: AtomicU64,
     max_batch_bytes: u64,
@@ -647,7 +654,7 @@ impl PortableWalWriter {
         let max_batch_bytes = (config.registered_buffers * config.buffer_size) as u64;
 
         Ok(Self {
-            writer: AsyncWriter::new(path, config)?,
+            writer: BlockingWriter::new(path, config)?,
             batch: Mutex::new(IoBatch::new()),
             pending_bytes: AtomicU64::new(0),
             max_batch_bytes,
@@ -881,7 +888,7 @@ mod tests {
         let path = dir.path().join("test.log");
 
         let config = IoUringConfig::minimal();
-        let writer = AsyncWriter::new(&path, config).unwrap();
+        let writer = BlockingWriter::new(&path, config).unwrap();
 
         let offset = writer.write(b"hello").unwrap();
         assert_eq!(offset, 0);
@@ -1014,7 +1021,7 @@ mod tests {
         let path = dir.path().join("batch_write.log");
 
         let config = IoUringConfig::minimal();
-        let writer = AsyncWriter::new(&path, config).unwrap();
+        let writer = BlockingWriter::new(&path, config).unwrap();
         let executor = BatchExecutor::for_writer(writer);
 
         let mut batch = IoBatch::new();

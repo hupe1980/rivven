@@ -50,6 +50,8 @@ pub enum ValidationError {
     InvalidConsumerGroupId { id: String },
     /// Client ID is invalid
     InvalidClientId { id: String },
+    /// Configuration value is invalid or conflicts with OS limits
+    InvalidConfig(String),
 }
 
 impl std::fmt::Display for ValidationError {
@@ -81,6 +83,7 @@ impl std::fmt::Display for ValidationError {
             Self::InvalidClientId { id } => {
                 write!(f, "Invalid client ID: {}", id)
             }
+            Self::InvalidConfig(msg) => write!(f, "Invalid configuration: {}", msg),
         }
     }
 }
@@ -221,6 +224,45 @@ impl Validator {
             sanitized
         }
     }
+
+    /// Validate `max_connections` against the OS file descriptor limit.
+    ///
+    /// Returns `Ok(())` if the limit is sufficient, or a warning message if
+    /// `max_connections` exceeds the available file descriptors. Each connection
+    /// requires at least one FD, plus the server needs FDs for log segments,
+    /// WAL files, and other internal bookkeeping.
+    #[cfg(unix)]
+    pub fn validate_max_connections(max_connections: u64) -> Result<(), ValidationError> {
+        // SAFETY: libc::getrlimit is a standard POSIX function
+        let mut rlim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) };
+        if rc != 0 {
+            // getrlimit failed — can't validate, skip
+            return Ok(());
+        }
+
+        // Reserve ~256 FDs for internal use (WAL, segments, listeners, etc.)
+        const RESERVED_FDS: u64 = 256;
+        let available = rlim.rlim_cur.saturating_sub(RESERVED_FDS);
+
+        if max_connections > available {
+            return Err(ValidationError::InvalidConfig(format!(
+                "max_connections ({}) exceeds available file descriptors \
+                 (ulimit -n = {}, reserved = {}, available = {}). \
+                 Increase the file descriptor limit with `ulimit -n {}` or reduce max_connections.",
+                max_connections,
+                rlim.rlim_cur,
+                RESERVED_FDS,
+                available,
+                max_connections.saturating_add(RESERVED_FDS),
+            )));
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -338,5 +380,27 @@ mod tests {
             Validator::sanitize_for_log(with_newlines, 100),
             "helloworld"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_max_connections_within_limit() {
+        // A small value should always be within the OS limit
+        assert!(Validator::validate_max_connections(10).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_max_connections_exceeds_limit() {
+        // u64::MAX should exceed any real OS limit
+        let result = Validator::validate_max_connections(u64::MAX);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ValidationError::InvalidConfig(msg) => {
+                assert!(msg.contains("max_connections"));
+                assert!(msg.contains("exceeds available file descriptors"));
+            }
+            other => panic!("Expected InvalidConfig, got {:?}", other),
+        }
     }
 }

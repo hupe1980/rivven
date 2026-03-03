@@ -1442,6 +1442,15 @@ impl Sink for IcebergSink {
         }
         builder = builder.check_passed("table_config");
 
+        // Reject unsupported commit modes early
+        if config.commit_mode == CommitMode::Upsert {
+            return Ok(CheckResult::failure(
+                "CommitMode::Upsert is not yet implemented (requires Iceberg equality-delete files). \
+                 Use 'append' or 'overwrite' instead.",
+            ));
+        }
+        builder = builder.check_passed("commit_mode");
+
         // Validate partition configuration
         if config.partitioning != PartitionStrategy::None
             && config.partitioning != PartitionStrategy::TableDefault

@@ -286,6 +286,11 @@ impl BufferPool {
     }
 
     /// Return a buffer to the pool
+    ///
+    /// Routes the buffer back to its correct size class based on the pool's
+    /// class thresholds rather than the buffer's actual capacity, which may
+    /// differ due to allocator rounding (e.g. `with_capacity(4096)` may
+    /// allocate 4160 bytes).
     pub fn deallocate(&self, mut buf: BytesMut) {
         if self.config.enable_tracking {
             self.stats.deallocations.fetch_add(1, Ordering::Relaxed);
@@ -293,16 +298,23 @@ impl BufferPool {
         }
 
         buf.clear();
-        let class = SizeClass::for_size(buf.capacity());
+        let cap = buf.capacity();
 
-        let sender = match class {
-            SizeClass::Small => &self.small_pool.0,
-            SizeClass::Medium => &self.medium_pool.0,
-            SizeClass::Large => &self.large_pool.0,
-            SizeClass::Huge => return, // Don't pool huge buffers
+        // Classify by the pool's canonical sizes, not the potentially rounded
+        // allocator capacity.  A buffer whose capacity is within +12.5% of a
+        // pool size class is returned to that class.
+        let sender = if cap <= SizeClass::Small.size() + SizeClass::Small.size() / 8 {
+            &self.small_pool.0
+        } else if cap <= SizeClass::Medium.size() + SizeClass::Medium.size() / 8 {
+            &self.medium_pool.0
+        } else if cap <= SizeClass::Large.size() + SizeClass::Large.size() / 8 {
+            &self.large_pool.0
+        } else {
+            return; // Huge — don't pool
         };
 
-        // Try to return to pool, drop if full
+        // The if-else above already guarantees cap is within tolerance
+        // of the matched class, so no additional check is needed.
         let _ = sender.try_send(buf);
     }
 
@@ -317,7 +329,7 @@ impl BufferPool {
                 .stats
                 .bytes_allocated
                 .fetch_add(delta as usize, Ordering::Relaxed)
-                + delta as usize;
+                .wrapping_add(delta as usize);
             // Update peak if necessary
             let mut peak = self.stats.peak_bytes.load(Ordering::Relaxed);
             while new > peak {
@@ -694,5 +706,52 @@ mod tests {
         let _buf2 = pool.allocate(200);
 
         assert_eq!(pool.stats().allocations.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn test_deallocate_tolerates_allocator_rounding() {
+        let config = BufferPoolConfig {
+            enable_tracking: true,
+            ..Default::default()
+        };
+        let pool = BufferPool::new(config);
+
+        // Allocate a small buffer — the allocator may round capacity up
+        let buf = pool.allocate(4000);
+        let actual_cap = buf.capacity();
+
+        // The allocator might give us more than 4096 (e.g. 4160)
+        // Deallocate should still route it to the small pool
+        pool.deallocate(buf);
+
+        // Re-allocating a small buffer should recycle from the pool
+        let buf2 = pool.allocate(4000);
+        assert_eq!(
+            buf2.capacity(),
+            actual_cap,
+            "Buffer should be recycled from pool despite allocator rounding"
+        );
+    }
+
+    #[test]
+    fn test_deallocate_drops_oversized_buffer() {
+        let pool = BufferPool::new(BufferPoolConfig::default());
+
+        // Allocate a Medium-class buffer and grow it beyond Medium tolerance
+        let mut buf = pool.allocate(10_000);
+        // Extend far beyond Medium class (64KB + 12.5% = 73728)
+        buf.resize(80_000, 0);
+
+        let oversized_cap = buf.capacity();
+        pool.deallocate(buf);
+
+        // The oversized buffer should NOT have been pooled as Medium.
+        // A fresh Medium allocation should get a new buffer.
+        let buf2 = pool.allocate(10_000);
+        assert!(
+            buf2.capacity() != oversized_cap
+                || buf2.capacity() <= SizeClass::Medium.size() + SizeClass::Medium.size() / 8,
+            "Should get a correctly-sized buffer, not the oversized one"
+        );
     }
 }

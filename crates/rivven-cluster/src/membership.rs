@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, RwLock};
 use tracing::{debug, error, info, trace, warn};
+use zeroize::Zeroizing;
 
 #[cfg(feature = "swim")]
 use hmac::{Hmac, Mac};
@@ -127,7 +128,8 @@ pub struct Membership {
     shutdown: broadcast::Receiver<()>,
 
     /// Pre-validated HMAC key for message authentication (None = no auth)
-    hmac_key: Option<String>,
+    /// Wrapped in Zeroizing to scrub key material from memory on drop.
+    hmac_key: Option<Zeroizing<String>>,
 
     /// Gossip dissemination queue — items piggyback on Ping/Ack messages
     gossip_queue: Arc<tokio::sync::Mutex<Vec<GossipItem>>>,
@@ -162,10 +164,10 @@ impl Membership {
                 Hmac::<Sha256>::new_from_slice(token.as_bytes())
                     .expect("HMAC can accept key of any length")
             })
-            .map(|_| config.auth_token.clone().unwrap());
+            .map(|_| Zeroizing::new(config.auth_token.clone().unwrap()));
 
         #[cfg(not(feature = "swim"))]
-        let hmac_key: Option<String> = {
+        let hmac_key: Option<Zeroizing<String>> = {
             if config.auth_token.is_some() {
                 tracing::warn!(
                     "auth_token is configured but the 'swim' feature is disabled — \
@@ -199,15 +201,31 @@ impl Membership {
         Ok(())
     }
 
-    /// Sign a serialized message by appending an HMAC-SHA256 tag
+    /// Sign a serialized message by prepending an 8-byte timestamp (millis
+    /// since epoch) and appending an HMAC-SHA256 tag over (timestamp ‖ data).
+    ///
+    /// Wire format: `[timestamp:8][payload:N][hmac_tag:32]`
+    ///
+    /// The timestamp is included in the HMAC input to prevent replay attacks
+    /// (CLUSTER-H1 fix). The receiver rejects messages whose timestamp
+    /// falls outside a configurable window (default ±60 s).
     fn sign_message(&self, data: &[u8]) -> Vec<u8> {
         #[cfg(feature = "swim")]
         if let Some(ref key) = self.hmac_key {
+            let ts_millis = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let ts_bytes = ts_millis.to_be_bytes();
+
             let mut mac =
                 Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("HMAC key always valid");
+            mac.update(&ts_bytes);
             mac.update(data);
             let tag = mac.finalize().into_bytes();
-            let mut signed = Vec::with_capacity(data.len() + HMAC_TAG_LEN);
+
+            let mut signed = Vec::with_capacity(8 + data.len() + HMAC_TAG_LEN);
+            signed.extend_from_slice(&ts_bytes);
             signed.extend_from_slice(data);
             signed.extend_from_slice(&tag);
             return signed;
@@ -215,20 +233,41 @@ impl Membership {
         data.to_vec()
     }
 
-    /// Verify and strip an HMAC-SHA256 tag from received data.
-    /// Returns the payload (without tag) on success.
+    /// Verify and strip an HMAC-SHA256 tag and timestamp from received data.
+    ///
+    /// Rejects messages whose embedded timestamp is more than 60 seconds
+    /// from the local clock to prevent replay attacks. Returns the payload
+    /// (timestamp and tag stripped) on success.
     fn verify_message<'a>(&self, data: &'a [u8]) -> std::result::Result<&'a [u8], &'static str> {
         #[cfg(feature = "swim")]
         if let Some(ref key) = self.hmac_key {
-            if data.len() < HMAC_TAG_LEN {
-                return Err("message too short for HMAC tag");
+            // Minimum: 8 (timestamp) + 0 (payload) + 32 (HMAC tag)
+            if data.len() < 8 + HMAC_TAG_LEN {
+                return Err("message too short for timestamp + HMAC tag");
             }
-            let (payload, tag) = data.split_at(data.len() - HMAC_TAG_LEN);
+            let (ts_bytes, rest) = data.split_at(8);
+            let (payload, tag) = rest.split_at(rest.len() - HMAC_TAG_LEN);
+
+            // Verify HMAC over (timestamp ‖ payload)
             let mut mac =
                 Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("HMAC key always valid");
+            mac.update(ts_bytes);
             mac.update(payload);
             mac.verify_slice(tag)
                 .map_err(|_| "HMAC verification failed")?;
+
+            // Replay protection: reject messages outside ±60s window
+            let msg_millis =
+                u64::from_be_bytes(ts_bytes.try_into().map_err(|_| "invalid timestamp")?);
+            let now_millis = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let drift = now_millis.abs_diff(msg_millis);
+            if drift > 60_000 {
+                return Err("message timestamp outside acceptable window (replay protection)");
+            }
+
             return Ok(payload);
         }
         Ok(data)
@@ -923,7 +962,7 @@ impl Membership {
         socket: &Arc<UdpSocket>,
         gossip_queue: &Arc<tokio::sync::Mutex<Vec<GossipItem>>>,
         members: &Arc<DashMap<NodeId, Node>>,
-        hmac_key: &Option<String>,
+        hmac_key: &Option<Zeroizing<String>>,
     ) -> Result<()> {
         // Send the primary message
         Self::send_message_static(msg, addr, socket, hmac_key).await?;
@@ -942,7 +981,7 @@ impl Membership {
         msg: &SwimMessage,
         addr: SocketAddr,
         socket: &Arc<UdpSocket>,
-        hmac_key: &Option<String>,
+        hmac_key: &Option<Zeroizing<String>>,
     ) -> Result<()> {
         let data = postcard::to_allocvec(msg)?;
         let packet = Self::sign_message_static(&data, hmac_key);
@@ -951,14 +990,25 @@ impl Membership {
     }
 
     /// Static version of `sign_message` for use inside spawned tasks.
-    fn sign_message_static(data: &[u8], hmac_key: &Option<String>) -> Vec<u8> {
+    ///
+    /// Wire format must match `sign_message`: `[timestamp:8][payload:N][hmac_tag:32]`
+    fn sign_message_static(data: &[u8], hmac_key: &Option<Zeroizing<String>>) -> Vec<u8> {
         #[cfg(feature = "swim")]
         if let Some(ref key) = hmac_key {
+            let ts_millis = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let ts_bytes = ts_millis.to_be_bytes();
+
             let mut mac =
                 Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("HMAC key always valid");
+            mac.update(&ts_bytes);
             mac.update(data);
             let tag = mac.finalize().into_bytes();
-            let mut signed = Vec::with_capacity(data.len() + HMAC_TAG_LEN);
+
+            let mut signed = Vec::with_capacity(8 + data.len() + HMAC_TAG_LEN);
+            signed.extend_from_slice(&ts_bytes);
             signed.extend_from_slice(data);
             signed.extend_from_slice(&tag);
             return signed;
@@ -994,7 +1044,7 @@ impl Membership {
         source_id: &NodeId,
         members: &Arc<DashMap<NodeId, Node>>,
         socket: &Arc<UdpSocket>,
-        hmac_key: &Option<String>,
+        hmac_key: &Option<Zeroizing<String>>,
         incarnation: &Arc<RwLock<u64>>,
         indirect_probes_k: usize,
     ) -> Result<()> {

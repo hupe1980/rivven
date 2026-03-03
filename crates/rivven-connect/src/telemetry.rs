@@ -290,28 +290,36 @@ pub fn init_tracing(config: &TelemetryConfig) -> Result<(), TelemetryError> {
         "Initializing OpenTelemetry tracing"
     );
 
-    // Note: Full OpenTelemetry integration requires the opentelemetry crate
-    // which would be added as an optional dependency behind a feature flag.
-    // This is a placeholder implementation showing the API.
+    // NOTE: Full OpenTelemetry SDK integration (opentelemetry + opentelemetry-otlp)
+    // is not yet wired. The configuration is validated and logged so that when the
+    // SDK dependency is added behind a feature flag, no config changes are needed.
+    // Until then, standard `tracing` spans (source_read_span, sink_write_span, etc.)
+    // are emitted and visible via the normal tracing subscriber (e.g. env_logger),
+    // but they are NOT exported to an OTLP/Jaeger collector.
 
     match &config.exporter {
         ExporterConfig::Otlp {
             endpoint, use_http, ..
         } => {
-            info!(
+            warn!(
                 endpoint = %endpoint,
                 use_http = %use_http,
-                "Configured OTLP exporter"
+                "OTLP exporter configured but OpenTelemetry SDK is not yet integrated — \
+                 traces will be emitted via the tracing subscriber only, not exported to the collector"
             );
         }
         ExporterConfig::Jaeger { endpoint } => {
-            info!(endpoint = %endpoint, "Configured Jaeger exporter");
+            warn!(
+                endpoint = %endpoint,
+                "Jaeger exporter configured but OpenTelemetry SDK is not yet integrated — \
+                 traces will be emitted via the tracing subscriber only, not exported to the collector"
+            );
         }
         ExporterConfig::Console => {
-            info!("Configured console exporter for debugging");
+            info!("Console exporter configured — traces visible via tracing subscriber");
         }
         ExporterConfig::None => {
-            warn!("Tracing enabled but exporter is set to 'none'");
+            warn!("Tracing enabled but exporter is set to 'none' — no traces will be exported");
         }
     }
 
@@ -322,10 +330,11 @@ pub fn init_tracing(config: &TelemetryConfig) -> Result<(), TelemetryError> {
 ///
 /// Flushes any pending spans and shuts down the tracer provider.
 /// Call this at application shutdown.
+///
+/// Note: This is currently a no-op until the OpenTelemetry SDK is integrated.
+/// When the SDK is added, this should call `opentelemetry::global::shutdown_tracer_provider()`.
 pub fn shutdown_tracing() {
     info!("Shutting down OpenTelemetry tracing");
-    // In a real implementation, this would call:
-    // opentelemetry::global::shutdown_tracer_provider();
 }
 
 /// Error type for telemetry operations

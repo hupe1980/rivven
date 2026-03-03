@@ -30,7 +30,7 @@ proptest! {
         topic in arbitrary_string(100),
         partition in any::<Option<u32>>(),
         offset in any::<u64>(),
-        max_messages in 1usize..1000,
+        max_messages in 1u32..1000,
         consumer_group in arbitrary_string(100),
     ) {
         let requests = vec![

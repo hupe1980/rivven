@@ -161,9 +161,9 @@ cargo build -p rivvend --no-default-features
 
 ### API Errors
 
-1. **CORS issues**: Dashboard must be served from same origin as API
+1. **CORS issues**: Dashboard must be served from same origin as API. When the broker binds to `0.0.0.0`, the CORS allow-origin is automatically rewritten to `http://127.0.0.1:<port>` because browsers never send `0.0.0.0` as an origin. If accessing via a different hostname or IP, use a reverse proxy.
 2. **Connection refused**: Verify rivvend is running and port is accessible
-3. **Empty data**: Check that topics/consumer groups exist
+3. **Wrong replication factor**: The dashboard displays the broker's configured `default_replication_factor`. Per-topic replication factors are not yet supported.
 
 ### Refresh Not Working
 

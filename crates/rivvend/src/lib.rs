@@ -23,6 +23,7 @@ pub mod auth_handler;
 pub mod cli;
 pub mod cluster_server;
 pub mod framing;
+pub mod group_coordinator;
 pub mod handler;
 pub mod partitioner;
 pub mod protocol;
@@ -39,6 +40,7 @@ mod protocol_tests;
 pub use auth_handler::{AuthenticatedHandler, ConnectionAuth};
 pub use cli::{Cli, DeploymentMode};
 pub use cluster_server::{ClusterServer, RequestRouter, ServerStats, ServerStatus, ShutdownHandle};
+pub use group_coordinator::GroupCoordinator;
 pub use partitioner::{StickyPartitioner, StickyPartitionerConfig};
 pub use raft_api::{create_raft_router, start_raft_api_server, RaftApiState};
 pub use rate_limiter::{

@@ -138,9 +138,13 @@ pub struct DashboardState {
     pub topic_manager: rivven_core::TopicManager,
     /// Offset manager for consumer group info
     pub offset_manager: rivven_core::OffsetManager,
+    /// Consumer group coordinator for real state/member info
+    pub group_coordinator: Arc<crate::group_coordinator::GroupCoordinator>,
     /// Optional cluster auth token — when set, the `/dashboard/data`
     /// endpoint requires `Authorization: Bearer <token>`.
     pub cluster_auth_token: Option<Arc<String>>,
+    /// Default replication factor from broker configuration
+    pub default_replication_factor: u16,
 }
 
 // ============================================================================
@@ -307,12 +311,10 @@ async fn dashboard_data_handler(State(state): State<DashboardState>) -> impl Int
                 });
             }
 
-            // Use the actual cluster node count as the
-            // replication factor instead of hardcoding 1. In standalone
-            // mode the Raft state returns a single-node list, so this
-            // naturally reports 1. In cluster mode it reflects the true
-            // configured replication.
-            let replication_factor = state.raft_state.node_count().unwrap_or(1) as u16;
+            // Use the configured default replication factor from broker config.
+            // Per-topic replication factors are not yet supported, so all
+            // topics share the cluster-wide default.
+            let replication_factor = state.default_replication_factor;
 
             topics.push(TopicInfo {
                 name,
@@ -323,7 +325,7 @@ async fn dashboard_data_handler(State(state): State<DashboardState>) -> impl Int
             });
         } else {
             // Fallback if topic access fails
-            let replication_factor = state.raft_state.node_count().unwrap_or(1) as u16;
+            let replication_factor = state.default_replication_factor;
             topics.push(TopicInfo {
                 name,
                 partitions: 1,
@@ -363,13 +365,15 @@ async fn dashboard_data_handler(State(state): State<DashboardState>) -> impl Int
         }
 
         consumer_groups.push(ConsumerGroupInfo {
-            group_id,
-            // Show "Unknown" instead of misleading "Stable" — the
-            // dashboard does not have access to the consumer coordinator's
-            // group state or member list. Operators should use the admin API
-            // (DescribeGroup) for accurate group health information.
-            state: "Unknown".to_string(),
-            member_count: 0,
+            group_id: group_id.clone(),
+            // Use real state and member count from the group coordinator
+            // when the group is tracked, otherwise fall back to offset-only info.
+            state: state
+                .group_coordinator
+                .get_group_state(&group_id)
+                .await
+                .unwrap_or_else(|| "Empty".to_string()),
+            member_count: state.group_coordinator.get_member_count(&group_id).await,
             topics: group_topics,
             total_lag,
         });

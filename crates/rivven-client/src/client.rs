@@ -1,6 +1,7 @@
 use crate::{Error, MessageData, Request, Response, Result};
 use bytes::Bytes;
 use rivven_core::PasswordHash;
+use rivven_protocol::SyncGroupAssignments;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -131,6 +132,9 @@ impl Client {
             .map_err(|_| Error::TimeoutWithMessage(format!("Connection to {} timed out", addr)))?
             .map_err(|e| Error::ConnectionError(e.to_string()))?;
 
+        // Disable Nagle's algorithm for lower latency on small request/response RPC.
+        let _ = stream.set_nodelay(true);
+
         let mut client = Self {
             stream: ClientStream::Plaintext(stream),
             next_correlation_id: 0,
@@ -173,6 +177,11 @@ impl Client {
                 Error::TimeoutWithMessage(format!("TLS connection to {} timed out", addr))
             })?
             .map_err(|e| Error::ConnectionError(format!("TCP connection error: {}", e)))?;
+
+        // Disable Nagle for low-latency RPC (matches plaintext path)
+        tcp_stream
+            .set_nodelay(true)
+            .map_err(|e| Error::ConnectionError(format!("Failed to set TCP_NODELAY: {}", e)))?;
 
         // Create TLS connector
         let connector = TlsConnector::new(tls_config)
@@ -323,9 +332,17 @@ impl Client {
     /// networks, prefer `authenticate_scram()` which never sends the password.
     #[allow(deprecated)]
     pub async fn authenticate(&mut self, username: &str, password: &str) -> Result<AuthSession> {
+        // Client-side guard: SASL/PLAIN sends the password in cleartext.
+        // Without TLS, a network observer captures credentials immediately.
+        if !self.is_tls() {
+            return Err(Error::AuthenticationFailed(
+                "SASL/PLAIN requires a TLS connection — use authenticate_scram() for plaintext channels".to_string(),
+            ));
+        }
+
         // Tell the server whether we are on a TLS connection so it can
         // reject the request when TLS is not active.
-        let require_tls = self.is_tls();
+        let require_tls = true; // always true — we checked above
         let request = Request::Authenticate {
             username: username.to_string(),
             password: password.to_string(),
@@ -611,7 +628,7 @@ impl Client {
     /// order. Each entry is `Ok(messages)` or `Err(Error)`.
     pub async fn consume_pipelined(
         &mut self,
-        fetches: &[(&str, u32, u64, usize, Option<u8>)],
+        fetches: &[(&str, u32, u64, u32, Option<u8>)],
     ) -> Result<Vec<Result<Vec<MessageData>>>> {
         if fetches.is_empty() {
             return Ok(Vec::new());
@@ -634,7 +651,7 @@ impl Client {
 
     async fn consume_pipelined_inner(
         &mut self,
-        fetches: &[(&str, u32, u64, usize, Option<u8>)],
+        fetches: &[(&str, u32, u64, u32, Option<u8>)],
     ) -> Result<Vec<Result<Vec<MessageData>>>> {
         let mut correlation_ids = Vec::with_capacity(fetches.len());
         let mut bytes_sent = false;
@@ -700,6 +717,7 @@ impl Client {
 
         // Phase 2: Read all responses in-order.
         let mut results = Vec::with_capacity(fetches.len());
+        let mut response_buf: Vec<u8> = Vec::with_capacity(4096);
         for &expected_cid in &correlation_ids {
             let mut len_buf = [0u8; 4];
             self.stream.read_exact(&mut len_buf).await.map_err(|e| {
@@ -713,7 +731,7 @@ impl Client {
                 return Err(Error::ResponseTooLarge(msg_len, DEFAULT_MAX_RESPONSE_SIZE));
             }
 
-            let mut response_buf = vec![0u8; msg_len];
+            response_buf.resize(msg_len, 0);
             self.stream
                 .read_exact(&mut response_buf)
                 .await
@@ -815,7 +833,7 @@ impl Client {
         topic: impl Into<String>,
         partition: u32,
         offset: u64,
-        max_messages: usize,
+        max_messages: u32,
     ) -> Result<Vec<MessageData>> {
         self.consume_with_isolation(topic, partition, offset, max_messages, None)
             .await
@@ -845,7 +863,7 @@ impl Client {
         topic: impl Into<String>,
         partition: u32,
         offset: u64,
-        max_messages: usize,
+        max_messages: u32,
         isolation_level: Option<u8>,
     ) -> Result<Vec<MessageData>> {
         let request = Request::Consume {
@@ -878,7 +896,7 @@ impl Client {
         topic: impl Into<String>,
         partition: u32,
         offset: u64,
-        max_messages: usize,
+        max_messages: u32,
         isolation_level: Option<u8>,
         max_wait_ms: u64,
     ) -> Result<Vec<MessageData>> {
@@ -911,7 +929,7 @@ impl Client {
         topic: impl Into<String>,
         partition: u32,
         offset: u64,
-        max_messages: usize,
+        max_messages: u32,
     ) -> Result<Vec<MessageData>> {
         self.consume_with_isolation(topic, partition, offset, max_messages, Some(1))
             .await
@@ -1392,6 +1410,8 @@ impl Client {
                 // --- Read body ---
                 let body_bytes = if is_chunked {
                     // Chunked transfer-encoding: read chunk-size\r\n, chunk-data\r\n, repeat until 0\r\n
+                    const MAX_CHUNK_SIZE: usize = 16 * 1024 * 1024;
+                    const MAX_TOTAL_BODY: usize = 16 * 1024 * 1024;
                     let mut body = Vec::new();
                     loop {
                         let mut size_line = String::new();
@@ -1407,11 +1427,13 @@ impl Client {
                                 ))
                             })?;
                         if chunk_size == 0 {
-                            break; // Terminal chunk
+                            // Terminal chunk — consume trailing CRLF per RFC 7230 §4.1
+                            let mut trailer_buf = [0u8; 2];
+                            let _ = reader.read_exact(&mut trailer_buf).await;
+                            break;
                         }
 
-                        // Guard against malicious chunk sizes (max 16 MB per chunk)
-                        const MAX_CHUNK_SIZE: usize = 16 * 1024 * 1024;
+                        // Guard against malicious chunk sizes
                         if chunk_size > MAX_CHUNK_SIZE {
                             return Err(Error::ConnectionError(format!(
                                 "chunk size {} exceeds maximum {}",
@@ -1425,12 +1447,38 @@ impl Client {
                         })?;
                         body.extend_from_slice(&chunk);
 
-                        // Consume trailing \r\n after chunk data
-                        let mut crlf = String::new();
-                        reader.read_line(&mut crlf).await.ok();
+                        // Guard against unbounded total body accumulation
+                        if body.len() > MAX_TOTAL_BODY {
+                            return Err(Error::ConnectionError(format!(
+                                "chunked body {} bytes exceeds maximum {}",
+                                body.len(),
+                                MAX_TOTAL_BODY
+                            )));
+                        }
+
+                        // Consume trailing \r\n (exactly 2 bytes) after chunk data.
+                        // Using read_exact instead of read_line prevents unbounded
+                        // memory reads on malformed input.
+                        let mut crlf_buf = [0u8; 2];
+                        reader.read_exact(&mut crlf_buf).await.map_err(|e| {
+                            Error::ConnectionError(format!("failed to read chunk CRLF: {e}"))
+                        })?;
+                        if crlf_buf != [b'\r', b'\n'] {
+                            return Err(Error::ConnectionError(format!(
+                                "expected CRLF after chunk data, got {:02x?}",
+                                crlf_buf
+                            )));
+                        }
                     }
                     body
                 } else if let Some(len) = content_length {
+                    const MAX_CONTENT_LENGTH: usize = 16 * 1024 * 1024;
+                    if len > MAX_CONTENT_LENGTH {
+                        return Err(Error::ConnectionError(format!(
+                            "response Content-Length {} bytes exceeds maximum {}",
+                            len, MAX_CONTENT_LENGTH
+                        )));
+                    }
                     let mut body = vec![0u8; len];
                     reader.read_exact(&mut body).await.map_err(|e| {
                         Error::ConnectionError(format!("failed to read response body: {e}"))
@@ -1511,6 +1559,137 @@ impl Client {
 
         match response {
             Response::GroupDeleted => Ok(()),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
+    // =========================================================================
+    // Consumer Group Coordination
+    // =========================================================================
+
+    /// Join a consumer group.
+    ///
+    /// The coordinator assigns (or generates) a member ID and returns the
+    /// current generation, leader, and the full member list. The leader
+    /// uses the member list to compute partition assignments and sends
+    /// them via [`sync_group`](Self::sync_group).
+    ///
+    /// # Returns
+    /// `(generation_id, protocol_type, member_id, leader_id, members)`
+    /// where `members` is `Vec<(member_id, subscriptions)>`.
+    pub async fn join_group(
+        &mut self,
+        group_id: impl Into<String>,
+        member_id: impl Into<String>,
+        session_timeout_ms: u32,
+        rebalance_timeout_ms: u32,
+        protocol_type: impl Into<String>,
+        subscriptions: Vec<String>,
+    ) -> Result<(u32, String, String, String, Vec<(String, Vec<String>)>)> {
+        let request = Request::JoinGroup {
+            group_id: group_id.into(),
+            member_id: member_id.into(),
+            session_timeout_ms,
+            rebalance_timeout_ms,
+            protocol_type: protocol_type.into(),
+            subscriptions,
+        };
+
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::JoinGroupResult {
+                generation_id,
+                protocol_type,
+                member_id,
+                leader_id,
+                members,
+            } => Ok((generation_id, protocol_type, member_id, leader_id, members)),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
+    /// Synchronize consumer group assignments.
+    ///
+    /// The group leader sends partition assignments for all members;
+    /// followers send an empty assignment list. Every member receives
+    /// their own assignment in the response.
+    ///
+    /// # Arguments
+    /// * `assignments` — `Vec<(member_id, Vec<(topic, Vec<partition>)>)>`.
+    ///   Only the leader should provide non-empty assignments.
+    ///
+    /// # Returns
+    /// This member's partition assignment: `Vec<(topic, Vec<partition>)>`.
+    pub async fn sync_group(
+        &mut self,
+        group_id: impl Into<String>,
+        generation_id: u32,
+        member_id: impl Into<String>,
+        assignments: SyncGroupAssignments,
+    ) -> Result<Vec<(String, Vec<u32>)>> {
+        let request = Request::SyncGroup {
+            group_id: group_id.into(),
+            generation_id,
+            member_id: member_id.into(),
+            assignments,
+        };
+
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::SyncGroupResult { assignments } => Ok(assignments),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
+    /// Send a heartbeat to the consumer group coordinator.
+    ///
+    /// # Returns
+    /// * `0` — OK, member is in sync
+    /// * `27` — REBALANCE_IN_PROGRESS, member should rejoin
+    pub async fn heartbeat(
+        &mut self,
+        group_id: impl Into<String>,
+        generation_id: u32,
+        member_id: impl Into<String>,
+    ) -> Result<i32> {
+        let request = Request::Heartbeat {
+            group_id: group_id.into(),
+            generation_id,
+            member_id: member_id.into(),
+        };
+
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::HeartbeatResult { error_code } => Ok(error_code),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
+    /// Leave a consumer group.
+    ///
+    /// Gracefully removes this member, triggering a rebalance for
+    /// remaining group members. Call this during consumer shutdown.
+    pub async fn leave_group(
+        &mut self,
+        group_id: impl Into<String>,
+        member_id: impl Into<String>,
+    ) -> Result<()> {
+        let request = Request::LeaveGroup {
+            group_id: group_id.into(),
+            member_id: member_id.into(),
+        };
+
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::LeaveGroupResult => Ok(()),
             Response::Error { message } => Err(Error::ServerError(message)),
             _ => Err(Error::InvalidResponse),
         }
@@ -1787,6 +1966,7 @@ impl Client {
             } => Ok(ProducerState {
                 producer_id,
                 producer_epoch,
+                partition_sequences: std::collections::HashMap::new(),
                 next_sequence: 0,
             }),
             Response::Error { message } => Err(Error::ServerError(message)),
@@ -1833,6 +2013,10 @@ impl Client {
         value: impl Into<Bytes>,
         producer: &mut ProducerState,
     ) -> Result<(u64, u32, bool)> {
+        let topic_str = topic.into();
+        // Use per-partition sequence when a partition is known; fall back to
+        // the global counter for server-assigned partitions. The broker
+        // deduplicates per (producer_id, partition, sequence).
         let sequence = producer.next_sequence;
         producer.next_sequence = producer.next_sequence.wrapping_add(1);
         // After wrapping past i32::MAX, reset to 1 (not 0)
@@ -1843,7 +2027,7 @@ impl Client {
         }
 
         let request = Request::IdempotentPublish {
-            topic: topic.into(),
+            topic: topic_str,
             partition: None,
             key: key.map(|k| k.into()),
             value: value.into(),
@@ -1861,6 +2045,46 @@ impl Client {
                 partition,
                 duplicate,
             } => Ok((offset, partition, duplicate)),
+            Response::Error { message } => Err(Error::ServerError(message)),
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
+    /// Publish a message idempotently to a **specific** partition.
+    ///
+    /// Uses the per-(topic, partition) sequence counter from `ProducerState`
+    /// instead of the global counter, giving the broker correct dedup tracking
+    /// per partition.
+    pub async fn publish_idempotent_to_partition(
+        &mut self,
+        topic: impl Into<String>,
+        partition: u32,
+        key: Option<impl Into<Bytes>>,
+        value: impl Into<Bytes>,
+        producer: &mut ProducerState,
+    ) -> Result<(u64, u32, bool)> {
+        let topic_str = topic.into();
+        let sequence = producer.next_sequence_for(&topic_str, partition);
+
+        let request = Request::IdempotentPublish {
+            topic: topic_str,
+            partition: Some(partition),
+            key: key.map(|k| k.into()),
+            value: value.into(),
+            producer_id: producer.producer_id,
+            producer_epoch: producer.producer_epoch,
+            sequence,
+            leader_epoch: None,
+        };
+
+        let response = self.send_request(request).await?;
+
+        match response {
+            Response::IdempotentPublished {
+                offset,
+                partition: resp_partition,
+                duplicate,
+            } => Ok((offset, resp_partition, duplicate)),
             Response::Error { message } => Err(Error::ServerError(message)),
             _ => Err(Error::InvalidResponse),
         }
@@ -2108,8 +2332,31 @@ pub struct ProducerState {
     pub producer_id: u64,
     /// Current epoch (increments on reconnect)
     pub producer_epoch: u16,
-    /// Next sequence number to use (per-producer, not per-partition)
+    /// Per-partition sequence numbers for idempotent produce.
+    /// When the client specifies a partition, the per-partition sequence
+    /// is used for correct broker-side deduplication.
+    /// Key: (topic, partition), Value: next sequence number.
+    pub partition_sequences: std::collections::HashMap<(String, u32), i32>,
+    /// Global sequence counter used when the partition is server-assigned
+    /// (partition=None). The broker tracks this per producer_id.
     pub next_sequence: i32,
+}
+
+impl ProducerState {
+    /// Get the next sequence number for a specific topic-partition,
+    /// initializing to 1 if this is the first message to that partition.
+    pub fn next_sequence_for(&mut self, topic: &str, partition: u32) -> i32 {
+        let seq = self
+            .partition_sequences
+            .entry((topic.to_string(), partition))
+            .or_insert(1);
+        let current = *seq;
+        *seq = seq.wrapping_add(1);
+        if *seq <= 0 {
+            *seq = 1;
+        }
+        current
+    }
 }
 
 /// Result of altering topic configuration
@@ -2178,6 +2425,15 @@ pub(crate) fn parse_server_first(server_first: &str) -> Result<(String, String, 
     let salt = salt.ok_or_else(|| Error::AuthenticationFailed("Missing salt".into()))?;
     let iterations =
         iterations.ok_or_else(|| Error::AuthenticationFailed("Missing iterations".into()))?;
+
+    // RFC 7677 §4 requires a minimum of 4096 iterations for SCRAM-SHA-256.
+    // A malicious server could send i=1 to weaken key derivation.
+    if iterations < 4096 {
+        return Err(Error::AuthenticationFailed(format!(
+            "SCRAM iteration count {} is below minimum 4096 (possible downgrade attack)",
+            iterations
+        )));
+    }
 
     Ok((nonce, salt, iterations))
 }

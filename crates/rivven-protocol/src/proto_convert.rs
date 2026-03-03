@@ -6,9 +6,30 @@
 //! This module is only compiled when the `protobuf` feature is enabled.
 
 use crate::proto;
-use crate::{Request, Response};
+use crate::{ProtocolError, Request, Response};
 use bytes::Bytes;
 use prost::Message;
+
+/// Convert a string-based node ID to a `u32` for the proto wire format.
+///
+/// If the string is already a valid `u32` (e.g. `"42"`), it is parsed
+/// directly.  Otherwise a deterministic FNV-1a hash is computed so that
+/// the same logical node always maps to the same u32 value, regardless
+/// of Rust toolchain version or platform.
+///
+/// The result is masked to `0x7FFF_FFFF` to keep it in the positive
+/// `i32` range (important for proto interop with signed-int clients).
+fn node_id_to_u32(s: &str) -> u32 {
+    s.parse::<u32>().unwrap_or_else(|_| {
+        // FNV-1a 32-bit — deterministic, stable, no dependencies.
+        let mut hash: u32 = 0x811c_9dc5; // FNV offset basis
+        for byte in s.as_bytes() {
+            hash ^= u32::from(*byte);
+            hash = hash.wrapping_mul(0x0100_0193); // FNV prime
+        }
+        hash & 0x7FFF_FFFF
+    })
+}
 
 /// Safely convert a proto `u32` producer_epoch to the internal `u16`.
 ///
@@ -29,9 +50,19 @@ fn safe_producer_epoch(epoch: u32) -> Result<u16, crate::ProtocolError> {
 // ============================================================================
 
 impl Request {
-    /// Convert native Request to protobuf bytes
+    /// Convert native Request to protobuf bytes.
+    ///
+    /// The proto `Header.correlation_id` will be 0.  Use
+    /// [`to_proto_bytes_with_id`](Self::to_proto_bytes_with_id) when a
+    /// real correlation ID is available (e.g. from the wire header).
     pub fn to_proto_bytes(&self) -> crate::Result<Vec<u8>> {
-        let proto_request = self.to_proto()?;
+        self.to_proto_bytes_with_id(0)
+    }
+
+    /// Convert native Request to protobuf bytes, embedding
+    /// `correlation_id` (u32 wire value cast to u64) in the proto Header.
+    pub fn to_proto_bytes_with_id(&self, correlation_id: u32) -> crate::Result<Vec<u8>> {
+        let proto_request = self.to_proto(u64::from(correlation_id))?;
         Ok(proto_request.encode_to_vec())
     }
 
@@ -40,11 +71,18 @@ impl Request {
         let proto_request = proto::Request::decode(data).map_err(|e| {
             crate::ProtocolError::Serialization(format!("Protobuf decode error: {}", e))
         })?;
-        Self::from_proto(&proto_request)
+        let request = Self::from_proto(&proto_request)?;
+        request.validate()?;
+        Ok(request)
     }
 
-    /// Convert native Request to proto Request
-    fn to_proto(&self) -> crate::Result<proto::Request> {
+    /// Convert native Request to proto Request.
+    ///
+    /// `correlation_id` is propagated into the proto `Header` so that
+    /// gRPC/proto consumers can match responses to requests.  When
+    /// called via `to_proto_bytes()` (which has no caller-provided id)
+    /// the value defaults to 0.
+    fn to_proto(&self, correlation_id: u64) -> crate::Result<proto::Request> {
         use proto::request::RequestType;
 
         let request_type = match self {
@@ -81,6 +119,10 @@ impl Request {
                 record: Some(proto::Record {
                     key: key.clone().map(|b| b.to_vec()).unwrap_or_default(),
                     value: value.to_vec(),
+                    // TODO(PROTO-M2): Native Request::Publish lacks headers/timestamp
+                    // fields. Adding them requires a wire-format change. For now,
+                    // defaults are used; gRPC-originated publishes round-trip correctly
+                    // via from_proto which does carry these fields.
                     headers: vec![],
                     timestamp: 0,
                     has_key: key.is_some(),
@@ -99,7 +141,7 @@ impl Request {
                 topic: topic.clone(),
                 partition: *partition,
                 offset: *offset,
-                max_messages: u32::try_from(*max_messages).unwrap_or(u32::MAX),
+                max_messages: *max_messages,
                 max_bytes: 0,
                 isolation_level: u32::from(isolation_level.unwrap_or(0)),
                 max_wait_ms: *max_wait_ms,
@@ -210,6 +252,7 @@ impl Request {
                     record: Some(proto::Record {
                         key: key.clone().map(|b| b.to_vec()).unwrap_or_default(),
                         value: value.to_vec(),
+                        // TODO(PROTO-M2): headers/timestamp not in native IdempotentPublish
                         headers: vec![],
                         timestamp: 0,
                         has_key: key.is_some(),
@@ -346,6 +389,7 @@ impl Request {
                     record: Some(proto::Record {
                         key: key.clone().map(|b| b.to_vec()).unwrap_or_default(),
                         value: value.to_vec(),
+                        // TODO(PROTO-M2): headers/timestamp not in native TransactionalPublish
                         headers: vec![],
                         timestamp: 0,
                         has_key: key.is_some(),
@@ -433,12 +477,28 @@ impl Request {
                 protocol_version: *protocol_version,
                 client_id: client_id.clone(),
             })),
+
+            // Consumer group coordination is only available via postcard wire format.
+            // Proto messages are not defined for these variants.
+            Request::JoinGroup { .. }
+            | Request::SyncGroup { .. }
+            | Request::Heartbeat { .. }
+            | Request::LeaveGroup { .. }
+            // Batch publish is a native-protocol-only hot-path optimization.
+            | Request::PublishBatch { .. }
+            | Request::IdempotentPublishBatch { .. } => {
+                return Err(crate::ProtocolError::UnsupportedFormat(
+                    "Consumer group coordination and batch publish \
+                     are only available via postcard wire format"
+                        .to_string(),
+                ));
+            }
         };
 
         Ok(proto::Request {
             header: Some(proto::Header {
                 version: crate::PROTOCOL_VERSION,
-                correlation_id: 0,
+                correlation_id,
                 client_id: String::new(),
             }),
             request_type,
@@ -494,12 +554,7 @@ impl Request {
                 topic: req.topic.clone(),
                 partition: req.partition,
                 offset: req.offset,
-                max_messages: usize::try_from(req.max_messages).map_err(|_| {
-                    crate::ProtocolError::InvalidFormat(format!(
-                        "max_messages {} exceeds usize::MAX",
-                        req.max_messages
-                    ))
-                })?,
+                max_messages: req.max_messages,
                 isolation_level: if req.isolation_level > 0 {
                     Some(u8::try_from(req.isolation_level).map_err(|_| {
                         crate::ProtocolError::InvalidFormat(format!(
@@ -748,9 +803,19 @@ impl Request {
 // ============================================================================
 
 impl Response {
-    /// Convert native Response to protobuf bytes
+    /// Convert native Response to protobuf bytes.
+    ///
+    /// The proto `Header.correlation_id` will be 0. Use
+    /// [`to_proto_bytes_with_id`](Self::to_proto_bytes_with_id) when a
+    /// real correlation ID is available.
     pub fn to_proto_bytes(&self) -> crate::Result<Vec<u8>> {
-        let proto_response = self.to_proto()?;
+        self.to_proto_bytes_with_id(0)
+    }
+
+    /// Convert native Response to protobuf bytes, embedding
+    /// `correlation_id` (u32 wire value cast to u64) in the proto Header.
+    pub fn to_proto_bytes_with_id(&self, correlation_id: u32) -> crate::Result<Vec<u8>> {
+        let proto_response = self.to_proto(u64::from(correlation_id))?;
         Ok(proto_response.encode_to_vec())
     }
 
@@ -759,11 +824,15 @@ impl Response {
         let proto_response = proto::Response::decode(data).map_err(|e| {
             crate::ProtocolError::Serialization(format!("Protobuf decode error: {}", e))
         })?;
-        Self::from_proto(&proto_response)
+        let response = Self::from_proto(&proto_response)?;
+        response.validate()?;
+        Ok(response)
     }
 
-    /// Convert native Response to proto Response
-    fn to_proto(&self) -> crate::Result<proto::Response> {
+    /// Convert native Response to proto Response.
+    ///
+    /// See [`Request::to_proto`] for `correlation_id` semantics.
+    fn to_proto(&self, correlation_id: u64) -> crate::Result<proto::Response> {
         use proto::response::ResponseType;
 
         let response_type = match self {
@@ -796,6 +865,10 @@ impl Response {
             }
 
             Response::Messages { messages } => {
+                // Derive high_watermark from the maximum offset in the message set.
+                // high_watermark = max(offset) + 1, matching Kafka's convention
+                // ("next offset to be written"). Falls back to 0 for empty sets.
+                let high_watermark = messages.iter().map(|m| m.offset + 1).max().unwrap_or(0);
                 Some(ResponseType::Consume(proto::ConsumeResponse {
                     records: messages
                         .iter()
@@ -816,7 +889,7 @@ impl Response {
                             has_key: m.key.is_some(),
                         })
                         .collect(),
-                    high_watermark: 0,
+                    high_watermark,
                 }))
             }
 
@@ -847,10 +920,20 @@ impl Response {
             }
 
             Response::Offset { offset } => {
+                let wire_offset = match offset {
+                    Some(o) => match i64::try_from(*o) {
+                        Ok(v) => v,
+                        Err(_) => {
+                            return Err(ProtocolError::InvalidFormat(format!(
+                                "offset {} exceeds i64 range",
+                                o
+                            )))
+                        }
+                    },
+                    None => -1,
+                };
                 Some(ResponseType::GetOffset(proto::GetOffsetResponse {
-                    offset: offset
-                        .map(|o| i64::try_from(o).unwrap_or(i64::MAX))
-                        .unwrap_or(-1),
+                    offset: wire_offset,
                     metadata: String::new(),
                 }))
             }
@@ -882,13 +965,7 @@ impl Response {
                     brokers: brokers
                         .iter()
                         .map(|b| proto::BrokerInfo {
-                            id: b.node_id.parse().unwrap_or_else(|_| {
-                                tracing::warn!(
-                                    node_id = %b.node_id,
-                                    "BrokerInfo.id: failed to parse node_id as u32, using sentinel u32::MAX",
-                                );
-                                u32::MAX
-                            }),
+                            id: node_id_to_u32(&b.node_id),
                             host: b.host.clone(),
                             port: u32::from(b.port),
                             rack: b.rack.clone().unwrap_or_default(),
@@ -903,16 +980,13 @@ impl Response {
                                 .iter()
                                 .map(|p| proto::PartitionMetadata {
                                     id: p.partition,
-                                    leader: p
-                                        .leader
-                                        .as_ref()
-                                        .and_then(|l| l.parse().ok()),
+                                    leader: p.leader.as_ref().map(|l| node_id_to_u32(l)),
                                     replicas: p
                                         .replicas
                                         .iter()
-                                        .filter_map(|r| r.parse().ok())
+                                        .map(|r| node_id_to_u32(r))
                                         .collect(),
-                                    isr: p.isr.iter().filter_map(|i| i.parse().ok()).collect(),
+                                    isr: p.isr.iter().map(|i| node_id_to_u32(i)).collect(),
                                 })
                                 .collect(),
                             internal: t.is_internal,
@@ -1117,11 +1191,11 @@ impl Response {
                 },
             )),
 
-            Response::QuotasAltered { altered_count } => Some(ResponseType::QuotasAltered(
-                proto::QuotasAlteredResponse {
+            Response::QuotasAltered { altered_count } => {
+                Some(ResponseType::QuotasAltered(proto::QuotasAlteredResponse {
                     altered_count: u32::try_from(*altered_count).unwrap_or(u32::MAX),
-                },
-            )),
+                }))
+            }
 
             Response::Throttled {
                 throttle_time_ms,
@@ -1144,12 +1218,27 @@ impl Response {
                     message: message.clone(),
                 },
             )),
+
+            // Consumer group coordination responses are only available via postcard wire format.
+            Response::JoinGroupResult { .. }
+            | Response::SyncGroupResult { .. }
+            | Response::HeartbeatResult { .. }
+            | Response::LeaveGroupResult
+            // Batch publish responses are a native-protocol-only hot-path optimization.
+            | Response::PublishedBatch { .. }
+            | Response::IdempotentPublishedBatch { .. } => {
+                return Err(crate::ProtocolError::UnsupportedFormat(
+                    "Consumer group coordination and batch publish responses \
+                     are only available via postcard wire format"
+                        .to_string(),
+                ));
+            }
         };
 
         Ok(proto::Response {
             header: Some(proto::Header {
                 version: crate::PROTOCOL_VERSION,
-                correlation_id: 0,
+                correlation_id,
                 client_id: String::new(),
             }),
             response_type,
@@ -1277,7 +1366,7 @@ impl Response {
                                 leader: p.leader.map(|l| l.to_string()),
                                 replicas: p.replicas.iter().map(|r| r.to_string()).collect(),
                                 isr: p.isr.iter().map(|i| i.to_string()).collect(),
-                                offline: p.leader.is_none() && p.replicas.is_empty(),
+                                offline: p.leader.is_none(),
                             })
                             .collect(),
                     })

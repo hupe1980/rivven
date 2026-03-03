@@ -47,6 +47,8 @@ This multi-binary architecture provides **security isolation**—database creden
 - **Auto-create topics**: Topics created automatically with configurable defaults
 - **Per-source configuration**: Override partitions and settings per connector
 - **Connection resilience**: Exponential backoff with jitter, automatic reconnection
+- **Source publish retry**: Source connectors retry failed publishes up to 3 times with exponential backoff before propagating errors
+- **Storage upload retry**: Object storage sinks retry uploads up to 3 times with exponential backoff for transient failures
 - **Producer reconnection**: Producers automatically reconnect with exponential backoff and jitter on connection loss
 
 ---
@@ -77,7 +79,7 @@ This multi-binary architecture provides **security isolation**—database creden
 | Crate | Purpose | Description |
 |:------|:--------|:------------|
 | `rivven-core` | Storage engine | Topics, partitions, consumer groups, compression |
-| `rivvend` | Broker binary | TCP server, protocol handling, auth |
+| `rivvend` | Broker binary | TCP server, protocol handling, auth, group coordination |
 | `rivven-client` | Rust client | Production client with pooling, batching, retries |
 | `rivven-protocol` | Wire protocol | postcard + protobuf serialization |
 | `rivven` | CLI | Command-line interface |
@@ -238,6 +240,8 @@ The Write-Ahead Log validates CRC32 checksums consistently across all scan paths
 - **`timestamp_bounds()`** (segment scan): Skips CRC-invalid records to prevent corrupted timestamps from skewing min/max bounds
 - **`find_offset_for_timestamp()`** (consumer seek): Validates CRC per record during timestamp-based lookups
 - **`WalRecord::from_bytes()`** (deserialization): Rejects zero-length `Full`, `First`, and `Last` records as invalid, preventing phantom records from pre-allocated WAL tail space from entering the replay loop
+- **LSN from filename**: The WAL Log Sequence Number is derived from the filename (e.g., `00000000000000000042.wal` → LSN 42), ensuring deterministic ordering during recovery without relying on in-band metadata
+- **Graceful shutdown drain**: WAL shutdown calls `rx.close()` then async-receives all pending entries from the group commit channel before closing the file, ensuring zero data loss on clean shutdown
 
 WAL file pre-allocation uses `tokio::task::spawn_blocking` to avoid creating unbounded OS threads during rapid rotation.
 
@@ -339,7 +343,7 @@ slice.copy_from_slice(&data);
 let frozen = buffer.freeze();  // True zero-copy via Bytes::from_owner()
 ```
 
-The `freeze()` method uses `Bytes::from_owner()` to wrap the buffer in an `Arc`-backed `Bytes` — no `memcpy` occurs. The `ZeroCopyBufferPool` enforces a `max_buffers` limit (default: `initial_count * 4`) to prevent unbounded memory growth under backpressure.
+The `freeze()` method uses `Bytes::from_owner()` to wrap the buffer in an `Arc`-backed `Bytes` — no `memcpy` occurs. The `ZeroCopyBufferPool` enforces a `max_buffers` limit (default: `initial_count * 4`) to prevent unbounded memory growth under backpressure. Buffer recycling uses `try_reset()` which verifies exclusive `Arc` ownership (`strong_count == 1`) before resetting the write position — preventing data corruption from resetting buffers with outstanding references.
 
 #### Lock-Free Data Structures
 
@@ -351,7 +355,7 @@ Optimized for streaming workloads:
 | `ConcurrentHashMap` | Partition lookup | Sharded RwLocks |
 | `AppendOnlyLog` | Sequential writes | Single-writer |
 | `ConcurrentSkipList` | Range queries | Lock-free traversal |
-| `TokenBucketRateLimiter` | Connector throughput control | Fully lock-free (AtomicU64 CAS for refill + acquire) |
+| `TokenBucketRateLimiter` | Connector throughput control | Fully lock-free (AtomicU64 CAS retry loop for refill + acquire) |
 
 The `LogSegment` backing `AppendOnlyLog` uses raw pointer access (no `UnsafeCell<Vec>`) to avoid Rust aliasing violations during concurrent CAS-reserved writes and committed-range reads. The buffer is pre-allocated at segment creation and never resized.
 
@@ -369,6 +373,7 @@ The partition append path avoids unnecessary copies:
 Slab allocation with thread-local caching:
 
 - **Size Classes**: Small (64-512B), Medium (512-4KB), Large (4-64KB), Huge (64KB-1MB)
+- **Tolerance-Based Routing**: Returned buffers are classified by pool canonical sizes with +12.5% tolerance to compensate for allocator rounding — prevents buffer leakage between size classes
 - **Thread-Local Cache**: Fast path avoids global lock
 - **Pool Statistics**: Hit rate monitoring
 
@@ -427,6 +432,8 @@ Rivven provides a portable async I/O layer with an io_uring-style API. The curre
 └────────────┘     └─────────────────┘     └────────────┘
 ```
 
+**Concurrent Reads (Unix):** `AsyncFile::read_at()` uses `pread` (positioned read) via `std::os::unix::fs::FileExt`, eliminating the mutex for read operations. Multiple concurrent segment fetch requests proceed without contention. Non-Unix falls back to seek+read under `TokioMutex`.
+
 ### Response Framing Optimization
 
 Consume responses use a **single-write framing strategy**: the response header and all message frames are assembled in a single buffer before writing to the socket. This avoids multiple small `write()` syscalls and reduces TCP packet fragmentation, improving consumer throughput especially under high fan-out.
@@ -439,6 +446,7 @@ The Rivven client supports **HTTP/2-style request pipelining**:
 - Automatic batching with configurable flush intervals
 - Backpressure via semaphores to prevent memory exhaustion
 - **Connection safety:** `bytes_sent` tracking poisons the client on partial I/O failures, preventing TCP stream desync from stale responses. Serialization, deserialization, and `ResponseTooLarge` errors after bytes are on the wire also poison the stream. Non-pipelined `send_request_inner` poisons on every I/O operation (write, flush, read). Timeout cancellation mid-I/O also poisons the stream. Poisoned clients fail fast — no sequential fallback is attempted. `ProtocolError` and `ResponseTooLarge` trigger automatic consumer reconnect.
+- **Lock-free flush**: `flush_batch` registers pending responses under the lock, then writes to the socket **outside** the lock. This prevents TCP backpressure from blocking the reader task's response dispatch.
 
 ```rust
 use rivven_client::{PipelinedClient, PipelineConfig};
@@ -732,16 +740,19 @@ protoc --java_out=. crates/rivven-protocol/proto/rivven.proto
 
 ### Request Types
 
-- `Publish` - Send message to topic
-- `Consume` - Read messages from partition
+- `Publish` / `IdempotentPublish` - Send message to topic
+- `Consume` / `ConsumeLongPoll` - Read messages from partition
 - `CreateTopic` / `DeleteTopic` - Topic management
-- `CommitOffset` / `GetOffset` - Consumer group operations
+- `CommitOffset` / `GetOffset` - Consumer group offset operations
+- `JoinGroup` / `SyncGroup` / `Heartbeat` / `LeaveGroup` - Consumer group coordination
 - `Authenticate` - SASL authentication
+- `BeginTransaction` / `CommitTransaction` / `AbortTransaction` - Transactions
 
 ### Response Types
 
 - `Published` - Offset confirmation
 - `Messages` - Batch of messages
+- `JoinGroupResult` / `SyncGroupResult` / `HeartbeatResult` / `LeaveGroupResult` - Group coordination results
 - `Error` - Error with message
 
 ---

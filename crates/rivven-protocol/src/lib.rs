@@ -58,10 +58,10 @@ mod proto_convert;
 
 pub use error::{ProtocolError, Result};
 pub use messages::{
-    DeleteRecordsResult, QuotaAlteration, QuotaEntry, Request, Response, TopicConfigDescription,
-    TopicConfigEntry, TopicConfigValue,
+    BatchRecord, DeleteRecordsResult, QuotaAlteration, QuotaEntry, Request, Response,
+    SyncGroupAssignments, TopicConfigDescription, TopicConfigEntry, TopicConfigValue,
 };
-pub use metadata::{BrokerInfo, PartitionMetadata, TopicMetadata};
+pub use metadata::{is_internal_topic, BrokerInfo, PartitionMetadata, TopicMetadata};
 pub use types::{MessageData, SchemaType};
 
 /// Protocol version for compatibility checking
@@ -76,6 +76,18 @@ pub const WIRE_HEADER_SIZE: usize = 5;
 /// `SecureServerConfig::max_message_size` to avoid silent truncation or
 /// misleading protocol-level limits.
 pub const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
+
+/// Maximum topic/group/entity name length (256 bytes).
+pub const MAX_NAME_LEN: usize = 256;
+
+/// Maximum number of items in a list field (topics, partitions, configs, etc.).
+pub const MAX_LIST_LEN: usize = 10_000;
+
+/// Maximum number of messages in a single `Response::Messages` batch.
+pub const MAX_MESSAGES_PER_RESPONSE: usize = 100_000;
+
+/// Maximum authentication / SASL payload (64 KiB).
+pub const MAX_AUTH_PAYLOAD: usize = 64 * 1024;
 
 /// Wire format identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

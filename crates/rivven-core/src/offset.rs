@@ -162,9 +162,9 @@ impl OffsetManager {
                 .insert(partition, offset);
         }
 
-        let pending = self.pending_commits.fetch_add(1, Ordering::Relaxed) + 1;
+        let pending = self.pending_commits.fetch_add(1, Ordering::AcqRel) + 1;
         if pending >= CHECKPOINT_INTERVAL {
-            self.pending_commits.store(0, Ordering::Relaxed);
+            self.pending_commits.store(0, Ordering::Release);
             self.checkpoint().await;
         }
     }
@@ -174,7 +174,7 @@ impl OffsetManager {
     /// Should be called during graceful shutdown to ensure no committed
     /// offsets are lost.
     pub async fn flush(&self) {
-        if self.pending_commits.swap(0, Ordering::Relaxed) > 0 {
+        if self.pending_commits.swap(0, Ordering::AcqRel) > 0 {
             self.checkpoint().await;
         }
     }

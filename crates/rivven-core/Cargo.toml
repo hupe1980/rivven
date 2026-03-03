@@ -90,6 +90,9 @@ snap = { version = "1.1", optional = true }
 # Cloud object storage (S3, GCS, Azure, MinIO)
 object_store = { version = "0.11", optional = true }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 uuid = { workspace = true }

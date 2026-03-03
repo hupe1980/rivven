@@ -30,6 +30,9 @@ tracing = { workspace = true }
 rivven-client = { workspace = true }
 rivven-core = { workspace = true }
 
+# Async utilities (join_all for batch sends)
+futures = { workspace = true }
+
 # Concurrent per-transactional-id lock map
 dashmap = "6.1"
 

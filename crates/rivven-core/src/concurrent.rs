@@ -278,11 +278,16 @@ struct LogSegment {
     ///
     /// Concurrent access is safe because:
     /// - Writers CAS on `write_pos` to reserve disjoint byte ranges
-    /// - Readers only access bytes below the committed `write_pos`
+    /// - Readers only access bytes below the committed `committed_pos`
     /// - No `&mut [u8]` references are ever created to the shared region
     data: UnsafeCell<Box<[u8]>>,
-    /// Current write position
+    /// Next free write position (reservation frontier).
+    /// Writers CAS on this to reserve exclusive byte ranges.
     write_pos: AtomicUsize,
+    /// Committed position — all data below this offset is fully written
+    /// and safe to read. Advanced by writers *after* their data copy
+    /// completes, in reservation order.
+    committed_pos: AtomicUsize,
     /// Segment capacity
     capacity: usize,
     /// Segment base offset
@@ -292,11 +297,12 @@ struct LogSegment {
 }
 
 // SAFETY: All accesses to the data buffer go through `UnsafeCell` pointer
-// arithmetic coordinated by atomic `write_pos`. The CAS on write_pos
-// guarantees exclusive write access to each reserved byte range. Reads are
-// bounded by write_pos (Acquire ordering), ensuring all data before that
-// position is fully written. No `&mut` / `&` references to the buffer are
-// ever created concurrently.
+// arithmetic coordinated by atomic `write_pos` and `committed_pos`. The CAS
+// on write_pos guarantees exclusive write access to each reserved byte range.
+// Readers use `committed_pos` (Acquire ordering) as their upper bound,
+// ensuring all data before that position is fully written. Writers advance
+// `committed_pos` only after their copy is complete, in reservation order.
+// No `&mut` / `&` references to the buffer are ever created concurrently.
 unsafe impl Send for LogSegment {}
 unsafe impl Sync for LogSegment {}
 
@@ -308,6 +314,7 @@ impl LogSegment {
             data: UnsafeCell::new(data),
             capacity,
             write_pos: AtomicUsize::new(0),
+            committed_pos: AtomicUsize::new(0),
             base_offset,
             sealed: AtomicBool::new(false),
         }
@@ -376,6 +383,21 @@ impl LogSegment {
                         );
                     }
 
+                    // Commit: spin until all prior writers have committed,
+                    // then advance committed_pos so readers can see our data.
+                    while self
+                        .committed_pos
+                        .compare_exchange_weak(
+                            current_pos,
+                            new_pos,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_err()
+                    {
+                        std::hint::spin_loop();
+                    }
+
                     let offset = self.base_offset + current_pos as u64;
                     return Some((current_pos, offset));
                 }
@@ -389,14 +411,14 @@ impl LogSegment {
 
     /// Read an entry at the given position
     fn read(&self, position: usize) -> Option<&[u8]> {
-        let committed = self.write_pos.load(Ordering::Acquire);
+        let committed = self.committed_pos.load(Ordering::Acquire);
 
         if position + 4 > committed {
             return None;
         }
 
         // SAFETY: position..position+4 is within committed range,
-        // all data up to committed has been fully written, and we
+        // all data up to committed_pos has been fully written, and we
         // only create a shared slice over the committed (immutable) region.
         let ptr = self.data_ptr();
         unsafe {
@@ -415,7 +437,7 @@ impl LogSegment {
 
     /// Get committed size
     fn committed_size(&self) -> usize {
-        self.write_pos.load(Ordering::Acquire)
+        self.committed_pos.load(Ordering::Acquire)
     }
 
     /// Check if segment is sealed
@@ -737,11 +759,15 @@ impl<K: Hash + Eq + Clone, V: Clone> ConcurrentHashMap<K, V> {
         entries
     }
 
-    /// Clear all entries atomically.
+    /// Clear all entries.
     ///
-    /// Swaps each shard with a fresh empty `HashMap` in one step, so concurrent
-    /// readers never observe a partially-cleared state. The old maps are dropped
-    /// after all shards have been swapped.
+    /// Each shard is atomically swapped with a fresh empty `HashMap`, but
+    /// the overall clear is **not** globally atomic — concurrent readers may
+    /// observe a partially-cleared state between the first and last shard
+    /// swap (CORE-05).
+    ///
+    /// The old maps are dropped after all shards have been swapped so
+    /// deallocation does not happen while any shard lock is held.
     pub fn clear(&self) {
         // Collect the old maps so they are dropped AFTER all locks are released.
         let mut old_maps = Vec::with_capacity(SHARD_COUNT);

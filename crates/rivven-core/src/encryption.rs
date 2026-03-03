@@ -516,16 +516,6 @@ impl EncryptionManager {
         Ok(())
     }
 
-    /// Get a key by version for decryption
-    fn get_key_for_version(&self, version: u32) -> Result<()> {
-        let store = self.key_store.read();
-        if store.contains_key(&version) {
-            Ok(())
-        } else {
-            Err(EncryptionError::KeyNotFound(version))
-        }
-    }
-
     /// Create a no-op encryption manager for when encryption is disabled
     pub fn disabled() -> Arc<DisabledEncryption> {
         Arc::new(DisabledEncryption)
@@ -609,9 +599,6 @@ impl EncryptionManager {
         }
 
         let header = EncryptedHeader::from_bytes(ciphertext)?;
-
-        // Look up key by version from the key store (supports rotated keys)
-        self.get_key_for_version(header.key_version)?;
 
         let nonce = Nonce::assume_unique_for_key(header.nonce);
 

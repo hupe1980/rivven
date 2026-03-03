@@ -43,7 +43,7 @@ use crate::types::{
 };
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use tracing::debug;
 
 /// Configuration for the validation engine
@@ -155,7 +155,7 @@ impl ValidationEngine {
     pub fn clear(&mut self) {
         self.global_rules.clear();
         self.subject_rules.clear();
-        self.regex_cache.lock().unwrap().clear();
+        self.regex_cache.lock().clear();
     }
 
     /// Get a compiled regex from the cache, or compile and cache it.
@@ -163,7 +163,7 @@ impl ValidationEngine {
     /// The cache is bounded to 1 000 entries; when full the cache is cleared
     /// to prevent unbounded memory growth from attacker-chosen patterns.
     fn get_or_compile_regex(&self, pattern: &str) -> SchemaResult<regex::Regex> {
-        let mut cache = self.regex_cache.lock().unwrap();
+        let mut cache = self.regex_cache.lock();
         if let Some(re) = cache.get(pattern) {
             return Ok(re.clone());
         }

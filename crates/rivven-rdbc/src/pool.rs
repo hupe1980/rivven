@@ -653,6 +653,47 @@ impl SimpleConnectionPool {
             }
         }
 
+        // Spawn a periodic maintenance task that replenishes idle
+        // connections back to `min_size` so the pool never stays
+        // permanently shrunk after evictions.
+        {
+            let weak = Arc::downgrade(&pool);
+            let min_size = config.min_size;
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(30));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    interval.tick().await;
+                    let Some(pool) = weak.upgrade() else {
+                        break; // Pool dropped
+                    };
+                    if pool.shutdown.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let idle_count = pool.idle.lock().await.len();
+                    let total = pool.total_connections.load(Ordering::Acquire);
+                    // Replenish if idle count is below min_size and total
+                    // connections allow room for new ones.
+                    if idle_count < min_size && total < pool.config.max_size {
+                        let deficit = min_size.saturating_sub(idle_count);
+                        for _ in 0..deficit {
+                            match pool.create_connection().await {
+                                Ok(conn) => {
+                                    let mut idle = pool.idle.lock().await;
+                                    idle.push(PoolEntry {
+                                        conn,
+                                        created_at: Instant::now(),
+                                        last_used: Instant::now(),
+                                    });
+                                }
+                                Err(_) => break, // stop trying on failure
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
         Ok(pool)
     }
 

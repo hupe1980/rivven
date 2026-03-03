@@ -37,6 +37,7 @@ Rivven provides **native CDC support** for PostgreSQL, MySQL/MariaDB, and SQL Se
 | **I/O Timeouts** | All CDC protocol I/O wrapped in timeouts to prevent hung connections |
 | **Notifications** | Snapshot progress, streaming status, webhook alerts |
 | **Automatic Reconnection** | Exponential backoff with jitter for MySQL binlog reconnection |
+| **Binlog Format Validation** | MySQL source fails fast with a clear error if `binlog_format` is not `ROW` — empty-result edge case is handled |
 | **Proactive WAL Keepalives** | PostgreSQL sends periodic standby status updates to prevent slot timeout |
 | **Full JSON Type Support** | MySQL binary JSON columns decoded to structured values (not raw bytes) |
 | **Composite PK Snapshots** | PostgreSQL snapshots support multi-column primary keys |
@@ -573,6 +574,10 @@ while let Some(chunk) = executor.next_chunk().await? {
 ## Event Routing
 
 Route CDC events to different destinations based on content, table, operation, or custom conditions.
+
+> **Note:** There are two kinds of DLQ in Rivven CDC:
+> 1. **Routing DLQ** (`router.dead_letter_queue`) — catches events that don't match any routing rule (configured below)
+> 2. **Publish DLQ** (`dead_letter_topic` on the source) — catches events that fail all broker publish retries. This is critical for CDC because the replication slot advances past events; without a publish DLQ, a failed publish means permanent data loss. See [Connectors — Dead Letter Queue](connectors#dead-letter-queue-dlq) for configuration.
 
 ### Configuration
 
@@ -1168,6 +1173,7 @@ Rivven CDC provides comprehensive Prometheus metrics for full observability.
 | **Streaming** | `streaming_lag_ms`, `create_events`, `update_events`, `delete_events` |
 | **Incremental Snapshot** | `incremental_snapshot_chunks_processed`, `incremental_snapshot_rows_captured` |
 | **Performance** | `processing_time_p99_us`, `average_batch_size`, `batches_processed` |
+| **Dead Letter Queue** | `events_dead_lettered` — events routed to DLQ after publish retry exhaustion |
 
 See [Troubleshooting Guide](cdc-troubleshooting) for alert rules and health checks.
 

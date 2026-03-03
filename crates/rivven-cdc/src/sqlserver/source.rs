@@ -608,6 +608,28 @@ fn save_checkpoint(path: &str, position: &CdcPosition) {
             "Failed to rename checkpoint file {} → {}: {}",
             tmp_path, path, e
         );
+        return;
+    }
+    // Fsync the parent directory so the rename is durable (CDC-01).
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        match std::fs::File::open(parent) {
+            Ok(dir) => {
+                if let Err(e) = dir.sync_all() {
+                    warn!(
+                        "Directory fsync failed after checkpoint rename {}: {}",
+                        parent.display(),
+                        e
+                    );
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to open parent directory {} for fsync: {}",
+                    parent.display(),
+                    e
+                );
+            }
+        }
     }
 }
 

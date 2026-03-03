@@ -67,7 +67,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, Mutex, Semaphore};
-use tracing::{debug, trace, warn};
+use tracing::{debug, info, trace, warn};
 
 // ============================================================================
 // Type Aliases
@@ -95,6 +95,8 @@ pub struct PipelineConfig {
     pub write_buffer_size: usize,
     /// Request timeout
     pub request_timeout: Duration,
+    /// Maximum time to wait for in-flight responses during close()
+    pub close_timeout: Duration,
     /// Optional TLS configuration
     #[cfg(feature = "tls")]
     pub tls: Option<PipelineTlsConfig>,
@@ -113,12 +115,21 @@ pub struct PipelineTlsConfig {
 }
 
 /// Authentication configuration for pipelined client
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PipelineAuthConfig {
     /// Username
     pub username: String,
     /// Password
     pub password: String,
+}
+
+impl std::fmt::Debug for PipelineAuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PipelineAuthConfig")
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl Default for PipelineConfig {
@@ -130,6 +141,7 @@ impl Default for PipelineConfig {
             read_buffer_size: 64 * 1024,  // 64KB
             write_buffer_size: 64 * 1024, // 64KB
             request_timeout: Duration::from_secs(30),
+            close_timeout: Duration::from_secs(5),
             #[cfg(feature = "tls")]
             tls: None,
             auth: None,
@@ -152,6 +164,7 @@ impl PipelineConfig {
             read_buffer_size: 256 * 1024,
             write_buffer_size: 256 * 1024,
             request_timeout: Duration::from_secs(60),
+            close_timeout: Duration::from_secs(10),
             #[cfg(feature = "tls")]
             tls: None,
             auth: None,
@@ -167,6 +180,7 @@ impl PipelineConfig {
             read_buffer_size: 16 * 1024,
             write_buffer_size: 16 * 1024,
             request_timeout: Duration::from_secs(10),
+            close_timeout: Duration::from_secs(3),
             #[cfg(feature = "tls")]
             tls: None,
             auth: None,
@@ -243,6 +257,12 @@ impl PipelineConfigBuilder {
             username: username.into(),
             password: password.into(),
         });
+        self
+    }
+
+    /// Set close timeout for draining in-flight responses
+    pub fn close_timeout(mut self, timeout: Duration) -> Self {
+        self.config.close_timeout = timeout;
         self
     }
 
@@ -336,6 +356,8 @@ impl PipelinedClient {
                 .map_err(|e| Error::ConnectionError(format!("TLS handshake error: {e}")))?;
             let (read_half, write_half) = tokio::io::split(tls_stream);
             let client = Self::setup_pipeline(addr, config, read_half, write_half).await?;
+            // Version handshake before authentication
+            Self::pipeline_handshake(&client).await?;
             // authenticate after pipeline setup
             if let Some(auth) = &auth_config {
                 Self::pipeline_authenticate(&client, &auth.username, &auth.password).await?;
@@ -345,6 +367,8 @@ impl PipelinedClient {
 
         let (read_half, write_half) = stream.into_split();
         let client = Self::setup_pipeline(addr, config, read_half, write_half).await?;
+        // Version handshake before authentication
+        Self::pipeline_handshake(&client).await?;
         // authenticate after pipeline setup
         if let Some(auth) = &auth_config {
             Self::pipeline_authenticate(&client, &auth.username, &auth.password).await?;
@@ -437,14 +461,83 @@ impl PipelinedClient {
     /// window to finish reading already-written responses before the
     /// shutdown flag takes effect.
     pub async fn close(&self) {
-        // Drop the sender side of the request channel so the writer task
-        // flushes its remaining batch and exits naturally.
-        // (The sender is held by PipelinedClientInner; clones held by
-        // callers keep the channel open, so this is best-effort.)
-        //
+        // Wait for in-flight requests to drain before shutdown (CLIENT-10).
+        // This gives outstanding responses a chance to arrive so callers
+        // don't silently lose acknowledgments.
+        let drain_deadline = tokio::time::Instant::now() + self.inner.config.close_timeout;
+        loop {
+            let pending = {
+                let map = self.inner.pending_responses.lock().await;
+                map.len()
+            };
+            if pending == 0 {
+                break;
+            }
+            if tokio::time::Instant::now() >= drain_deadline {
+                tracing::warn!(
+                    pending,
+                    "Pipeline close() timed out waiting for in-flight responses"
+                );
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+
         // Signal shutdown — the reader task will drain pending responses
         // until the connection is closed or the flag is observed.
         let _ = self.inner.shutdown.send(true);
+    }
+
+    /// Perform version handshake over the pipeline.
+    ///
+    /// Mirrors [`Client::handshake()`] — sends a `Request::Handshake` and
+    /// validates the server speaks a compatible protocol version.  Old servers
+    /// that don't recognise the message return `Response::Error`, which is
+    /// accepted with a warning so the pipeline degrades gracefully.
+    async fn pipeline_handshake(client: &PipelinedClient) -> Result<()> {
+        let response = client
+            .send_request(Request::Handshake {
+                protocol_version: rivven_protocol::PROTOCOL_VERSION,
+                client_id: format!("pipeline-{}", std::process::id()),
+            })
+            .await?;
+
+        match response {
+            Response::HandshakeResult {
+                compatible,
+                server_version,
+                message: _,
+            } => {
+                if compatible {
+                    info!(
+                        "Pipeline handshake OK (client v{}, server v{})",
+                        rivven_protocol::PROTOCOL_VERSION,
+                        server_version
+                    );
+                    Ok(())
+                } else {
+                    Err(Error::ProtocolError(
+                        rivven_protocol::ProtocolError::VersionMismatch {
+                            expected: rivven_protocol::PROTOCOL_VERSION,
+                            actual: server_version,
+                        },
+                    ))
+                }
+            }
+            Response::Error { message } => {
+                // Server doesn't support handshake — proceed for backward
+                // compatibility with older servers
+                warn!(
+                    "Server returned error on pipeline handshake: {}, proceeding anyway",
+                    message
+                );
+                Ok(())
+            }
+            _ => {
+                warn!("Server did not return HandshakeResult, proceeding without version check");
+                Ok(())
+            }
+        }
     }
 
     /// Perform SCRAM-SHA-256 authentication over the pipeline.
@@ -770,22 +863,48 @@ async fn flush_batch<W: tokio::io::AsyncWrite + Unpin>(
     pending: &PendingResponses,
     stats: &PipelineStats,
 ) -> std::io::Result<()> {
-    let mut pending_guard = pending.lock().await;
-
-    // capture count before drain() empties the vec
     let batch_count = batch.len();
 
-    for req in batch.drain(..) {
-        // Write length-prefixed request
-        let len: u32 = req.data.len().try_into().unwrap_or(u32::MAX);
-        writer.write_all(&len.to_be_bytes()).await?;
-        writer.write_all(&req.data).await?;
+    // Phase 1: Register all pending entries BEFORE writing to the socket.
+    // This ensures the reader task can always find the entry even if a
+    // response arrives before we finish writing the full batch.
+    let mut request_data: Vec<(u64, bytes::Bytes)> = Vec::with_capacity(batch_count);
+    {
+        let mut pending_guard = pending.lock().await;
+        for req in batch.drain(..) {
+            pending_guard.insert(req.id, req.response_tx);
+            request_data.push((req.id, req.data));
+        }
+    }
+    // Lock released here — reader task is unblocked during I/O.
 
-        // Register pending response
-        pending_guard.insert(req.id, req.response_tx);
+    // Phase 2: Write all requests to the socket without holding the lock.
+    let write_result: std::io::Result<()> = async {
+        for (_id, data) in &request_data {
+            let len: u32 = data.len().try_into().unwrap_or(u32::MAX);
+            writer.write_all(&len.to_be_bytes()).await?;
+            writer.write_all(data).await?;
+        }
+        writer.flush().await?;
+        Ok(())
+    }
+    .await;
+
+    if let Err(ref e) = write_result {
+        // I/O failed — remove entries we registered in Phase 1 and notify
+        // callers with a proper error instead of leaving them orphaned.
+        let mut pending_guard = pending.lock().await;
+        for (id, _) in &request_data {
+            if let Some(tx) = pending_guard.remove(id) {
+                let _ = tx.send(Err(Error::ConnectionError(e.to_string())));
+            }
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            e.to_string(),
+        ));
     }
 
-    writer.flush().await?;
     trace!("Flushed batch of {} requests", batch_count);
     stats.batches_flushed.fetch_add(1, Ordering::Relaxed);
 

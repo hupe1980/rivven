@@ -19,12 +19,13 @@
 // - Committed offsets are not lost
 // - Rebalance state is recoverable
 
+use parking_lot::RwLock;
 use rivven_core::consumer_group::{
     ConsumerGroup, GroupId, GroupState, MemberId, PartitionAssignment,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -56,18 +57,8 @@ pub enum CoordinatorError {
     #[error("Invalid session timeout: {0}")]
     InvalidSessionTimeout(String),
 
-    #[error("Internal error: lock poisoned")]
-    LockPoisoned,
-
     #[error("Persistence error: {0}")]
     PersistenceError(String),
-}
-
-// Implement From for PoisonError to allow ? operator
-impl<T> From<PoisonError<T>> for CoordinatorError {
-    fn from(_: PoisonError<T>) -> Self {
-        CoordinatorError::LockPoisoned
-    }
 }
 
 // ===== Persistence Layer =====
@@ -146,35 +137,23 @@ impl InMemoryPersistence {
 
 impl GroupPersistence for InMemoryPersistence {
     fn save_group(&self, state: &PersistedGroupState) -> CoordinatorResult<()> {
-        let mut groups = self
-            .groups
-            .write()
-            .map_err(|_| CoordinatorError::LockPoisoned)?;
+        let mut groups = self.groups.write();
         groups.insert(state.group_id.clone(), state.clone());
         Ok(())
     }
 
     fn load_group(&self, group_id: &str) -> CoordinatorResult<Option<PersistedGroupState>> {
-        let groups = self
-            .groups
-            .read()
-            .map_err(|_| CoordinatorError::LockPoisoned)?;
+        let groups = self.groups.read();
         Ok(groups.get(group_id).cloned())
     }
 
     fn list_groups(&self) -> CoordinatorResult<Vec<String>> {
-        let groups = self
-            .groups
-            .read()
-            .map_err(|_| CoordinatorError::LockPoisoned)?;
+        let groups = self.groups.read();
         Ok(groups.keys().cloned().collect())
     }
 
     fn delete_group(&self, group_id: &str) -> CoordinatorResult<()> {
-        let mut groups = self
-            .groups
-            .write()
-            .map_err(|_| CoordinatorError::LockPoisoned)?;
+        let mut groups = self.groups.write();
         groups.remove(group_id);
         Ok(())
     }
@@ -186,10 +165,7 @@ impl GroupPersistence for InMemoryPersistence {
         partition: u32,
         offset: i64,
     ) -> CoordinatorResult<()> {
-        let mut groups = self
-            .groups
-            .write()
-            .map_err(|_| CoordinatorError::LockPoisoned)?;
+        let mut groups = self.groups.write();
 
         if let Some(state) = groups.get_mut(group_id) {
             state
@@ -206,10 +182,7 @@ impl GroupPersistence for InMemoryPersistence {
         &self,
         group_id: &str,
     ) -> CoordinatorResult<HashMap<String, HashMap<u32, i64>>> {
-        let groups = self
-            .groups
-            .read()
-            .map_err(|_| CoordinatorError::LockPoisoned)?;
+        let groups = self.groups.read();
         Ok(groups
             .get(group_id)
             .map(|s| s.offsets.clone())
@@ -262,10 +235,7 @@ impl RaftPersistence {
     ///
     /// This is called by the Raft state machine when a log entry is committed.
     pub fn apply_log_entry(&self, entry: &RaftLogEntry) -> CoordinatorResult<()> {
-        let mut cache = self
-            .cache
-            .write()
-            .map_err(|_| CoordinatorError::LockPoisoned)?;
+        let mut cache = self.cache.write();
 
         match entry {
             RaftLogEntry::GroupStateChange(state) => {
@@ -298,20 +268,14 @@ impl RaftPersistence {
         &self,
         groups: HashMap<String, PersistedGroupState>,
     ) -> CoordinatorResult<()> {
-        let mut cache = self
-            .cache
-            .write()
-            .map_err(|_| CoordinatorError::LockPoisoned)?;
+        let mut cache = self.cache.write();
         *cache = groups;
         Ok(())
     }
 
     /// Create a snapshot of current state
     pub fn create_snapshot(&self) -> CoordinatorResult<HashMap<String, PersistedGroupState>> {
-        let cache = self
-            .cache
-            .read()
-            .map_err(|_| CoordinatorError::LockPoisoned)?;
+        let cache = self.cache.read();
         Ok(cache.clone())
     }
 
@@ -358,18 +322,12 @@ impl GroupPersistence for RaftPersistence {
     }
 
     fn load_group(&self, group_id: &str) -> CoordinatorResult<Option<PersistedGroupState>> {
-        let cache = self
-            .cache
-            .read()
-            .map_err(|_| CoordinatorError::LockPoisoned)?;
+        let cache = self.cache.read();
         Ok(cache.get(group_id).cloned())
     }
 
     fn list_groups(&self) -> CoordinatorResult<Vec<String>> {
-        let cache = self
-            .cache
-            .read()
-            .map_err(|_| CoordinatorError::LockPoisoned)?;
+        let cache = self.cache.read();
         Ok(cache.keys().cloned().collect())
     }
 
@@ -396,10 +354,7 @@ impl GroupPersistence for RaftPersistence {
         &self,
         group_id: &str,
     ) -> CoordinatorResult<HashMap<String, HashMap<u32, i64>>> {
-        let cache = self
-            .cache
-            .read()
-            .map_err(|_| CoordinatorError::LockPoisoned)?;
+        let cache = self.cache.read();
         Ok(cache
             .get(group_id)
             .map(|s| s.offsets.clone())

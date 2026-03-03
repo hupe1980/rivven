@@ -56,7 +56,7 @@ async fn test_authentication_success() -> Result<()> {
 
     // Authenticate as admin
     let (username, password) = broker.admin_credentials();
-    let session = client.authenticate(username, password).await?;
+    let session = client.authenticate_scram(username, password).await?;
 
     assert!(
         !session.session_id.is_empty(),
@@ -82,7 +82,7 @@ async fn test_authentication_failure_invalid_password() -> Result<()> {
     let mut client = Client::connect(&broker.connection_string()).await?;
 
     // Try to authenticate with wrong password
-    let result = client.authenticate("admin", "wrongpassword").await;
+    let result = client.authenticate_scram("admin", "wrongpassword").await;
 
     assert!(
         result.is_err(),
@@ -102,7 +102,9 @@ async fn test_authentication_failure_unknown_user() -> Result<()> {
     let mut client = Client::connect(&broker.connection_string()).await?;
 
     // Try to authenticate as non-existent user
-    let result = client.authenticate("nonexistent", "password123").await;
+    let result = client
+        .authenticate_scram("nonexistent", "password123")
+        .await;
 
     assert!(
         result.is_err(),
@@ -153,7 +155,7 @@ async fn test_admin_can_create_topic() -> Result<()> {
 
     // Authenticate as admin
     let (username, password) = broker.admin_credentials();
-    client.authenticate(username, password).await?;
+    client.authenticate_scram(username, password).await?;
 
     // Admin should be able to create a topic
     let topic = unique_topic_name("admin-topic");
@@ -181,7 +183,9 @@ async fn test_producer_can_publish() -> Result<()> {
     // First, create a topic as admin
     let mut admin_client = Client::connect(&broker.connection_string()).await?;
     let (admin_user, admin_pass) = broker.admin_credentials();
-    admin_client.authenticate(admin_user, admin_pass).await?;
+    admin_client
+        .authenticate_scram(admin_user, admin_pass)
+        .await?;
 
     let topic = unique_topic_name("producer-topic");
     admin_client.create_topic(&topic, Some(1)).await?;
@@ -191,7 +195,7 @@ async fn test_producer_can_publish() -> Result<()> {
     let mut producer_client = Client::connect(&broker.connection_string()).await?;
     let producer = broker.get_user("producer").unwrap();
     producer_client
-        .authenticate(&producer.username, &producer.password)
+        .authenticate_scram(&producer.username, &producer.password)
         .await?;
 
     // Producer should be able to publish
@@ -221,7 +225,9 @@ async fn test_consumer_can_consume() -> Result<()> {
     // Create topic and publish as admin
     let mut admin_client = Client::connect(&broker.connection_string()).await?;
     let (admin_user, admin_pass) = broker.admin_credentials();
-    admin_client.authenticate(admin_user, admin_pass).await?;
+    admin_client
+        .authenticate_scram(admin_user, admin_pass)
+        .await?;
 
     let topic = unique_topic_name("consumer-topic");
     admin_client.create_topic(&topic, Some(1)).await?;
@@ -234,7 +240,7 @@ async fn test_consumer_can_consume() -> Result<()> {
     let mut consumer_client = Client::connect(&broker.connection_string()).await?;
     let consumer = broker.get_user("consumer").unwrap();
     consumer_client
-        .authenticate(&consumer.username, &consumer.password)
+        .authenticate_scram(&consumer.username, &consumer.password)
         .await?;
 
     // Consumer should be able to consume
@@ -268,7 +274,9 @@ async fn test_readonly_can_describe() -> Result<()> {
     // Create topic as admin
     let mut admin_client = Client::connect(&broker.connection_string()).await?;
     let (admin_user, admin_pass) = broker.admin_credentials();
-    admin_client.authenticate(admin_user, admin_pass).await?;
+    admin_client
+        .authenticate_scram(admin_user, admin_pass)
+        .await?;
 
     let topic = unique_topic_name("readonly-topic");
     admin_client.create_topic(&topic, Some(1)).await?;
@@ -278,7 +286,7 @@ async fn test_readonly_can_describe() -> Result<()> {
     let mut readonly_client = Client::connect(&broker.connection_string()).await?;
     let readonly = broker.get_user("readonly").unwrap();
     readonly_client
-        .authenticate(&readonly.username, &readonly.password)
+        .authenticate_scram(&readonly.username, &readonly.password)
         .await?;
 
     // Read-only does NOT have Cluster Describe permission (by design)
@@ -314,7 +322,9 @@ async fn test_unauthorized_publish_denied() -> Result<()> {
     // Create topic as admin
     let mut admin_client = Client::connect(&broker.connection_string()).await?;
     let (admin_user, admin_pass) = broker.admin_credentials();
-    admin_client.authenticate(admin_user, admin_pass).await?;
+    admin_client
+        .authenticate_scram(admin_user, admin_pass)
+        .await?;
 
     let topic = unique_topic_name("denied-topic");
     admin_client.create_topic(&topic, Some(1)).await?;
@@ -324,7 +334,7 @@ async fn test_unauthorized_publish_denied() -> Result<()> {
     let mut readonly_client = Client::connect(&broker.connection_string()).await?;
     let readonly = broker.get_user("readonly").unwrap();
     readonly_client
-        .authenticate(&readonly.username, &readonly.password)
+        .authenticate_scram(&readonly.username, &readonly.password)
         .await?;
 
     // Read-only user should NOT be able to publish
@@ -357,7 +367,7 @@ async fn test_unauthorized_topic_creation_denied() -> Result<()> {
     let mut consumer_client = Client::connect(&broker.connection_string()).await?;
     let consumer = broker.get_user("consumer").unwrap();
     consumer_client
-        .authenticate(&consumer.username, &consumer.password)
+        .authenticate_scram(&consumer.username, &consumer.password)
         .await?;
 
     // Consumer should NOT be able to create topics (admin only)
@@ -394,7 +404,7 @@ async fn test_session_persistence() -> Result<()> {
 
     // Authenticate
     let (username, password) = broker.admin_credentials();
-    client.authenticate(username, password).await?;
+    client.authenticate_scram(username, password).await?;
 
     // Perform multiple operations to verify session persistence
     let topic = unique_topic_name("session-test");
@@ -425,16 +435,18 @@ async fn test_concurrent_sessions() -> Result<()> {
 
     // Authenticate each
     let (admin_user, admin_pass) = broker.admin_credentials();
-    admin_client.authenticate(admin_user, admin_pass).await?;
+    admin_client
+        .authenticate_scram(admin_user, admin_pass)
+        .await?;
 
     let producer = broker.get_user("producer").unwrap();
     producer_client
-        .authenticate(&producer.username, &producer.password)
+        .authenticate_scram(&producer.username, &producer.password)
         .await?;
 
     let consumer = broker.get_user("consumer").unwrap();
     consumer_client
-        .authenticate(&consumer.username, &consumer.password)
+        .authenticate_scram(&consumer.username, &consumer.password)
         .await?;
 
     // Admin creates topic
@@ -473,7 +485,9 @@ async fn test_custom_users() -> Result<()> {
 
     // Authenticate as custom admin
     let mut client = Client::connect(&broker.connection_string()).await?;
-    client.authenticate("custom-admin", "Custom@Adm1").await?;
+    client
+        .authenticate_scram("custom-admin", "Custom@Adm1")
+        .await?;
 
     let topic = unique_topic_name("custom-user-topic");
     client.create_topic(&topic, Some(1)).await?;
@@ -481,7 +495,9 @@ async fn test_custom_users() -> Result<()> {
 
     // Authenticate as custom user with both producer and consumer roles
     let mut client2 = Client::connect(&broker.connection_string()).await?;
-    client2.authenticate("custom-user", "Custom@Usr1").await?;
+    client2
+        .authenticate_scram("custom-user", "Custom@Usr1")
+        .await?;
 
     // Should be able to both produce and consume
     client2.publish(&topic, b"custom message".to_vec()).await?;
@@ -507,13 +523,13 @@ async fn test_auth_lockout_after_failures() -> Result<()> {
     // Make multiple failed authentication attempts
     for i in 0..6 {
         let mut client = Client::connect(&broker.connection_string()).await?;
-        let result = client.authenticate("admin", "wrongpassword").await;
+        let result = client.authenticate_scram("admin", "wrongpassword").await;
         info!("Failed attempt {}: {:?}", i + 1, result.is_err());
     }
 
     // After max failures, should be locked out even with correct password
     let mut client = Client::connect(&broker.connection_string()).await?;
-    let result = client.authenticate("admin", "Admin@123").await;
+    let result = client.authenticate_scram("admin", "Admin@123").await;
 
     // Depending on lockout implementation, this might fail
     if let Err(e) = result {
@@ -541,12 +557,12 @@ async fn test_empty_credentials() -> Result<()> {
     let mut client = Client::connect(&broker.connection_string()).await?;
 
     // Empty username
-    let result = client.authenticate("", "password").await;
+    let result = client.authenticate_scram("", "password").await;
     assert!(result.is_err(), "Empty username should be rejected");
 
     // Empty password
     let mut client2 = Client::connect(&broker.connection_string()).await?;
-    let result = client2.authenticate("admin", "").await;
+    let result = client2.authenticate_scram("admin", "").await;
     assert!(result.is_err(), "Empty password should be rejected");
 
     info!("Empty credentials correctly rejected");
@@ -564,7 +580,9 @@ async fn test_special_characters_in_credentials() -> Result<()> {
     let broker = TestSecureBroker::start_with_users(users).await?;
 
     let mut client = Client::connect(&broker.connection_string()).await?;
-    let result = client.authenticate("special-user", "P@ssw0rd!#$%").await;
+    let result = client
+        .authenticate_scram("special-user", "P@ssw0rd!#$%")
+        .await;
 
     assert!(
         result.is_ok(),

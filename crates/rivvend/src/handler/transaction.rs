@@ -490,14 +490,28 @@ impl RequestHandler {
                         "Failed to serialise TxnCommit payload for txn {}: {}",
                         txn_id, e
                     );
-                    match self
-                        .transaction_coordinator
-                        .complete_abort(&txn_id, producer_id)
-                    {
-                        TransactionResult::Ok => {}
-                        other => {
+                    // State is PrepareCommit — must transition through PrepareAbort
+                    // before completing the abort (complete_abort requires PrepareAbort).
+                    match self.transaction_coordinator.prepare_abort(
+                        &txn_id,
+                        producer_id,
+                        producer_epoch,
+                    ) {
+                        Ok(_) => match self
+                            .transaction_coordinator
+                            .complete_abort(&txn_id, producer_id)
+                        {
+                            TransactionResult::Ok => {}
+                            other => {
+                                error!(
+                                    "Failed to complete abort for txn '{}' after serialisation failure: {:?}",
+                                    txn_id, other
+                                );
+                            }
+                        },
+                        Err(other) => {
                             error!(
-                                "Failed to abort txn '{}' after serialisation failure: {:?}",
+                                "Failed to prepare abort for txn '{}' after serialisation failure: {:?}",
                                 txn_id, other
                             );
                         }
@@ -521,15 +535,29 @@ impl RequestHandler {
                     "WAL write failed for TxnCommit record of txn {}: {}",
                     txn_id, e
                 );
-                // Cannot commit if the decision isn't durable
-                match self
-                    .transaction_coordinator
-                    .complete_abort(&txn_id, producer_id)
-                {
-                    TransactionResult::Ok => {}
-                    other => {
+                // Cannot commit if the decision isn't durable.
+                // State is PrepareCommit — must transition through PrepareAbort
+                // before completing the abort (complete_abort requires PrepareAbort).
+                match self.transaction_coordinator.prepare_abort(
+                    &txn_id,
+                    producer_id,
+                    producer_epoch,
+                ) {
+                    Ok(_) => match self
+                        .transaction_coordinator
+                        .complete_abort(&txn_id, producer_id)
+                    {
+                        TransactionResult::Ok => {}
+                        other => {
+                            error!(
+                                "Failed to complete abort for txn '{}' after WAL failure: {:?}",
+                                txn_id, other
+                            );
+                        }
+                    },
+                    Err(other) => {
                         error!(
-                            "Failed to abort txn '{}' after WAL failure: {:?}",
+                            "Failed to prepare abort for txn '{}' after WAL failure: {:?}",
                             txn_id, other
                         );
                     }
@@ -543,130 +571,108 @@ impl RequestHandler {
             }
         }
 
-        let mut marker_failed = false;
-        let mut committed_partitions: Vec<rivven_core::TransactionPartition> = Vec::new();
+        // Phase 1: Write COMMIT markers to all partitions.
+        //
+        // INVARIANT (BROKER-C2 fix): Once TxnCommit is durable in the WAL,
+        // the commit decision is FINAL. We must NEVER write a compensating
+        // TxnAbort on top of a durable TxnCommit — that creates ambiguous
+        // recovery where the abort WAL write itself can fail, leaving only
+        // the TxnCommit and causing crash recovery to re-commit a supposedly
+        // aborted transaction.
+        //
+        // Instead, like Kafka's transaction coordinator, we retry COMMIT
+        // marker writes with exponential backoff. If a partition/topic is
+        // genuinely gone (permanent error), crash recovery will re-apply
+        // the COMMIT markers from the WAL record anyway.
+        let max_marker_retries: u32 = 5;
+        let mut all_markers_written = true;
         for tp in &txn.partitions {
-            if let Ok(topic_obj) = self.topic_manager.get_topic(&tp.topic).await {
-                if let Ok(partition) = topic_obj.partition(tp.partition) {
-                    let marker = Message {
-                        producer_id: Some(producer_id),
-                        transaction_marker: Some(TransactionMarker::Commit),
-                        is_transactional: true,
-                        ..Message::new(Bytes::new())
-                    };
-                    if let Err(e) = partition.append(marker).await {
-                        error!(
-                            "Failed to write COMMIT marker for txn {} to {}/{}: {} — aborting transaction",
-                            txn_id, tp.topic, tp.partition, e
+            let mut marker_written = false;
+            // Construct the COMMIT marker once outside the retry loop so that
+            // all attempts carry identical content and timestamps.
+            let marker = Message {
+                producer_id: Some(producer_id),
+                transaction_marker: Some(TransactionMarker::Commit),
+                is_transactional: true,
+                ..Message::new(Bytes::new())
+            };
+            for attempt in 0..max_marker_retries {
+                match self.topic_manager.get_topic(&tp.topic).await {
+                    Ok(topic_obj) => match topic_obj.partition(tp.partition) {
+                        Ok(partition) => match partition.append(marker.clone()).await {
+                            Ok(_) => {
+                                marker_written = true;
+                                break;
+                            }
+                            Err(e) => {
+                                let backoff_ms = 50 * 2u64.pow(attempt);
+                                warn!(
+                                        "COMMIT marker write attempt {}/{} for txn {} to {}/{} failed: {} (retrying in {}ms)",
+                                        attempt + 1, max_marker_retries, txn_id, tp.topic, tp.partition, e, backoff_ms
+                                    );
+                                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms))
+                                    .await;
+                            }
+                        },
+                        Err(e) => {
+                            warn!(
+                                "Partition {}/{} not found during commit of txn {} (attempt {}/{}): {}",
+                                tp.topic, tp.partition, txn_id, attempt + 1, max_marker_retries, e
+                            );
+                            let backoff_ms = 50 * 2u64.pow(attempt);
+                            tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                        }
+                    },
+                    Err(e) => {
+                        warn!(
+                            "Topic {} not found during commit of txn {} (attempt {}/{}): {}",
+                            tp.topic,
+                            txn_id,
+                            attempt + 1,
+                            max_marker_retries,
+                            e
                         );
-                        marker_failed = true;
-                        break;
+                        let backoff_ms = 50 * 2u64.pow(attempt);
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
                     }
-                    committed_partitions.push(tp.clone());
-                } else {
-                    error!(
-                        "Partition {}/{} not found during commit of txn {} — aborting transaction",
-                        tp.topic, tp.partition, txn_id
-                    );
-                    marker_failed = true;
-                    break;
                 }
-            } else {
+            }
+            if !marker_written {
+                // Exhausted retries for this partition. The TxnCommit WAL record
+                // is durable, so crash recovery will re-apply this marker.
+                // Log at error level but do NOT abort — the commit decision is final.
                 error!(
-                    "Topic {} not found during commit of txn {} — aborting transaction",
-                    tp.topic, txn_id
+                    "COMMIT marker for txn {} to {}/{} failed after {} attempts — \
+                     WAL recovery will re-apply on restart",
+                    txn_id, tp.topic, tp.partition, max_marker_retries
                 );
-                marker_failed = true;
-                break;
+                all_markers_written = false;
             }
         }
 
-        if marker_failed {
-            // WAL 2.6: Write a compensating TxnAbort WAL record BEFORE writing
-            // ABORT markers.  The original TxnCommit record is already durable,
-            // so without an explicit TxnAbort, crash-recovery would re-commit
-            // this transaction — reversing the abort decision.
-            if let Some(ref wal) = self.wal {
-                let abort_payload = rivven_core::TxnWalPayload {
-                    txn_id: txn_id.clone(),
-                    producer_id,
-                    producer_epoch,
-                    // Include ALL registered partitions: both those that
-                    // already got COMMIT markers (need ABORT to fix) and
-                    // those that didn't (need ABORT for completeness).
-                    partitions: txn
-                        .partitions
-                        .iter()
-                        .map(|tp| (tp.topic.clone(), tp.partition))
-                        .collect(),
-                };
-                match postcard::to_allocvec(&abort_payload) {
-                    Ok(abort_bytes) => {
-                        if let Err(e) = wal
-                            .write_with_type(
-                                bytes::Bytes::from(abort_bytes),
-                                rivven_core::RecordType::TxnAbort,
-                            )
-                            .await
-                        {
-                            error!(
-                                "WAL write failed for compensating TxnAbort of txn {}: {} — \
-                                 crash recovery may re-commit this aborted transaction",
-                                txn_id, e
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        error!(
-                            "Failed to serialise compensating TxnAbort for txn {}: {} — \
-                             crash recovery may re-commit this aborted transaction",
-                            txn_id, e
-                        );
-                    }
-                }
-            }
+        if !all_markers_written {
+            warn!(
+                "Transaction {} committed (WAL-durable) but some COMMIT markers \
+                 could not be written — they will be re-applied on WAL recovery",
+                txn_id
+            );
+        }
 
-            // Write ABORT markers to partitions that already received
-            // COMMIT markers, so consumers with read_committed isolation don't
-            // see partial commits.
-            for tp in &committed_partitions {
-                if let Ok(topic_obj) = self.topic_manager.get_topic(&tp.topic).await {
-                    if let Ok(partition) = topic_obj.partition(tp.partition) {
-                        let abort_marker = Message {
-                            producer_id: Some(producer_id),
-                            transaction_marker: Some(TransactionMarker::Abort),
-                            is_transactional: true,
-                            ..Message::new(Bytes::new())
-                        };
-                        if let Err(e) = partition.append(abort_marker).await {
-                            error!(
-                                "Failed to write compensating ABORT marker for txn {} to {}/{}: {}",
-                                txn_id, tp.topic, tp.partition, e
-                            );
-                        }
-                    }
-                }
+        // Phase 1.5: Apply transactional offset commits (BROKER-C1 fix).
+        // These offsets were registered via SendOffsetsToTransaction and must
+        // be committed atomically with the transaction. Without this step,
+        // exactly-once consumer semantics (read-process-write) are broken
+        // because the consumer offsets would be silently discarded.
+        for oc in &txn.offset_commits {
+            for (tp, offset) in &oc.offsets {
+                self.offset_manager
+                    .commit_offset(&oc.group_id, &tp.topic, tp.partition, *offset as u64)
+                    .await;
+                debug!(
+                    "Applied transactional offset commit: group={}, topic={}, partition={}, offset={} (txn={})",
+                    oc.group_id, tp.topic, tp.partition, offset, txn_id
+                );
             }
-
-            // Abort instead of proceeding with partial commit
-            match self
-                .transaction_coordinator
-                .complete_abort(&txn_id, producer_id)
-            {
-                TransactionResult::Ok => {}
-                other => {
-                    error!(
-                        "Failed to abort txn '{}' after commit marker failure: {:?}",
-                        txn_id, other
-                    );
-                }
-            }
-            return Response::Error {
-                message: format!(
-                    "COMMIT_FAILED: marker write failed for txn '{}', transaction aborted",
-                    txn_id
-                ),
-            };
         }
 
         // Phase 2: Complete commit
@@ -771,17 +777,23 @@ impl RequestHandler {
                         )
                         .await
                     {
-                        warn!(
-                            "WAL write failed for TxnAbort record of txn {}: {} — proceeding with abort anyway",
+                        error!(
+                            "WAL write failed for TxnAbort record of txn {}: {} — abort is not durable",
                             txn_id, e
                         );
+                        return Response::Error {
+                            message: format!("WAL failure during abort: {e}"),
+                        };
                     }
                 }
                 Err(e) => {
-                    warn!(
-                        "Failed to serialise TxnAbort payload for txn {}: {} — proceeding with abort anyway",
+                    error!(
+                        "Failed to serialise TxnAbort payload for txn {}: {} — cannot persist abort",
                         txn_id, e
                     );
+                    return Response::Error {
+                        message: format!("Failed to serialise TxnAbort: {e}"),
+                    };
                 }
             }
         }
@@ -803,35 +815,60 @@ impl RequestHandler {
 
         let mut abort_marker_failures: Vec<String> = Vec::new();
         let mut abort_marker_successes: Vec<String> = Vec::new();
+        let max_abort_marker_retries: u32 = 5;
         for tp in &written_partitions {
-            if let Ok(topic_obj) = self.topic_manager.get_topic(&tp.topic).await {
-                if let Ok(partition) = topic_obj.partition(tp.partition) {
-                    let marker = Message {
-                        producer_id: Some(producer_id),
-                        transaction_marker: Some(TransactionMarker::Abort),
-                        is_transactional: true,
-                        ..Message::new(Bytes::new())
-                    };
-                    if let Err(e) = partition.append(marker).await {
-                        error!(
-                            "Failed to write ABORT marker for txn {} to {}/{}: {}",
-                            txn_id, tp.topic, tp.partition, e
+            // Construct the ABORT marker once outside the retry loop.
+            let marker = Message {
+                producer_id: Some(producer_id),
+                transaction_marker: Some(TransactionMarker::Abort),
+                is_transactional: true,
+                ..Message::new(Bytes::new())
+            };
+            let mut marker_written = false;
+            for attempt in 0..max_abort_marker_retries {
+                match self.topic_manager.get_topic(&tp.topic).await {
+                    Ok(topic_obj) => match topic_obj.partition(tp.partition) {
+                        Ok(partition) => match partition.append(marker.clone()).await {
+                            Ok(_) => {
+                                marker_written = true;
+                                break;
+                            }
+                            Err(e) => {
+                                let backoff_ms = 50 * 2u64.pow(attempt);
+                                warn!(
+                                        "ABORT marker write attempt {}/{} for txn {} to {}/{} failed: {} (retrying in {}ms)",
+                                        attempt + 1, max_abort_marker_retries, txn_id, tp.topic, tp.partition, e, backoff_ms
+                                    );
+                                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms))
+                                    .await;
+                            }
+                        },
+                        Err(e) => {
+                            let backoff_ms = 50 * 2u64.pow(attempt);
+                            warn!(
+                                "Partition {}/{} not found during abort of txn {} (attempt {}/{}): {} (retrying in {}ms)",
+                                tp.topic, tp.partition, txn_id, attempt + 1, max_abort_marker_retries, e, backoff_ms
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                        }
+                    },
+                    Err(e) => {
+                        let backoff_ms = 50 * 2u64.pow(attempt);
+                        warn!(
+                            "Topic {} not found during abort of txn {} (attempt {}/{}): {} (retrying in {}ms)",
+                            tp.topic, txn_id, attempt + 1, max_abort_marker_retries, e, backoff_ms
                         );
-                        abort_marker_failures.push(format!("{}/{}", tp.topic, tp.partition));
-                    } else {
-                        abort_marker_successes.push(format!("{}/{}", tp.topic, tp.partition));
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
                     }
-                } else {
-                    warn!(
-                        "Partition {}/{} not found during abort of txn {} — partition may have been deleted",
-                        tp.topic, tp.partition, txn_id
-                    );
-                    abort_marker_failures.push(format!("{}/{}", tp.topic, tp.partition));
                 }
+            }
+            if marker_written {
+                abort_marker_successes.push(format!("{}/{}", tp.topic, tp.partition));
             } else {
-                warn!(
-                    "Topic {} not found during abort of txn {} — topic may have been deleted",
-                    tp.topic, txn_id
+                error!(
+                    "ABORT marker for txn {} to {}/{} failed after {} attempts — \
+                     WAL recovery will re-apply on restart",
+                    txn_id, tp.topic, tp.partition, max_abort_marker_retries
                 );
                 abort_marker_failures.push(format!("{}/{}", tp.topic, tp.partition));
             }
@@ -843,27 +880,20 @@ impl RequestHandler {
             .complete_abort(&txn_id, producer_id)
         {
             TransactionResult::Ok => {
-                if abort_marker_failures.is_empty() {
-                    debug!("Transaction {} aborted", txn_id);
-                    Response::TransactionAborted { txn_id }
-                } else {
-                    // Surface abort marker failures as an error so
-                    // clients know some partitions may have uncommitted
-                    // transactional data visible under read_committed.
-                    error!(
-                        "Transaction {} aborted but ABORT markers failed for: {:?}",
+                if !abort_marker_failures.is_empty() {
+                    // The abort itself succeeded — the transaction is no longer
+                    // active and the producer can start a new one. Some partition
+                    // ABORT markers may not have been written; WAL recovery will
+                    // re-apply them on restart. Return success so the client does
+                    // NOT retry the abort (which would hit INVALID_TXN_ID).
+                    warn!(
+                        "Transaction {} aborted but ABORT markers failed for: {:?} — \
+                         WAL recovery will re-apply on restart",
                         txn_id, abort_marker_failures
                     );
-                    Response::Error {
-                        message: format!(
-                            "ABORT_PARTIAL_FAILURE: transaction '{}' aborted but ABORT markers \
-                             failed for partitions: {}. Affected partitions may expose \
-                             uncommitted data under read_committed isolation.",
-                            txn_id,
-                            abort_marker_failures.join(", ")
-                        ),
-                    }
                 }
+                debug!("Transaction {} aborted", txn_id);
+                Response::TransactionAborted { txn_id }
             }
             other => Response::Error {
                 message: format!("ABORT_FAILED: {:?}", other),

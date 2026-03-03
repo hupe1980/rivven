@@ -356,9 +356,10 @@ async def main():
     await client.create_topic("events", partitions=3)
     
     # Produce messages
-    producer = client.producer("events")
+    producer = await client.producer("events")
     offset = await producer.send(b"Hello from Python!", key=b"key-1")
     print(f"Published at offset: {offset}")
+    await producer.close()
     
     # Consume messages
     consumer = client.consumer("events", group_id="my-group")

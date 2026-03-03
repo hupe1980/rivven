@@ -447,6 +447,7 @@ match result {
 
 ### Connection Pooling
 - Use appropriate `min_size` to avoid connection creation latency
+- The pool runs a background maintenance task every 30 seconds that replenishes idle connections back to `min_size`, so the pool never permanently shrinks below the configured minimum after evictions
 - Set `max_size` based on database capacity and concurrent workload
 - Enable `test_on_borrow` for reliability (slight latency impact)
 

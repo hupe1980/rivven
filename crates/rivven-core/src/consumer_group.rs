@@ -531,7 +531,7 @@ impl ConsumerGroup {
     ///
     /// For static members: Saves assignment for potential restoration (no rebalance until timeout)
     /// For dynamic members: Triggers immediate rebalance
-    pub fn remove_member(&mut self, member_id: &MemberId) -> bool {
+    pub fn remove_member(&mut self, member_id: &str) -> bool {
         if let Some(member) = self.members.remove(member_id) {
             // Handle static member removal differently
             if member.is_static {
@@ -554,7 +554,7 @@ impl ConsumerGroup {
             }
 
             // If leader left, elect new leader
-            if self.leader_id.as_ref() == Some(member_id) {
+            if self.leader_id.as_deref() == Some(member_id) {
                 self.leader_id = self.members.keys().next().cloned();
             }
 
@@ -614,7 +614,7 @@ impl ConsumerGroup {
     }
 
     /// Update member heartbeat
-    pub fn heartbeat(&mut self, member_id: &MemberId) -> Result<(), String> {
+    pub fn heartbeat(&mut self, member_id: &str) -> Result<(), String> {
         if let Some(member) = self.members.get_mut(member_id) {
             member.last_heartbeat = SystemTime::now();
             Ok(())
@@ -815,8 +815,14 @@ impl ConsumerGroup {
 
     /// Complete cooperative rebalance with final assignments
     ///
-    /// Called after all revocations are acknowledged. Assigns partitions
-    /// that were revoked to their new owners.
+    /// Called after all revocations are acknowledged (two-phase path).
+    /// Assigns partitions that were revoked to their new owners.
+    ///
+    /// This bumps the generation because the two-phase revocation path goes
+    /// through `request_revocations` (which does NOT bump) and needs its own
+    /// epoch marker. The no-revocation fast path in `rebalance_with_strategy`
+    /// uses `complete_rebalance` instead (which doesn't bump, since
+    /// `transition_to_preparing_rebalance` already did).
     pub fn complete_cooperative_rebalance(
         &mut self,
         final_assignments: HashMap<MemberId, Vec<PartitionAssignment>>,
@@ -836,8 +842,15 @@ impl ConsumerGroup {
         // Clear revocation state
         self.awaiting_revocation.clear();
 
-        // Increment generation
-        // Use wrapping_add to prevent panic on u32 overflow
+        // Bump generation for the completion of the two-phase revocation round.
+        // This is ONLY valid when called after `request_revocations()` (two-phase
+        // cooperative path). The no-revocation fast path uses `complete_rebalance`
+        // instead to avoid double-bumping.
+        debug_assert!(
+            self.state == GroupState::CompletingRebalance,
+            "complete_cooperative_rebalance called outside revocation flow (state={:?})",
+            self.state,
+        );
         self.generation_id = self.generation_id.wrapping_add(1);
         self.state = GroupState::Stable;
     }
@@ -861,8 +874,12 @@ impl ConsumerGroup {
                 let revocations = self.compute_revocations(&new_assignments);
 
                 if revocations.is_empty() {
-                    // No revocations needed - can complete immediately
-                    self.complete_cooperative_rebalance(new_assignments);
+                    // No revocations needed — complete immediately.
+                    // Use complete_rebalance (not complete_cooperative_rebalance)
+                    // because transition_to_preparing_rebalance already bumped
+                    // the generation when the member join/leave triggered this
+                    // rebalance. complete_cooperative_rebalance would double-bump.
+                    self.complete_rebalance(new_assignments);
                     RebalanceResult::Complete
                 } else {
                     // Need to revoke first
@@ -876,10 +893,36 @@ impl ConsumerGroup {
         }
     }
 
-    /// Transition to PreparingRebalance state
+    /// Transition to PreparingRebalance state.
+    ///
+    /// Bumps the generation ID only when the group was previously `Stable`
+    /// (i.e. a fully-settled group is disrupted by a new join/leave).
+    /// During the initial join phase (`Empty` → `PreparingRebalance` →
+    /// `CompletingRebalance` → back to `PreparingRebalance`) the generation
+    /// is NOT bumped so that all members joining the same round see the
+    /// same generation and can use it consistently in SyncGroup/Heartbeat.
     fn transition_to_preparing_rebalance(&mut self) {
-        if self.state != GroupState::Empty {
-            self.state = GroupState::PreparingRebalance;
+        match self.state {
+            GroupState::Stable => {
+                // A stable group is being disrupted — new rebalance epoch.
+                self.generation_id = self.generation_id.wrapping_add(1);
+                self.state = GroupState::PreparingRebalance;
+            }
+            GroupState::CompletingRebalance => {
+                // A new member joined before the current rebalance finished.
+                // Stay in the same generation — just re-enter PreparingRebalance.
+                self.state = GroupState::PreparingRebalance;
+            }
+            GroupState::PreparingRebalance => {
+                // Already in PreparingRebalance — no-op.
+                // Additional members joining the same rebalance cycle.
+            }
+            GroupState::Empty | GroupState::Dead => {
+                // Empty/Dead groups transition to PreparingRebalance without
+                // bumping generation; generation starts at 0 for the first
+                // rebalance.
+                self.state = GroupState::PreparingRebalance;
+            }
         }
     }
 
@@ -892,9 +935,8 @@ impl ConsumerGroup {
             }
         }
 
-        // Increment generation
-        // Use wrapping_add to prevent panic on u32 overflow
-        self.generation_id = self.generation_id.wrapping_add(1);
+        // Generation was already bumped when entering PreparingRebalance.
+        // Just transition to Stable.
         self.state = GroupState::Stable;
     }
 
@@ -1008,7 +1050,9 @@ pub mod assignment {
 
     /// Sticky assignment: Minimize partition movement during rebalance
     ///
-    /// Preserves previous assignments as much as possible.
+    /// Preserves previous assignments as much as possible while guaranteeing
+    /// a balanced distribution (max-difference-of-1 between any two members).
+    /// This matches Kafka's `StickyAssignor` (KIP-54) fairness property.
     pub fn sticky_assignment(
         members: &[MemberId],
         topic_partitions: &HashMap<String, u32>,
@@ -1031,10 +1075,14 @@ pub mod assignment {
             }
         }
 
+        let total = all_partitions.len();
+        let n = members.len();
+        let target = total / n; // Minimum partitions per member
+
         // Track which partitions are assigned
         let mut assigned: HashSet<PartitionAssignment> = HashSet::new();
 
-        // Step 1: Preserve previous assignments for existing members
+        // Step 1: Preserve previous assignments for existing members (up to their target)
         for member_id in members {
             if let Some(prev_partitions) = previous_assignments.get(member_id) {
                 let valid_partitions: Vec<_> = prev_partitions
@@ -1051,20 +1099,63 @@ pub mod assignment {
             }
         }
 
-        // Step 2: Distribute unassigned partitions using round-robin
-        let unassigned: Vec<_> = all_partitions
+        // Step 2: Rebalance excess — trim over-provisioned members to at most target + 1
+        // Sort members by current count descending so we trim the most over-loaded first
+        let mut sorted_members: Vec<_> = members.to_vec();
+        sorted_members.sort_by(|a, b| {
+            let count_b = assignments.get(b).map_or(0, |v| v.len());
+            let count_a = assignments.get(a).map_or(0, |v| v.len());
+            count_b.cmp(&count_a)
+        });
+
+        let mut unassigned: Vec<PartitionAssignment> = Vec::new();
+        for member_id in &sorted_members {
+            let max_for_member = target + 1; // Will trim further in step 4 if needed
+            if let Some(parts) = assignments.get_mut(member_id) {
+                if parts.len() > max_for_member {
+                    // Remove excess partitions (from the end to minimize churn)
+                    let excess: Vec<_> = parts.split_off(max_for_member);
+                    for p in &excess {
+                        assigned.remove(p);
+                    }
+                    unassigned.extend(excess);
+                }
+            }
+        }
+
+        // Step 3: Collect remaining unassigned partitions
+        let remaining_unassigned: Vec<_> = all_partitions
             .into_iter()
             .filter(|p| !assigned.contains(p))
             .collect();
+        unassigned.extend(remaining_unassigned);
 
-        let mut member_idx = 0;
+        // Step 4: Distribute unassigned to under-provisioned members
+        //
+        // Greedy fewest-first: always assign to the member with the fewest
+        // partitions (re-sort after each assignment). This guarantees the
+        // max-difference-of-1 fairness property without fragile index-based
+        // remainder logic.
         for partition in unassigned {
-            assignments
-                .entry(members[member_idx].clone())
-                .or_default()
-                .push(partition);
+            // Re-sort by current count ascending before each assignment
+            sorted_members.sort_by(|a, b| {
+                let count_a = assignments.get(a).map_or(0, |v| v.len());
+                let count_b = assignments.get(b).map_or(0, |v| v.len());
+                count_a.cmp(&count_b)
+            });
 
-            member_idx = (member_idx + 1) % members.len();
+            // The member with fewest partitions is always first
+            if let Some(member) = sorted_members.first() {
+                assignments
+                    .entry(member.clone())
+                    .or_default()
+                    .push(partition);
+            }
+        }
+
+        // Ensure every member has an entry
+        for member_id in members {
+            assignments.entry(member_id.clone()).or_default();
         }
 
         assignments
@@ -1133,7 +1224,7 @@ mod tests {
 
         group.state = GroupState::Stable;
 
-        group.remove_member(&"member-2".to_string());
+        group.remove_member("member-2");
 
         assert_eq!(group.members.len(), 1);
         assert_eq!(group.state, GroupState::PreparingRebalance);
@@ -1153,7 +1244,7 @@ mod tests {
             vec![],
             vec![],
         );
-        group.remove_member(&"member-1".to_string());
+        group.remove_member("member-1");
 
         assert_eq!(group.state, GroupState::Empty);
         assert_eq!(group.generation_id, 0);
@@ -1353,6 +1444,89 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_sticky_assignment_member_leaves() {
+        // Previous: 3 members each with 2 partitions → one leaves
+        let members = vec!["m1".to_string(), "m2".to_string()];
+        let mut topic_partitions = HashMap::new();
+        topic_partitions.insert("topic-1".to_string(), 6);
+
+        let mut previous = HashMap::new();
+        previous.insert(
+            "m1".to_string(),
+            vec![
+                PartitionAssignment {
+                    topic: "topic-1".to_string(),
+                    partition: 0,
+                },
+                PartitionAssignment {
+                    topic: "topic-1".to_string(),
+                    partition: 1,
+                },
+            ],
+        );
+        previous.insert(
+            "m2".to_string(),
+            vec![
+                PartitionAssignment {
+                    topic: "topic-1".to_string(),
+                    partition: 2,
+                },
+                PartitionAssignment {
+                    topic: "topic-1".to_string(),
+                    partition: 3,
+                },
+            ],
+        );
+        // m3 left — its previous partitions should be redistributed
+        previous.insert(
+            "m3".to_string(),
+            vec![
+                PartitionAssignment {
+                    topic: "topic-1".to_string(),
+                    partition: 4,
+                },
+                PartitionAssignment {
+                    topic: "topic-1".to_string(),
+                    partition: 5,
+                },
+            ],
+        );
+
+        let assignments = assignment::sticky_assignment(&members, &topic_partitions, &previous);
+
+        // All 6 partitions must be assigned
+        let total: usize = assignments.values().map(|v| v.len()).sum();
+        assert_eq!(total, 6, "All 6 partitions must be assigned");
+
+        // Each member gets 3 (fair: 6/2)
+        assert_eq!(assignments.get("m1").unwrap().len(), 3);
+        assert_eq!(assignments.get("m2").unwrap().len(), 3);
+
+        // Original assignments should be preserved for m1 and m2
+        let m1_parts: HashSet<u32> = assignments
+            .get("m1")
+            .unwrap()
+            .iter()
+            .map(|p| p.partition)
+            .collect();
+        let m2_parts: HashSet<u32> = assignments
+            .get("m2")
+            .unwrap()
+            .iter()
+            .map(|p| p.partition)
+            .collect();
+        assert!(m1_parts.contains(&0), "m1 should keep partition 0");
+        assert!(m1_parts.contains(&1), "m1 should keep partition 1");
+        assert!(m2_parts.contains(&2), "m2 should keep partition 2");
+        assert!(m2_parts.contains(&3), "m2 should keep partition 3");
+
+        // m3's orphaned partitions should be evenly distributed
+        let all_parts: HashSet<u32> = m1_parts.union(&m2_parts).copied().collect();
+        assert!(all_parts.contains(&4));
+        assert!(all_parts.contains(&5));
+    }
+
     // =========================================================================
     // Static Membership Tests
     // =========================================================================
@@ -1430,7 +1604,7 @@ mod tests {
         let gen_before = group.generation_id;
 
         // Remove static member (simulates disconnect)
-        group.remove_member(&"member-1".to_string());
+        group.remove_member("member-1");
 
         // Assignment should be saved for restoration
         assert!(group.pending_static_members.contains_key("instance-1"));
@@ -1521,7 +1695,7 @@ mod tests {
         group.state = GroupState::Stable;
 
         // Remove dynamic member
-        group.remove_member(&"dynamic-member".to_string());
+        group.remove_member("dynamic-member");
 
         // Should trigger rebalance for dynamic member removal
         assert_eq!(group.state, GroupState::PreparingRebalance);
@@ -1620,7 +1794,7 @@ mod tests {
             vec![],
         );
 
-        group.remove_member(&"member-1".to_string());
+        group.remove_member("member-1");
 
         // Even though member left, pending assignment is preserved
         // But let's also remove the static mapping to test full cleanup

@@ -12,7 +12,7 @@
 |:---------|:---------|
 | **Connectivity** | Connection pooling, request pipelining, automatic failover |
 | **Resilience** | Circuit breaker, exponential backoff with jitter, reconnection, health monitoring |
-| **Security** | TLS/mTLS (rustls) for all clients including Producer, SCRAM-SHA-256 authentication |
+| **Security** | TLS/mTLS (rustls) for all clients including Producer and Consumer, SCRAM-SHA-256 authentication |
 | **Semantics** | Transactions, idempotent producer, exactly-once delivery |
 | **Compression** | LZ4, Snappy, Zstd (Gzip returns an error) |
 
@@ -155,7 +155,13 @@ let config = ResilientClientConfig::builder()
 
 For maximum throughput, use `PipelinedClient` which allows multiple in-flight requests over a single connection. Supports optional **TLS** and **authentication**.
 
+**Handshake:** `PipelinedClient` performs a version handshake before authentication, matching the basic `Client` connection sequence. This ensures protocol version compatibility is verified before any credentials are exchanged.
+
 **Connection safety:** The pipelined client tracks wire state via a `bytes_sent` flag. If an I/O error occurs after bytes have been written (partial send, broken read), the connection is automatically poisoned to prevent TCP stream desync from stale responses. Non-pipelined requests poison on every I/O operation (write, flush, read). `ProtocolError`, `ResponseTooLarge`, and request timeouts also trigger poisoning and consumer auto-reconnect. Timeout cancellation mid-I/O poisons the stream because the dropped future may leave partial frames on the wire.
+
+**Concurrency improvement:** `flush_batch` registers pending responses under the lock, then writes to the socket **outside** the lock. This prevents TCP backpressure from blocking the reader task's response dispatch. If Phase 2 (socket write) fails, all pending entries registered in Phase 1 are cleaned up and callers receive a `ConnectionError`, preventing leaked oneshot channels.
+
+**Security:** SASL/PLAIN authentication requires a TLS connection. The client refuses to send plaintext credentials over unencrypted connections, returning an error before any bytes are written. TLS connections automatically enable `TCP_NODELAY` to minimize latency.
 
 ```rust
 use rivven_client::{PipelinedClient, PipelineConfig};
@@ -198,6 +204,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `batch_linger_us` | 1000 | 5000 | 0 |
 | `max_batch_size` | 64 | 256 | 1 |
 | `request_timeout` | 30s | 60s | 10s |
+| `close_timeout` | 5s | 10s | 3s |
 
 ### High-Performance Producer
 
@@ -217,6 +224,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .buffer_memory(32 * 1024 * 1024)  // 32MB buffer
         .compression_type(CompressionType::Lz4)  // LZ4 batch compression
         .enable_idempotence(true)   // Exactly-once semantics
+        .retries(5)                 // Retry failed batches up to 5 times
+        .retry_backoff_ms(100)      // Start with 100ms backoff
+        .retry_backoff_max_ms(2000) // Cap at 2s
         .auth("producer-app", "password")  // SCRAM-SHA-256 auth
         .build();
 
@@ -257,6 +267,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | **Metadata Cache** | TTL-based caching with persistent metadata client (avoids per-topic connection churn) |
 | **Sticky Partitioning** | Batches keyless messages to same partition |
 | **Backpressure** | Memory-bounded buffers prevent OOM; applies to standard, idempotent, and transactional publish paths |
+| **Batch Retry** | Per-batch retry with exponential backoff; undelivered records are returned and resent on a fresh connection. Configurable via `retries`, `retry_backoff_ms`, `retry_backoff_max_ms`. Permanent errors (`PRODUCER_FENCED`, `INVALID_TOPIC`, auth) skip retries via `Error::is_retriable()` |
+| **Error Propagation** | Permanent server errors are propagated as `ServerError` (not `ConnectionError`), preserving `is_retriable() = false` so callers can programmatically distinguish permanent rejections from transient failures. `needs_reconnect` is only set for transient errors |
+| **Zero-Duplication Timeout** | `read_batch_responses` drains delivered records from the vectors as it goes (`Vec::remove(0)` instead of dummy oneshot channels). On timeout cancellation, only truly undelivered records remain — eliminating duplicate retries in non-idempotent mode and removing per-record oneshot allocation overhead |
+| **Hot-Path Allocation** | `heartbeat()` and `remove_member()` accept `&str` instead of `&String`, avoiding a heap allocation on every heartbeat call (3–10 second intervals per consumer) |
+| **Per-Batch Timeout** | Response-reading phase in `send_batch` is wrapped in `tokio::time::timeout(request_timeout)`, preventing stalled broker responses from blocking the producer |
 | **Murmur2 Hashing** | Kafka-compatible key partitioning (optimized) |
 | **Batched I/O** | Single flush per batch minimizes syscalls |
 | **Pipelined Responses** | Write-all, then read-all for throughput |
@@ -278,6 +293,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `enable_idempotence` | false | false | false | true |
 | `acks` | 1 | 1 | 1 | -1 (all) |
 | `auth` | None | — | — | — |
+
+> **Idempotent producer constraint:** When `enable_idempotence` is `true`, `max_in_flight_requests` must be ≤ 5 (matching Kafka's KIP-98). The builder returns an error otherwise.
 
 ### Health Monitoring
 
@@ -572,6 +589,28 @@ match client.commit_transaction(txn_id, &producer).await {
 | `max_connection_lifetime` | 300s | Maximum time a pooled connection can be reused before recycling |
 | `idle_timeout` | 60s | Maximum time a pooled connection can sit idle before eviction |
 
+### ConsumerConfig
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `bootstrap_servers` | `["127.0.0.1:9092"]` | Bootstrap server addresses |
+| `group_id` | `"default-group"` | Consumer group ID |
+| `max_poll_records` | 500 | Maximum records per poll |
+| `max_poll_interval_ms` | 5000 | Maximum poll interval in ms |
+| `auto_commit_interval` | 5s | Auto-commit interval (`None` to disable) |
+| `isolation_level` | 0 | 0 = read_uncommitted, 1 = read_committed |
+| `metadata_refresh_interval` | 300s | Interval for re-discovering partitions |
+| `reconnect_backoff_ms` | 100 | Initial reconnect backoff delay in ms |
+| `reconnect_backoff_max_ms` | 10 000 | Maximum reconnect backoff delay in ms |
+| `max_reconnect_attempts` | 10 | Maximum reconnect attempts before giving up |
+| `session_timeout_ms` | 10 000 | Session timeout for group coordination in ms |
+| `rebalance_timeout_ms` | 30 000 | Maximum time the coordinator waits for all members to join during rebalance |
+| `heartbeat_interval_ms` | 3 000 | Heartbeat interval in ms (clamped to ≤ 1/3 of session timeout at build time) |
+| `tls_config` | `None` | TLS configuration (requires `tls` feature) |
+| `tls_server_name` | `None` | Override SNI hostname for TLS handshake |
+
+> **Coordination mode**: When no explicit partition assignments are configured (i.e., `partitions` is empty), the consumer automatically uses server-side group coordination via the JoinGroup/SyncGroup/Heartbeat/LeaveGroup protocol. Set explicit partitions via `.assign("topic", vec![0, 1, 2])` to bypass coordination and use static partition assignment.
+
 ## Error Handling
 
 The client provides typed errors for different failure modes:
@@ -587,6 +626,9 @@ match client.publish("topic", None, b"data").await {
     Err(Error::AllServersUnavailable) => {
         println!("All servers are unavailable");
     }
+    Err(Error::AuthenticationFailed(msg)) => {
+        println!("Authentication failed: {}", msg);
+    }
     Err(Error::ConnectionError(msg)) => {
         println!("Connection failed: {}", msg);
     }
@@ -597,6 +639,8 @@ match client.publish("topic", None, b"data").await {
     Err(e) => println!("Other error: {}", e),
 }
 ```
+
+Auth config structs (`ProducerAuthConfig`, `ConsumerAuthConfig`, `PipelineAuthConfig`) use custom `Debug` impls that redact passwords as `[REDACTED]`, so debug logging never leaks credentials.
 
 ## TLS Configuration
 
@@ -616,6 +660,55 @@ let tls_config = TlsConfig::builder()
     .build()?;
 
 let client = Client::connect_with_tls("localhost:9093", tls_config).await?;
+```
+
+### Consumer with TLS
+
+```rust
+use rivven_client::{Consumer, ConsumerConfig, TlsConfig};
+
+let tls = TlsConfig::builder()
+    .ca_cert_path("/path/to/ca.crt")
+    .build()?;
+
+let config = ConsumerConfig::builder()
+    .bootstrap_servers(vec!["localhost:9093".into()])
+    .group_id("my-group")
+    .tls(tls, None) // None = use bootstrap server hostname for SNI
+    .build()?;
+
+let mut consumer = Consumer::new(config).await?;
+```
+
+### Rebalance Listener
+
+Register callbacks for partition assignment changes during consumer group rebalances:
+
+```rust
+use rivven_client::{Consumer, ConsumerConfig, RebalanceListener, TopicPartition};
+use async_trait::async_trait;
+
+struct MyListener;
+
+#[async_trait]
+impl RebalanceListener for MyListener {
+    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) {
+        // Commit offsets before partitions are taken away
+        for tp in partitions {
+            println!("Revoking {}/{}", tp.topic, tp.partition);
+        }
+    }
+
+    async fn on_partitions_assigned(&self, partitions: &[TopicPartition]) {
+        // Initialize state for newly assigned partitions
+        for tp in partitions {
+            println!("Assigned {}/{}", tp.topic, tp.partition);
+        }
+    }
+}
+
+let mut consumer = Consumer::new(config).await?;
+consumer.set_rebalance_listener(MyListener);
 ```
 
 ## Documentation

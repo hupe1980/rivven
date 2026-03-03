@@ -249,7 +249,7 @@ async fn test_at_least_once_delivery() -> Result<()> {
         let mut client = Client::connect(&broker.connection_string()).await?;
 
         let messages = client.consume(&topic, 0, 0, partial_count).await?;
-        assert_eq!(messages.len(), partial_count);
+        assert_eq!(messages.len(), partial_count as usize);
 
         // Simulate crash - no offset commit
         info!("Simulating consumer crash (no commit)");

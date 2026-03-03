@@ -398,7 +398,10 @@ commit_mode: overwrite
 
 ### Upsert (Merge)
 
-Update existing records or insert new ones based on key fields:
+{: .warning }
+> `CommitMode::Upsert` is **not yet implemented** and will be rejected at connector validation time. Iceberg equality-delete files are required for merge semantics but are not yet supported. Use `append` or `overwrite` instead.
+
+Update existing records or insert new ones based on key fields (planned):
 
 ```yaml
 commit_mode: upsert
@@ -750,7 +753,7 @@ This can occur with multiple writers. Solutions:
 |-------|-------------|
 | `append` | Append records |
 | `overwrite` | Replace partition data |
-| `upsert` | Merge with key matching |
+| `upsert` | Merge with key matching (**not yet implemented** — rejected at validation) |
 
 ### SchemaEvolution
 

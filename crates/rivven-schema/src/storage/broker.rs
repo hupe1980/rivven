@@ -158,6 +158,32 @@ struct IdCounterRecord {
     next_id: u32,
 }
 
+/// Atomic registration record that combines schema + subject-version in a
+/// single broker write. This eliminates the partial-state window where a
+/// crash between separate `schema/` and `subject/.../version/` writes could
+/// leave orphaned records or missing subject-version mappings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RegistrationRecord {
+    /// Schema ID
+    schema_id: u32,
+    /// Schema type
+    schema_type: SchemaType,
+    /// Schema definition
+    schema: String,
+    /// Schema fingerprint
+    #[serde(default)]
+    fingerprint: Option<String>,
+    /// References to other schemas
+    #[serde(default)]
+    references: Vec<crate::types::SchemaReference>,
+    /// Schema metadata
+    #[serde(default)]
+    metadata: Option<crate::types::SchemaMetadata>,
+    /// Subject name
+    subject: String,
+    /// Version number
+    version: u32,
+}
 impl BrokerStorage {
     /// Create a new broker storage instance
     ///
@@ -334,6 +360,12 @@ impl BrokerStorage {
                             if let Some(id) = Self::extract_schema_id_from_key(key) {
                                 max_schema_id = max_schema_id.max(id);
                             }
+                            // Also extract from atomic registration records
+                            if let Some(id) =
+                                Self::extract_schema_id_from_registration(key, &msg.value)
+                            {
+                                max_schema_id = max_schema_id.max(id);
+                            }
                         }
 
                         offset = msg.offset + 1;
@@ -355,8 +387,11 @@ impl BrokerStorage {
             }
         }
 
-        // Initialize schema ID counter to max + 1
-        self.next_id.store(max_schema_id + 1, Ordering::SeqCst);
+        // Initialize schema ID counter using fetch_max to respect any
+        // IDs set during bootstrap processing (e.g., from `id/counter` records)
+        // rather than unconditionally overwriting.
+        self.next_id
+            .fetch_max(max_schema_id.saturating_add(1), Ordering::SeqCst);
         self.current_offset.store(offset, Ordering::SeqCst);
 
         // Mark as connected
@@ -410,6 +445,16 @@ impl BrokerStorage {
     fn extract_schema_id_from_key(key: &Bytes) -> Option<u32> {
         let key_str = std::str::from_utf8(key).ok()?;
         key_str.strip_prefix("schema/")?.parse().ok()
+    }
+
+    /// Extract schema ID from a registration record value (for max_schema_id tracking)
+    fn extract_schema_id_from_registration(key: &Bytes, value: &Bytes) -> Option<u32> {
+        let key_str = std::str::from_utf8(key).ok()?;
+        if !key_str.starts_with("registration/") {
+            return None;
+        }
+        let record: RegistrationRecord = serde_json::from_slice(value).ok()?;
+        Some(record.schema_id)
     }
 
     /// Process a message during bootstrap
@@ -485,13 +530,54 @@ impl BrokerStorage {
             let record: IdCounterRecord = serde_json::from_slice(value)
                 .map_err(|e| SchemaError::Storage(format!("Invalid ID counter record: {}", e)))?;
 
-            // Only update if greater than current
-            let current = self.next_id.load(Ordering::SeqCst);
-            if record.next_id > current {
-                self.next_id.store(record.next_id, Ordering::SeqCst);
-            }
+            // Atomically advance next_id — fetch_max avoids the TOCTOU
+            // race with concurrent register_schema_atomic() calls.
+            self.next_id.fetch_max(record.next_id, Ordering::SeqCst);
 
             debug!(next_id = record.next_id, "Loaded ID counter from broker");
+        } else if key_str.starts_with("registration/") {
+            // Atomic registration record (SCHEMA-C1 fix) — combines schema + subject-version
+            // in a single write for crash-safe registration.
+            let record: RegistrationRecord = serde_json::from_slice(value)
+                .map_err(|e| SchemaError::Storage(format!("Invalid registration record: {}", e)))?;
+
+            // Build and insert schema
+            let schema = Schema {
+                id: SchemaId::new(record.schema_id),
+                schema_type: record.schema_type,
+                schema: record.schema,
+                fingerprint: record.fingerprint.clone(),
+                references: record.references,
+                metadata: record.metadata,
+            };
+
+            if let Some(ref fp) = record.fingerprint {
+                self.fingerprints.insert(fp.clone(), record.schema_id);
+            }
+            self.schemas.insert(record.schema_id, schema);
+
+            // Build and insert subject-version
+            let entry = SubjectVersionEntry {
+                version: record.version,
+                schema_id: record.schema_id,
+                schema_type: record.schema_type,
+                deleted: false,
+                state: VersionState::Enabled,
+            };
+
+            let mut versions = self.subjects.entry(record.subject.clone()).or_default();
+            if let Some(existing) = versions.iter_mut().find(|v| v.version == record.version) {
+                *existing = entry;
+            } else {
+                versions.push(entry);
+            }
+
+            debug!(
+                schema_id = record.schema_id,
+                subject = %record.subject,
+                version = record.version,
+                "Loaded atomic registration from broker"
+            );
         }
 
         Ok(())
@@ -689,13 +775,19 @@ impl BrokerStorage {
                             );
                         }
 
-                        // Track max schema ID
+                        // Track max schema ID — use fetch_max to avoid
+                        // racing with concurrent register_schema_atomic()
+                        // which uses fetch_update on the same AtomicU32.
                         if let Some(key) = &msg.key {
                             if let Some(id) = Self::extract_schema_id_from_key(key) {
-                                let current = self.next_id.load(Ordering::SeqCst);
-                                if id >= current {
-                                    self.next_id.store(id + 1, Ordering::SeqCst);
-                                }
+                                self.next_id
+                                    .fetch_max(id.saturating_add(1), Ordering::SeqCst);
+                            }
+                            if let Some(id) =
+                                Self::extract_schema_id_from_registration(key, &msg.value)
+                            {
+                                self.next_id
+                                    .fetch_max(id.saturating_add(1), Ordering::SeqCst);
                             }
                         }
 
@@ -889,7 +981,9 @@ impl StorageBackend for BrokerStorage {
             .ok_or_else(|| SchemaError::NotFound(format!("Schema ID {}", schema_id)))?;
 
         let entry = self.subjects.entry(subject.0.clone()).or_default();
-        let version = entry.len() as u32 + 1;
+        // Use max(existing_versions) + 1 instead of len() + 1 to handle
+        // gaps from hard-deleted versions correctly.
+        let version = entry.iter().map(|v| v.version).max().unwrap_or(0) + 1;
 
         let version_entry = SubjectVersionEntry {
             version,
@@ -1301,6 +1395,130 @@ impl StorageBackend for BrokerStorage {
                 subject
             )))
         }
+    }
+
+    /// Atomically register a schema under a subject in a single broker write.
+    ///
+    /// This combines ID allocation, schema storage, and subject-version
+    /// registration into ONE `publish_with_key` call, eliminating the
+    /// partial-state window from crashes between separate writes.
+    ///
+    /// The schema ID is allocated internally (via `next_id` atomic) so that
+    /// the `id/counter` broker write is no longer needed — the registration
+    /// record itself is the source of truth for ID allocation during bootstrap.
+    ///
+    /// The record is stored with key `registration/{subject}/{version}` and
+    /// contains the full schema content alongside the subject-version mapping.
+    /// Bootstrap and sync handle this key prefix to reconstruct both the
+    /// schema index and subject-version index from a single record.
+    async fn register_schema_atomic(
+        &self,
+        mut schema: Schema,
+        subject: &Subject,
+    ) -> SchemaResult<(SchemaId, SchemaVersion)> {
+        self.ensure_connected().await?;
+
+        // Validate subject name — prevent injection of path separators or
+        // excessively long names that could cause issues with key construction.
+        if subject.0.is_empty() || subject.0.len() > 255 {
+            return Err(SchemaError::InvalidInput(format!(
+                "Subject name must be 1-255 characters, got {}",
+                subject.0.len()
+            )));
+        }
+        if subject.0.contains('/') || subject.0.contains('\0') {
+            return Err(SchemaError::InvalidInput(format!(
+                "Subject name must not contain '/' or null bytes: '{}'",
+                subject.0
+            )));
+        }
+
+        // Allocate schema ID atomically (no separate broker write needed —
+        // the registration record below is the source of truth).
+        let schema_id = self
+            .next_id
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_add(1))
+            .map_err(|_| {
+                SchemaError::Internal("Schema ID space exhausted (u32::MAX reached)".into())
+            })?;
+
+        // Update the schema object with the allocated ID
+        schema.id = SchemaId::new(schema_id);
+
+        // Compute the next version number for this subject.
+        // Use max(existing_versions) + 1 instead of len() + 1 to handle
+        // gaps from hard-deleted versions correctly.
+        let version = {
+            let entry = self.subjects.entry(subject.0.clone()).or_default();
+            entry.iter().map(|v| v.version).max().unwrap_or(0) + 1
+        };
+
+        // Build the atomic registration record
+        let record = RegistrationRecord {
+            schema_id,
+            schema_type: schema.schema_type,
+            schema: schema.schema.clone(),
+            fingerprint: schema.fingerprint.clone(),
+            references: schema.references.clone(),
+            metadata: schema.metadata.clone(),
+            subject: subject.0.clone(),
+            version,
+        };
+
+        let key = format!("registration/{}/{}", subject.0, version);
+        let value = serde_json::to_vec(&record).map_err(|e| {
+            SchemaError::Storage(format!("Failed to serialize registration record: {}", e))
+        })?;
+
+        debug!(
+            key = %key,
+            schema_id = schema_id,
+            subject = %subject,
+            version = version,
+            "Writing atomic registration record to broker"
+        );
+
+        // Single atomic write — if this fails, no partial state is left and
+        // the schema ID is "lost" (a gap), which is harmless.
+        self.client
+            .publish_with_key(
+                &self.config.topic,
+                Some(Bytes::from(key)),
+                Bytes::from(value),
+            )
+            .await
+            .map_err(|e| {
+                SchemaError::Storage(format!(
+                    "Failed to write atomic registration to broker: {}",
+                    e
+                ))
+            })?;
+
+        // Broker write succeeded — update in-memory indexes
+        self.schemas.insert(schema_id, schema.clone());
+
+        if let Some(ref fp) = schema.fingerprint {
+            self.fingerprints.insert(fp.clone(), schema_id);
+        }
+
+        let version_entry = SubjectVersionEntry {
+            version,
+            schema_id,
+            schema_type: schema.schema_type,
+            deleted: false,
+            state: VersionState::Enabled,
+        };
+        let mut entry = self.subjects.entry(subject.0.clone()).or_default();
+        entry.push(version_entry);
+
+        debug!(
+            schema_id = schema_id,
+            subject = %subject,
+            version = version,
+            "Atomic registration complete"
+        );
+
+        Ok((schema.id, SchemaVersion::new(version)))
     }
 }
 

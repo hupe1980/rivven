@@ -9,9 +9,11 @@
 
 mod admin;
 mod consume;
+pub(crate) mod group;
 mod produce;
 mod transaction;
 
+use crate::group_coordinator::GroupCoordinator;
 use crate::partitioner::{StickyPartitioner, StickyPartitionerConfig};
 use crate::protocol::{Request, Response};
 use rivven_core::{
@@ -55,6 +57,8 @@ pub struct RequestHandler {
     /// When set, every produce is WAL-written before being appended to the
     /// topic partition. Group-commit batching keeps the overhead minimal.
     pub(crate) wal: Option<Arc<GroupCommitWal>>,
+    /// Consumer group coordinator for JoinGroup/SyncGroup/Heartbeat/LeaveGroup.
+    pub(crate) group_coordinator: Arc<GroupCoordinator>,
 }
 
 impl RequestHandler {
@@ -76,6 +80,7 @@ impl RequestHandler {
             pending_bytes: Arc::new(AtomicUsize::new(0)),
             leader_epoch_checker: None,
             wal: None,
+            group_coordinator: Arc::new(GroupCoordinator::new()),
         }
     }
 
@@ -98,6 +103,7 @@ impl RequestHandler {
             pending_bytes: Arc::new(AtomicUsize::new(0)),
             leader_epoch_checker: None,
             wal: None,
+            group_coordinator: Arc::new(GroupCoordinator::new()),
         }
     }
 
@@ -120,6 +126,7 @@ impl RequestHandler {
             pending_bytes: Arc::new(AtomicUsize::new(0)),
             leader_epoch_checker: None,
             wal: None,
+            group_coordinator: Arc::new(GroupCoordinator::new()),
         }
     }
 
@@ -138,6 +145,11 @@ impl RequestHandler {
         &self.transaction_coordinator
     }
 
+    /// Get the group coordinator (for background heartbeat checker)
+    pub fn group_coordinator(&self) -> &Arc<GroupCoordinator> {
+        &self.group_coordinator
+    }
+
     /// Set whether topics are auto-created on first publish
     pub fn set_auto_create_topics(&mut self, enabled: bool) {
         self.auto_create_topics = enabled;
@@ -146,6 +158,11 @@ impl RequestHandler {
     /// Set the WAL for crash-safe durability on the produce path (§3.3).
     pub fn set_wal(&mut self, wal: Arc<GroupCommitWal>) {
         self.wal = Some(wal);
+    }
+
+    /// Set a shared group coordinator (for sharing across handler and dashboard).
+    pub fn set_group_coordinator(&mut self, gc: Arc<GroupCoordinator>) {
+        self.group_coordinator = gc;
     }
 
     /// §3.3: Write a message to the WAL before appending to the topic.
@@ -219,6 +236,13 @@ impl RequestHandler {
             | Request::IdempotentPublish { value, .. }
             | Request::TransactionalPublish { value, .. } => {
                 let bytes = value.len() as u64;
+                if let Some(throttle) = self.check_produce_quota(user, client_id, bytes) {
+                    return throttle;
+                }
+            }
+            Request::PublishBatch { ref records, .. }
+            | Request::IdempotentPublishBatch { ref records, .. } => {
+                let bytes: u64 = records.iter().map(|r| r.value.len() as u64).sum();
                 if let Some(throttle) = self.check_produce_quota(user, client_id, bytes) {
                     return throttle;
                 }
@@ -475,6 +499,57 @@ impl RequestHandler {
                 self.handle_describe_topic_configs(topics).await
             }
 
+            // Consumer Group Coordination
+            Request::JoinGroup {
+                group_id,
+                member_id,
+                session_timeout_ms,
+                rebalance_timeout_ms,
+                protocol_type,
+                subscriptions,
+            } => {
+                group::handle_join_group(
+                    &self.group_coordinator,
+                    group_id,
+                    member_id,
+                    session_timeout_ms,
+                    rebalance_timeout_ms,
+                    protocol_type,
+                    subscriptions,
+                )
+                .await
+            }
+
+            Request::SyncGroup {
+                group_id,
+                generation_id,
+                member_id,
+                assignments,
+            } => {
+                group::handle_sync_group(
+                    &self.group_coordinator,
+                    group_id,
+                    generation_id,
+                    member_id,
+                    assignments,
+                )
+                .await
+            }
+
+            Request::Heartbeat {
+                group_id,
+                generation_id,
+                member_id,
+            } => {
+                group::handle_heartbeat(&self.group_coordinator, group_id, generation_id, member_id)
+                    .await
+            }
+
+            Request::LeaveGroup {
+                group_id,
+                member_id,
+            } => group::handle_leave_group(&self.group_coordinator, group_id, member_id).await,
+
             // Protocol version handshake
             Request::Handshake {
                 protocol_version,
@@ -508,6 +583,38 @@ impl RequestHandler {
                         )
                     },
                 }
+            }
+
+            // Batch publish (hot-path optimization)
+            Request::PublishBatch {
+                topic,
+                partition,
+                records,
+                leader_epoch,
+            } => {
+                self.handle_publish_batch(topic, partition, records, leader_epoch)
+                    .await
+            }
+
+            Request::IdempotentPublishBatch {
+                topic,
+                partition,
+                records,
+                producer_id,
+                producer_epoch,
+                base_sequence,
+                leader_epoch,
+            } => {
+                self.handle_idempotent_publish_batch(
+                    topic,
+                    partition,
+                    records,
+                    producer_id,
+                    producer_epoch,
+                    base_sequence,
+                    leader_epoch,
+                )
+                .await
             }
         }
     }

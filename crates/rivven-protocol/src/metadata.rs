@@ -2,6 +2,18 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Known internal topic names (Kafka-style explicit list).
+const INTERNAL_TOPICS: &[&str] = &["__consumer_offsets", "__transaction_state", "_schemas"];
+
+/// Check whether a topic name designates an internal system topic.
+///
+/// Uses an explicit allowlist plus the `__` prefix convention (double
+/// underscore) — matching Kafka's behaviour.  Single-underscore topics
+/// like `_audit_log` are treated as user topics.
+pub fn is_internal_topic(name: &str) -> bool {
+    INTERNAL_TOPICS.contains(&name) || name.starts_with("__")
+}
+
 /// Broker/node information for metadata discovery
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BrokerInfo {
@@ -53,7 +65,7 @@ impl TopicMetadata {
     /// Create a new topic metadata
     pub fn new(name: impl Into<String>, partitions: Vec<PartitionMetadata>) -> Self {
         let name = name.into();
-        let is_internal = name.starts_with('_');
+        let is_internal = is_internal_topic(&name);
         Self {
             name,
             is_internal,

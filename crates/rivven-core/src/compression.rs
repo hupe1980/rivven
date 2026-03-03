@@ -439,6 +439,31 @@ fn compress_lz4(data: &[u8], _level: CompressionLevel) -> Result<Vec<u8>> {
     Ok(lz4_flex::block::compress_prepend_size(data))
 }
 
+/// Compress LZ4 data directly into the tail of a `BytesMut`.
+///
+/// Writes the 4-byte LE uncompressed-size prefix + compressed block.
+/// Returns the number of bytes written.
+fn compress_lz4_into(data: &[u8], out: &mut BytesMut) -> Result<usize> {
+    use lz4_flex::block::get_maximum_output_size;
+
+    let max_compressed = 4 + get_maximum_output_size(data.len());
+    out.reserve(max_compressed);
+
+    // Write uncompressed size prefix (LE u32)
+    let len_bytes = (data.len() as u32).to_le_bytes();
+    out.extend_from_slice(&len_bytes);
+
+    // Compress directly into the BytesMut tail
+    let offset = out.len();
+    out.resize(offset + get_maximum_output_size(data.len()), 0);
+    let compressed_len =
+        lz4_flex::block::compress_into(data, &mut out[offset..]).map_err(|e| {
+            CompressionError::Lz4Error(e.to_string())
+        })?;
+    out.truncate(offset + compressed_len);
+    Ok(4 + compressed_len)
+}
+
 /// Decompress LZ4 data
 ///
 /// Validates the prepended uncompressed size against `MAX_DECOMPRESSION_SIZE`
@@ -466,14 +491,31 @@ fn compress_zstd(data: &[u8], level: CompressionLevel) -> Result<Vec<u8>> {
     zstd::bulk::compress(data, level).map_err(|e| CompressionError::ZstdError(e.to_string()))
 }
 
+/// Compress Zstd data directly into the tail of a `BytesMut`.
+///
+/// Returns the number of bytes written.
+fn compress_zstd_into(data: &[u8], level: CompressionLevel, out: &mut BytesMut) -> Result<usize> {
+    let zstd_level = level.zstd_level();
+    let max_compressed = zstd::zstd_safe::compress_bound(data.len());
+    out.reserve(max_compressed);
+
+    let offset = out.len();
+    out.resize(offset + max_compressed, 0);
+    let compressed_len = zstd::zstd_safe::compress(&mut out[offset..], data, zstd_level)
+        .map_err(|code| CompressionError::ZstdError(format!("zstd compress error: {code}")))?;
+    out.truncate(offset + compressed_len);
+    Ok(compressed_len)
+}
+
 /// Maximum decompression output size (256 MiB) to prevent decompression bombs.
 const MAX_DECOMPRESSION_SIZE: usize = 256 * 1024 * 1024;
 
 /// Decompress Zstd data.
 ///
 /// Uses `original_size` from the header when available (capped at `MAX_DECOMPRESSION_SIZE`)
-/// to allocate the correct buffer. Falls back to a conservative 16 MB limit when the
-/// original size is unknown.
+/// to allocate the correct buffer. When unknown, reads the content size from the
+/// zstd frame header. Falls back to streaming decompression if the frame header
+/// does not contain a content size.
 fn decompress_zstd(data: &[u8], original_size: Option<usize>) -> Result<Vec<u8>> {
     let capacity = match original_size {
         Some(size) => {
@@ -486,7 +528,41 @@ fn decompress_zstd(data: &[u8], original_size: Option<usize>) -> Result<Vec<u8>>
             }
             size
         }
-        None => 16 * 1024 * 1024, // 16 MB fallback when size unknown
+        None => {
+            // Try to extract content size from the zstd frame header
+            match zstd::zstd_safe::get_frame_content_size(data) {
+                Ok(Some(size)) => {
+                    let size = size as usize;
+                    if size > MAX_DECOMPRESSION_SIZE {
+                        return Err(CompressionError::DecompressionBomb {
+                            size,
+                            max: MAX_DECOMPRESSION_SIZE,
+                        });
+                    }
+                    size
+                }
+                _ => {
+                    // Frame header missing or content size unknown — use streaming
+                    // decompression with a size-limited reader
+                    let mut decoder = zstd::Decoder::new(data)
+                        .map_err(|e| CompressionError::ZstdError(e.to_string()))?;
+                    let mut output = Vec::new();
+                    use std::io::Read;
+                    decoder
+                        .by_ref()
+                        .take(MAX_DECOMPRESSION_SIZE as u64 + 1)
+                        .read_to_end(&mut output)
+                        .map_err(|e| CompressionError::ZstdError(e.to_string()))?;
+                    if output.len() > MAX_DECOMPRESSION_SIZE {
+                        return Err(CompressionError::DecompressionBomb {
+                            size: output.len(),
+                            max: MAX_DECOMPRESSION_SIZE,
+                        });
+                    }
+                    return Ok(output);
+                }
+            }
+        }
     };
     zstd::bulk::decompress(data, capacity).map_err(|e| CompressionError::ZstdError(e.to_string()))
 }
@@ -497,6 +573,23 @@ fn compress_snappy(data: &[u8]) -> Result<Vec<u8>> {
     encoder
         .compress_vec(data)
         .map_err(|e| CompressionError::SnappyError(e.to_string()))
+}
+
+/// Compress Snappy data directly into the tail of a `BytesMut`.
+///
+/// Returns the number of bytes written.
+fn compress_snappy_into(data: &[u8], out: &mut BytesMut) -> Result<usize> {
+    let max_compressed = snap::raw::max_compress_len(data.len());
+    out.reserve(max_compressed);
+
+    let offset = out.len();
+    out.resize(offset + max_compressed, 0);
+    let mut encoder = snap::raw::Encoder::new();
+    let compressed_len = encoder
+        .compress(data, &mut out[offset..])
+        .map_err(|e| CompressionError::SnappyError(e.to_string()))?;
+    out.truncate(offset + compressed_len);
+    Ok(compressed_len)
 }
 
 /// Decompress Snappy data
@@ -581,19 +674,16 @@ impl Compressor {
             self.config.algorithm
         };
 
-        // Compress based on algorithm
-        let compressed = match algorithm {
-            CompressionAlgorithm::None => {
-                self.stats.record_skipped(data.len());
-                return Ok(self.encode_uncompressed(data));
-            }
-            CompressionAlgorithm::Lz4 => compress_lz4(data, self.config.level)?,
-            CompressionAlgorithm::Zstd => compress_zstd(data, self.config.level)?,
-            CompressionAlgorithm::Snappy => compress_snappy(data)?,
-        };
+        if algorithm == CompressionAlgorithm::None {
+            self.stats.record_skipped(data.len());
+            return Ok(self.encode_uncompressed(data));
+        }
+
+        // Compress directly into BytesMut (header + payload, single allocation)
+        let (buf, compressed_len) = self.compress_into_buf(data, algorithm)?;
 
         // Check if compression was worthwhile
-        let ratio = compressed.len() as f32 / data.len() as f32;
+        let ratio = compressed_len as f32 / data.len() as f32;
         if ratio > self.config.ratio_threshold {
             // Compression didn't help enough, store uncompressed
             self.stats.record_skipped(data.len());
@@ -602,10 +692,9 @@ impl Compressor {
 
         // Record stats
         self.stats
-            .record_compression(algorithm, data.len(), compressed.len());
+            .record_compression(algorithm, data.len(), compressed_len);
 
-        // Encode with header
-        self.encode_compressed(algorithm, data.len(), &compressed, data)
+        Ok(buf.freeze())
     }
 
     /// Compress data with explicit algorithm choice
@@ -615,16 +704,11 @@ impl Compressor {
             return Ok(self.encode_uncompressed(data));
         }
 
-        let compressed = match algorithm {
-            CompressionAlgorithm::None => unreachable!(),
-            CompressionAlgorithm::Lz4 => compress_lz4(data, self.config.level)?,
-            CompressionAlgorithm::Zstd => compress_zstd(data, self.config.level)?,
-            CompressionAlgorithm::Snappy => compress_snappy(data)?,
-        };
+        let (buf, compressed_len) = self.compress_into_buf(data, algorithm)?;
 
         self.stats
-            .record_compression(algorithm, data.len(), compressed.len());
-        self.encode_compressed(algorithm, data.len(), &compressed, data)
+            .record_compression(algorithm, data.len(), compressed_len);
+        Ok(buf.freeze())
     }
 
     /// Decompress data (auto-detects algorithm from header)
@@ -751,6 +835,60 @@ impl Compressor {
         CompressionAlgorithm::Lz4
     }
 
+    /// Compress directly into a `BytesMut` with header pre-written.
+    ///
+    /// Returns the buffer and the compressed payload size (used for ratio checks).
+    /// This eliminates the intermediate `Vec<u8>` allocation that the old
+    /// `compress_xxx() → encode_compressed()` path required.
+    fn compress_into_buf(
+        &self,
+        data: &[u8],
+        algorithm: CompressionAlgorithm,
+    ) -> Result<(BytesMut, usize)> {
+        let has_checksum = self.config.checksum;
+
+        // Reject payloads > u32::MAX before truncating to 4-byte size header
+        if data.len() > u32::MAX as usize {
+            return Err(CompressionError::PayloadTooLarge {
+                size: data.len(),
+                max: u32::MAX as usize,
+            });
+        }
+
+        // Header: flags (1) + original_size (4) + optional checksum (4)
+        let header_size = 5 + if has_checksum { 4 } else { 0 };
+
+        // Upper bound on compressed output so we can pre-allocate once
+        let max_compressed = match algorithm {
+            CompressionAlgorithm::Lz4 => {
+                4 + lz4_flex::block::get_maximum_output_size(data.len())
+            }
+            CompressionAlgorithm::Zstd => zstd::zstd_safe::compress_bound(data.len()),
+            CompressionAlgorithm::Snappy => snap::raw::max_compress_len(data.len()),
+            CompressionAlgorithm::None => unreachable!("None handled before compress_into_buf"),
+        };
+
+        let mut buf = BytesMut::with_capacity(header_size + max_compressed);
+
+        // Write header
+        buf.put_u8(algorithm.to_flags(true, has_checksum));
+        buf.put_u32_le(data.len() as u32);
+        if has_checksum {
+            // Checksum of the original (uncompressed) data
+            buf.put_u32_le(crc32_checksum(data));
+        }
+
+        // Compress directly into the buffer tail — no intermediate Vec<u8>
+        let compressed_len = match algorithm {
+            CompressionAlgorithm::Lz4 => compress_lz4_into(data, &mut buf)?,
+            CompressionAlgorithm::Zstd => compress_zstd_into(data, self.config.level, &mut buf)?,
+            CompressionAlgorithm::Snappy => compress_snappy_into(data, &mut buf)?,
+            CompressionAlgorithm::None => unreachable!("None handled before compress_into_buf"),
+        };
+
+        Ok((buf, compressed_len))
+    }
+
     /// Encode uncompressed data with header
     fn encode_uncompressed(&self, data: &[u8]) -> Bytes {
         let has_checksum = self.config.checksum;
@@ -765,44 +903,6 @@ impl Compressor {
 
         buf.put_slice(data);
         buf.freeze()
-    }
-
-    /// Encode compressed data with header
-    ///
-    /// `original_data` is used to compute the checksum over the *uncompressed*
-    /// payload, matching what `decompress()` verifies after decompression.
-    fn encode_compressed(
-        &self,
-        algorithm: CompressionAlgorithm,
-        original_size: usize,
-        compressed: &[u8],
-        original_data: &[u8],
-    ) -> Result<Bytes> {
-        let has_checksum = self.config.checksum;
-
-        // reject payloads > u32::MAX before truncating to 4-byte size header
-        if original_size > u32::MAX as usize {
-            return Err(CompressionError::PayloadTooLarge {
-                size: original_size,
-                max: u32::MAX as usize,
-            });
-        }
-
-        // Header: flags (1) + size (4) + optional checksum (4)
-        let header_size = 5 + if has_checksum { 4 } else { 0 };
-
-        let mut buf = BytesMut::with_capacity(header_size + compressed.len());
-        buf.put_u8(algorithm.to_flags(true, has_checksum));
-        buf.put_u32_le(original_size as u32);
-
-        if has_checksum {
-            // Checksum of the original (uncompressed) data — decompress() verifies
-            // against decompressed output, so the checksum must match that.
-            buf.put_u32_le(crc32_checksum(original_data));
-        }
-
-        buf.put_slice(compressed);
-        Ok(buf.freeze())
     }
 }
 
@@ -1022,7 +1122,34 @@ impl CompressionAnalysis {
     }
 }
 
-/// Estimate Shannon entropy of data (bits per byte, 0-8)
+/// Precomputed lookup table: `LUT[c] = round(c * log2(c) * 256)` (Q8 fixed-point).
+///
+/// Used by `estimate_entropy` to avoid per-frequency floating-point division
+/// and `log2()`. Index 0 is defined as 0 (limₓ→0 x·log₂x = 0).
+/// Maximum index 4096 matches the sample cap.
+const ENTROPY_LUT_SIZE: usize = 4097;
+static ENTROPY_LUT: std::sync::LazyLock<Box<[u32; ENTROPY_LUT_SIZE]>> =
+    std::sync::LazyLock::new(|| {
+        let mut table = Box::new([0u32; ENTROPY_LUT_SIZE]);
+        for c in 1..ENTROPY_LUT_SIZE {
+            // c * log2(c) * 256, rounded
+            let val = (c as f64) * (c as f64).log2() * 256.0;
+            table[c] = val.round() as u32;
+        }
+        table
+    });
+
+/// Estimate Shannon entropy of data (bits per byte, 0.0–8.0).
+///
+/// Uses an integer-only approximation via a precomputed Q8 lookup table,
+/// avoiding per-frequency `f32` division and `log2()` on the hot path.
+/// The final result is converted back to `f32` for API compatibility.
+///
+/// Formula: H = log₂(N) − (1/N) Σ cᵢ·log₂(cᵢ)
+///   where N = sample size, cᵢ = byte frequency counts.
+///
+/// In fixed point (Q8): H·256 = log₂(N)·256 − (Σ LUT[cᵢ]) / N · 256
+///   simplified to:       H = log₂(N) − sum_q8 / (N · 256)
 fn estimate_entropy(data: &[u8]) -> f32 {
     if data.is_empty() {
         return 0.0;
@@ -1038,18 +1165,21 @@ fn estimate_entropy(data: &[u8]) -> f32 {
         freq[byte as usize] += 1;
     }
 
-    // Calculate entropy
-    let len = sample.len() as f32;
-    let mut entropy = 0.0f32;
-
-    for count in freq.iter() {
-        if *count > 0 {
-            let p = *count as f32 / len;
-            entropy -= p * p.log2();
+    // Accumulate Σ LUT[cᵢ] (Q8 fixed-point)
+    let lut = &*ENTROPY_LUT;
+    let mut sum_q8: u64 = 0;
+    for &count in freq.iter() {
+        if count > 0 {
+            sum_q8 += lut[count as usize] as u64;
         }
     }
 
-    entropy
+    // H = log₂(N) − Σ(cᵢ·log₂(cᵢ)) / N
+    //   = log₂(N) − sum_q8 / (N · 256)
+    let n = sample_size as f64;
+    let entropy = n.log2() - (sum_q8 as f64) / (n * 256.0);
+
+    entropy as f32
 }
 
 // ============================================================================

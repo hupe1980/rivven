@@ -571,7 +571,7 @@ impl LlmProvider for BedrockProvider {
         let mut results: Vec<(usize, Vec<f32>, u32)> = Vec::with_capacity(request.input.len());
         while let Some(res) = join_set.join_next().await {
             let (idx, values, tokens) =
-                res.map_err(|e| LlmError::Config(format!("embedding task panicked: {e}")))??;
+                res.map_err(|e| LlmError::Internal(format!("embedding task panicked: {e}")))??;
             results.push((idx, values, tokens));
         }
         results.sort_by_key(|(idx, _, _)| *idx);

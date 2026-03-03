@@ -21,6 +21,23 @@ use rivven_core::{
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+/// The authorization requirement for a single request.
+///
+/// Returned by [`AuthenticatedHandler::resolve_permission`] — the single
+/// source of truth for the Request → (ResourceType, Permission) mapping.
+enum AuthRequirement {
+    /// No authorization needed (auth handshake, Ping).
+    None,
+    /// A single (resource, permission) check.
+    Single(ResourceType, Permission),
+    /// Two checks: a prerequisite (e.g. ConsumerGroup Write) that must pass
+    /// before the primary check (e.g. Topic Read).
+    Dual {
+        prerequisite: (ResourceType, Permission),
+        primary: (ResourceType, Permission),
+    },
+}
+
 /// Connection authentication state
 #[derive(Debug, Clone)]
 pub enum ConnectionAuth {
@@ -389,6 +406,138 @@ impl AuthenticatedHandler {
         Ok(())
     }
 
+    /// Resolve the authorization requirement for a given request.
+    ///
+    /// This is the **single source of truth** for mapping Request variants
+    /// to (ResourceType, Permission) tuples.  Both `authorize_request` and
+    /// `authorize_and_handle` delegate to this method, eliminating the
+    /// duplication that previously allowed new variants to slip through one
+    /// of the two match blocks.
+    fn resolve_permission(request: &Request) -> AuthRequirement {
+        match request {
+            Request::Publish { topic, .. } => {
+                AuthRequirement::Single(ResourceType::Topic(topic.clone()), Permission::Write)
+            }
+            Request::PublishBatch { topic, .. } => {
+                AuthRequirement::Single(ResourceType::Topic(topic.clone()), Permission::Write)
+            }
+            Request::Consume { topic, .. } => {
+                AuthRequirement::Single(ResourceType::Topic(topic.clone()), Permission::Read)
+            }
+            Request::CreateTopic { name, .. } => {
+                AuthRequirement::Single(ResourceType::Topic(name.clone()), Permission::Create)
+            }
+            Request::DeleteTopic { name } => {
+                AuthRequirement::Single(ResourceType::Topic(name.clone()), Permission::Delete)
+            }
+            Request::ListTopics => {
+                AuthRequirement::Single(ResourceType::Cluster, Permission::Describe)
+            }
+            Request::GetMetadata { topic } => {
+                AuthRequirement::Single(ResourceType::Topic(topic.clone()), Permission::Describe)
+            }
+            Request::GetOffsetBounds { topic, .. } => {
+                AuthRequirement::Single(ResourceType::Topic(topic.clone()), Permission::Describe)
+            }
+            Request::GetOffsetForTimestamp { topic, .. } => {
+                AuthRequirement::Single(ResourceType::Topic(topic.clone()), Permission::Describe)
+            }
+            Request::GetClusterMetadata { .. } => {
+                AuthRequirement::Single(ResourceType::Cluster, Permission::Describe)
+            }
+            Request::CommitOffset {
+                consumer_group,
+                topic,
+                ..
+            } => AuthRequirement::Dual {
+                prerequisite: (
+                    ResourceType::ConsumerGroup(consumer_group.clone()),
+                    Permission::Write,
+                ),
+                primary: (ResourceType::Topic(topic.clone()), Permission::Read),
+            },
+            Request::GetOffset {
+                consumer_group,
+                topic,
+                ..
+            } => AuthRequirement::Dual {
+                prerequisite: (
+                    ResourceType::ConsumerGroup(consumer_group.clone()),
+                    Permission::Read,
+                ),
+                primary: (ResourceType::Topic(topic.clone()), Permission::Read),
+            },
+            Request::ListGroups => {
+                AuthRequirement::Single(ResourceType::Cluster, Permission::Describe)
+            }
+            Request::DescribeGroup { consumer_group, .. } => AuthRequirement::Single(
+                ResourceType::ConsumerGroup(consumer_group.clone()),
+                Permission::Describe,
+            ),
+            Request::DeleteGroup { consumer_group, .. } => AuthRequirement::Single(
+                ResourceType::ConsumerGroup(consumer_group.clone()),
+                Permission::Delete,
+            ),
+            Request::InitProducerId { .. } => {
+                AuthRequirement::Single(ResourceType::Cluster, Permission::IdempotentWrite)
+            }
+            Request::IdempotentPublish { topic, .. } => AuthRequirement::Dual {
+                prerequisite: (ResourceType::Cluster, Permission::IdempotentWrite),
+                primary: (ResourceType::Topic(topic.clone()), Permission::Write),
+            },
+            Request::IdempotentPublishBatch { topic, .. } => AuthRequirement::Dual {
+                prerequisite: (ResourceType::Cluster, Permission::IdempotentWrite),
+                primary: (ResourceType::Topic(topic.clone()), Permission::Write),
+            },
+            Request::BeginTransaction { .. }
+            | Request::AddPartitionsToTxn { .. }
+            | Request::AddOffsetsToTxn { .. }
+            | Request::CommitTransaction { .. }
+            | Request::AbortTransaction { .. } => {
+                AuthRequirement::Single(ResourceType::Cluster, Permission::IdempotentWrite)
+            }
+            Request::TransactionalPublish { topic, .. } => AuthRequirement::Dual {
+                prerequisite: (ResourceType::Cluster, Permission::IdempotentWrite),
+                primary: (ResourceType::Topic(topic.clone()), Permission::Write),
+            },
+            Request::DescribeQuotas { .. } => {
+                AuthRequirement::Single(ResourceType::Cluster, Permission::Describe)
+            }
+            Request::AlterQuotas { .. } => {
+                AuthRequirement::Single(ResourceType::Cluster, Permission::Alter)
+            }
+            Request::AlterTopicConfig { topic, .. } => {
+                AuthRequirement::Single(ResourceType::Topic(topic.clone()), Permission::Alter)
+            }
+            Request::CreatePartitions { topic, .. } => {
+                AuthRequirement::Single(ResourceType::Topic(topic.clone()), Permission::Alter)
+            }
+            Request::DeleteRecords { topic, .. } => {
+                AuthRequirement::Single(ResourceType::Topic(topic.clone()), Permission::Delete)
+            }
+            Request::DescribeTopicConfigs { .. } => {
+                AuthRequirement::Single(ResourceType::Cluster, Permission::Describe)
+            }
+            // Consumer group coordination — JoinGroup/SyncGroup/Heartbeat
+            // require Write on the ConsumerGroup resource; LeaveGroup uses
+            // Write as well (membership mutation).
+            Request::JoinGroup { group_id, .. }
+            | Request::SyncGroup { group_id, .. }
+            | Request::Heartbeat { group_id, .. }
+            | Request::LeaveGroup { group_id, .. } => AuthRequirement::Single(
+                ResourceType::ConsumerGroup(group_id.clone()),
+                Permission::Write,
+            ),
+            #[allow(deprecated)]
+            Request::Authenticate { .. }
+            | Request::SaslAuthenticate { .. }
+            | Request::ScramClientFirst { .. }
+            | Request::ScramClientFinal { .. }
+            | Request::Handshake { .. }
+            | Request::Ping => AuthRequirement::None,
+        }
+    }
+
     /// Check authorization for a request without handling it.
     ///
     /// Returns `Ok(())` if the request is authorized, or `Err(Response)` with
@@ -404,189 +553,57 @@ impl AuthenticatedHandler {
         session: &AuthSession,
         client_ip: &str,
     ) -> Result<(), Response> {
-        // Determine required permission for this request
-        let (resource, permission) = match request {
-            Request::Publish { topic, .. } => {
-                (ResourceType::Topic(topic.clone()), Permission::Write)
-            }
-            Request::Consume { topic, .. } => {
-                (ResourceType::Topic(topic.clone()), Permission::Read)
-            }
-            Request::CreateTopic { name, .. } => {
-                (ResourceType::Topic(name.clone()), Permission::Create)
-            }
-            Request::DeleteTopic { name } => {
-                (ResourceType::Topic(name.clone()), Permission::Delete)
-            }
-            Request::ListTopics => (ResourceType::Cluster, Permission::Describe),
-            Request::GetMetadata { topic } => {
-                (ResourceType::Topic(topic.clone()), Permission::Describe)
-            }
-            Request::GetOffsetBounds { topic, .. } => {
-                (ResourceType::Topic(topic.clone()), Permission::Describe)
-            }
-            Request::GetOffsetForTimestamp { topic, .. } => {
-                (ResourceType::Topic(topic.clone()), Permission::Describe)
-            }
-            Request::GetClusterMetadata { .. } => (ResourceType::Cluster, Permission::Describe),
-            Request::CommitOffset {
-                consumer_group,
-                topic,
-                ..
-            } => {
-                // Commit offset requires both consumer group Write and topic Read
-                self.auth_manager
-                    .authorize(
-                        session,
-                        &ResourceType::ConsumerGroup(consumer_group.clone()),
-                        Permission::Write,
-                        client_ip,
-                    )
-                    .map_err(|e| {
-                        warn!(
-                            "Authorization denied for '{}' on consumer group '{}': {}",
-                            session.principal_name, consumer_group, e
-                        );
-                        Response::Error {
-                            message: format!(
-                                "AUTHORIZATION_FAILED: Consumer group access denied: {}",
-                                e
-                            ),
-                        }
-                    })?;
-                (ResourceType::Topic(topic.clone()), Permission::Read)
-            }
-            Request::GetOffset {
-                consumer_group,
-                topic,
-                ..
-            } => {
-                // Get offset requires consumer group Read and topic Read
-                self.auth_manager
-                    .authorize(
-                        session,
-                        &ResourceType::ConsumerGroup(consumer_group.clone()),
-                        Permission::Read,
-                        client_ip,
-                    )
-                    .map_err(|e| {
-                        warn!(
-                            "Authorization denied for '{}' on consumer group '{}': {}",
-                            session.principal_name, consumer_group, e
-                        );
-                        Response::Error {
-                            message: format!(
-                                "AUTHORIZATION_FAILED: Consumer group access denied: {}",
-                                e
-                            ),
-                        }
-                    })?;
-                (ResourceType::Topic(topic.clone()), Permission::Read)
-            }
-            Request::ListGroups => (ResourceType::Cluster, Permission::Describe),
-            Request::DescribeGroup { consumer_group, .. } => (
-                ResourceType::ConsumerGroup(consumer_group.clone()),
-                Permission::Describe,
-            ),
-            Request::DeleteGroup { consumer_group, .. } => (
-                ResourceType::ConsumerGroup(consumer_group.clone()),
-                Permission::Delete,
-            ),
-            Request::InitProducerId { .. } => (ResourceType::Cluster, Permission::IdempotentWrite),
-            Request::IdempotentPublish { topic, .. } => {
-                // Idempotent publish requires IdempotentWrite on Cluster and Write on Topic
-                self.auth_manager
-                    .authorize(
-                        session,
-                        &ResourceType::Cluster,
-                        Permission::IdempotentWrite,
-                        client_ip,
-                    )
-                    .map_err(|e| {
-                        warn!(
-                            "IdempotentWrite denied for '{}' on cluster: {}",
-                            session.principal_name, e
-                        );
-                        Response::Error {
-                            message: format!(
-                                "AUTHORIZATION_FAILED: IdempotentWrite permission denied: {}",
-                                e
-                            ),
-                        }
-                    })?;
-                (ResourceType::Topic(topic.clone()), Permission::Write)
-            }
-            Request::BeginTransaction { .. }
-            | Request::AddPartitionsToTxn { .. }
-            | Request::AddOffsetsToTxn { .. }
-            | Request::CommitTransaction { .. }
-            | Request::AbortTransaction { .. } => {
-                (ResourceType::Cluster, Permission::IdempotentWrite)
-            }
-            Request::TransactionalPublish { topic, .. } => {
-                // Transactional publish requires IdempotentWrite on Cluster and Write on Topic
-                self.auth_manager
-                    .authorize(
-                        session,
-                        &ResourceType::Cluster,
-                        Permission::IdempotentWrite,
-                        client_ip,
-                    )
-                    .map_err(|e| {
-                        warn!(
-                            "IdempotentWrite denied for '{}' on cluster: {}",
-                            session.principal_name, e
-                        );
-                        Response::Error {
-                            message: format!(
-                                "AUTHORIZATION_FAILED: IdempotentWrite permission denied: {}",
-                                e
-                            ),
-                        }
-                    })?;
-                (ResourceType::Topic(topic.clone()), Permission::Write)
-            }
-            Request::DescribeQuotas { .. } => (ResourceType::Cluster, Permission::Describe),
-            Request::AlterQuotas { .. } => (ResourceType::Cluster, Permission::Alter),
-            Request::AlterTopicConfig { topic, .. } => {
-                (ResourceType::Topic(topic.clone()), Permission::Alter)
-            }
-            Request::CreatePartitions { topic, .. } => {
-                (ResourceType::Topic(topic.clone()), Permission::Alter)
-            }
-            Request::DeleteRecords { topic, .. } => {
-                (ResourceType::Topic(topic.clone()), Permission::Delete)
-            }
-            Request::DescribeTopicConfigs { .. } => (ResourceType::Cluster, Permission::Describe),
-            // Auth requests and Ping don't require authorization
-            #[allow(deprecated)]
-            Request::Authenticate { .. }
-            | Request::SaslAuthenticate { .. }
-            | Request::ScramClientFirst { .. }
-            | Request::ScramClientFinal { .. }
-            | Request::Handshake { .. }
-            | Request::Ping => return Ok(()),
+        let make_err = |resource: &ResourceType, e: &dyn std::fmt::Display| Response::Error {
+            message: format!("AUTHORIZATION_FAILED: {:?} access denied: {}", resource, e),
         };
 
-        // Authorize against the primary resource
-        self.auth_manager
-            .authorize(session, &resource, permission, client_ip)
-            .map_err(|e| {
-                warn!(
-                    "Authorization denied for '{}' on {:?}: {}",
-                    session.principal_name, resource, e
+        match Self::resolve_permission(request) {
+            AuthRequirement::None => Ok(()),
+            AuthRequirement::Single(resource, permission) => {
+                self.auth_manager
+                    .authorize(session, &resource, permission, client_ip)
+                    .map_err(|e| {
+                        warn!(
+                            "Authorization denied for '{}' on {:?}: {}",
+                            session.principal_name, resource, e
+                        );
+                        make_err(&resource, &e)
+                    })?;
+                debug!(
+                    "Authorized '{}' for {:?} on {:?}",
+                    session.principal_name, permission, resource
                 );
-                Response::Error {
-                    message: format!("AUTHORIZATION_FAILED: {}", e),
-                }
-            })?;
-
-        debug!(
-            "Authorized '{}' for {:?} on {:?}",
-            session.principal_name, permission, resource
-        );
-
-        Ok(())
+                Ok(())
+            }
+            AuthRequirement::Dual {
+                prerequisite: (pre_resource, pre_perm),
+                primary: (resource, permission),
+            } => {
+                self.auth_manager
+                    .authorize(session, &pre_resource, pre_perm, client_ip)
+                    .map_err(|e| {
+                        warn!(
+                            "Authorization denied for '{}' on {:?}: {}",
+                            session.principal_name, pre_resource, e
+                        );
+                        make_err(&pre_resource, &e)
+                    })?;
+                self.auth_manager
+                    .authorize(session, &resource, permission, client_ip)
+                    .map_err(|e| {
+                        warn!(
+                            "Authorization denied for '{}' on {:?}: {}",
+                            session.principal_name, resource, e
+                        );
+                        make_err(&resource, &e)
+                    })?;
+                debug!(
+                    "Authorized '{}' for {:?} on {:?}",
+                    session.principal_name, permission, resource
+                );
+                Ok(())
+            }
+        }
     }
 
     /// Authorize and handle a request
@@ -596,229 +613,86 @@ impl AuthenticatedHandler {
         session: Option<&AuthSession>,
         client_ip: &str,
     ) -> Response {
-        // Determine required permission for this request
-        let (resource, permission) = match &request {
-            Request::Publish { topic, .. } => {
-                (ResourceType::Topic(topic.clone()), Permission::Write)
-            }
-            Request::Consume { topic, .. } => {
-                (ResourceType::Topic(topic.clone()), Permission::Read)
-            }
-            Request::CreateTopic { name, .. } => {
-                (ResourceType::Topic(name.clone()), Permission::Create)
-            }
-            Request::DeleteTopic { name } => {
-                (ResourceType::Topic(name.clone()), Permission::Delete)
-            }
-            Request::ListTopics => (ResourceType::Cluster, Permission::Describe),
-            Request::GetMetadata { topic } => {
-                (ResourceType::Topic(topic.clone()), Permission::Describe)
-            }
-            Request::GetOffsetBounds { topic, .. } => {
-                (ResourceType::Topic(topic.clone()), Permission::Describe)
-            }
-            Request::GetOffsetForTimestamp { topic, .. } => {
-                (ResourceType::Topic(topic.clone()), Permission::Describe)
-            }
-            Request::GetClusterMetadata { .. } => (ResourceType::Cluster, Permission::Describe),
-            Request::CommitOffset {
-                consumer_group,
-                topic,
-                ..
-            } => {
-                // Commit offset requires both consumer group Write and topic Read permissions
-                // We check consumer group here, topic is checked below for dual-resource ops
-                if let Some(session) = session {
-                    // First check consumer group permission
-                    if let Err(e) = self.auth_manager.authorize(
-                        session,
-                        &ResourceType::ConsumerGroup(consumer_group.clone()),
-                        Permission::Write,
-                        client_ip,
-                    ) {
-                        warn!(
-                            "Authorization denied for '{}' on consumer group '{}': {}",
-                            session.principal_name, consumer_group, e
-                        );
-                        return Response::Error {
-                            message: format!(
-                                "AUTHORIZATION_FAILED: Consumer group access denied: {}",
-                                e
-                            ),
-                        };
-                    }
-                }
-                // Then check topic Read permission
-                (ResourceType::Topic(topic.clone()), Permission::Read)
-            }
-            Request::GetOffset {
-                consumer_group,
-                topic,
-                ..
-            } => {
-                // Get offset requires consumer group Read and topic Read
-                if let Some(session) = session {
-                    if let Err(e) = self.auth_manager.authorize(
-                        session,
-                        &ResourceType::ConsumerGroup(consumer_group.clone()),
-                        Permission::Read,
-                        client_ip,
-                    ) {
-                        warn!(
-                            "Authorization denied for '{}' on consumer group '{}': {}",
-                            session.principal_name, consumer_group, e
-                        );
-                        return Response::Error {
-                            message: format!(
-                                "AUTHORIZATION_FAILED: Consumer group access denied: {}",
-                                e
-                            ),
-                        };
-                    }
-                }
-                (ResourceType::Topic(topic.clone()), Permission::Read)
-            }
-            Request::ListGroups => (ResourceType::Cluster, Permission::Describe),
-            Request::DescribeGroup { consumer_group, .. } => (
-                ResourceType::ConsumerGroup(consumer_group.clone()),
-                Permission::Describe,
-            ),
-            Request::DeleteGroup { consumer_group, .. } => (
-                ResourceType::ConsumerGroup(consumer_group.clone()),
-                Permission::Delete,
-            ),
-            // Idempotent Producer
-            Request::InitProducerId { .. } => {
-                // InitProducerId requires IdempotentWrite on Cluster
-                (ResourceType::Cluster, Permission::IdempotentWrite)
-            }
-            Request::IdempotentPublish { topic, .. } => {
-                // Idempotent publish requires both IdempotentWrite on Cluster and Write on Topic
-                if let Some(session) = session {
-                    // First check cluster-level IdempotentWrite permission
-                    if let Err(e) = self.auth_manager.authorize(
-                        session,
-                        &ResourceType::Cluster,
-                        Permission::IdempotentWrite,
-                        client_ip,
-                    ) {
-                        warn!(
-                            "IdempotentWrite denied for '{}' on cluster: {}",
-                            session.principal_name, e
-                        );
-                        return Response::Error {
-                            message: format!(
-                                "AUTHORIZATION_FAILED: IdempotentWrite permission denied: {}",
-                                e
-                            ),
-                        };
-                    }
-                }
-                // Then check topic Write permission
-                (ResourceType::Topic(topic.clone()), Permission::Write)
-            }
-            // Native Transactions
-            Request::BeginTransaction { .. }
-            | Request::AddPartitionsToTxn { .. }
-            | Request::AddOffsetsToTxn { .. }
-            | Request::CommitTransaction { .. }
-            | Request::AbortTransaction { .. } => {
-                // Transaction operations require IdempotentWrite on Cluster
-                (ResourceType::Cluster, Permission::IdempotentWrite)
-            }
-            Request::TransactionalPublish { topic, .. } => {
-                // Transactional publish requires IdempotentWrite on Cluster and Write on Topic
-                if let Some(session) = session {
-                    if let Err(e) = self.auth_manager.authorize(
-                        session,
-                        &ResourceType::Cluster,
-                        Permission::IdempotentWrite,
-                        client_ip,
-                    ) {
-                        warn!(
-                            "IdempotentWrite denied for '{}' on cluster: {}",
-                            session.principal_name, e
-                        );
-                        return Response::Error {
-                            message: format!(
-                                "AUTHORIZATION_FAILED: IdempotentWrite permission denied: {}",
-                                e
-                            ),
-                        };
-                    }
-                }
-                (ResourceType::Topic(topic.clone()), Permission::Write)
-            }
-            // Per-Principal Quotas (Kafka Parity)
-            Request::DescribeQuotas { .. } => {
-                // DescribeQuotas requires Describe on Cluster
-                (ResourceType::Cluster, Permission::Describe)
-            }
-            Request::AlterQuotas { .. } => {
-                // AlterQuotas requires Alter on Cluster (admin operation)
-                (ResourceType::Cluster, Permission::Alter)
-            }
-            // Admin API (Kafka Parity)
-            Request::AlterTopicConfig { topic, .. } => {
-                // AlterTopicConfig requires Alter on Topic
-                (ResourceType::Topic(topic.clone()), Permission::Alter)
-            }
-            Request::CreatePartitions { topic, .. } => {
-                // CreatePartitions requires Alter on Topic
-                (ResourceType::Topic(topic.clone()), Permission::Alter)
-            }
-            Request::DeleteRecords { topic, .. } => {
-                // DeleteRecords requires Delete on Topic
-                (ResourceType::Topic(topic.clone()), Permission::Delete)
-            }
-            Request::DescribeTopicConfigs { .. } => {
-                // DescribeTopicConfigs requires Describe on Cluster
-                (ResourceType::Cluster, Permission::Describe)
-            }
-            // Auth requests handled earlier
-            #[allow(deprecated)]
-            Request::Authenticate { .. }
-            | Request::SaslAuthenticate { .. }
-            | Request::ScramClientFirst { .. }
-            | Request::ScramClientFinal { .. }
-            | Request::Handshake { .. }
-            | Request::Ping => {
-                // Already handled
+        match Self::resolve_permission(&request) {
+            AuthRequirement::None => {
+                // Auth/Ping requests should never reach authorize_and_handle —
+                // they are intercepted earlier. If we land here, a new Request
+                // variant was added with AuthRequirement::None but not handled
+                // upstream. Log for diagnosis.
+                tracing::error!(
+                    request_type = ?std::mem::discriminant(&request),
+                    "BUG: AuthRequirement::None reached authorize_and_handle"
+                );
                 return Response::Error {
                     message: "INTERNAL_ERROR: Unexpected request type".to_string(),
                 };
             }
-        };
-
-        // Authorize if we have a session
-        if let Some(session) = session {
-            if let Err(e) = self
-                .auth_manager
-                .authorize(session, &resource, permission, client_ip)
-            {
-                warn!(
-                    "Authorization denied for '{}' on {:?}: {}",
-                    session.principal_name, resource, e
-                );
-                return Response::Error {
-                    message: format!("AUTHORIZATION_FAILED: {}", e),
-                };
+            AuthRequirement::Single(resource, permission) => {
+                if let Some(session) = session {
+                    if let Err(e) = self
+                        .auth_manager
+                        .authorize(session, &resource, permission, client_ip)
+                    {
+                        warn!(
+                            "Authorization denied for '{}' on {:?}: {}",
+                            session.principal_name, resource, e
+                        );
+                        return Response::Error {
+                            message: format!("AUTHORIZATION_FAILED: {}", e),
+                        };
+                    }
+                    debug!(
+                        "Authorized '{}' for {:?} on {:?}",
+                        session.principal_name, permission, resource
+                    );
+                } else if self.require_auth {
+                    return Response::Error {
+                        message: "AUTHENTICATION_REQUIRED".to_string(),
+                    };
+                }
             }
-            debug!(
-                "Authorized '{}' for {:?} on {:?}",
-                session.principal_name, permission, resource
-            );
-        } else if self.require_auth {
-            // No session and auth required - shouldn't reach here but safety check
-            return Response::Error {
-                message: "AUTHENTICATION_REQUIRED".to_string(),
-            };
+            AuthRequirement::Dual {
+                prerequisite: (pre_resource, pre_perm),
+                primary: (resource, permission),
+            } => {
+                if let Some(session) = session {
+                    if let Err(e) =
+                        self.auth_manager
+                            .authorize(session, &pre_resource, pre_perm, client_ip)
+                    {
+                        warn!(
+                            "Authorization denied for '{}' on {:?}: {}",
+                            session.principal_name, pre_resource, e
+                        );
+                        return Response::Error {
+                            message: format!("AUTHORIZATION_FAILED: {}", e),
+                        };
+                    }
+                    if let Err(e) = self
+                        .auth_manager
+                        .authorize(session, &resource, permission, client_ip)
+                    {
+                        warn!(
+                            "Authorization denied for '{}' on {:?}: {}",
+                            session.principal_name, resource, e
+                        );
+                        return Response::Error {
+                            message: format!("AUTHORIZATION_FAILED: {}", e),
+                        };
+                    }
+                    debug!(
+                        "Authorized '{}' for {:?} on {:?}",
+                        session.principal_name, permission, resource
+                    );
+                } else if self.require_auth {
+                    return Response::Error {
+                        message: "AUTHENTICATION_REQUIRED".to_string(),
+                    };
+                }
+            }
         }
 
         // ======== Per-principal quota enforcement ========
-        // Delegate to base handler with principal context.
-        // handle_with_principal() checks request, produce, and consume quotas
-        // with the real user identity — no double-counting.
         let user = session.map(|s| s.principal_name.as_str());
         self.handler
             .handle_with_principal(request, user, None)

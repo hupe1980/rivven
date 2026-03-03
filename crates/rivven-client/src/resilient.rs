@@ -495,6 +495,9 @@ impl ConnectionPool {
     /// When the circuit breaker is open, normal `get()` calls are blocked,
     /// which would prevent health checks from ever running to re-close the
     /// breaker. This method allows health probes to bypass that check.
+    ///
+    /// Uses the same TLS + SCRAM-SHA-256 logic as `get()` to avoid
+    /// security regressions (CLIENT-C1/C2).
     async fn get_for_health_check(&self) -> Result<PooledConnection> {
         // Skip circuit breaker — the whole point is to probe a possibly-down server
         let permit = self
@@ -519,15 +522,56 @@ impl ConnectionPool {
             }
         }
 
-        // Create new connection for health check
+        // Create new connection for health check — use TLS when configured
+        // (mirrors the get() logic to avoid sending credentials over plaintext)
+        #[cfg(feature = "tls")]
+        let mut client = if let Some(ref tls) = self.config.tls {
+            timeout(
+                self.config.connection_timeout,
+                Client::connect_tls_with_timeout(
+                    &self.addr,
+                    &tls.tls_config,
+                    &tls.server_name,
+                    self.config.connection_timeout,
+                ),
+            )
+            .await
+            .map_err(|_| {
+                Error::ConnectionError(format!(
+                    "TLS health-check connection timeout to {}",
+                    self.addr
+                ))
+            })?
+            .map_err(|e| {
+                Error::ConnectionError(format!(
+                    "Failed TLS health-check connect to {}: {}",
+                    self.addr, e
+                ))
+            })?
+        } else {
+            timeout(self.config.connection_timeout, Client::connect(&self.addr))
+                .await
+                .map_err(|_| Error::Timeout)?
+                .map_err(|e| Error::ConnectionError(e.to_string()))?
+        };
+
+        #[cfg(not(feature = "tls"))]
         let mut client = timeout(self.config.connection_timeout, Client::connect(&self.addr))
             .await
             .map_err(|_| Error::Timeout)?
             .map_err(|e| Error::ConnectionError(e.to_string()))?;
 
-        // Authenticate if needed
+        // Authenticate using SCRAM-SHA-256 (not SASL/PLAIN) — same as get()
         if let Some(ref auth) = self.config.auth {
-            client.authenticate(&auth.username, &auth.password).await?;
+            client
+                .authenticate_scram(&auth.username, &auth.password)
+                .await
+                .map_err(|e| {
+                    Error::AuthenticationFailed(format!(
+                        "Health-check authentication failed for {}: {}",
+                        self.addr, e
+                    ))
+                })?;
         }
 
         Ok(PooledConnection {
@@ -815,7 +859,7 @@ impl ResilientClient {
         topic: impl Into<String>,
         partition: u32,
         offset: u64,
-        max_messages: usize,
+        max_messages: u32,
     ) -> Result<Vec<MessageData>> {
         self.consume_with_isolation(topic, partition, offset, max_messages, None)
             .await
@@ -836,7 +880,7 @@ impl ResilientClient {
         topic: impl Into<String>,
         partition: u32,
         offset: u64,
-        max_messages: usize,
+        max_messages: u32,
         isolation_level: Option<u8>,
     ) -> Result<Vec<MessageData>> {
         let topic = topic.into();
@@ -868,7 +912,7 @@ impl ResilientClient {
         topic: impl Into<String>,
         partition: u32,
         offset: u64,
-        max_messages: usize,
+        max_messages: u32,
     ) -> Result<Vec<MessageData>> {
         self.consume_with_isolation(topic, partition, offset, max_messages, Some(1))
             .await
@@ -1057,11 +1101,7 @@ pub struct ServerStats {
 /// permanent credential problems, not transient network issues. Retrying
 /// them wastes time and may trigger account lockout policies.
 fn is_retryable_error(error: &Error) -> bool {
-    match error {
-        Error::AuthenticationFailed(_) => false,
-        Error::ConnectionError(_) | Error::IoError(_, _) | Error::CircuitBreakerOpen(_) => true,
-        _ => false,
-    }
+    error.is_retriable()
 }
 
 /// Calculate exponential backoff with jitter
@@ -1131,6 +1171,7 @@ mod tests {
 
     #[test]
     fn test_is_retryable_error() {
+        // Transient errors — should be retried
         assert!(is_retryable_error(&Error::ConnectionError("test".into())));
         assert!(is_retryable_error(&Error::IoError(
             std::io::ErrorKind::ConnectionReset,
@@ -1139,11 +1180,29 @@ mod tests {
         assert!(is_retryable_error(&Error::CircuitBreakerOpen(
             "test".into()
         )));
-        assert!(!is_retryable_error(&Error::InvalidResponse));
-        assert!(!is_retryable_error(&Error::ServerError("test".into())));
-        // Auth failures must NOT be retried
+        assert!(is_retryable_error(&Error::Timeout));
+        assert!(is_retryable_error(&Error::PoolExhausted(
+            "pool full".into()
+        )));
+        // Generic server errors without a permanent prefix are transient
+        assert!(is_retryable_error(&Error::ServerError(
+            "NOT_LEADER: try another broker".into()
+        )));
+        // InvalidResponse is transient (network corruption, partial read)
+        assert!(is_retryable_error(&Error::InvalidResponse));
+
+        // Permanent errors — must NOT be retried
         assert!(!is_retryable_error(&Error::AuthenticationFailed(
             "bad password".into()
+        )));
+        assert!(!is_retryable_error(&Error::ServerError(
+            "PRODUCER_FENCED: epoch mismatch".into()
+        )));
+        assert!(!is_retryable_error(&Error::ServerError(
+            "INVALID_TOPIC: bad name".into()
+        )));
+        assert!(!is_retryable_error(&Error::ConfigError(
+            "bad config".into()
         )));
     }
 

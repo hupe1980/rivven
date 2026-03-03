@@ -185,22 +185,25 @@ rivven-schema compat --url http://localhost:8081 --subject user-value --schema n
 
 The standalone Schema Registry (`rivven-schema`) supports enterprise-grade authentication methods.
 
+When authentication is enabled, **all 15 mutating handlers** — including register schema, delete subject (soft & permanent), update global/subject compatibility config, undelete, deprecate/disable/enable version, create/delete context, add/delete validation rules, and set version state — enforce subject-level permission checks. Read-only endpoints allow anonymous access only when explicitly configured. The middleware authenticates requests via the configured method, and each handler enforces authorization for the specific operation (Create, Delete, Alter) on the target subject.
+
+{: .note }
+> **Architecture note:** The global compatibility level is stored directly in the registry (behind `RwLock<CompatibilityLevel>`) as the single source of truth. The REST API layer propagates compatibility changes to the registry immediately — there is no separate copy that can drift.
+
 ### Authentication Methods
 
 | Method | Header | Feature Flag | Use Case |
 |--------|--------|--------------|----------|
-| **HTTP Basic Auth** | `Authorization: Basic base64(user:pass)` | `auth` | Simple deployments |
-| **Bearer Token** | `Authorization: Bearer <session-id>` | `auth` | Session-based auth |
+| **HTTP Basic Auth** | `Authorization: Basic base64(user:pass)` | built-in | Simple deployments |
+| **Bearer Token** | `Authorization: Bearer <session-id>` | built-in | Session-based auth |
 | **JWT/OIDC** | `Authorization: Bearer <jwt>` | `jwt` | Enterprise SSO |
-| **API Keys** | `X-API-Key: <key>` | `auth` | Service-to-service auth |
+| **API Keys** | `X-API-Key: <key>` | built-in | Service-to-service auth |
 
-### Enable Authentication
+### Enable JWT/OIDC
+
+Basic auth, bearer tokens, and API keys are always available. For JWT/OIDC support:
 
 ```bash
-# Basic auth + Bearer token + API Keys
-cargo build -p rivven-schema --features auth
-
-# JWT/OIDC support (includes auth)
 cargo build -p rivven-schema --features jwt
 ```
 
@@ -259,6 +262,11 @@ auth:
 ### Cedar Policy-Based Authorization
 
 For fine-grained, policy-as-code authorization:
+
+{: .note }
+> Cedar authorization is fully wired and evaluates every request through
+> `cedar_policy::Authorizer::is_authorized()`. Policies are checked at runtime — this is not a stub.
+> See [Cedar documentation](cedar.md#schema-registry-integration) for details.
 
 ```bash
 cargo build -p rivven-schema --features cedar
@@ -804,6 +812,27 @@ assert!(compatible); // ✅ New optional field is fully compatible
 - **Varint**: int32, int64, uint32, uint64, bool
 - **32-bit**: fixed32, sfixed32, float
 - **64-bit**: fixed64, sfixed64, double
+
+#### JSON Schema Compatibility Rules
+
+JSON Schema compatibility checking recursively validates nested object structures, not just top-level properties.
+
+| Change | Backward | Forward | Full |
+|--------|----------|---------|------|
+| Add optional property | ✅ | ✅ | ✅ |
+| Add required property | ❌ | ✅ | ❌ |
+| Remove optional property | ✅ | ❌ | ❌ |
+| Remove required property | ✅ | ❌ | ❌ |
+| Change property type | ❌ | ❌ | ❌ |
+| Widen type (e.g. int → number) | ✅ | ❌ | ❌ |
+| Add enum value | ❌ | ✅ | ❌ |
+| Remove enum value | ✅ | ❌ | ❌ |
+| Allow additionalProperties | ✅ | ❌ | ❌ |
+| Disallow additionalProperties | ❌ | ✅ | ❌ |
+| Change nested object property | Recurse | Recurse | Recurse |
+| Change array `items` schema | Recurse | Recurse | Recurse |
+
+Nested properties are reported with dotted paths (e.g., `address.street`) for clear error messages.
 
 ## Schema Evolution Strategies
 

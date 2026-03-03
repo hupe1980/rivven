@@ -53,7 +53,7 @@ Producer                           Broker
 
 - **Producer ID (PID)**: Unique 64-bit identifier for each producer instance
 - **Epoch**: Increments on producer restart, fencing old instances
-- **Sequence Number**: Per-partition counter starting at 0
+- **Sequence Number**: Per-partition counter starting at 0. The client's `publish_idempotent_to_partition()` method wires per-partition sequence numbers directly, ensuring correct deduplication when a single producer publishes to multiple partitions.
 - **Offset Cache**: The broker maintains a ring buffer of the 5 most recent
   `(sequence, offset)` pairs per producer per partition. When a duplicate is
   detected, the cached offset is returned to the client so it knows the exact
@@ -100,6 +100,23 @@ New instance (Epoch=1) → Produce → Success
 | `PRODUCER_FENCED` | Epoch too old | Re-initialize producer |
 | `UNKNOWN_PRODUCER_ID` | PID not initialized | Call InitProducerId first |
 
+#### Error Classification
+
+The client's `Error::is_retriable()` method classifies errors as **permanent** or **transient** to guide retry behavior:
+
+| Category | Examples | Retry? |
+|----------|----------|--------|
+| Permanent | `PRODUCER_FENCED`, `INVALID_TOPIC`, `ILLEGAL_GENERATION`, `UNKNOWN_MEMBER_ID`, `INVALID_SESSION_TIMEOUT`, `RECORD_TOO_LARGE`, `MESSAGE_TOO_LARGE`, `INVALID_REQUIRED_ACKS`, authentication errors | No — retrying will never succeed |
+| Transient | I/O errors, timeouts, broker unavailable, `UNKNOWN_TOPIC` (supports auto-topic-creation) | Yes — may succeed on retry |
+
+Error matching uses specific variants (`UNSUPPORTED_VERSION`, `UNSUPPORTED_COMPRESSION`, `UNSUPPORTED_FOR_MESSAGE_FORMAT`) rather than a broad `UNSUPPORTED` prefix, preventing accidental misclassification.
+
+The producer retry loop automatically skips retries for permanent errors, failing fast instead of wasting retry budget.
+
+#### Per-Batch Timeout
+
+The producer's `send_batch` response-reading phase is wrapped in `tokio::time::timeout(request_timeout)`, ensuring that a stalled broker response cannot block the producer indefinitely. If the timeout fires, the batch is treated as a transient failure and may be retried.
+
 ---
 
 ## Native Transactions
@@ -111,7 +128,7 @@ Transactions provide atomicity across multiple topics and partitions, enabling e
 All transaction state transitions are persisted to a **CRC32-protected write-ahead log** (WAL) **before** modifying in-memory state. This strict WAL-before-memory ordering ensures that every acknowledged state transition is recoverable after a crash. The WAL captures:
 
 - `Begin`, `AddPartition`, `RecordWrite` — written before the coordinator updates in-memory maps
-- `OffsetCommit` — consumer offset commits for exactly-once consume-transform-produce
+- `OffsetCommit` — consumer offset commits for exactly-once consume-transform-produce. On transaction commit, these offsets are **applied** to the consumer group offset manager, ensuring that committed offsets take effect atomically with the transaction.
 - `PrepareCommit` / `PrepareAbort` — the 2PC decision is durable before Phase 2
 - `CompleteCommit` / `CompleteAbort` — final resolution logged before cleanup
 - `TimedOut` — zombie cleanup recorded before removing the transaction from memory
@@ -124,7 +141,7 @@ All transaction state transitions are persisted to a **CRC32-protected write-ahe
 
 1. **Validate-before-write**: `TransactionalPublish` validates partition membership in the transaction BEFORE appending data to the partition log. This prevents orphaned records if the partition wasn't added via `AddPartitionsToTxn`.
 
-2. **Atomic COMMIT markers**: If any COMMIT marker write fails, a compensating `TxnAbort` WAL record is written (to prevent crash recovery from re-committing the aborted transaction), then compensating ABORT markers are written to all partitions that already received COMMIT markers, and the transaction is aborted. This prevents `read_committed` consumers from seeing partial commits and ensures crash recovery honours the abort decision.
+2. **Atomic COMMIT markers**: If any COMMIT marker write fails, the broker retries the COMMIT with exponential backoff (up to 5 attempts, starting at 50 ms). Since the `TxnCommit` WAL record is already durable at this point, the transaction's commit decision is irrevocable — crash recovery will replay the COMMIT markers from the WAL. If all retries are exhausted, the broker logs an error but does **not** write a compensating `TxnAbort`, because the WAL already records the commit decision. This eliminates the ambiguity of having both `TxnCommit` and `TxnAbort` records for the same transaction.
 
 3. **ABORT marker failure returns error**: When any ABORT marker write fails, the broker returns an `ABORT_PARTIAL_FAILURE` error to the client instead of a success response. The error includes the affected partition list so clients know which partitions may expose uncommitted data under `read_committed` isolation.
 

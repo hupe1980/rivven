@@ -53,6 +53,11 @@ pub struct PostgresCdcConfig {
     pub tls_config: Option<TlsConfig>,
     /// Signal configuration for runtime control
     pub signal_config: Option<SignalConfig>,
+    /// Drop the replication slot when the CDC source is stopped.
+    /// Default: `false` (slot is retained for resumable replication).
+    /// Set to `true` for ephemeral connectors that should not leave
+    /// orphaned slots behind.
+    pub drop_slot_on_stop: bool,
 }
 
 impl std::fmt::Debug for PostgresCdcConfig {
@@ -289,6 +294,7 @@ impl PostgresCdcConfigBuilder {
             #[cfg(feature = "postgres-tls")]
             tls_config: self.tls_config,
             signal_config: self.signal_config,
+            drop_slot_on_stop: false,
         };
         config.validate()?;
         Ok(config)
@@ -447,12 +453,50 @@ impl CdcSource for PostgresCdc {
             handle.abort();
             let _ = handle.await;
         }
+
+        // Optionally drop the replication slot to avoid orphaned slots.
+        if self.config.drop_slot_on_stop {
+            info!(
+                "Dropping replication slot '{}' (drop_slot_on_stop=true)",
+                self.config.slot_name
+            );
+            match drop_replication_slot(&self.config).await {
+                Ok(()) => info!("Replication slot '{}' dropped", self.config.slot_name),
+                Err(e) => warn!(
+                    "Failed to drop replication slot '{}': {}",
+                    self.config.slot_name, e
+                ),
+            }
+        }
+
         Ok(())
     }
 
     async fn is_healthy(&self) -> bool {
         self.active
     }
+}
+
+/// Drop a PostgreSQL logical replication slot using a regular SQL connection.
+///
+/// We open a short-lived connection rather than reusing the streaming
+/// connection because `DROP_REPLICATION_SLOT` requires a non-replication
+/// session in most configurations.
+async fn drop_replication_slot(config: &PostgresCdcConfig) -> anyhow::Result<()> {
+    use tokio_postgres::NoTls;
+    let (client, connection) = tokio_postgres::connect(&config.connection_string, NoTls).await?;
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            tracing::warn!("drop-slot connection error: {}", e);
+        }
+    });
+    client
+        .simple_query(&format!(
+            "SELECT pg_drop_replication_slot('{}')",
+            config.slot_name.replace('\'', "''")
+        ))
+        .await?;
+    Ok(())
 }
 
 /// Main CDC loop

@@ -171,6 +171,7 @@ let consumer_view = buffer.freeze();
 - **Cache-friendly** access patterns with 64-byte alignment
 - **Reference counting** for safe shared access
 - **Bounded pool** with `max_buffers` limit to prevent unbounded memory growth
+- **Safe reset** via `try_reset()` — verifies exclusive `Arc` ownership before recycling
 
 ### Lock-Free Data Structures
 
@@ -232,9 +233,15 @@ println!("Hit rate: {:.1}%", stats.hit_rate() * 100.0);
 | Large | 4KB-64KB | Batched records |
 | Huge | 64KB-1MB | Large payloads |
 
+**Deallocate Routing:** Returned buffers are classified by pool canonical sizes with +12.5% tolerance to compensate for allocator rounding (e.g. `with_capacity(4096)` may allocate 4160 bytes). Buffers that grew beyond the tolerance are dropped instead of mis-pooled.
+
 ## Async I/O (io_uring-style API)
 
-rivven-core provides a portable async I/O layer with an io_uring-style API. The current implementation uses `std::fs::File` behind `parking_lot::Mutex` as a portable fallback. The API is designed so a true io_uring backend can be swapped in on Linux 5.6+ without changing callers:
+rivven-core provides a portable async I/O layer with an io_uring-style API. The current implementation uses `std::fs::File` behind `parking_lot::Mutex` as a portable fallback. The API is designed so a true io_uring backend can be swapped in on Linux 5.6+ without changing callers.
+
+**Concurrent Reads:** On Unix, `AsyncFile::read_at()` uses `pread` (positioned read) via `std::os::unix::fs::FileExt`, eliminating the mutex for read operations. Concurrent segment fetches proceed without contention. Non-Unix falls back to seek+read under `TokioMutex`.
+
+> **⚠️ Note:** `BlockingWriter` in `io_uring.rs` performs synchronous file I/O under a blocking mutex. Use `tokio::task::spawn_blocking` or the async `AsyncFile` from `async_io.rs` for async contexts.
 
 ```rust
 use rivven_core::io_uring::{IoUringConfig, PortableWalWriter, SegmentReader, IoBatch, BatchExecutor};
@@ -265,7 +272,7 @@ let messages = reader.read_messages(0, 64 * 1024)?;
 Batched I/O reduces syscall overhead by queueing multiple operations:
 
 ```rust
-use rivven_core::io_uring::{IoBatch, BatchExecutor, AsyncWriter, IoUringConfig, BatchStats};
+use rivven_core::io_uring::{IoBatch, BatchExecutor, BlockingWriter, IoUringConfig, BatchStats};
 
 // Create a batch of operations
 let mut batch = IoBatch::new();
@@ -282,7 +289,7 @@ println!("Batch: {} writes ({} bytes), {} reads ({} bytes), {} syncs",
     stats.sync_ops);
 
 // Execute batch
-let writer = AsyncWriter::new("/data/file.log", IoUringConfig::default())?;
+let writer = BlockingWriter::new("/data/file.log", IoUringConfig::default())?;
 let executor = BatchExecutor::for_writer(writer);
 executor.execute(&mut batch)?;
 ```
@@ -398,6 +405,8 @@ committed.await?;  // Wait for fsync
 - **CRC-validated recovery**: Both `find_actual_end()` and `scan_wal_file()` validate CRC32 for every record. Replayed records are written via `append_replicated` to preserve original offsets. `WalRecord::from_bytes()` rejects zero-length `Full`/`First`/`Last` records to prevent phantom records from pre-allocated WAL tail. Transaction COMMIT/ABORT markers are replayed from `TxnWalPayload` records.
 - **File pre-allocation**: Background `spawn_blocking` pre-allocates the next WAL file during normal operation, enabling zero-latency rotation when the current file fills up
 - **Failure-safe stats**: Write statistics (`writes_total`, `bytes_written`, etc.) are only updated on successful writes — failed flushes are never counted
+- **LSN from filename**: On recovery, the starting LSN is derived from the WAL segment filename rather than scanning the file. If the filename cannot be parsed, recovery falls back to a full scan — this eliminates an O(n) scan on every startup
+- **Graceful shutdown drain**: On shutdown the write channel is closed and all remaining buffered writes are drained and flushed before the WAL file is closed, ensuring zero data loss for in-flight appends. The shutdown sequence awaits the background worker `JoinHandle` to guarantee the task has fully terminated before returning
 
 | Batch Size | fsync/sec | Throughput |
 |:-----------|:----------|:-----------|
@@ -455,7 +464,7 @@ cargo test -p rivven-core --lib
 cargo test -p rivven-core --lib --features "compression,tls,metrics"
 ```
 
-**Current Coverage:** 282 tests (100% passing)
+**Current Coverage:** 306 tests (100% passing)
 
 | Category | Tests | Description |
 |:---------|:------|:------------|

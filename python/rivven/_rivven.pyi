@@ -110,7 +110,11 @@ class Message:
         ...
 
 class Producer:
-    """Producer for publishing messages to a topic"""
+    """High-performance producer with internal batching.
+    
+    Uses a background sender task that coalesces messages into wire-level
+    batches for maximum throughput.
+    """
     
     @property
     def topic(self) -> str:
@@ -138,7 +142,19 @@ class Producer:
         self,
         messages: List[Tuple[bytes, Optional[bytes]]],
     ) -> List[int]:
-        """Send multiple messages (value, key) and return their offsets"""
+        """Send multiple messages (value, key) and return their offsets.
+        
+        All messages are enqueued concurrently and batched automatically
+        on the wire — no N-round-trip overhead.
+        """
+        ...
+    
+    async def flush(self) -> None:
+        """Flush all pending records and wait for delivery"""
+        ...
+    
+    async def close(self) -> None:
+        """Close the producer, flushing pending records first"""
         ...
 
 class Consumer:
@@ -226,8 +242,13 @@ class RivvenClient:
     
     # Producer/Consumer Factory
     
-    def producer(self, topic: str) -> Producer:
-        """Get a producer for the specified topic"""
+    async def producer(
+        self,
+        topic: str,
+        batch_size: int = 16384,
+        linger_ms: int = 5,
+    ) -> Producer:
+        """Get a batching producer for the specified topic"""
         ...
     
     async def consumer(

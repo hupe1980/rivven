@@ -18,7 +18,7 @@ use crate::types::{
     ValidationRule, ValidationRuleType, VersionState,
 };
 use axum::{
-    extract::{DefaultBodyLimit, Path, Query, State},
+    extract::{DefaultBodyLimit, Extension, Path, Query, State},
     http::StatusCode,
     routing::{delete, get, post, put},
     Json, Router,
@@ -31,11 +31,9 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
-#[cfg(feature = "auth")]
-use crate::auth::{auth_middleware, AuthConfig, ServerAuthState};
-#[cfg(feature = "auth")]
+use crate::auth::AuthState;
+use crate::auth::{auth_middleware, AuthConfig, SchemaPermission, ServerAuthState};
 use axum::middleware;
-#[cfg(feature = "auth")]
 use rivven_core::AuthManager;
 
 /// Server configuration
@@ -43,8 +41,7 @@ use rivven_core::AuthManager;
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
-    /// Authentication configuration (requires `auth` feature)
-    #[cfg(feature = "auth")]
+    /// Authentication configuration
     pub auth: Option<AuthConfig>,
 }
 
@@ -53,15 +50,13 @@ impl Default for ServerConfig {
         Self {
             host: "0.0.0.0".to_string(),
             port: 8081,
-            #[cfg(feature = "auth")]
             auth: None,
         }
     }
 }
 
 impl ServerConfig {
-    /// Enable authentication with default config
-    #[cfg(feature = "auth")]
+    /// Enable authentication with the given config
     pub fn with_auth(mut self, auth_config: AuthConfig) -> Self {
         self.auth = Some(auth_config);
         self
@@ -91,15 +86,15 @@ impl std::fmt::Display for RegistryMode {
 pub struct ServerState {
     pub registry: SchemaRegistry,
     pub mode: RwLock<RegistryMode>,
-    pub default_compatibility: RwLock<CompatibilityLevel>,
+    #[cfg(feature = "cedar")]
+    pub cedar_authorizer: Option<Arc<rivven_core::CedarAuthorizer>>,
 }
 
 /// Schema Registry HTTP Server
 pub struct SchemaServer {
     state: Arc<ServerState>,
-    #[allow(dead_code)] // Used for auth config when feature is enabled
     config: ServerConfig,
-    #[cfg(all(feature = "auth", not(feature = "cedar")))]
+    #[cfg(not(feature = "cedar"))]
     auth_manager: Option<Arc<AuthManager>>,
     #[cfg(feature = "cedar")]
     auth_manager: Option<Arc<AuthManager>>,
@@ -110,15 +105,14 @@ pub struct SchemaServer {
 impl SchemaServer {
     /// Create a new schema server
     pub fn new(registry: SchemaRegistry, config: ServerConfig) -> Self {
-        let default_compat = registry.get_default_compatibility();
         Self {
             state: Arc::new(ServerState {
                 registry,
                 mode: RwLock::new(RegistryMode::default()),
-                default_compatibility: RwLock::new(default_compat),
+                #[cfg(feature = "cedar")]
+                cedar_authorizer: None,
             }),
             config,
-            #[cfg(feature = "auth")]
             auth_manager: None,
             #[cfg(feature = "cedar")]
             cedar_authorizer: None,
@@ -126,18 +120,16 @@ impl SchemaServer {
     }
 
     /// Create a new schema server with authentication
-    #[cfg(all(feature = "auth", not(feature = "cedar")))]
+    #[cfg(not(feature = "cedar"))]
     pub fn with_auth(
         registry: SchemaRegistry,
         config: ServerConfig,
         auth_manager: Arc<AuthManager>,
     ) -> Self {
-        let default_compat = registry.get_default_compatibility();
         Self {
             state: Arc::new(ServerState {
                 registry,
                 mode: RwLock::new(RegistryMode::default()),
-                default_compatibility: RwLock::new(default_compat),
             }),
             config,
             auth_manager: Some(auth_manager),
@@ -151,12 +143,11 @@ impl SchemaServer {
         config: ServerConfig,
         auth_manager: Arc<AuthManager>,
     ) -> Self {
-        let default_compat = registry.get_default_compatibility();
         Self {
             state: Arc::new(ServerState {
                 registry,
                 mode: RwLock::new(RegistryMode::default()),
-                default_compatibility: RwLock::new(default_compat),
+                cedar_authorizer: None,
             }),
             config,
             auth_manager: Some(auth_manager),
@@ -172,12 +163,11 @@ impl SchemaServer {
         auth_manager: Arc<AuthManager>,
         cedar_authorizer: Arc<rivven_core::CedarAuthorizer>,
     ) -> Self {
-        let default_compat = registry.get_default_compatibility();
         Self {
             state: Arc::new(ServerState {
                 registry,
                 mode: RwLock::new(RegistryMode::default()),
-                default_compatibility: RwLock::new(default_compat),
+                cedar_authorizer: Some(cedar_authorizer.clone()),
             }),
             config,
             auth_manager: Some(auth_manager),
@@ -292,7 +282,7 @@ impl SchemaServer {
             .layer(TraceLayer::new_for_http());
 
         // Add authentication middleware if configured (simple RBAC)
-        #[cfg(all(feature = "auth", not(feature = "cedar")))]
+        #[cfg(not(feature = "cedar"))]
         let base_router = if let Some(auth_manager) = &self.auth_manager {
             let auth_config = self.config.auth.clone().unwrap_or_default();
             let auth_state = Arc::new(ServerAuthState {
@@ -349,6 +339,53 @@ fn schema_error_response(e: SchemaError) -> (StatusCode, Json<ErrorResponse>) {
             message: e.to_string(),
         }),
     )
+}
+
+/// Enforce subject-level permission.
+///
+/// When Cedar is enabled and a `CedarAuthorizer` is configured in `ServerState`,
+/// policy evaluation is delegated to Cedar. Otherwise, simple session-based RBAC
+/// is used. If no auth middleware is active (auth extension absent), the request
+/// is allowed — the server was started without authentication.
+fn enforce_permission(
+    auth: &Option<Extension<AuthState>>,
+    subject: &str,
+    permission: SchemaPermission,
+    server_state: &ServerState,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let _ = server_state; // used only when cedar feature is enabled
+
+    if let Some(Extension(ref state)) = auth {
+        let map_err = |e: crate::auth::AuthErrorResponse| {
+            (
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error_code: e.error_code as u32,
+                    message: e.message,
+                }),
+            )
+        };
+
+        #[cfg(not(feature = "cedar"))]
+        crate::auth::check_subject_permission(state, subject, permission).map_err(map_err)?;
+
+        #[cfg(feature = "cedar")]
+        {
+            if let Some(ref authorizer) = server_state.cedar_authorizer {
+                crate::auth::check_subject_permission_cedar(
+                    state, subject, permission, authorizer, None,
+                )
+                .map_err(map_err)?;
+            } else {
+                // Cedar feature enabled but no authorizer configured — fall back to simple RBAC
+                crate::auth::check_subject_permission(state, subject, permission)
+                    .map_err(map_err)?;
+            }
+        }
+    }
+    // No auth middleware configured (auth extension absent) → pass through.
+    // The server was started without authentication.
+    Ok(())
 }
 
 // ============================================================================
@@ -563,7 +600,10 @@ async fn delete_subject(
     State(state): State<Arc<ServerState>>,
     Path(subject): Path<String>,
     Query(params): Query<QueryParams>,
+    auth: Option<Extension<AuthState>>,
 ) -> Result<Json<Vec<u32>>, (StatusCode, Json<ErrorResponse>)> {
+        enforce_permission(&auth, &subject, SchemaPermission::Delete, &state)?;
+
     // Check mode
     if *state.mode.read() == RegistryMode::ReadOnly {
         return Err((
@@ -599,7 +639,10 @@ async fn list_deleted_subjects(
 async fn undelete_subject(
     State(state): State<Arc<ServerState>>,
     Path(subject): Path<String>,
+    auth: Option<Extension<AuthState>>,
 ) -> Result<Json<Vec<u32>>, (StatusCode, Json<ErrorResponse>)> {
+        enforce_permission(&auth, &subject, SchemaPermission::Create, &state)?;
+
     // Check mode
     if *state.mode.read() == RegistryMode::ReadOnly {
         return Err((
@@ -634,8 +677,11 @@ async fn list_subject_versions(
 async fn register_schema(
     State(state): State<Arc<ServerState>>,
     Path(subject): Path<String>,
+    auth: Option<Extension<AuthState>>,
     Json(req): Json<RegisterSchemaRequest>,
 ) -> Result<Json<RegisterSchemaResponse>, (StatusCode, Json<ErrorResponse>)> {
+        enforce_permission(&auth, &subject, SchemaPermission::Create, &state)?;
+
     // Check mode
     if *state.mode.read() == RegistryMode::ReadOnly {
         return Err((
@@ -711,7 +757,10 @@ async fn delete_version(
     State(state): State<Arc<ServerState>>,
     Path((subject, version)): Path<(String, u32)>,
     Query(params): Query<QueryParams>,
+    auth: Option<Extension<AuthState>>,
 ) -> Result<Json<u32>, (StatusCode, Json<ErrorResponse>)> {
+        enforce_permission(&auth, &subject, SchemaPermission::Delete, &state)?;
+
     // Check mode
     if *state.mode.read() == RegistryMode::ReadOnly {
         return Err((
@@ -808,14 +857,17 @@ async fn check_compatibility(
 
 async fn get_global_config(State(state): State<Arc<ServerState>>) -> Json<ConfigResponse> {
     Json(ConfigResponse {
-        compatibility_level: state.default_compatibility.read().to_string(),
+        compatibility_level: state.registry.get_default_compatibility().to_string(),
     })
 }
 
 async fn update_global_config(
     State(state): State<Arc<ServerState>>,
+    auth: Option<Extension<AuthState>>,
     Json(req): Json<ConfigRequest>,
 ) -> Result<Json<ConfigResponse>, (StatusCode, Json<ErrorResponse>)> {
+        enforce_permission(&auth, "_global", SchemaPermission::Alter, &state)?;
+
     let level: CompatibilityLevel = req.compatibility.parse().map_err(|_| {
         (
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -826,7 +878,7 @@ async fn update_global_config(
         )
     })?;
 
-    *state.default_compatibility.write() = level;
+    state.registry.set_default_compatibility(level);
 
     Ok(Json(ConfigResponse {
         compatibility_level: level.to_string(),
@@ -848,8 +900,11 @@ async fn get_subject_config(
 async fn update_subject_config(
     State(state): State<Arc<ServerState>>,
     Path(subject): Path<String>,
+    auth: Option<Extension<AuthState>>,
     Json(req): Json<ConfigRequest>,
 ) -> Result<Json<ConfigResponse>, (StatusCode, Json<ErrorResponse>)> {
+        enforce_permission(&auth, &subject, SchemaPermission::Alter, &state)?;
+
     let level: CompatibilityLevel = req.compatibility.parse().map_err(|_| {
         (
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -877,8 +932,11 @@ async fn get_mode(State(state): State<Arc<ServerState>>) -> Json<ModeResponse> {
 
 async fn update_mode(
     State(state): State<Arc<ServerState>>,
+    auth: Option<Extension<AuthState>>,
     Json(req): Json<ModeRequest>,
 ) -> Result<Json<ModeResponse>, (StatusCode, Json<ErrorResponse>)> {
+        enforce_permission(&auth, "_global", SchemaPermission::Alter, &state)?;
+
     let mode = match req.mode.to_uppercase().as_str() {
         "READWRITE" => RegistryMode::ReadWrite,
         "READONLY" => RegistryMode::ReadOnly,
@@ -934,8 +992,11 @@ async fn get_version_state(
 async fn set_version_state(
     State(state): State<Arc<ServerState>>,
     Path((subject, version)): Path<(String, u32)>,
+    auth: Option<Extension<AuthState>>,
     Json(req): Json<VersionStateRequest>,
 ) -> Result<Json<VersionStateResponse>, (StatusCode, Json<ErrorResponse>)> {
+        enforce_permission(&auth, &subject, SchemaPermission::Alter, &state)?;
+
     let version_state: VersionState = req.state.parse().map_err(|_| {
         (
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -960,7 +1021,10 @@ async fn set_version_state(
 async fn deprecate_version(
     State(state): State<Arc<ServerState>>,
     Path((subject, version)): Path<(String, u32)>,
+    auth: Option<Extension<AuthState>>,
 ) -> Result<Json<VersionStateResponse>, (StatusCode, Json<ErrorResponse>)> {
+        enforce_permission(&auth, &subject, SchemaPermission::Alter, &state)?;
+
     state
         .registry
         .deprecate_version(subject.as_str(), SchemaVersion::new(version))
@@ -975,7 +1039,10 @@ async fn deprecate_version(
 async fn disable_version(
     State(state): State<Arc<ServerState>>,
     Path((subject, version)): Path<(String, u32)>,
+    auth: Option<Extension<AuthState>>,
 ) -> Result<Json<VersionStateResponse>, (StatusCode, Json<ErrorResponse>)> {
+        enforce_permission(&auth, &subject, SchemaPermission::Alter, &state)?;
+
     state
         .registry
         .disable_version(subject.as_str(), SchemaVersion::new(version))
@@ -990,7 +1057,10 @@ async fn disable_version(
 async fn enable_version(
     State(state): State<Arc<ServerState>>,
     Path((subject, version)): Path<(String, u32)>,
+    auth: Option<Extension<AuthState>>,
 ) -> Result<Json<VersionStateResponse>, (StatusCode, Json<ErrorResponse>)> {
+        enforce_permission(&auth, &subject, SchemaPermission::Alter, &state)?;
+
     state
         .registry
         .enable_version(subject.as_str(), SchemaVersion::new(version))
@@ -1100,8 +1170,11 @@ async fn list_validation_rules(
 
 async fn add_validation_rule(
     State(state): State<Arc<ServerState>>,
+    auth: Option<Extension<AuthState>>,
     Json(req): Json<AddValidationRuleRequest>,
 ) -> Result<Json<ValidationRuleResponse>, (StatusCode, Json<ErrorResponse>)> {
+        enforce_permission(&auth, "_global", SchemaPermission::Create, &state)?;
+
     let rule_type: ValidationRuleType = req.rule_type.parse().map_err(|_| {
         (
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1136,8 +1209,18 @@ async fn add_validation_rule(
         let schema_types: Vec<SchemaType> = req
             .schema_types
             .iter()
-            .filter_map(|s| s.parse().ok())
-            .collect();
+            .map(|s| {
+                s.parse::<SchemaType>().map_err(|_| {
+                    (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(ErrorResponse {
+                            error_code: 42202,
+                            message: format!("Unknown schema type: '{}'", s),
+                        }),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         rule = rule.for_schema_types(schema_types);
     }
 
@@ -1156,7 +1239,10 @@ async fn add_validation_rule(
 async fn delete_validation_rule(
     State(state): State<Arc<ServerState>>,
     Path(name): Path<String>,
+    auth: Option<Extension<AuthState>>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+        enforce_permission(&auth, "_global", SchemaPermission::Delete, &state)?;
+
     let removed = state
         .registry
         .validation_engine()
@@ -1209,8 +1295,11 @@ async fn list_contexts(State(state): State<Arc<ServerState>>) -> Json<Vec<Contex
 
 async fn create_context(
     State(state): State<Arc<ServerState>>,
+    auth: Option<Extension<AuthState>>,
     Json(req): Json<CreateContextRequest>,
 ) -> Result<Json<ContextResponse>, (StatusCode, Json<ErrorResponse>)> {
+        enforce_permission(&auth, "_global", SchemaPermission::Create, &state)?;
+
     let mut context = SchemaContext::new(&req.name);
     if let Some(desc) = &req.description {
         context = context.with_description(desc);
@@ -1256,7 +1345,10 @@ async fn get_context(
 async fn delete_context(
     State(state): State<Arc<ServerState>>,
     Path(context_name): Path<String>,
+    auth: Option<Extension<AuthState>>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
+        enforce_permission(&auth, "_global", SchemaPermission::Delete, &state)?;
+
     state
         .registry
         .delete_context(&context_name)

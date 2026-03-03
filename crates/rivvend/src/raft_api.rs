@@ -383,7 +383,11 @@ fn create_raft_router_base<S: Clone + Send + Sync + 'static>(state: RaftApiState
     let protected = Router::new()
         // Raft RPCs (internal cluster communication)
         .route("/raft/append", post(append_entries_handler))
-        .route("/raft/snapshot", post(install_snapshot_handler))
+        .route(
+            "/raft/snapshot",
+            post(install_snapshot_handler)
+                .layer(axum::extract::DefaultBodyLimit::max(256 * 1024 * 1024)), // 256 MiB for snapshots
+        )
         .route("/raft/vote", post(vote_handler))
         // Cluster management APIs
         .route("/api/v1/bootstrap", post(bootstrap_handler))
@@ -829,6 +833,36 @@ async fn bootstrap_handler(
             )
         })
         .collect();
+
+    // Detect hash collisions — two different node IDs mapping to the same
+    // numeric ID would make them indistinguishable in Raft (PROTO-03).
+    if members.len() != req.members.len() {
+        // At least one collision occurred. Find the colliding pairs.
+        let mut seen: std::collections::HashMap<u64, &str> = std::collections::HashMap::new();
+        for m in &req.members {
+            let numeric = hash_node_id(&m.node_id);
+            if let Some(existing) = seen.insert(numeric, &m.node_id) {
+                error!(
+                    node_a = existing,
+                    node_b = %m.node_id,
+                    hash = numeric,
+                    "Node ID hash collision detected during bootstrap"
+                );
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(BootstrapResponse {
+                        success: false,
+                        message: format!(
+                            "Node ID hash collision: '{}' and '{}' both hash to {}",
+                            existing, m.node_id, numeric
+                        ),
+                        leader_id: None,
+                    }),
+                )
+                    .into_response();
+            }
+        }
+    }
 
     // Register all node addresses for leader forwarding
     drop(raft);
@@ -1456,6 +1490,10 @@ pub struct DashboardConfig {
     pub topic_manager: rivven_core::TopicManager,
     /// Offset manager
     pub offset_manager: rivven_core::OffsetManager,
+    /// Consumer group coordinator
+    pub group_coordinator: std::sync::Arc<crate::group_coordinator::GroupCoordinator>,
+    /// Default replication factor from broker config
+    pub default_replication_factor: u16,
 }
 
 /// Start the Raft API HTTP server with optional TLS
@@ -1506,13 +1544,41 @@ pub async fn start_raft_api_server_with_dashboard(
 ) -> anyhow::Result<()> {
     use tower_http::cors::CorsLayer;
 
-    // Create the dashboard state
+    // Create the dashboard state.
+    // If no explicit cluster_auth_token is configured, generate an
+    // ephemeral token so the dashboard data endpoint is always protected
+    // (BROKER-06). The same token is used by the Raft API middleware.
+    let effective_token: Option<Arc<String>> = state.cluster_auth_token.clone().or_else(|| {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let bytes: [u8; 32] = rng.gen();
+        let token = format!(
+            "rvn-ephemeral-{}",
+            bytes
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<String>()
+        );
+        tracing::warn!(
+            "No cluster_auth_token configured — generated ephemeral token for dashboard + Raft API: {}…[REDACTED]",
+            &token[..16],
+        );
+        Some(Arc::new(token))
+    });
+
+    // Propagate the effective token back into the Raft API state so
+    // `create_raft_api_router` uses the same token.
+    let mut state = state;
+    state.cluster_auth_token = effective_token.clone();
+
     let dashboard_state = crate::dashboard::DashboardState {
         raft_state: state.clone(),
         stats: dashboard_config.stats,
         topic_manager: dashboard_config.topic_manager,
         offset_manager: dashboard_config.offset_manager,
-        cluster_auth_token: state.cluster_auth_token.clone(),
+        group_coordinator: dashboard_config.group_coordinator,
+        cluster_auth_token: effective_token,
+        default_replication_factor: dashboard_config.default_replication_factor,
     };
 
     // Build app with both Raft API and Dashboard routes
@@ -1520,15 +1586,23 @@ pub async fn start_raft_api_server_with_dashboard(
         info!("Dashboard enabled at http://{}/", bind_addr);
 
         // CORS layer for dashboard API requests
-        // /Only allow same-origin requests by default.
+        // Only allow same-origin requests by default.
         // The dashboard is served from the same host, so no cross-origin
         // access is needed. If external tools need access, operators should
         // deploy a reverse proxy with appropriate CORS headers.
+        //
+        // Map 0.0.0.0 to 127.0.0.1 — browsers never send "0.0.0.0" as origin.
+        let cors_addr = if bind_addr.ip().is_unspecified() {
+            std::net::SocketAddr::new(
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                bind_addr.port(),
+            )
+        } else {
+            bind_addr
+        };
         let cors = CorsLayer::new()
             .allow_origin(tower_http::cors::AllowOrigin::exact(
-                format!("http://{}", bind_addr).parse().unwrap_or_else(|_| {
-                    // Fall back to the specific bind address rather than
-                    // a permissive "http://localhost". Use 127.0.0.1 with exact port.
+                format!("http://{}", cors_addr).parse().unwrap_or_else(|_| {
                     tracing::warn!(
                         "Failed to parse CORS origin from bind_addr '{}', trying 127.0.0.1 with port",
                         bind_addr

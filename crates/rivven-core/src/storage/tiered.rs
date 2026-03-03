@@ -17,7 +17,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, Mutex, RwLock, Semaphore};
@@ -313,6 +313,10 @@ pub struct SegmentMetadata {
     pub dead_records: AtomicU64,
     /// Total records
     pub total_records: u64,
+    /// Whether this segment has been successfully migrated to cold storage.
+    /// WarmTier eviction will skip segments that have not been migrated,
+    /// preventing data loss when the warm tier fills up (CORE-03).
+    pub migrated_to_cold: AtomicBool,
 }
 
 impl SegmentMetadata {
@@ -341,6 +345,7 @@ impl SegmentMetadata {
             access_count: AtomicU64::new(0),
             dead_records: AtomicU64::new(0),
             total_records: (end_offset - base_offset),
+            migrated_to_cold: AtomicBool::new(false),
         }
     }
 
@@ -467,7 +472,7 @@ impl HotTier {
             let last = entries.len() - 1;
             entries.move_index(idx, last);
             // Access by index (now at `last`) — avoids a second hash lookup
-            let data = entries.get_index(last).unwrap().1.clone();
+            let data = entries.get_index(last).expect("element was just moved to this index").1.clone();
             Some(data)
         } else {
             None
@@ -695,14 +700,46 @@ impl WarmTier {
     }
 
     /// Evict the oldest (by creation time) segment from warm tier to free space.
-    /// Returns the evicted segment's key and data so the caller can migrate to cold storage.
+    /// Only evicts segments that have been successfully migrated to cold storage
+    /// to prevent data loss (CORE-03). Returns the evicted segment's key and
+    /// data so the caller can verify the migration if needed.
     async fn evict_oldest(&self) -> Option<(Arc<str>, u32, u64, Bytes)> {
         let to_evict = {
             let segments = self.segments.read().await;
             segments
                 .iter()
+                .filter(|(_, meta)| meta.migrated_to_cold.load(Ordering::Acquire))
                 .min_by_key(|(_, meta)| meta.created_at)
                 .map(|(key, _)| key.clone())
+        };
+
+        // If no migrated segments are available for eviction, try to find the
+        // oldest segment regardless of migration status and return its data so
+        // the caller can attempt migration before we delete it.
+        let to_evict = match to_evict {
+            Some(key) => Some(key),
+            None => {
+                let segments = self.segments.read().await;
+                let candidate =
+                    segments
+                        .iter()
+                        .min_by_key(|(_, meta)| meta.created_at)
+                        .map(|(key, meta)| {
+                            (key.clone(), meta.migrated_to_cold.load(Ordering::Acquire))
+                        });
+                match candidate {
+                    Some((key, false)) => {
+                        tracing::warn!(
+                            topic = %key.0,
+                            partition = key.1,
+                            base_offset = key.2,
+                            "Evicting warm tier segment that has NOT been migrated to cold storage — data may be lost"
+                        );
+                        Some(key)
+                    }
+                    _ => None,
+                }
+            }
         };
 
         if let Some((topic, partition, base_offset)) = to_evict {
@@ -1729,6 +1766,72 @@ impl TieredStorage {
         Ok(results)
     }
 
+    /// Read messages from storage, deserializing the length-prefixed framing.
+    ///
+    /// Unlike [`read`], which returns raw segment blobs, this method parses the
+    /// 4-byte big-endian length-prefix framing written by `Partition::append`
+    /// and returns fully deserialized [`Message`](crate::Message) objects.
+    pub async fn read_messages(
+        &self,
+        topic: &str,
+        partition: u32,
+        start_offset: u64,
+        max_bytes: usize,
+    ) -> Result<Vec<crate::Message>> {
+        let raw_segments = self.read(topic, partition, start_offset, max_bytes).await?;
+        let mut messages = Vec::new();
+
+        for (_base_offset, data) in raw_segments {
+            Self::deframe_segment_data(&data, &mut messages);
+        }
+
+        // Filter to only messages >= start_offset
+        messages.retain(|m| m.offset >= start_offset);
+        Ok(messages)
+    }
+
+    /// Parse length-prefixed segment data into individual messages.
+    ///
+    /// The wire format is a sequence of `[u32-BE length][postcard-serialized Message]`
+    /// frames.  Truncated or corrupt frames are skipped with a warning.
+    pub fn deframe_segment_data(data: &[u8], out: &mut Vec<crate::Message>) {
+        let mut cursor = 0;
+        while cursor < data.len() {
+            if cursor + 4 > data.len() {
+                tracing::warn!("Tiered segment data truncated at byte {}", cursor);
+                break;
+            }
+            let len = u32::from_be_bytes([
+                data[cursor],
+                data[cursor + 1],
+                data[cursor + 2],
+                data[cursor + 3],
+            ]) as usize;
+            cursor += 4;
+
+            if cursor + len > data.len() {
+                tracing::warn!(
+                    "Tiered segment frame overflows: need {} bytes, only {} remain",
+                    len,
+                    data.len() - cursor
+                );
+                break;
+            }
+
+            match crate::Message::from_bytes(&data[cursor..cursor + len]) {
+                Ok(msg) => out.push(msg),
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to deserialize tiered message at byte {}: {}",
+                        cursor,
+                        e
+                    );
+                }
+            }
+            cursor += len;
+        }
+    }
+
     /// Get metadata for a specific segment
     pub async fn get_segment_metadata(
         &self,
@@ -2025,10 +2128,20 @@ impl TieredStorage {
                 self.cold_storage.upload(&key, &data).await?;
                 self.stats.cold_writes.fetch_add(1, Ordering::Relaxed);
 
+                // Mark segment as migrated to cold storage BEFORE removing
+                // from warm tier, so that if eviction races with demotion
+                // the eviction logic sees the flag (CORE-03).
+                if let Some(meta) = self
+                    .get_segment_metadata(topic, partition, base_offset)
+                    .await
+                {
+                    meta.migrated_to_cold.store(true, Ordering::Release);
+                }
+
                 // Remove from warm tier
                 self.warm_tier.remove(topic, partition, base_offset).await?;
             }
-            StorageTier::Hot => unreachable!(),
+            StorageTier::Hot => unreachable!("cannot migrate FROM hot tier — already hot"),
         }
 
         // Update metadata
@@ -2046,6 +2159,9 @@ impl TieredStorage {
                 access_count: AtomicU64::new(meta.access_count.load(Ordering::Relaxed)),
                 dead_records: AtomicU64::new(meta.dead_records.load(Ordering::Relaxed)),
                 total_records: meta.total_records,
+                migrated_to_cold: AtomicBool::new(
+                    meta.migrated_to_cold.load(Ordering::Relaxed) || to_tier == StorageTier::Cold,
+                ),
             });
 
             let mut index = self.segment_index.write().await;
@@ -2110,7 +2226,7 @@ impl TieredStorage {
                     .store(topic, partition, base_offset, metadata.end_offset, &data)
                     .await?;
             }
-            StorageTier::Cold => unreachable!(),
+            StorageTier::Cold => unreachable!("cannot migrate TO cold tier via this path — use promote_to_cold()"),
         }
 
         // Update metadata
@@ -2126,6 +2242,7 @@ impl TieredStorage {
             access_count: AtomicU64::new(0), // Reset access count after promotion
             dead_records: AtomicU64::new(metadata.dead_records.load(Ordering::Relaxed)),
             total_records: metadata.total_records,
+            migrated_to_cold: AtomicBool::new(metadata.migrated_to_cold.load(Ordering::Relaxed)),
         });
 
         {
@@ -2382,6 +2499,7 @@ impl TieredStorage {
             access_count: AtomicU64::new(metadata.access_count.load(Ordering::Relaxed)),
             dead_records: AtomicU64::new(0), // Reset after compaction
             total_records: compacted_count as u64,
+            migrated_to_cold: AtomicBool::new(metadata.migrated_to_cold.load(Ordering::Relaxed)),
         });
 
         {

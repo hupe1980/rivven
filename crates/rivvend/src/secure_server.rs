@@ -686,9 +686,11 @@ impl SecureServer {
             let (request, wire_format, correlation_id) = frame;
 
             // Per-request rate limiting (mirrors ClusterServer behaviour)
+            // Use actual frame size for rate limiter's max-request-size check
+            let frame_size = buffer.len();
             match self
                 .rate_limiter
-                .check_request(&security_ctx.client_addr.ip(), 1)
+                .check_request(&security_ctx.client_addr.ip(), frame_size)
                 .await
             {
                 crate::rate_limiter::RequestResult::Allowed => {}

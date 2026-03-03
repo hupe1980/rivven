@@ -134,6 +134,8 @@ pub struct ClusterServer {
     wal: Option<Arc<rivven_core::GroupCommitWal>>,
     /// Authentication manager (active when --require-auth is set)
     auth_manager: Option<Arc<rivven_core::AuthManager>>,
+    /// Consumer group coordinator for JoinGroup/SyncGroup/Heartbeat/LeaveGroup
+    group_coordinator: Arc<crate::group_coordinator::GroupCoordinator>,
     /// TLS acceptor for secure connections
     #[cfg(feature = "tls")]
     tls_acceptor: Option<Arc<TlsAcceptor>>,
@@ -338,6 +340,7 @@ impl ClusterServer {
             rate_limiter,
             wal,
             auth_manager,
+            group_coordinator: Arc::new(crate::group_coordinator::GroupCoordinator::new()),
             #[cfg(feature = "tls")]
             tls_acceptor,
         })
@@ -434,6 +437,8 @@ impl ClusterServer {
             let stats_clone = self.stats.clone();
             let topic_manager_clone = self.topic_manager.clone();
             let offset_manager_clone = self.offset_manager.clone();
+            let group_coordinator_clone = self.group_coordinator.clone();
+            let default_replication_factor = self.cli.replication_factor;
 
             infra_handles.push(tokio::spawn(async move {
                 let dashboard_config = crate::raft_api::DashboardConfig {
@@ -441,6 +446,8 @@ impl ClusterServer {
                     stats: stats_clone,
                     topic_manager: topic_manager_clone,
                     offset_manager: offset_manager_clone,
+                    group_coordinator: group_coordinator_clone,
+                    default_replication_factor,
                 };
                 tokio::select! {
                     result = crate::raft_api::start_raft_api_server_with_dashboard(
@@ -573,12 +580,35 @@ impl ClusterServer {
             partitioner_config.clone(),
         );
 
+        // Wire the shared group coordinator into the handler
+        handler.set_group_coordinator(self.group_coordinator.clone());
+
         // §3.3: Wire the WAL into the request handler for produce-path durability
         if let Some(ref wal) = self.wal {
             handler.set_wal(wal.clone());
         }
 
         let handler = Arc::new(handler);
+
+        // Spawn background heartbeat checker for consumer group coordination.
+        {
+            let gc = self.group_coordinator.clone();
+            let mut hb_shutdown = self.shutdown_tx.subscribe();
+            infra_handles.push(tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_secs(1));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            gc.check_timeouts().await;
+                        }
+                        _ = hb_shutdown.recv() => {
+                            break;
+                        }
+                    }
+                }
+            }));
+        }
 
         // Spawn background transaction reaper that aborts timed-out transactions.
         // Without this, a client that begins a transaction and disconnects will leak
@@ -627,6 +657,7 @@ impl ClusterServer {
                     self.offset_manager.clone(),
                     partitioner_config,
                 );
+                auth_inner.set_group_coordinator(self.group_coordinator.clone());
                 if let Some(ref wal) = self.wal {
                     auth_inner.set_wal(wal.clone());
                 }
@@ -1221,7 +1252,7 @@ impl RequestRouter {
 
         TopicMetadata {
             name: name.to_string(),
-            is_internal: name.starts_with("__"), // Convention for internal topics
+            is_internal: rivven_protocol::is_internal_topic(name),
             partitions,
         }
     }
@@ -1253,6 +1284,12 @@ impl RequestRouter {
                 key,
                 ..
             } => self.route_publish(topic, *partition, key).await,
+            Request::PublishBatch {
+                topic, partition, ..
+            } => self.route_publish(topic, *partition, &None).await,
+            Request::IdempotentPublishBatch {
+                topic, partition, ..
+            } => self.route_publish(topic, *partition, &None).await,
             Request::Consume {
                 topic, partition, ..
             } => self.route_consume(topic, *partition).await,
@@ -1291,7 +1328,12 @@ impl RequestRouter {
             | Request::AlterTopicConfig { .. }
             | Request::CreatePartitions { .. }
             | Request::DeleteRecords { .. }
-            | Request::DescribeTopicConfigs { .. } => RoutingDecision::Local,
+            | Request::DescribeTopicConfigs { .. }
+            // Consumer group coordination — always local to the coordinator node
+            | Request::JoinGroup { .. }
+            | Request::SyncGroup { .. }
+            | Request::Heartbeat { .. }
+            | Request::LeaveGroup { .. } => RoutingDecision::Local,
 
             // Transactional publish - route to partition leader like regular publish
             Request::TransactionalPublish {
@@ -1306,17 +1348,26 @@ impl RequestRouter {
         // If the client supplied a leader_epoch, validate it against the current
         // partition leader epoch. If the client's epoch is stale, reject the write
         // immediately instead of letting a stale leader accept it.
-        if let Request::Publish {
-            topic,
-            partition: Some(partition),
-            leader_epoch: Some(client_epoch),
-            ..
-        } = &request
-        {
+        let epoch_check = match &request {
+            Request::Publish {
+                topic,
+                partition: Some(partition),
+                leader_epoch: Some(client_epoch),
+                ..
+            }
+            | Request::PublishBatch {
+                topic,
+                partition: Some(partition),
+                leader_epoch: Some(client_epoch),
+                ..
+            } => Some((topic.as_str(), *partition, *client_epoch)),
+            _ => None,
+        };
+        if let Some((topic, partition, client_epoch)) = epoch_check {
             if let Some(coordinator) = &self.coordinator {
                 let coord = coordinator.read().await;
-                if let Some(current_epoch) = coord.partition_leader_epoch(topic, *partition).await {
-                    if *client_epoch < current_epoch {
+                if let Some(current_epoch) = coord.partition_leader_epoch(topic, partition).await {
+                    if client_epoch < current_epoch {
                         return Response::Error {
                             message: format!(
                                 "FENCED_LEADER_EPOCH: client epoch {} < current epoch {} for {}/{}",
@@ -1415,9 +1466,9 @@ where
 
         let (request, wire_format, correlation_id) = frame;
 
-        // Check rate limit before processing
-        // Use a small size estimate (1) since we already validated the message size above
-        match rate_limiter.check_request(&client_ip, 1).await {
+        // Check rate limit before processing — use actual frame size
+        let frame_size = buffer.len();
+        match rate_limiter.check_request(&client_ip, frame_size).await {
             crate::rate_limiter::RequestResult::Allowed => {}
             crate::rate_limiter::RequestResult::RateLimited => {
                 debug!("Rate limited request from {}", client_ip);
@@ -1499,10 +1550,11 @@ where
         if let Err(e) =
             crate::framing::send_response(&mut stream, &response, wire_format, correlation_id).await
         {
-            error!("Failed to send response: {}", e);
-            // Attempt to send an error response as a last resort
+            // Do not leak internal error details to the client.
+            // Log the actual error server-side for diagnostics.
+            error!("Response send failed: {}", e);
             let error_response = Response::Error {
-                message: format!("INTERNAL_ERROR: response send failed: {}", e),
+                message: "INTERNAL_ERROR: response send failed".to_string(),
             };
             if let Err(e2) = crate::framing::send_response(
                 &mut stream,
@@ -1520,7 +1572,9 @@ where
                     correlation_id,
                 )
                 .await;
-                debug!("Error response also failed to send: {}", e2);
+                warn!("Error response also failed to send: {}", e2);
+                // Connection is in an inconsistent framing state — close it.
+                return Ok(());
             }
         }
     }

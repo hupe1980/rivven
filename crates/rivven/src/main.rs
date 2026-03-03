@@ -71,7 +71,7 @@ enum Commands {
 
         /// Maximum messages to consume
         #[arg(short, long, default_value = "100")]
-        max: usize,
+        max: u32,
 
         /// Server address
         #[arg(short, long, default_value = "127.0.0.1:9092")]

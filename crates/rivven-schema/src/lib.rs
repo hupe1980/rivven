@@ -143,7 +143,7 @@ pub mod validation;
 #[cfg(feature = "cedar")]
 pub use auth::check_subject_permission_cedar;
 #[cfg(feature = "server")]
-pub use auth::{AuthConfig, AuthState, SchemaPermission};
+pub use auth::{AuthConfig, AuthState, SchemaPermission, ServerAuthState};
 pub use compatibility::{CompatibilityChecker, CompatibilityLevel, CompatibilityResult};
 #[cfg(feature = "broker")]
 pub use config::{BrokerAuthConfig, BrokerStorageConfig, BrokerTlsConfig};

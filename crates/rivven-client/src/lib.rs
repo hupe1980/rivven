@@ -152,6 +152,7 @@ pub mod resilient;
 pub use client::{AlterTopicConfigResult, AuthSession, Client, DeleteRecordsResult, ProducerState};
 pub use consumer::{
     Consumer, ConsumerAuthConfig, ConsumerConfig, ConsumerConfigBuilder, ConsumerRecord,
+    RebalanceListener, TopicPartition,
 };
 pub use error::{Error, Result};
 pub use pipeline::{

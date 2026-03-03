@@ -30,6 +30,7 @@ use crate::traits::sink::{Sink, WriteResult};
 use crate::traits::source::{CheckDetail, CheckResult, Source};
 use crate::traits::spec::{ConnectorSpec, SyncModeSpec};
 use crate::traits::state::State;
+use crate::SensitiveString;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -84,7 +85,12 @@ pub enum SaslMechanism {
 }
 
 /// Kafka security configuration
-#[derive(Debug, Clone, Default, Serialize, Deserialize, Validate, JsonSchema)]
+///
+/// Sensitive fields (`sasl_password`, `oauth_token`, `aws_secret_access_key`)
+/// use `SensitiveString` which redacts values in Debug/Display output and
+/// serializes as `"***REDACTED***"` to prevent credential leaks in logs
+/// and config dumps.
+#[derive(Clone, Default, Serialize, Deserialize, Validate, JsonSchema)]
 pub struct KafkaSecurityConfig {
     /// Security protocol
     #[serde(default)]
@@ -97,16 +103,16 @@ pub struct KafkaSecurityConfig {
     pub sasl_username: Option<String>,
 
     /// SASL password (for PLAIN, SCRAM-SHA-256, SCRAM-SHA-512)
-    pub sasl_password: Option<String>,
+    pub sasl_password: Option<SensitiveString>,
 
     /// OAuth bearer token (for OAUTHBEARER mechanism)
-    pub oauth_token: Option<String>,
+    pub oauth_token: Option<SensitiveString>,
 
     /// AWS access key ID (for AWS_MSK_IAM mechanism)
     pub aws_access_key_id: Option<String>,
 
     /// AWS secret access key (for AWS_MSK_IAM mechanism)
-    pub aws_secret_access_key: Option<String>,
+    pub aws_secret_access_key: Option<SensitiveString>,
 
     /// AWS region (for AWS_MSK_IAM mechanism, e.g. "us-east-1")
     pub aws_region: Option<String>,
@@ -119,6 +125,21 @@ pub struct KafkaSecurityConfig {
 
     /// Path to client key for mTLS (PEM format)
     pub ssl_client_key: Option<String>,
+}
+
+impl std::fmt::Debug for KafkaSecurityConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KafkaSecurityConfig")
+            .field("protocol", &self.protocol)
+            .field("sasl_mechanism", &self.sasl_mechanism)
+            .field("sasl_username", &self.sasl_username)
+            .field("sasl_password", &self.sasl_password) // prints [REDACTED]
+            .field("oauth_token", &self.oauth_token) // prints [REDACTED]
+            .field("aws_access_key_id", &self.aws_access_key_id)
+            .field("aws_secret_access_key", &self.aws_secret_access_key) // prints [REDACTED]
+            .field("aws_region", &self.aws_region)
+            .finish()
+    }
 }
 
 impl KafkaSecurityConfig {
@@ -157,11 +178,15 @@ impl KafkaSecurityConfig {
                 krafka::auth::AuthConfig::sasl_scram_sha512(username, password)
             }
             SaslMechanism::OAuthBearer => {
-                let token = self.oauth_token.as_deref().ok_or_else(|| {
-                    ConnectorError::Config(
-                        "oauth_token is required for OAUTHBEARER mechanism".to_string(),
-                    )
-                })?;
+                let token = self
+                    .oauth_token
+                    .as_ref()
+                    .map(|s| s.expose_secret())
+                    .ok_or_else(|| {
+                        ConnectorError::Config(
+                            "oauth_token is required for OAUTHBEARER mechanism".to_string(),
+                        )
+                    })?;
                 krafka::auth::AuthConfig::sasl_oauthbearer(token)
             }
             SaslMechanism::AwsMskIam => {
@@ -179,11 +204,16 @@ impl KafkaSecurityConfig {
                         "aws_access_key_id is required for AWS_MSK_IAM mechanism".to_string(),
                     )
                 })?;
-                let secret_key = self.aws_secret_access_key.as_deref().ok_or_else(|| {
-                    ConnectorError::Config(
-                        "aws_secret_access_key is required for AWS_MSK_IAM mechanism".to_string(),
-                    )
-                })?;
+                let secret_key = self
+                    .aws_secret_access_key
+                    .as_ref()
+                    .map(|s| s.expose_secret())
+                    .ok_or_else(|| {
+                        ConnectorError::Config(
+                            "aws_secret_access_key is required for AWS_MSK_IAM mechanism"
+                                .to_string(),
+                        )
+                    })?;
                 let region = self.aws_region.as_deref().ok_or_else(|| {
                     ConnectorError::Config(
                         "aws_region is required for AWS_MSK_IAM mechanism".to_string(),
@@ -207,10 +237,13 @@ impl KafkaSecurityConfig {
     /// Require SASL password, returning a config error if absent.
     #[inline]
     fn require_password(&self) -> Result<&str> {
-        self.sasl_password.as_deref().ok_or_else(|| {
-            ConnectorError::Config("sasl_password is required for SASL protocols".to_string())
-                .into()
-        })
+        self.sasl_password
+            .as_ref()
+            .map(|s| s.expose_secret())
+            .ok_or_else(|| {
+                ConnectorError::Config("sasl_password is required for SASL protocols".to_string())
+                    .into()
+            })
     }
 }
 
@@ -1897,7 +1930,7 @@ mod tests {
             protocol: SecurityProtocol::SaslPlaintext,
             sasl_mechanism: Some(SaslMechanism::Plain),
             sasl_username: Some("user".to_string()),
-            sasl_password: Some("pass".to_string()),
+            sasl_password: Some("pass".to_string().into()),
             ..Default::default()
         };
         assert!(config.to_auth_config().unwrap().is_some());
@@ -1908,7 +1941,7 @@ mod tests {
         let config = KafkaSecurityConfig {
             protocol: SecurityProtocol::SaslSsl,
             sasl_mechanism: Some(SaslMechanism::Plain),
-            sasl_password: Some("pass".to_string()),
+            sasl_password: Some("pass".to_string().into()),
             ..Default::default()
         };
         assert!(config.to_auth_config().is_err());
@@ -2377,7 +2410,7 @@ mod tests {
             protocol: SecurityProtocol::SaslPlaintext,
             sasl_mechanism: Some(SaslMechanism::Plain),
             sasl_username: Some("user".to_string()),
-            sasl_password: Some("pass".to_string()),
+            sasl_password: Some("pass".to_string().into()),
             ..Default::default()
         };
         let auth = config.to_auth_config().unwrap();
@@ -2390,7 +2423,7 @@ mod tests {
             protocol: SecurityProtocol::SaslSsl,
             sasl_mechanism: Some(SaslMechanism::ScramSha256),
             sasl_username: Some("user".to_string()),
-            sasl_password: Some("pass".to_string()),
+            sasl_password: Some("pass".to_string().into()),
             ..Default::default()
         };
         let auth = config.to_auth_config().unwrap();
@@ -2404,7 +2437,7 @@ mod tests {
         let config = KafkaSecurityConfig {
             protocol: SecurityProtocol::SaslPlaintext,
             sasl_mechanism: Some(SaslMechanism::OAuthBearer),
-            oauth_token: Some("my-jwt-token".to_string()),
+            oauth_token: Some("my-jwt-token".to_string().into()),
             ..Default::default()
         };
         let auth = config.to_auth_config().unwrap();
@@ -2429,7 +2462,11 @@ mod tests {
             protocol: SecurityProtocol::SaslSsl,
             sasl_mechanism: Some(SaslMechanism::AwsMskIam),
             aws_access_key_id: Some("AKIAIOSFODNN7EXAMPLE".to_string()),
-            aws_secret_access_key: Some("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string()),
+            aws_secret_access_key: Some(
+                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+                    .to_string()
+                    .into(),
+            ),
             aws_region: Some("us-east-1".to_string()),
             ..Default::default()
         };
@@ -2442,7 +2479,7 @@ mod tests {
         let config = KafkaSecurityConfig {
             protocol: SecurityProtocol::SaslSsl,
             sasl_mechanism: Some(SaslMechanism::AwsMskIam),
-            aws_secret_access_key: Some("secret".to_string()),
+            aws_secret_access_key: Some("secret".to_string().into()),
             aws_region: Some("us-east-1".to_string()),
             ..Default::default()
         };
@@ -2467,7 +2504,7 @@ mod tests {
             protocol: SecurityProtocol::SaslSsl,
             sasl_mechanism: Some(SaslMechanism::AwsMskIam),
             aws_access_key_id: Some("AKID".to_string()),
-            aws_secret_access_key: Some("secret".to_string()),
+            aws_secret_access_key: Some("secret".to_string().into()),
             ..Default::default()
         };
         assert!(config.to_auth_config().is_err());
@@ -2601,8 +2638,12 @@ mod tests {
             Some(SaslMechanism::OAuthBearer)
         );
         assert_eq!(
-            config.security.oauth_token,
-            Some("my-jwt-token".to_string())
+            config
+                .security
+                .oauth_token
+                .as_ref()
+                .map(|t| t.expose_secret()),
+            Some("my-jwt-token")
         );
     }
 
@@ -2657,7 +2698,7 @@ mod tests {
             protocol: SecurityProtocol::SaslSsl,
             sasl_mechanism: Some(SaslMechanism::ScramSha512),
             sasl_username: Some("user".to_string()),
-            sasl_password: Some("pass".to_string()),
+            sasl_password: Some("pass".to_string().into()),
             ..Default::default()
         };
         let auth = config.to_auth_config().unwrap();
@@ -2682,7 +2723,7 @@ mod tests {
         let config = KafkaSecurityConfig {
             protocol: SecurityProtocol::SaslPlaintext,
             sasl_username: Some("user".to_string()),
-            sasl_password: Some("pass".to_string()),
+            sasl_password: Some("pass".to_string().into()),
             ..Default::default()
         };
         let auth = config.to_auth_config().unwrap();
@@ -2698,7 +2739,7 @@ mod tests {
             protocol: SecurityProtocol::SaslPlaintext,
             sasl_mechanism: Some(SaslMechanism::AwsMskIam),
             aws_access_key_id: Some("AKID".to_string()),
-            aws_secret_access_key: Some("SECRET".to_string()),
+            aws_secret_access_key: Some("SECRET".to_string().into()),
             aws_region: Some("us-east-1".to_string()),
             ..Default::default()
         };

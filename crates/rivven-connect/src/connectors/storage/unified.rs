@@ -66,6 +66,45 @@ use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, PutPayload};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+/// Upload with retry (3 attempts, exponential backoff starting at 1s).
+async fn put_with_retry(
+    store: &dyn ObjectStore,
+    path: &ObjectPath,
+    payload: PutPayload,
+    provider: &StorageProvider,
+) -> std::result::Result<(), ConnectorError> {
+    // PutPayload doesn't implement Clone — serialise to bytes once so we can
+    // reconstruct a fresh payload on each retry attempt.
+    let raw: bytes::Bytes = payload.into();
+    let mut last_err = None;
+    for attempt in 0..3u32 {
+        match store.put(path, PutPayload::from(raw.clone())).await {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                last_err = Some(e);
+                if attempt < 2 {
+                    let backoff = std::time::Duration::from_secs(1 << attempt);
+                    warn!(
+                        "{:?} upload attempt {}/3 failed for {}: {} (retrying in {:?})",
+                        provider,
+                        attempt + 1,
+                        path,
+                        last_err.as_ref().unwrap(),
+                        backoff
+                    );
+                    tokio::time::sleep(backoff).await;
+                }
+            }
+        }
+    }
+    let e = last_err.unwrap();
+    error!("Failed to upload to {:?} after 3 attempts: {}", provider, e);
+    Err(ConnectorError::Connection(format!(
+        "{:?} upload failed after 3 retries: {}",
+        provider, e
+    )))
+}
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 use validator::Validate;
@@ -476,6 +515,7 @@ impl Sink for ObjectStorageSink {
         let store = Self::create_store(config)?;
         let mut batch: Vec<serde_json::Value> = Vec::with_capacity(config.batch_size);
         let mut total_written = 0u64;
+        let mut total_bytes = 0u64;
         let mut batch_id = 0u64;
         let mut last_flush = std::time::Instant::now();
         let flush_interval = std::time::Duration::from_secs(config.flush_interval_secs);
@@ -502,6 +542,7 @@ impl Sink for ObjectStorageSink {
                     batch_id,
                 );
                 let data = serialize_batch(&batch, &config.format, &config.compression)?;
+                let data_len = data.len() as u64;
                 let content_type = get_content_type(&config.format, &config.compression);
                 let path = ObjectPath::from(key.as_str());
 
@@ -513,16 +554,13 @@ impl Sink for ObjectStorageSink {
                     key
                 );
 
-                store
-                    .put(&path, PutPayload::from(data))
-                    .await
-                    .map_err(|e| {
-                        error!("Failed to upload to {:?}: {}", config.provider, e);
-                        ConnectorError::Connection(format!(
-                            "{:?} upload failed: {}",
-                            config.provider, e
-                        ))
-                    })?;
+                put_with_retry(
+                    store.as_ref(),
+                    &path,
+                    PutPayload::from(data),
+                    &config.provider,
+                )
+                .await?;
 
                 info!(
                     "Uploaded {} events to {:?}://{}/{} (content-type: {})",
@@ -534,6 +572,7 @@ impl Sink for ObjectStorageSink {
                 );
 
                 total_written += batch.len() as u64;
+                total_bytes += data_len;
                 batch.clear();
                 batch_id += 1;
                 last_flush = std::time::Instant::now();
@@ -552,17 +591,16 @@ impl Sink for ObjectStorageSink {
                 batch_id,
             );
             let data = serialize_batch(&batch, &config.format, &config.compression)?;
+            let data_len = data.len() as u64;
             let path = ObjectPath::from(key.as_str());
 
-            store
-                .put(&path, PutPayload::from(data))
-                .await
-                .map_err(|e| {
-                    ConnectorError::Connection(format!(
-                        "{:?} upload failed: {}",
-                        config.provider, e
-                    ))
-                })?;
+            put_with_retry(
+                store.as_ref(),
+                &path,
+                PutPayload::from(data),
+                &config.provider,
+            )
+            .await?;
 
             info!(
                 "Uploaded final {} events to {:?}://{}/{}",
@@ -573,6 +611,7 @@ impl Sink for ObjectStorageSink {
             );
 
             total_written += batch.len() as u64;
+            total_bytes += data_len;
         }
 
         info!(
@@ -582,7 +621,7 @@ impl Sink for ObjectStorageSink {
 
         Ok(WriteResult {
             records_written: total_written,
-            bytes_written: 0,
+            bytes_written: total_bytes,
             records_failed: 0,
             errors: vec![],
         })

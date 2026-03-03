@@ -17,7 +17,7 @@ name = "rivven_schema"
 path = "src/lib.rs"
 
 [features]
-default = ["server", "avro", "json-schema", "cli"]
+default = ["server", "avro", "json-schema", "protobuf", "cli"]
 # Types only - minimal feature for other crates to depend on (no heavy deps)
 types = []
 # CLI features
@@ -25,14 +25,13 @@ cli = ["dep:reqwest", "dep:tracing-subscriber"]
 # Schema formats
 avro = ["dep:apache-avro"]
 json-schema = ["dep:jsonschema"]
+protobuf = ["dep:protox-parse", "dep:prost-types"]
 # Server features
 server = ["dep:axum", "dep:tower", "dep:tower-http"]
-# Authentication support (Basic Auth + simple RBAC)
-auth = ["dep:rivven-core"]
-# JWT/OIDC token validation (requires auth)
-jwt = ["auth", "dep:jsonwebtoken"]
+# JWT/OIDC token validation
+jwt = ["dep:jsonwebtoken"]
 # Cedar policy-based authorization (fine-grained RBAC)
-cedar = ["auth", "rivven-core/cedar"]
+cedar = ["rivven-core/cedar"]
 # Broker-backed storage (store schemas in rivven topics for durability)
 broker = ["dep:rivven-client"]
 # Metrics support (uses metrics crate facade)
@@ -62,14 +61,16 @@ tracing-subscriber = { workspace = true, optional = true }
 # Schema formats
 apache-avro = { workspace = true, optional = true }
 jsonschema = { version = "0.18", optional = true }
+protox-parse = { version = "0.8", optional = true }
+prost-types = { version = "0.13", optional = true }
 
 # HTTP Server
 axum = { workspace = true, optional = true }
 tower = { workspace = true, optional = true, features = ["util"] }
 tower-http = { workspace = true, optional = true, features = ["cors", "trace", "compression-gzip"] }
 
-# Authentication (optional - for standalone server)
-rivven-core = { workspace = true, optional = true }
+# Authentication & authorization (RBAC, Cedar, etc.)
+rivven-core = { workspace = true }
 
 # JWT validation for OAuth2/OIDC (optional)
 jsonwebtoken = { version = "9", optional = true }

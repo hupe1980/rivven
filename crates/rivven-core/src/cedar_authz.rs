@@ -105,6 +105,9 @@ mod cedar_impl {
         #[error("Policy parse error: {0}")]
         PolicyParse(String),
 
+        #[error("Policy not found: {0}")]
+        PolicyNotFound(String),
+
         #[error("Schema error: {0}")]
         Schema(String),
 
@@ -612,23 +615,39 @@ mod cedar_impl {
             Ok(())
         }
 
-        /// Remove a policy by ID
+        /// Remove a policy by ID.
+        ///
+        /// Returns [`CedarError::PolicyNotFound`] if no policy with the given ID
+        /// exists.  If rebuilding the PolicySet fails (a re-add error), the
+        /// original set is left intact and the error is propagated.
         pub fn remove_policy(&self, id: &str) -> CedarResult<()> {
-            // Cedar PolicySet doesn't support removal directly
-            // We need to rebuild without the policy
+            // Cedar PolicySet doesn't support removal directly —
+            // we rebuild without the target policy.
             let mut policies = self.policies.write();
             let policy_id = cedar_policy::PolicyId::new(id);
 
-            // Create a new PolicySet without the specified policy
-            let new_policies = policies
+            let original_count = policies.policies().count();
+
+            // Collect all policies except the one being removed.
+            let remaining: Vec<_> = policies
                 .policies()
                 .filter(|p| p.id() != &policy_id)
                 .cloned()
-                .collect::<Vec<_>>();
+                .collect();
+
+            if remaining.len() == original_count {
+                return Err(CedarError::PolicyNotFound(id.to_string()));
+            }
 
             let mut new_set = PolicySet::new();
-            for policy in new_policies {
-                new_set.add(policy).ok();
+            for policy in &remaining {
+                new_set.add(policy.clone()).map_err(|e| {
+                    CedarError::Internal(format!(
+                        "Failed to re-add policy '{}' during removal rebuild: {}",
+                        policy.id(),
+                        e
+                    ))
+                })?;
             }
 
             *policies = new_set;

@@ -47,7 +47,7 @@ import rivven
 
 async def produce():
     client = await rivven.connect("localhost:9092")
-    producer = client.producer("my-topic")
+    producer = await client.producer("my-topic", batch_size=16384, linger_ms=5)
     
     # Send a message
     offset = await producer.send(b'{"event": "login"}', key=b"user-123")
@@ -56,8 +56,15 @@ async def produce():
     # Send to specific partition
     await producer.send_to_partition(b"value", partition=0, key=b"key")
     
-    # Batch send for better throughput
+    # Batch send — all messages are enqueued concurrently and
+    # batched automatically on the wire for maximum throughput
     offsets = await producer.send_batch([b"msg1", b"msg2", b"msg3"])
+    
+    # Flush pending records
+    await producer.flush()
+    
+    # Close when done
+    await producer.close()
 
 asyncio.run(produce())
 ```

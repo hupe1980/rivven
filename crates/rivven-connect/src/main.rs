@@ -424,9 +424,10 @@ async fn run_all(config: ConnectConfig) -> Result<()> {
 
 /// Wait for a fatal error from any connector task.
 ///
-/// Polls all task handles and returns as soon as any task completes (either
-/// successfully or with an error). This allows the select! in main to detect
-/// connector failures and trigger a graceful shutdown.
+/// Uses `select_all` to efficiently await the first completed task without
+/// busy-polling. Returns as soon as any task completes (either successfully
+/// or with an error), allowing the select! in main to detect connector
+/// failures and trigger a graceful shutdown.
 async fn wait_for_fatal_error(tasks: &mut [tokio::task::JoinHandle<error::Result<()>>]) {
     if tasks.is_empty() {
         // No tasks to monitor — wait forever (Ctrl+C will still work)
@@ -434,15 +435,22 @@ async fn wait_for_fatal_error(tasks: &mut [tokio::task::JoinHandle<error::Result
         return;
     }
 
-    loop {
-        for task in tasks.iter_mut() {
-            if task.is_finished() {
-                // A task has completed — this is always fatal (connectors should run forever)
-                return;
-            }
-        }
-        // Poll every 500ms instead of sleeping forever
-        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    // Take ownership of handles to pass to select_all
+    let owned: Vec<_> = tasks
+        .iter_mut()
+        .map(|h| {
+            // Replace with a no-op handle so the caller's slice stays valid
+            let placeholder = tokio::spawn(async { Ok(()) });
+            std::mem::replace(h, placeholder)
+        })
+        .collect();
+
+    // Await the first task to complete — O(1) wakeups, no polling
+    let (result, _index, _remaining) = futures::future::select_all(owned).await;
+    match result {
+        Ok(Ok(())) => warn!("A connector task exited unexpectedly (success)"),
+        Ok(Err(e)) => error!("A connector task failed: {e}"),
+        Err(e) => error!("A connector task panicked: {e}"),
     }
 }
 

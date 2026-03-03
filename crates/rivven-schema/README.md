@@ -115,15 +115,9 @@ Benefits:
 rivven-schema serve --port 8081
 ```
 
-## Authentication (Optional)
+## Authentication
 
-Enable authentication by building with the `auth` feature:
-
-```bash
-cargo build -p rivven-schema --features auth
-```
-
-The schema registry supports enterprise-grade authentication:
+Authentication is always compiled in and supports enterprise-grade methods:
 
 | Method | Header | Use Case |
 |--------|--------|----------|
@@ -151,13 +145,17 @@ Authentication integrates with rivven-core's RBAC system, supporting:
 - Anonymous read access (configurable)
 - Rate limiting and lockout protection
 
-### Cedar Policy-Based Authorization (Optional)
+### Cedar Policy-Based Authorization
 
-For fine-grained, policy-as-code authorization, use the `cedar` feature:
+For fine-grained, policy-as-code authorization, enable the `cedar` feature:
 
 ```bash
 cargo build -p rivven-schema --features cedar
 ```
+
+Cedar authorization is fully wired and evaluates every request through
+`cedar_policy::Authorizer::is_authorized()`. Policies are expressed in the Cedar
+language and checked at runtime — this is **not** a stub.
 
 Cedar provides powerful policy expressions with fine-grained access control:
 
@@ -350,6 +348,9 @@ The server implements a standard Schema Registry REST API plus enterprise extens
 }
 ```
 
+> **Recursive compatibility:** JSON Schema compatibility checking recursively validates nested `properties`, `items` (array schemas), `additionalProperties`, and `enum` values — not just top-level fields. Incompatibilities are reported with dotted paths (e.g., `address.street`).
+```
+
 ## Wire Format
 
 The registry uses a standard wire format for encoded messages:
@@ -376,6 +377,8 @@ This allows consumers to look up the schema by ID before deserializing.
 | `protobuf` | ✅ | Protobuf schema parsing and compatibility checking |
 | `external` | ❌ | External Schema Registry client |
 | `glue` | ❌ | AWS Glue Schema Registry client |
+| `jwt` | ❌ | JWT/OIDC token validation (HS256, RS256, ES256) |
+| `cedar` | ❌ | Cedar policy-based authorization |
 | `metrics` | ❌ | Prometheus metrics for monitoring |
 
 > **Note**: For encoding/decoding data with Avro/Protobuf codecs, use `rivven-connect`.

@@ -24,6 +24,10 @@ pub enum ProtocolError {
     /// Protocol version mismatch
     #[error("Protocol version mismatch: expected {expected}, got {actual}")]
     VersionMismatch { expected: u32, actual: u32 },
+
+    /// Wire format does not support this message type
+    #[error("Unsupported wire format: {0}")]
+    UnsupportedFormat(String),
 }
 
 impl From<postcard::Error> for ProtocolError {

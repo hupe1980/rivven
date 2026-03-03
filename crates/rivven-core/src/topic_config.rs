@@ -288,12 +288,16 @@ impl TopicConfig {
                 self.retention_ms = val;
             }
             "retention.bytes" => {
-                self.retention_bytes = match value {
+                let val: i64 = match value {
                     Some(v) => v
                         .parse()
                         .map_err(|e| format!("Invalid retention.bytes: {}", e))?,
                     None => DEFAULT_RETENTION_BYTES,
                 };
+                if val < -1 {
+                    return Err("retention.bytes must be >= -1 (-1 = infinite)".into());
+                }
+                self.retention_bytes = val;
             }
             "max.message.bytes" => {
                 let val: i64 = match value {
@@ -320,12 +324,16 @@ impl TopicConfig {
                 self.segment_bytes = val;
             }
             "segment.ms" => {
-                self.segment_ms = match value {
+                let val: i64 = match value {
                     Some(v) => v
                         .parse()
                         .map_err(|e| format!("Invalid segment.ms: {}", e))?,
                     None => DEFAULT_SEGMENT_MS,
                 };
+                if val < -1 {
+                    return Err("segment.ms must be >= -1 (-1 = infinite)".into());
+                }
+                self.segment_ms = val;
             }
             "cleanup.policy" => {
                 self.cleanup_policy = match value {
@@ -672,5 +680,35 @@ mod tests {
         let event = rx.try_recv().unwrap();
         assert_eq!(event.topic, "topic-b");
         assert!(!event.changed_keys.is_empty());
+    }
+
+    #[test]
+    fn test_retention_bytes_rejects_negative() {
+        let manager = TopicConfigManager::new();
+        let changes = vec![("retention.bytes".to_string(), Some("-2".to_string()))];
+        let result = manager.apply_changes("test-topic", &changes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_retention_bytes_allows_minus_one() {
+        let manager = TopicConfigManager::new();
+        let changes = vec![("retention.bytes".to_string(), Some("-1".to_string()))];
+        assert!(manager.apply_changes("test-topic", &changes).is_ok());
+    }
+
+    #[test]
+    fn test_segment_ms_rejects_negative() {
+        let manager = TopicConfigManager::new();
+        let changes = vec![("segment.ms".to_string(), Some("-2".to_string()))];
+        let result = manager.apply_changes("test-topic", &changes);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_segment_ms_allows_minus_one() {
+        let manager = TopicConfigManager::new();
+        let changes = vec![("segment.ms".to_string(), Some("-1".to_string()))];
+        assert!(manager.apply_changes("test-topic", &changes).is_ok());
     }
 }

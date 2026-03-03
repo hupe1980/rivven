@@ -239,6 +239,12 @@ pub struct SourceConfig {
     /// Transform steps applied after read, before publish (ordered)
     #[serde(default)]
     pub transforms: Vec<TransformStepConfig>,
+
+    /// Dead letter topic for events that fail to publish after all retries.
+    /// When configured, failed events are routed here instead of halting the pipeline.
+    /// When absent, retry exhaustion stops the pipeline with an error.
+    #[serde(default)]
+    pub dead_letter_topic: Option<String>,
 }
 
 /// Rate limiting configuration for source connectors
@@ -334,6 +340,20 @@ pub struct SinkConfig {
     /// Transform steps applied after consume, before write (ordered)
     #[serde(default)]
     pub transforms: Vec<TransformStepConfig>,
+
+    /// How often (in number of events) to commit consumer offsets.
+    /// Default: 100.
+    #[serde(default = "default_offset_commit_interval")]
+    pub offset_commit_interval: u64,
+
+    /// Dead letter topic for records that fail processing after all retries.
+    /// When configured, failed records are routed here instead of halting the sink.
+    #[serde(default)]
+    pub dead_letter_topic: Option<String>,
+}
+
+fn default_offset_commit_interval() -> u64 {
+    100
 }
 
 /// Rate limiting configuration for sinks
@@ -644,7 +664,16 @@ impl ConnectConfig {
                 let var_name = &caps[1];
                 let default = caps.get(2).map(|m| m.as_str());
 
-                std::env::var(var_name).unwrap_or_else(|_| default.unwrap_or("").to_string())
+                std::env::var(var_name).unwrap_or_else(|_| match default {
+                    Some(d) => d.to_string(),
+                    None => {
+                        tracing::warn!(
+                            "Environment variable '{}' is not set and has no default; substituting empty string",
+                            var_name
+                        );
+                        String::new()
+                    }
+                })
             })
             .to_string()
     }

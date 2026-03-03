@@ -666,9 +666,7 @@ async fn soak_test_extended_load() -> Result<()> {
     // Verify data integrity
     let mut consumed = 0;
     for partition in 0..8 {
-        let messages = client
-            .consume(&topic, partition, 0, u32::MAX as usize)
-            .await?;
+        let messages = client.consume(&topic, partition, 0, u32::MAX).await?;
         consumed += messages.len();
     }
     assert_eq!(consumed as u64, produced);

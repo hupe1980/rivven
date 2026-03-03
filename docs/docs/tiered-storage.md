@@ -61,6 +61,26 @@ This approach optimizes for both **performance** (hot data in memory) and **cost
 
 ---
 
+### Segment Data Format
+
+When segments are promoted to or demoted between tiers, messages are serialized with **4-byte big-endian length-prefix framing**. Each message in a segment is stored as:
+
+```
+┌──────────────┬─────────────────────┐
+│ Length (4 BE) │    Message Data     │
+├──────────────┼─────────────────────┤
+│ 0x00 0x01 F4 │ <500 bytes of data> │
+│ 0x00 0x00 C8 │ <200 bytes of data> │
+│   ...        │   ...               │
+└──────────────┴─────────────────────┘
+```
+
+On read, the tiered storage reader decodes each message by reading the 4-byte length prefix, then reading that many bytes of payload. CRC mismatches during segment reads return all valid messages read up to the corruption point (Kafka-style partial read), rather than failing the entire segment read.
+
+Uploads to object storage use **automatic retry with exponential backoff** (3 attempts, 1 s / 2 s / 4 s). The payload is cloned to `Bytes` before the first attempt so retries do not require re-serialisation. If all attempts fail the connector reports the error and can be restarted by the Connect framework.
+
+---
+
 ## Configuration
 
 ### Basic Configuration

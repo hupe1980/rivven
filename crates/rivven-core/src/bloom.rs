@@ -287,6 +287,16 @@ impl CountingBloomFilter {
     }
 
     /// Remove an item (decrement counters)
+    ///
+    /// # Concurrency note
+    ///
+    /// Each per-hash counter decrement is individually atomic, but the k
+    /// decrements across different counters are **not** atomic as a group.
+    /// Two concurrent `remove()` calls for the same item can each decrement
+    /// all k counters (net decrement of 2 for an item inserted once). This
+    /// is an inherent limitation of lock-free counting Bloom filters and may
+    /// produce false negatives after concurrent removals. If exact removal
+    /// semantics are required, external synchronization is needed.
     pub fn remove<T: Hash>(&self, item: &T) {
         let (h1, h2) = self.hash_pair(item);
 

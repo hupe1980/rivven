@@ -21,7 +21,7 @@ rivven-cdc = { workspace = true, features = ["postgres", "mysql", "mariadb", "cl
 rivven-client = { workspace = true, features = ["tls"] }
 rivven-connect = { workspace = true, features = ["rdbc-postgres", "kafka", "mqtt", "cloud-storage"] }
 rivven-protocol = { workspace = true, features = ["protobuf"] }
-rivven-schema = { workspace = true, features = ["server", "avro", "auth"] }
+rivven-schema = { workspace = true, features = ["server", "avro"] }
 rivvend = { workspace = true, features = ["tls", "protobuf"] }
 
 # TLS crypto provider - needed for runtime initialization

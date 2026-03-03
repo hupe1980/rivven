@@ -44,18 +44,19 @@
 
 use crate::client::ClientStream;
 use crate::{Error, Request, Response, Result};
+use rivven_protocol::BatchRecord;
 use bytes::Bytes;
 use rand::Rng;
 #[cfg(feature = "compression")]
 use rivven_core::compression::{CompressionAlgorithm, CompressionConfig, Compressor};
 #[cfg(feature = "tls")]
 use rivven_core::tls::TlsConfig;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
-use tokio::sync::{mpsc, oneshot, Notify, RwLock, Semaphore};
+use tokio::sync::{mpsc, oneshot, Notify, OwnedSemaphorePermit, RwLock, Semaphore};
 use tracing::{debug, error, info, warn};
 
 // ============================================================================
@@ -138,10 +139,19 @@ pub struct ProducerConfig {
 }
 
 /// Authentication configuration for the producer connection
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ProducerAuthConfig {
     pub username: String,
     pub password: String,
+}
+
+impl std::fmt::Debug for ProducerAuthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProducerAuthConfig")
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Compression types for producer messages
@@ -357,8 +367,10 @@ impl ProducerConfigBuilder {
 
     /// Build the configuration.
     ///
-    /// Returns an error when `tls_config` is set but `tls_server_name` is
-    /// missing (the server name is required for certificate verification).
+    /// Returns an error when:
+    /// - `tls_config` is set but `tls_server_name` is missing
+    /// - `enable_idempotence` is true and `max_in_flight_requests > 5`
+    ///   (Kafka mandates ≤ 5 for ordering guarantees)
     pub fn build(self) -> Result<ProducerConfig> {
         #[cfg(feature = "tls")]
         if self.config.tls_config.is_some() && self.config.tls_server_name.is_none() {
@@ -368,6 +380,18 @@ impl ProducerConfigBuilder {
                     .to_string(),
             ));
         }
+
+        // CLIENT-05: Enforce Kafka's max.in.flight.requests.per.connection ≤ 5
+        // when idempotence is enabled. Without this constraint, the broker
+        // cannot guarantee ordering and deduplication.
+        if self.config.enable_idempotence && self.config.max_in_flight_requests > 5 {
+            return Err(Error::ConfigError(format!(
+                "max_in_flight_requests ({}) must be ≤ 5 when enable_idempotence is true \
+                 (required for ordering guarantees, matching Kafka's KIP-98)",
+                self.config.max_in_flight_requests
+            )));
+        }
+
         Ok(self.config)
     }
 }
@@ -440,33 +464,36 @@ impl MetadataCache {
 // Sticky Partitioner
 // ============================================================================
 
-/// Sticky partitioner that batches messages to the same partition
+/// Sticky partitioner that batches messages to the same partition.
+///
+/// Uses `DashMap` with per-shard locking and atomics for interior
+/// mutability — no async lock, no global contention.
 struct StickyPartitioner {
-    /// Current sticky partition per topic
-    sticky_partitions: RwLock<HashMap<String, StickyState>>,
+    /// Per-topic sticky state (DashMap provides per-shard locking)
+    sticky_partitions: dashmap::DashMap<String, StickyState>,
 }
 
 struct StickyState {
-    /// Current partition
-    partition: u32,
+    /// Current partition (atomically updated)
+    partition: AtomicU32,
     /// Number of messages batched to this partition
-    batch_count: usize,
-    /// Total partitions for this topic
-    total_partitions: u32,
+    batch_count: AtomicU32,
+    /// Total partitions for this topic (updated on topology change)
+    total_partitions: AtomicU32,
 }
 
 impl StickyPartitioner {
     fn new() -> Self {
         Self {
-            sticky_partitions: RwLock::new(HashMap::new()),
+            sticky_partitions: dashmap::DashMap::new(),
         }
     }
 
-    /// Get partition for a message
+    /// Get partition for a message (sync — no async lock).
     ///
     /// If key is provided, uses consistent hashing.
     /// Otherwise, uses sticky partitioning (batch to same partition).
-    async fn partition(&self, topic: &str, key: Option<&[u8]>, num_partitions: u32) -> u32 {
+    fn partition(&self, topic: &str, key: Option<&[u8]>, num_partitions: u32) -> u32 {
         if num_partitions == 0 {
             return 0;
         }
@@ -476,31 +503,40 @@ impl StickyPartitioner {
             return murmur2_partition(key, num_partitions);
         }
 
-        // Sticky partitioning for keyless messages
-        let mut sticky = self.sticky_partitions.write().await;
-        let state = sticky
-            .entry(topic.to_string())
-            .or_insert_with(|| StickyState {
-                partition: rand_partition(num_partitions),
-                batch_count: 0,
-                total_partitions: num_partitions,
-            });
+        // Fast path: read existing entry via DashMap shard lock
+        if let Some(state) = self.sticky_partitions.get(topic) {
+            let total = state.total_partitions.load(Ordering::Relaxed);
 
-        // Update partition count if it changed
-        if state.total_partitions != num_partitions {
-            state.total_partitions = num_partitions;
-            state.partition = rand_partition(num_partitions);
-            state.batch_count = 0;
+            // Topology changed — reset
+            if total != num_partitions {
+                state.total_partitions.store(num_partitions, Ordering::Relaxed);
+                let new_part = rand_partition(num_partitions);
+                state.partition.store(new_part, Ordering::Relaxed);
+                state.batch_count.store(1, Ordering::Relaxed);
+                return new_part;
+            }
+
+            let count = state.batch_count.fetch_add(1, Ordering::Relaxed) + 1;
+            if count >= STICKY_BATCH_THRESHOLD as u32 {
+                let current = state.partition.load(Ordering::Relaxed);
+                let next = (current + 1) % num_partitions;
+                state.partition.store(next, Ordering::Relaxed);
+                state.batch_count.store(0, Ordering::Relaxed);
+                return next;
+            }
+
+            return state.partition.load(Ordering::Relaxed);
         }
 
-        // Switch partition when batch threshold is reached
-        state.batch_count += 1;
-        if state.batch_count >= STICKY_BATCH_THRESHOLD {
-            state.partition = (state.partition + 1) % num_partitions;
-            state.batch_count = 0;
-        }
-
-        state.partition
+        // Slow path: initialize new topic entry
+        let initial = rand_partition(num_partitions);
+        let state = StickyState {
+            partition: AtomicU32::new(initial),
+            batch_count: AtomicU32::new(1),
+            total_partitions: AtomicU32::new(num_partitions),
+        };
+        self.sticky_partitions.insert(topic.to_string(), state);
+        initial
     }
 }
 
@@ -512,7 +548,13 @@ fn murmur2_partition(key: &[u8], num_partitions: u32) -> u32 {
 }
 
 /// Get a random partition using a proper PRNG.
+///
+/// Returns `0` when `num_partitions` is zero to avoid a panic from the
+/// modulo operator (CLIENT-12).
 fn rand_partition(num_partitions: u32) -> u32 {
+    if num_partitions == 0 {
+        return 0;
+    }
     (rand::random::<u32>()) % num_partitions
 }
 
@@ -532,6 +574,10 @@ pub struct ProducerRecord {
     pub value: Bytes,
     /// Response channel
     response_tx: oneshot::Sender<Result<RecordMetadata>>,
+    /// Backpressure permit — travels with the record through the channel
+    /// and sender task pipeline so it is only released when the record is
+    /// consumed, NOT when the caller's delivery timeout fires (CLIENT-11).
+    _permit: OwnedSemaphorePermit,
 }
 
 /// Metadata returned after successful send
@@ -588,6 +634,24 @@ impl RecordBatch {
     fn len(&self) -> usize {
         self.records.len()
     }
+}
+
+/// Error from a batch send that carries undelivered records for retry.
+///
+/// When `send_batch` encounters a transport-level failure (I/O error,
+/// connection reset, etc.), it returns this struct instead of dropping
+/// the remaining oneshot channels. The caller can reconnect and retry
+/// with the `undelivered` records — their response channels are still
+/// live, so the original `Producer::send()` callers will receive the
+/// result of the retry attempt.
+struct BatchSendError {
+    error: Error,
+    /// Records that were NOT delivered. `(value, key, response_channel)`.
+    undelivered: Vec<(
+        Bytes,
+        Option<Bytes>,
+        oneshot::Sender<Result<RecordMetadata>>,
+    )>,
 }
 
 // ============================================================================
@@ -706,7 +770,7 @@ impl Producer {
         // Use Client::connect() for protocol handshake and optional
         // SCRAM-SHA-256 authentication, instead of raw TcpStream.
         let mut client: Option<crate::Client> = None;
-        let mut last_err = None;
+        let mut last_err: Option<Error> = None;
         for addr in &config.bootstrap_servers {
             let connect_fut = connect_producer_client(addr, &config);
             match tokio::time::timeout(config.connection_timeout, connect_fut).await {
@@ -717,19 +781,26 @@ impl Producer {
                 }
                 Ok(Err(e)) => {
                     debug!("Failed to connect to {}: {}", addr, e);
-                    last_err = Some(e.to_string());
+                    // Authentication failures are permanent — stop trying
+                    // other servers since credentials won't suddenly work.
+                    if !e.is_retriable() {
+                        return Err(e);
+                    }
+                    last_err = Some(e);
                 }
                 Err(_) => {
                     debug!("Connection timeout to {}", addr);
-                    last_err = Some(format!("Connection timeout to {}", addr));
+                    last_err = Some(Error::ConnectionError(format!(
+                        "Connection timeout to {}",
+                        addr
+                    )));
                 }
             }
         }
         let connected_client = client.ok_or_else(|| {
-            Error::ConnectionError(format!(
-                "Failed to connect to any bootstrap server: {}",
-                last_err.unwrap_or_default()
-            ))
+            last_err.unwrap_or_else(|| {
+                Error::ConnectionError("Failed to connect to any bootstrap server".into())
+            })
         })?;
         // Extract the underlying ClientStream (plaintext or TLS) for the sender task
         let stream = connected_client.into_client_stream();
@@ -809,9 +880,7 @@ impl Producer {
 
         let _permit = tokio::time::timeout(
             self.inner.config.request_timeout,
-            self.inner
-                .memory_semaphore
-                .acquire_many(permits_needed as u32),
+            Arc::clone(&self.inner.memory_semaphore).acquire_many_owned(permits_needed as u32),
         )
         .await
         .map_err(|_| Error::Timeout)?
@@ -825,6 +894,7 @@ impl Producer {
             key,
             value,
             response_tx,
+            _permit,
         };
 
         self.inner
@@ -867,9 +937,7 @@ impl Producer {
 
         let _permit = tokio::time::timeout(
             self.inner.config.request_timeout,
-            self.inner
-                .memory_semaphore
-                .acquire_many(permits_needed as u32),
+            Arc::clone(&self.inner.memory_semaphore).acquire_many_owned(permits_needed as u32),
         )
         .await
         .map_err(|_| Error::Timeout)?
@@ -883,6 +951,7 @@ impl Producer {
             key,
             value,
             response_tx,
+            _permit,
         };
 
         self.inner
@@ -971,8 +1040,18 @@ impl Producer {
         self.inner.idempotence_active.load(Ordering::Acquire)
     }
 
-    /// Close the producer gracefully
+    /// Close the producer gracefully.
+    ///
+    /// Flushes any buffered records (with a 30-second timeout) before
+    /// signalling shutdown, matching Kafka's `KafkaProducer.close()`
+    /// semantics.
     pub async fn close(&self) {
+        // Drain buffered records before shutdown
+        match tokio::time::timeout(Duration::from_secs(30), self.flush()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => warn!("Flush failed during close: {e}"),
+            Err(_) => warn!("Flush timed out during close"),
+        }
         self.inner.shutdown.store(true, Ordering::Relaxed);
         let _ = self.inner.shutdown_tx.send(true);
     }
@@ -1187,9 +1266,7 @@ async fn connect_producer_client(addr: &str, config: &ProducerConfig) -> Result<
         client
             .authenticate_scram(&auth.username, &auth.password)
             .await
-            .map_err(|e| {
-                Error::ConnectionError(format!("Authentication failed on {}: {}", addr, e))
-            })?;
+            .map_err(|e| Error::AuthenticationFailed(format!("{}: {}", addr, e)))?;
     }
 
     Ok(client)
@@ -1219,6 +1296,12 @@ async fn reconnect_producer_stream(
                     return Some(c.into_client_stream());
                 }
                 Ok(Err(e)) => {
+                    // Non-retriable errors (e.g. AuthenticationFailed) won't
+                    // resolve by retrying — bail out immediately.
+                    if !e.is_retriable() {
+                        error!("Permanent error during reconnect to {}: {}", addr, e);
+                        return None;
+                    }
                     debug!("Reconnect failed to {}: {}", addr, e);
                 }
                 Err(_) => {
@@ -1411,7 +1494,6 @@ async fn sender_task(
                 inner
                     .partitioner
                     .partition(&record.topic, record.key.as_deref(), num_partitions)
-                    .await
             };
 
             let key = (record.topic.clone(), partition);
@@ -1434,14 +1516,18 @@ async fn sender_task(
             let flush_batches: Vec<_> = batches.drain().collect();
             let mut failed = false;
 
+            let max_retries = inner.config.retries;
+            let retry_backoff_ms = inner.config.retry_backoff_ms;
+            let retry_backoff_max_ms = inner.config.retry_backoff_max_ms;
+
             for ((topic, partition), batch) in flush_batches {
                 if batch.is_empty() {
                     continue;
                 }
 
                 if failed {
-                    // Connection broken — notify all remaining batches with error
-                    // instead of silently dropping their response channels.
+                    // Connection broken and exhausted retries —
+                    // notify all remaining batches with error.
                     let batch_record_count = batch.len() as u64;
                     for (_value, _key, response_tx) in batch.records {
                         let _ = response_tx.send(Err(Error::ConnectionError(
@@ -1457,35 +1543,216 @@ async fn sender_task(
                     continue;
                 }
 
-                // Capture batch size before moving into send_batch,
-                // so we can decrement pending_records on failure.
-                let batch_record_count = batch.len();
-                if let Err(e) = send_batch(
-                    &mut writer,
-                    &mut reader,
-                    &inner,
-                    batch,
-                    producer_epoch,
-                    &mut partition_sequences,
-                )
-                .await
-                {
-                    warn!("Failed to send batch to {}/{}: {}", topic, partition, e);
-                    inner.stats.errors.fetch_add(1, Ordering::Relaxed);
-                    // Decrement pending_records for all records in the
-                    // failed batch. Without this, pending_records leaks permanently,
-                    // breaking flush() (it never reaches 0).
-                    let prev = inner
-                        .pending_records
-                        .fetch_sub(batch_record_count as u64, Ordering::Release);
-                    if prev <= batch_record_count as u64 {
-                        inner.flush_notify.notify_waiters();
+                // ── Per-batch retry loop ────────────────────────────────
+                let mut current_batch = batch;
+                let mut attempt = 0u32;
+                let batch_deadline = current_batch.created_at + inner.config.delivery_timeout;
+
+                loop {
+                    // Check per-batch delivery timeout before each attempt
+                    // (CLIENT-09). This bounds the total time a batch can spend
+                    // retrying, matching Kafka's delivery.timeout.ms semantics.
+                    if Instant::now() >= batch_deadline {
+                        warn!(
+                            topic = %topic,
+                            partition,
+                            attempt,
+                            "Batch delivery timed out after {:?}",
+                            inner.config.delivery_timeout
+                        );
+                        let undelivered_count = current_batch.len() as u64;
+                        for (_v, _k, tx) in current_batch.records {
+                            let _ = tx.send(Err(Error::Timeout));
+                        }
+                        let prev = inner
+                            .pending_records
+                            .fetch_sub(undelivered_count, Ordering::Release);
+                        if prev <= undelivered_count {
+                            inner.flush_notify.notify_waiters();
+                        }
+                        inner.stats.errors.fetch_add(1, Ordering::Relaxed);
+                        break;
                     }
 
-                    // Mark connection as broken so we reconnect before
-                    // the next send attempt.
-                    needs_reconnect = true;
-                    failed = true;
+                    let _batch_record_count = current_batch.len();
+
+                    match send_batch(
+                        &mut writer,
+                        &mut reader,
+                        &inner,
+                        current_batch,
+                        producer_epoch,
+                        &mut partition_sequences,
+                    )
+                    .await
+                    {
+                        Ok(()) => break, // Batch delivered successfully
+                        Err(BatchSendError { error, undelivered }) => {
+                            attempt += 1;
+
+                            // Check if the error is permanent (non-retriable).
+                            // Permanent errors like PRODUCER_FENCED, INVALID_TOPIC,
+                            // or authentication failures should not be retried.
+                            let is_permanent = !error.is_retriable();
+
+                            if is_permanent || attempt > max_retries || undelivered.is_empty() {
+                                // Exhausted retries or permanent error — notify callers
+                                let reason = if is_permanent {
+                                    " (permanent error)".to_string()
+                                } else {
+                                    format!(" after {} retries", attempt)
+                                };
+                                warn!(
+                                    topic = %topic,
+                                    partition,
+                                    attempt,
+                                    permanent = is_permanent,
+                                    error = %error,
+                                    "Batch send failed{}, giving up",
+                                    reason
+                                );
+                                inner.stats.errors.fetch_add(1, Ordering::Relaxed);
+                                let undelivered_count = undelivered.len() as u64;
+                                // Propagate the original error to callers so they can
+                                // programmatically distinguish between permanent rejections
+                                // (e.g., PRODUCER_FENCED) and transient failures.
+                                // Previously, errors were wrapped in ConnectionError which
+                                // lost the original error type and inverted is_retriable().
+                                let error_msg = format!("Batch send failed{}: {}", reason, error);
+                                for (_v, _k, tx) in undelivered {
+                                    let err = if is_permanent {
+                                        // Preserve as ServerError so callers see is_retriable() = false
+                                        Error::ServerError(error_msg.clone())
+                                    } else {
+                                        Error::ConnectionError(error_msg.clone())
+                                    };
+                                    let _ = tx.send(Err(err));
+                                }
+                                let prev = inner
+                                    .pending_records
+                                    .fetch_sub(undelivered_count, Ordering::Release);
+                                if prev <= undelivered_count {
+                                    inner.flush_notify.notify_waiters();
+                                }
+                                // Only set needs_reconnect for transient errors.
+                                // Permanent errors (PRODUCER_FENCED, etc.) won't resolve
+                                // by reconnecting — it just wastes a TCP + auth handshake.
+                                if !is_permanent {
+                                    needs_reconnect = true;
+                                }
+                                failed = true;
+                                break;
+                            }
+
+                            // Retriable — reconnect and retry
+                            inner.stats.retries.fetch_add(1, Ordering::Relaxed);
+                            // Clamp exponent to 63 to prevent u64 overflow in release
+                            // mode (wraps to 0) or panic in debug mode.
+                            let exp = attempt.saturating_sub(1).min(63);
+                            let base_backoff_ms = retry_backoff_ms
+                                .saturating_mul(2u64.pow(exp))
+                                .min(retry_backoff_max_ms);
+                            // Add 25% jitter to prevent thundering-herd on broker restart
+                            let jitter = rand::thread_rng().gen_range(0..=base_backoff_ms / 4);
+                            let backoff_ms = base_backoff_ms.saturating_add(jitter);
+                            warn!(
+                                topic = %topic,
+                                partition,
+                                attempt,
+                                max_retries,
+                                backoff_ms,
+                                error = %error,
+                                remaining_records = undelivered.len(),
+                                "Batch send failed, retrying after {}ms",
+                                backoff_ms
+                            );
+
+                            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+
+                            // Note: sequence rollback is NOT needed here —
+                            // init_producer_id (below) calls partition_sequences.clear() which
+                            // resets all sequences. For non-idempotent mode, sequences are unused.
+
+                            // Reconnect
+                            match reconnect_producer_stream(&inner, &mut shutdown_rx).await {
+                                Some(new_stream) => {
+                                    let (rh, wh) = tokio::io::split(new_stream);
+                                    writer = BufWriter::with_capacity(64 * 1024, wh);
+                                    reader = BufReader::with_capacity(64 * 1024, rh);
+
+                                    // Only re-init idempotent producer ID when the
+                                    // broker explicitly signals the identity is
+                                    // unknown.  For transient errors (NOT_LEADER,
+                                    // COORDINATOR_NOT_AVAILABLE, connection resets)
+                                    // we reuse the existing producer_id + epoch +
+                                    // sequences so the broker can still deduplicate
+                                    // retries (CLIENT-04 / KIP-360).
+                                    let needs_reinit =
+                                        error.to_string().contains("UNKNOWN_PRODUCER_ID")
+                                            || error.to_string().contains("OUT_OF_ORDER_SEQUENCE");
+
+                                    if inner.config.enable_idempotence && needs_reinit {
+                                        match init_producer_id(&mut writer, &mut reader, &inner)
+                                            .await
+                                        {
+                                            Ok((new_pid, epoch)) => {
+                                                inner.producer_id.store(new_pid, Ordering::Release);
+                                                inner
+                                                    .idempotence_active
+                                                    .store(true, Ordering::Release);
+                                                producer_epoch = epoch;
+                                                partition_sequences.clear();
+                                                debug!(
+                                                    "Re-initialized idempotent producer: id={}, epoch={}",
+                                                    new_pid, epoch
+                                                );
+                                            }
+                                            Err(e) => {
+                                                error!(
+                                                    "Failed to re-init producer ID on retry: {}",
+                                                    e
+                                                );
+                                                inner
+                                                    .idempotence_active
+                                                    .store(false, Ordering::Release);
+                                            }
+                                        }
+                                    } else if inner.config.enable_idempotence {
+                                        debug!(
+                                            "Reusing existing producer identity for retry: id={}, epoch={}",
+                                            inner.producer_id.load(Ordering::Acquire),
+                                            producer_epoch,
+                                        );
+                                    }
+                                }
+                                None => {
+                                    // Shutdown requested during reconnect
+                                    let undelivered_count = undelivered.len() as u64;
+                                    for (_v, _k, tx) in undelivered {
+                                        let _ = tx.send(Err(Error::ConnectionError(
+                                            "Producer shutting down during retry".to_string(),
+                                        )));
+                                    }
+                                    let prev = inner
+                                        .pending_records
+                                        .fetch_sub(undelivered_count, Ordering::Release);
+                                    if prev <= undelivered_count {
+                                        inner.flush_notify.notify_waiters();
+                                    }
+                                    failed = true;
+                                    break;
+                                }
+                            }
+
+                            // Rebuild batch from undelivered records
+                            let mut retry_batch = RecordBatch::new(topic.clone(), partition);
+                            for (v, k, tx) in undelivered {
+                                retry_batch.add(k, v, tx);
+                            }
+                            current_batch = retry_batch;
+                            needs_reconnect = false;
+                        }
+                    }
                 }
             }
 
@@ -1493,10 +1760,10 @@ async fn sender_task(
         }
     }
 
-    // Flush remaining batches
+    // Flush remaining batches (best-effort during shutdown)
     for ((_topic, _partition), batch) in batches.drain() {
         if !batch.is_empty() {
-            let _ = send_batch(
+            if let Err(BatchSendError { undelivered, .. }) = send_batch(
                 &mut writer,
                 &mut reader,
                 &inner,
@@ -1504,7 +1771,34 @@ async fn sender_task(
                 producer_epoch,
                 &mut partition_sequences,
             )
-            .await;
+            .await
+            {
+                // During shutdown, notify remaining callers with error
+                let count = undelivered.len() as u64;
+                for (_v, _k, tx) in undelivered {
+                    let _ = tx.send(Err(Error::ConnectionError(
+                        "Producer shutdown — batch delivery failed".to_string(),
+                    )));
+                }
+                let prev = inner.pending_records.fetch_sub(count, Ordering::Release);
+                if prev <= count {
+                    inner.flush_notify.notify_waiters();
+                }
+            }
+        }
+    }
+
+    // Drain any records still buffered in the mpsc channel.
+    // Without this, `pending_records` stays inflated and `flush()` spins
+    // until `delivery_timeout` expires instead of returning immediately.
+    record_rx.close();
+    while let Ok(record) = record_rx.try_recv() {
+        let _ = record.response_tx.send(Err(Error::ConnectionError(
+            "Producer shutdown — record not sent".to_string(),
+        )));
+        let prev = inner.pending_records.fetch_sub(1, Ordering::Release);
+        if prev == 1 {
+            inner.flush_notify.notify_waiters();
         }
     }
 }
@@ -1531,6 +1825,13 @@ async fn sender_task(
 /// would receive the wrong offset. The `PipelinedClient` in `pipeline.rs`
 /// uses 8-byte request IDs for true out-of-order correlation and should
 /// be used when multiplexing is required.
+///
+/// ## Retry semantics
+///
+/// On transport failure, returns [`BatchSendError`] carrying the records
+/// whose response channels have **not** been used. The caller can reconnect
+/// and resend those records. For idempotent producers, duplicate delivery
+/// is prevented by the server's sequence-number check.
 async fn send_batch<W: AsyncWrite + Unpin, R: AsyncRead + Unpin>(
     writer: &mut BufWriter<W>,
     reader: &mut BufReader<R>,
@@ -1538,7 +1839,7 @@ async fn send_batch<W: AsyncWrite + Unpin, R: AsyncRead + Unpin>(
     batch: RecordBatch,
     producer_epoch: u16,
     partition_sequences: &mut HashMap<(String, u32), i32>,
-) -> Result<()> {
+) -> std::result::Result<(), BatchSendError> {
     let topic = batch.topic.clone();
     let partition = batch.partition;
     let num_records = batch.len();
@@ -1549,23 +1850,29 @@ async fn send_batch<W: AsyncWrite + Unpin, R: AsyncRead + Unpin>(
 
     inner.stats.batches_sent.fetch_add(1, Ordering::Relaxed);
 
-    // Collect response channels for later
-    let mut response_channels: Vec<oneshot::Sender<Result<RecordMetadata>>> =
-        Vec::with_capacity(num_records);
+    // Phase 1: Build a single PublishBatch / IdempotentPublishBatch message.
+    //
+    // We keep cloned (value, key) data alongside the response channels
+    // so that on transport failure we can return them for retry.
+    // `Bytes::clone()` is O(1) — it just bumps an atomic ref-count.
+    let mut response_channels: VecDeque<oneshot::Sender<Result<RecordMetadata>>> =
+        VecDeque::with_capacity(num_records);
+    let mut cloned_data: VecDeque<(Bytes, Option<Bytes>)> = VecDeque::with_capacity(num_records);
+    let mut batch_records: Vec<BatchRecord> = Vec::with_capacity(num_records);
 
-    // Phase 1: Write all records (batched I/O - single flush at end)
-    // apply compression when configured
     #[cfg(feature = "compression")]
     let use_compression = inner.config.compression_type != CompressionType::None;
     #[cfg(not(feature = "compression"))]
     let use_compression = false;
-    // use IdempotentPublish when idempotence is enabled
-    let use_idempotent =
-        inner.config.enable_idempotence && inner.producer_id.load(Ordering::Acquire) != 0;
+
+    let use_idempotent = inner.idempotence_active.load(Ordering::Acquire)
+        && inner.producer_id.load(Ordering::Acquire) != 0;
     let pid = inner.producer_id.load(Ordering::Acquire);
 
     for (value, key, response_tx) in batch.records {
-        response_channels.push(response_tx);
+        // Keep cloned copies for potential retry
+        cloned_data.push_back((value.clone(), key.clone()));
+        response_channels.push_back(response_tx);
 
         let wire_value = if use_compression {
             #[cfg(feature = "compression")]
@@ -1586,55 +1893,91 @@ async fn send_batch<W: AsyncWrite + Unpin, R: AsyncRead + Unpin>(
             value
         };
 
-        let request = if use_idempotent {
-            let seq = partition_sequences
-                .entry((topic.clone(), partition))
-                .or_insert(0);
-            let current_seq = *seq;
-            *seq += 1;
-
-            Request::IdempotentPublish {
-                topic: topic.clone(),
-                partition: Some(partition),
-                key,
-                value: wire_value,
-                producer_id: pid,
-                producer_epoch,
-                sequence: current_seq,
-                leader_epoch: None,
-            }
-        } else {
-            Request::Publish {
-                topic: topic.clone(),
-                partition: Some(partition),
-                key,
-                value: wire_value,
-                leader_epoch: None,
-            }
-        };
-
-        // Serialize and write with wire format (no flush yet - BufWriter coalesces)
-        let request_bytes = request.to_wire(rivven_protocol::WireFormat::Postcard, 0u32)?;
-        let len: u32 = request_bytes
-            .len()
-            .try_into()
-            .map_err(|_| Error::RequestTooLarge(request_bytes.len(), u32::MAX as usize))?;
-        writer.write_all(&len.to_be_bytes()).await?;
-        writer.write_all(&request_bytes).await?;
+        batch_records.push(BatchRecord {
+            key,
+            value: wire_value,
+        });
     }
 
-    // Single flush for entire batch (minimizes syscalls)
-    writer.flush().await?;
+    // Build a single wire message for the entire batch — eliminates
+    // per-record topic cloning, serialization, and write syscalls.
+    let request = if use_idempotent {
+        let seq = partition_sequences
+            .entry((topic.clone(), partition))
+            .or_insert(0);
+        let base_seq = *seq;
+        *seq += num_records as i32;
+
+        Request::IdempotentPublishBatch {
+            topic: topic.clone(),
+            partition: Some(partition),
+            records: batch_records,
+            producer_id: pid,
+            producer_epoch,
+            base_sequence: base_seq,
+            leader_epoch: None,
+        }
+    } else {
+        Request::PublishBatch {
+            topic: topic.clone(),
+            partition: Some(partition),
+            records: batch_records,
+            leader_epoch: None,
+        }
+    };
+
+    // Serialize once (vs. N times with per-record Publish)
+    let request_bytes = match request.to_wire(rivven_protocol::WireFormat::Postcard, 0u32) {
+        Ok(b) => b,
+        Err(e) => {
+            let undelivered = reassemble_undelivered(cloned_data, response_channels);
+            return Err(BatchSendError {
+                error: Error::ProtocolError(e),
+                undelivered,
+            });
+        }
+    };
+    let len: u32 = match request_bytes.len().try_into() {
+        Ok(l) => l,
+        Err(_) => {
+            let undelivered = reassemble_undelivered(cloned_data, response_channels);
+            return Err(BatchSendError {
+                error: Error::RequestTooLarge(request_bytes.len(), u32::MAX as usize),
+                undelivered,
+            });
+        }
+    };
+
+    // Single write + flush (vs. 2N writes + 1 flush)
+    if let Err(e) = writer.write_all(&len.to_be_bytes()).await {
+        let undelivered = reassemble_undelivered(cloned_data, response_channels);
+        return Err(BatchSendError {
+            error: e.into(),
+            undelivered,
+        });
+    }
+    if let Err(e) = writer.write_all(&request_bytes).await {
+        let undelivered = reassemble_undelivered(cloned_data, response_channels);
+        return Err(BatchSendError {
+            error: e.into(),
+            undelivered,
+        });
+    }
+    if let Err(e) = writer.flush().await {
+        let undelivered = reassemble_undelivered(cloned_data, response_channels);
+        return Err(BatchSendError {
+            error: e.into(),
+            undelivered,
+        });
+    }
 
     // acks=0 (fire-and-forget) — skip reading responses.
-    // The broker still processes the writes, but the producer does not
-    // wait for confirmation, trading durability guarantees for latency.
     if inner.config.acks == 0 {
         for response_tx in response_channels {
             let _ = response_tx.send(Ok(RecordMetadata {
                 topic: topic.clone(),
                 partition,
-                offset: 0, // unknown without server response
+                offset: 0,
                 timestamp: 0,
             }));
             inner
@@ -1653,64 +1996,227 @@ async fn send_batch<W: AsyncWrite + Unpin, R: AsyncRead + Unpin>(
         return Ok(());
     }
 
-    // Phase 2: Read all responses (sequential correlation, see doc comment)
+    // Phase 2: Read single batch response (vs. N individual responses).
+    let request_timeout = inner.config.request_timeout;
+    match tokio::time::timeout(
+        request_timeout,
+        read_batch_response(
+            reader,
+            inner,
+            &topic,
+            partition,
+            num_records,
+            &mut cloned_data,
+            &mut response_channels,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(())) => {
+            debug!(
+                "Sent batch of {} records to {}/{}",
+                num_records, topic, partition
+            );
+            Ok(())
+        }
+        Ok(Err(batch_err)) => Err(batch_err),
+        Err(_elapsed) => {
+            let undelivered = reassemble_undelivered(cloned_data, response_channels);
+            Err(BatchSendError {
+                error: Error::TimeoutWithMessage(format!(
+                    "Response reading timed out after {:?} for batch of {} records on {}/{}",
+                    request_timeout, num_records, topic, partition
+                )),
+                undelivered,
+            })
+        }
+    }
+}
+
+/// Read a single batch response from the server and distribute offsets
+/// to per-record response channels.
+///
+/// The server returns one `PublishedBatch` or `IdempotentPublishedBatch`
+/// containing a `base_offset` and `record_count`. Each record gets
+/// `base_offset + i` as its assigned offset.
+///
+/// On error, remaining records in `cloned_data` / `response_channels`
+/// are returned for retry via `BatchSendError`.
+async fn read_batch_response<R: AsyncRead + Unpin>(
+    reader: &mut BufReader<R>,
+    inner: &Arc<ProducerInner>,
+    topic: &str,
+    _partition: u32,
+    num_records: usize,
+    cloned_data: &mut VecDeque<(Bytes, Option<Bytes>)>,
+    response_channels: &mut VecDeque<oneshot::Sender<Result<RecordMetadata>>>,
+) -> std::result::Result<(), BatchSendError> {
     let mut len_buf = [0u8; 4];
-    for response_tx in response_channels {
-        // Read response length
-        reader.read_exact(&mut len_buf).await?;
-        let response_len = u32::from_be_bytes(len_buf) as usize;
 
-        // validate response size to prevent OOM from malicious/buggy servers
-        const MAX_RESPONSE_SIZE: usize = 100 * 1024 * 1024; // 100 MB
-        if response_len > MAX_RESPONSE_SIZE {
-            return Err(Error::ResponseTooLarge(response_len, MAX_RESPONSE_SIZE));
+    // Read response length
+    if let Err(e) = reader.read_exact(&mut len_buf).await {
+        let undelivered = reassemble_undelivered(
+            std::mem::take(cloned_data),
+            std::mem::take(response_channels),
+        );
+        return Err(BatchSendError {
+            error: e.into(),
+            undelivered,
+        });
+    }
+    let response_len = u32::from_be_bytes(len_buf) as usize;
+
+    const MAX_RESPONSE_SIZE: usize = 100 * 1024 * 1024;
+    if response_len > MAX_RESPONSE_SIZE {
+        let undelivered = reassemble_undelivered(
+            std::mem::take(cloned_data),
+            std::mem::take(response_channels),
+        );
+        return Err(BatchSendError {
+            error: Error::ResponseTooLarge(response_len, MAX_RESPONSE_SIZE),
+            undelivered,
+        });
+    }
+
+    let mut response_buf = vec![0u8; response_len];
+    if let Err(e) = reader.read_exact(&mut response_buf).await {
+        let undelivered = reassemble_undelivered(
+            std::mem::take(cloned_data),
+            std::mem::take(response_channels),
+        );
+        return Err(BatchSendError {
+            error: e.into(),
+            undelivered,
+        });
+    }
+
+    let (response, _format, _correlation_id) = match Response::from_wire(&response_buf) {
+        Ok(r) => r,
+        Err(e) => {
+            let undelivered = reassemble_undelivered(
+                std::mem::take(cloned_data),
+                std::mem::take(response_channels),
+            );
+            return Err(BatchSendError {
+                error: Error::ProtocolError(e),
+                undelivered,
+            });
         }
+    };
 
-        // Read response body
-        let mut response_buf = vec![0u8; response_len];
-        reader.read_exact(&mut response_buf).await?;
-
-        let (response, _format, _correlation_id) =
-            Response::from_wire(&response_buf).map_err(Error::ProtocolError)?;
-
-        match response {
-            Response::Published {
-                offset,
-                partition: resp_partition,
-            } => {
-                inner
-                    .stats
-                    .records_delivered
-                    .fetch_add(1, Ordering::Relaxed);
-                let _ = response_tx.send(Ok(RecordMetadata {
-                    topic: topic.clone(),
-                    partition: resp_partition,
-                    offset,
-                    timestamp: 0, // Protocol doesn't return timestamp currently
-                }));
+    match response {
+        Response::PublishedBatch {
+            base_offset,
+            partition: resp_partition,
+            record_count,
+        } => {
+            debug_assert_eq!(
+                record_count as usize, num_records,
+                "server record_count mismatch"
+            );
+            for i in 0..record_count as u64 {
+                cloned_data.pop_front();
+                if let Some(response_tx) = response_channels.pop_front() {
+                    inner
+                        .stats
+                        .records_delivered
+                        .fetch_add(1, Ordering::Relaxed);
+                    let _ = response_tx.send(Ok(RecordMetadata {
+                        topic: topic.to_owned(),
+                        partition: resp_partition,
+                        offset: base_offset + i,
+                        timestamp: 0,
+                    }));
+                    let prev = inner.pending_records.fetch_sub(1, Ordering::Release);
+                    if prev == 1 {
+                        inner.flush_notify.notify_waiters();
+                    }
+                }
             }
-            Response::Error { message } => {
-                inner.stats.errors.fetch_add(1, Ordering::Relaxed);
-                let _ = response_tx.send(Err(Error::ServerError(message)));
+        }
+        Response::IdempotentPublishedBatch {
+            base_offset,
+            partition: resp_partition,
+            record_count,
+            duplicate,
+        } => {
+            if duplicate {
+                debug!(
+                    topic = %topic,
+                    partition = resp_partition,
+                    base_offset,
+                    record_count,
+                    "Server detected batch duplicate (idempotent dedup)"
+                );
             }
-            _ => {
+            debug_assert_eq!(
+                record_count as usize, num_records,
+                "server record_count mismatch"
+            );
+            for i in 0..record_count as u64 {
+                cloned_data.pop_front();
+                if let Some(response_tx) = response_channels.pop_front() {
+                    inner
+                        .stats
+                        .records_delivered
+                        .fetch_add(1, Ordering::Relaxed);
+                    let _ = response_tx.send(Ok(RecordMetadata {
+                        topic: topic.to_owned(),
+                        partition: resp_partition,
+                        offset: base_offset + i,
+                        timestamp: 0,
+                    }));
+                    let prev = inner.pending_records.fetch_sub(1, Ordering::Release);
+                    if prev == 1 {
+                        inner.flush_notify.notify_waiters();
+                    }
+                }
+            }
+        }
+        Response::Error { message } => {
+            inner
+                .stats
+                .errors
+                .fetch_add(num_records as u64, Ordering::Relaxed);
+            // Distribute error to all channels
+            while let Some(response_tx) = response_channels.pop_front() {
+                cloned_data.pop_front();
+                let _ = response_tx.send(Err(Error::ServerError(message.clone())));
+                let prev = inner.pending_records.fetch_sub(1, Ordering::Release);
+                if prev == 1 {
+                    inner.flush_notify.notify_waiters();
+                }
+            }
+        }
+        _ => {
+            // Unexpected response type
+            while let Some(response_tx) = response_channels.pop_front() {
+                cloned_data.pop_front();
                 let _ = response_tx.send(Err(Error::InvalidResponse));
+                let prev = inner.pending_records.fetch_sub(1, Ordering::Release);
+                if prev == 1 {
+                    inner.flush_notify.notify_waiters();
+                }
             }
-        }
-
-        // Decrement pending count and notify flush waiters
-        let prev = inner.pending_records.fetch_sub(1, Ordering::Release);
-        if prev == 1 {
-            // Last record delivered, notify any flush waiters
-            inner.flush_notify.notify_waiters();
         }
     }
 
-    debug!(
-        "Sent batch of {} records to {}/{}",
-        num_records, topic, partition
-    );
     Ok(())
+}
+
+/// Reassemble `(value, key, channel)` tuples from parallel vecs.
+fn reassemble_undelivered(
+    data: VecDeque<(Bytes, Option<Bytes>)>,
+    channels: VecDeque<oneshot::Sender<Result<RecordMetadata>>>,
+) -> Vec<(
+    Bytes,
+    Option<Bytes>,
+    oneshot::Sender<Result<RecordMetadata>>,
+)> {
+    data.into_iter()
+        .zip(channels)
+        .map(|((v, k), tx)| (v, k, tx))
+        .collect()
 }
 
 // ============================================================================
@@ -1876,28 +2382,26 @@ mod tests {
         assert!(cache.get("topic1").await.is_none());
     }
 
-    #[tokio::test]
-    async fn test_sticky_partitioner_with_key() {
+    #[test]
+    fn test_sticky_partitioner_with_key() {
         let partitioner = StickyPartitioner::new();
 
         // Same key should always map to same partition
         let p1 = partitioner
-            .partition("topic", Some(b"key1".as_slice()), 10)
-            .await;
+            .partition("topic", Some(b"key1".as_slice()), 10);
         let p2 = partitioner
-            .partition("topic", Some(b"key1".as_slice()), 10)
-            .await;
+            .partition("topic", Some(b"key1".as_slice()), 10);
         assert_eq!(p1, p2);
     }
 
-    #[tokio::test]
-    async fn test_sticky_partitioner_without_key() {
+    #[test]
+    fn test_sticky_partitioner_without_key() {
         let partitioner = StickyPartitioner::new();
 
         // Without key, should stick to same partition for batch
         let mut partitions = Vec::new();
         for _ in 0..STICKY_BATCH_THRESHOLD {
-            let p = partitioner.partition("topic", None, 10).await;
+            let p = partitioner.partition("topic", None, 10);
             partitions.push(p);
         }
 
@@ -2070,16 +2574,16 @@ mod tests {
         assert!(cache.get("topic2").await.is_none());
     }
 
-    #[tokio::test]
-    async fn test_sticky_partitioner_partition_change() {
+    #[test]
+    fn test_sticky_partitioner_partition_change() {
         let partitioner = StickyPartitioner::new();
 
         // Get initial partition with 4 partitions
-        let p1 = partitioner.partition("topic", None, 4).await;
+        let p1 = partitioner.partition("topic", None, 4);
         assert!(p1 < 4);
 
         // Change to 8 partitions - should reset
-        let p2 = partitioner.partition("topic", None, 8).await;
+        let p2 = partitioner.partition("topic", None, 8);
         assert!(p2 < 8);
     }
 }

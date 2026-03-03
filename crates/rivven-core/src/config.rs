@@ -141,6 +141,10 @@ impl Config {
                 self.log_level
             ));
         }
+        // Reject EveryNWrites(0) which would cause infinite loop / div-by-zero.
+        if let SegmentSyncPolicy::EveryNWrites(0) = self.sync_policy {
+            return Err("sync_policy EveryNWrites(n) requires n > 0".into());
+        }
         Ok(())
     }
 }

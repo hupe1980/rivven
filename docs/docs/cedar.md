@@ -523,6 +523,14 @@ authorization:
 
 The Schema Registry (`rivven-schema`) supports Cedar authorization for schema operations.
 
+{: .warning }
+> **Current Status:** Cedar authorization for the Schema Registry is **not yet fully integrated**.
+> When built with the `cedar` feature, all mutating endpoints (register, delete, alter config)
+> are **denied by default** (fail-closed) and return `403 Forbidden` — regardless of whether
+> auth middleware is configured. This ensures no mutations are possible while the Cedar policy
+> evaluation is being wired in. Read-only operations (describe, list, compatibility checks)
+> are unaffected.
+
 ### Enable Cedar for Schema Registry
 
 Build with the `cedar` feature:

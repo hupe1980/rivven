@@ -139,12 +139,11 @@ where
         .try_into()
         .map_err(|_| anyhow::anyhow!("response size {} exceeds u32::MAX", response_bytes.len()))?;
 
-    // Combine the 4-byte length prefix and the response body into a single
-    // write to avoid an extra async syscall per response.
-    let mut frame = Vec::with_capacity(4 + response_bytes.len());
-    frame.extend_from_slice(&len.to_be_bytes());
-    frame.extend_from_slice(&response_bytes);
-    stream.write_all(&frame).await?;
+    // Write length prefix and response body as two back-to-back writes.
+    // The caller's BufWriter (or TCP Nagle) coalesces them into a single
+    // syscall, avoiding the overhead of allocating an intermediate frame buffer.
+    stream.write_all(&len.to_be_bytes()).await?;
+    stream.write_all(&response_bytes).await?;
     stream.flush().await?;
     Ok(())
 }

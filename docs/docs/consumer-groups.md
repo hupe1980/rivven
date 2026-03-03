@@ -133,7 +133,7 @@ Consumer 3: P2, P5
 
 ### Sticky
 
-Minimizes partition movement during rebalances:
+Minimizes partition movement during rebalances while guaranteeing **KIP-54 fairness** (max-difference-of-1):
 
 ```
 Before (2 consumers):
@@ -143,8 +143,15 @@ Before (2 consumers):
 After adding Consumer 3 (sticky):
   Consumer 1: P0, P1      ← kept P0, P1
   Consumer 2: P3, P4      ← kept P3, P4
-  Consumer 3: P2, P5      ← only moved partitions
+  Consumer 3: P2, P5      ← received partitions from both
 ```
+
+The algorithm uses a 3-step approach:
+1. **Preserve**: Previous assignments that still exist are kept
+2. **Trim excess**: Over-provisioned members (more than ⌈total/n⌉ partitions) donate excess to the unassigned pool
+3. **Distribute**: Unassigned partitions go to under-provisioned members (fewest-first)
+
+This guarantees every member receives partitions and the max difference between any two members is 1.
 
 **Best for**: Stateful consumers, minimizing rebalance impact
 
@@ -249,6 +256,8 @@ Cooperative rebalancing eliminates **stop-the-world** rebalances by using increm
 ```
 
 ### Cooperative Rebalancing
+
+**Generation correctness:** `complete_cooperative_rebalance` bumps the generation only for the two-phase revocation path; the no-revocation fast path delegates to `complete_rebalance` (which does not bump, since `transition_to_preparing_rebalance` already did). `Empty` and `Dead` state transitions now properly move to `PreparingRebalance` rather than skipping rebalance phases.
 
 ```
 1. First rebalance: Identify partitions that need to move
@@ -371,6 +380,44 @@ Each consumer group has a **coordinator** broker responsible for:
 - Managing group membership
 - Triggering rebalances
 - Storing committed offsets
+- Processing JoinGroup/SyncGroup/Heartbeat/LeaveGroup protocol messages
+
+### Coordination Protocol
+
+The consumer group coordination protocol uses four request/response pairs:
+
+```text
+Consumer                    GroupCoordinator                 Consumer (leader)
+   │                               │                               │
+   │── JoinGroup ─────────────────►│◄──── JoinGroup ───────────────│
+   │                               │  (collects all members,       │
+   │                               │   selects leader,             │
+   │                               │   assigns generation ID)      │
+   │◄─ JoinGroupResult ───────────│──── JoinGroupResult ──────────►│
+   │   (member_id, generation)     │   (member_id, generation,     │
+   │                               │    + full member list)         │
+   │                               │                               │
+   │── SyncGroup(empty) ──────────►│◄── SyncGroup(assignments) ───│
+   │                               │  (leader sends partition      │
+   │                               │   assignments for all members)│
+   │◄─ SyncGroupResult ───────────│──── SyncGroupResult ──────────►│
+   │   (my partitions)             │   (leader's partitions)       │
+   │                               │                               │
+   │── Heartbeat ─────────────────►│                               │
+   │◄─ HeartbeatResult(0=OK) ─────│                               │
+   │   or (27=REBALANCE)           │                               │
+   │                               │                               │
+   │── LeaveGroup ────────────────►│                               │
+   │◄─ LeaveGroupResult ──────────│                               │
+```
+
+**JoinGroup**: Registers a consumer with the coordinator. The coordinator collects all members, selects a leader, assigns a new generation ID, and transitions the group to `CompletingRebalance`. **Generation correctness:** The generation ID is only bumped when transitioning from the `Stable` state to `PreparingRebalance`, not from `CompletingRebalance`. This ensures all members joining during the initial join phase share the same generation, avoiding generation-mismatch errors during rapid rejoin sequences.
+
+**SyncGroup**: The leader computes partition assignments (range-based by default) and sends them via `SyncGroup`. The coordinator distributes each member's assignment in the response. **Follower barrier:** If a follower calls `SyncGroup` before the leader has submitted assignments, the coordinator blocks the follower via `tokio::sync::Notify` until the leader's assignments are applied (subject to the rebalance timeout). The follower's `Notified` future is registered **before** acquiring the groups lock (`barrier.notified()` + `enable()`), eliminating a race where the leader's `notify_waiters()` could fire between the lock drop and `.await`, which previously caused followers to stall for the full 30-second rebalance timeout. This prevents followers from receiving empty assignments due to a race condition.
+
+**Heartbeat**: Periodic keep-alive. Returns error code `0` (OK) or `27` (`REBALANCE_IN_PROGRESS`) to signal that the consumer must rejoin.
+
+**LeaveGroup**: Graceful departure. Removes the member and triggers a rebalance for remaining members. If the group becomes empty, it transitions to `Dead` and is cleaned up.
 
 ### Finding the Coordinator
 
@@ -399,12 +446,13 @@ coordinator_broker = leader_of(coordinator_partition)
 
 ### Heartbeats
 
-Consumers send periodic heartbeats to prove liveness:
+Consumers send periodic `Heartbeat` requests to the coordinator to prove liveness.
+The coordinator responds with error code `0` (OK) or `27` (`REBALANCE_IN_PROGRESS`):
 
 ```yaml
 consumer:
   heartbeat_interval_ms: 3000   # Send heartbeat every 3s
-  session_timeout_ms: 45000     # Coordinator waits 45s before declaring dead
+  session_timeout_ms: 10000     # Coordinator waits 10s before declaring dead
 ```
 
 ### Session Timeout

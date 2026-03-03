@@ -276,6 +276,14 @@ if $INTEGRATION; then
     
     # Integration tests require Docker for testcontainers
     if command -v docker &> /dev/null && docker info &> /dev/null; then
+        # Clean up stale containers from previous test runs (testcontainers
+        # relies on async Drop which can silently fail to remove containers)
+        stale_containers=$(docker ps -aq --filter "status=exited" 2>/dev/null | wc -l | tr -d ' ')
+        if [[ "$stale_containers" -gt 0 ]]; then
+            print_info "Removing $stale_containers stale Docker container(s)…"
+            docker container prune -f > /dev/null 2>&1 || true
+        fi
+
         run_check "Integration Tests" cargo test --all-features --workspace -- --test-threads=1
     else
         print_err "Docker not available - integration tests require Docker"

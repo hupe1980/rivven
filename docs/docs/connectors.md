@@ -135,6 +135,52 @@ settings:
     validate_existing: false       # Warn if existing topic config differs
 ```
 
+### Resilience
+
+Source connectors and storage sinks include built-in retry logic for transient failures:
+
+| Component | Retry Behavior |
+|:----------|:---------------|
+| **Source publish** | 3 attempts with exponential backoff on broker publish failures |
+| **Dead Letter Queue** | Failed events routed to a configurable DLQ topic instead of halting the pipeline |
+| **Storage upload** | 3 attempts with exponential backoff via `put_with_retry()` for object storage sinks (S3, GCS, Azure) |
+| **Fatal error detection** | `select_all`-based efficient monitoring of connector tasks (no busy-polling) |
+
+### Dead Letter Queue (DLQ)
+
+When a source connector exhausts all publish retries for an event, the default behavior is to halt the pipeline to prevent silent data loss. This is particularly critical for CDC connectors where the replication slot advances past events — a failed publish means the event is permanently lost.
+
+By configuring a `dead_letter_topic`, failed events are instead routed to the DLQ topic so the pipeline can continue operating. The DLQ event is wrapped in an envelope containing the original payload (base64-encoded), the original topic, error details, retry count, and a timestamp for later inspection and replay.
+
+```yaml
+sources:
+  postgres:
+    connector: postgres-cdc
+    topic: cdc.events
+    dead_letter_topic: cdc.events.dlq    # Route failed publishes here
+    config:
+      # ...
+```
+
+The DLQ topic is auto-created alongside the main topic when `auto_create` is enabled. DLQ publish itself retries up to 3 times — if the DLQ publish also fails, the pipeline halts to prevent irretrievable data loss.
+
+| Config Field | Type | Default | Description |
+|:-------------|:-----|:--------|:------------|
+| `dead_letter_topic` | string | - | Topic for events that fail all publish retries |
+
+**DLQ Envelope Format:**
+
+```json
+{
+  "original_topic": "cdc.events",
+  "connector_name": "postgres",
+  "payload_b64": "<base64-encoded original payload>",
+  "error": "publish failed after 3 retries",
+  "retry_count": 3,
+  "timestamp": "2025-01-15T10:30:00Z"
+}
+```
+
 **Per-source overrides:**
 
 ```yaml
@@ -331,6 +377,8 @@ sources:
 | `consumer_group` | ✓ | - | Consumer group ID |
 | `start_offset` | | `latest` | `earliest`, `latest`, or specific offset |
 | `security.protocol` | | `plaintext` | `plaintext`, `ssl`, `sasl_plaintext`, `sasl_ssl` |
+
+> **Security Note:** Kafka connector secrets (`password`, `oauth_token`, `aws_secret_access_key`) are handled as `SensitiveString` values — they are zeroized on drop and automatically redacted in log output.
 
 **Metrics:**
 
@@ -1823,9 +1871,16 @@ sinks:
     rate_limit:
       events_per_second: 1000
       burst_capacity: 100
+    offset_commit_interval: 500  # commit offsets every 500 events (default: 100)
     config:
       url: https://api.example.com/ingest
 ```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `rate_limit.events_per_second` | `0` (unlimited) | Max events per second |
+| `rate_limit.burst_capacity` | 10% of events/sec | Extra burst allowance |
+| `offset_commit_interval` | `100` | Commit consumer offsets every N events |
 
 ---
 

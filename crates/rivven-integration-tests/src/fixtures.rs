@@ -1747,13 +1747,35 @@ impl TestKafka {
     ///
     /// Uses the Kafka testcontainer module which provides a single-node
     /// Kafka broker with KRaft (no Zookeeper required).
+    ///
+    /// Retries up to 3 times on container startup failures (e.g. Docker
+    /// log-stream races under resource pressure).
     pub async fn start() -> Result<Self> {
         use testcontainers::runners::AsyncRunner;
         use testcontainers_modules::kafka::apache::Kafka;
 
         info!("Starting Kafka container...");
 
-        let container = Kafka::default().start().await?;
+        let mut last_err: Option<anyhow::Error> = None;
+        let mut container = None;
+        for attempt in 1..=3 {
+            match Kafka::default().start().await {
+                Ok(c) => {
+                    container = Some(c);
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Kafka container start attempt {attempt}/3 failed: {e:#}; retrying…"
+                    );
+                    last_err = Some(e.into());
+                    sleep(Duration::from_secs(2)).await;
+                }
+            }
+        }
+        let container = container.ok_or_else(|| {
+            last_err.unwrap_or_else(|| anyhow::anyhow!("Kafka container failed to start"))
+        })?;
 
         // Use 127.0.0.1 – krafka requires numeric IP for SocketAddr parsing,
         // and the advertised listener also uses 127.0.0.1.

@@ -52,7 +52,7 @@ pub struct Consumer {
     partition: u32,
     group: Option<String>,
     offset: Arc<Mutex<u64>>,
-    batch_size: usize,
+    batch_size: u32,
     auto_commit: bool,
     /// Poll interval for empty fetch retries in `__anext__`.
     /// Prevents StopAsyncIteration on momentarily empty topics.
@@ -74,7 +74,7 @@ impl Consumer {
         partition: u32,
         group: Option<String>,
         start_offset: u64,
-        batch_size: usize,
+        batch_size: u32,
         auto_commit: bool,
     ) -> Self {
         Self {
@@ -140,7 +140,7 @@ impl Consumer {
     pub fn fetch<'py>(
         &self,
         py: Python<'py>,
-        max_messages: Option<usize>,
+        max_messages: Option<u32>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = Arc::clone(&self.client);
         let topic = self.topic.clone();

@@ -473,11 +473,9 @@ impl ValidationRule {
 
         // Check subject pattern filter
         if !self.subject_patterns.is_empty() {
-            let matches_any = self.subject_patterns.iter().any(|pattern| {
-                regex::Regex::new(pattern)
-                    .map(|re| re.is_match(subject))
-                    .unwrap_or(false)
-            });
+            let matches_any = regex::RegexSet::new(&self.subject_patterns)
+                .map(|set| set.is_match(subject))
+                .unwrap_or(false);
             if !matches_any {
                 return false;
             }

@@ -304,7 +304,12 @@ impl OpenAiProvider {
             // send a small JSON envelope with a multi-megabyte message field.
             let msg = err.error.message;
             if msg.len() > MAX_ERROR_BODY_BYTES {
-                msg[..MAX_ERROR_BODY_BYTES].to_string()
+                // Safe truncation: find a valid UTF-8 boundary
+                let mut end = MAX_ERROR_BODY_BYTES;
+                while end > 0 && !msg.is_char_boundary(end) {
+                    end -= 1;
+                }
+                msg[..end].to_string()
             } else {
                 msg
             }

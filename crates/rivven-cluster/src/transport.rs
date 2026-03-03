@@ -143,6 +143,12 @@ pub struct Transport {
 impl Transport {
     /// Create new transport
     pub fn new(local_node: NodeId, bind_addr: SocketAddr, config: TransportConfig) -> Self {
+        #[cfg(not(feature = "quic"))]
+        warn!(
+            "Cluster transport is PLAINTEXT — all Raft, replication and metadata traffic is \
+             unencrypted. Enable the 'quic' feature for TLS 1.3 encryption."
+        );
+
         Self {
             local_node,
             bind_addr,
@@ -372,21 +378,29 @@ impl Transport {
         Ok(())
     }
 
-    /// Broadcast request to all peers
+    /// Broadcast request to all peers concurrently.
+    ///
+    /// Sends to all peers in parallel so a single slow/dead node does not
+    /// delay the entire broadcast (CLUSTER-02).
     pub async fn broadcast(
         &self,
         request: ClusterRequest,
     ) -> Vec<(NodeId, Result<ClusterResponse>)> {
         let peers: Vec<_> = self.peer_addrs.iter().map(|e| e.key().clone()).collect();
 
-        let mut results = Vec::with_capacity(peers.len());
+        let futures: Vec<_> = peers
+            .into_iter()
+            .map(|peer| {
+                let req = request.clone();
+                let peer_clone = peer.clone();
+                async move {
+                    let result = self.send(&peer_clone, req).await;
+                    (peer_clone, result)
+                }
+            })
+            .collect();
 
-        for peer in peers {
-            let result = self.send(&peer, request.clone()).await;
-            results.push((peer, result));
-        }
-
-        results
+        futures::future::join_all(futures).await
     }
 
     /// Get connection from pool or create new one

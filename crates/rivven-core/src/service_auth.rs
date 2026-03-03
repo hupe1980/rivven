@@ -864,7 +864,7 @@ impl ServiceAuthManager {
             client_ip,
             permissions,
             Some(key_id.clone()),
-        );
+        )?;
 
         // Clear rate limit on success
         self.rate_limiter.write().clear(client_ip);
@@ -909,7 +909,7 @@ impl ServiceAuthManager {
             client_ip,
             permissions,
             None,
-        );
+        )?;
 
         info!(
             "Authenticated service '{}' via mTLS certificate from {}",
@@ -927,10 +927,11 @@ impl ServiceAuthManager {
         client_ip: &str,
         permissions: Vec<String>,
         api_key_id: Option<String>,
-    ) -> ServiceSession {
+    ) -> Result<ServiceSession, ServiceAuthError> {
         let rng = SystemRandom::new();
         let mut session_id_bytes = [0u8; 16];
-        rng.fill(&mut session_id_bytes).expect("RNG failed");
+        rng.fill(&mut session_id_bytes)
+            .map_err(|_| ServiceAuthError::Internal("OS entropy source unavailable".into()))?;
         let session_id = hex::encode(session_id_bytes);
 
         let now = Instant::now();
@@ -946,7 +947,7 @@ impl ServiceAuthManager {
         };
 
         self.sessions.write().insert(session_id, session.clone());
-        session
+        Ok(session)
     }
 
     /// Validate a session

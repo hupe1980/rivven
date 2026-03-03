@@ -88,6 +88,8 @@ sync_binlog = 1               # Durability
 
 Restart MySQL/MariaDB after changes.
 
+> **Note:** Rivven validates `binlog_format=ROW` at connector startup and returns an error if the server is configured with `STATEMENT` or `MIXED` format. This prevents silent data loss from statement-based binlog events that the row-level CDC decoder cannot handle.
+
 ### User Permissions
 
 ```sql

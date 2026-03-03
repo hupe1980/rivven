@@ -105,38 +105,55 @@ impl TokenBucket {
     }
 
     /// Refill tokens based on elapsed time
+    ///
+    /// Uses a CAS retry loop to ensure no tokens are lost under contention.
+    /// If two threads race on `last_refill`, the loser retries with the
+    /// winner's updated timestamp instead of silently dropping tokens.
     fn refill(&self) {
-        let now = self.created.elapsed().as_nanos() as u64;
-        let last = self.last_refill.load(Ordering::Acquire);
+        loop {
+            let now = self.created.elapsed().as_nanos() as u64;
+            let last = self.last_refill.load(Ordering::Acquire);
 
-        if now <= last {
-            return;
-        }
+            if now <= last {
+                return;
+            }
 
-        let rate = self.refill_rate();
-        let elapsed_secs = (now - last) as f64 / 1_000_000_000.0;
-        let new_tokens = (elapsed_secs * rate) as u64;
+            let rate = self.refill_rate();
+            let elapsed_secs = (now - last) as f64 / 1_000_000_000.0;
+            let new_tokens = (elapsed_secs * rate) as u64;
 
-        if new_tokens == 0 {
-            return;
-        }
+            if new_tokens == 0 {
+                return;
+            }
 
-        if self
-            .last_refill
-            .compare_exchange(last, now, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
-        {
-            loop {
-                let current = self.tokens.load(Ordering::Acquire);
-                let new_total = (current + new_tokens).min(self.capacity);
+            match self.last_refill.compare_exchange_weak(
+                last,
+                now,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    loop {
+                        let current = self.tokens.load(Ordering::Acquire);
+                        let new_total = (current + new_tokens).min(self.capacity);
 
-                if self
-                    .tokens
-                    .compare_exchange_weak(current, new_total, Ordering::AcqRel, Ordering::Relaxed)
-                    .is_ok()
-                {
-                    break;
+                        if self
+                            .tokens
+                            .compare_exchange_weak(
+                                current,
+                                new_total,
+                                Ordering::AcqRel,
+                                Ordering::Relaxed,
+                            )
+                            .is_ok()
+                        {
+                            break;
+                        }
+                        std::hint::spin_loop();
+                    }
+                    return;
                 }
+                Err(_) => continue, // Retry with updated `last`
             }
         }
     }
@@ -228,6 +245,7 @@ impl CreditFlowControl {
                 self.stats.consumed.fetch_add(count, Ordering::Relaxed);
                 return true;
             }
+            std::hint::spin_loop();
         }
     }
 
@@ -253,6 +271,7 @@ impl CreditFlowControl {
                 self.credit_notify.notify_waiters();
                 break;
             }
+            std::hint::spin_loop();
         }
     }
 

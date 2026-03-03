@@ -11,7 +11,7 @@ impl RequestHandler {
         topic_name: String,
         partition: u32,
         offset: u64,
-        max_messages: usize,
+        max_messages: u32,
         isolation_level: Option<u8>,
         max_wait_ms: Option<u64>,
     ) -> Response {
@@ -28,7 +28,7 @@ impl RequestHandler {
         }
 
         // Enforce reasonable limits on max_messages
-        const MAX_MESSAGES_LIMIT: usize = 10_000;
+        const MAX_MESSAGES_LIMIT: u32 = 10_000;
         if max_messages > MAX_MESSAGES_LIMIT {
             warn!(
                 "max_messages {} exceeds server limit of {}, capping",
@@ -36,6 +36,7 @@ impl RequestHandler {
             );
         }
         let max_messages = max_messages.min(MAX_MESSAGES_LIMIT);
+        let max_messages_usize = max_messages as usize;
 
         // Parse isolation level (0 = read_uncommitted, 1 = read_committed)
         let read_committed = isolation_level.map(|l| l == 1).unwrap_or(false);
@@ -66,7 +67,7 @@ impl RequestHandler {
 
         let messages = if max_wait.is_zero() {
             // Immediate fetch (backward compatible)
-            match topic.read(partition, offset, max_messages).await {
+            match topic.read(partition, offset, max_messages_usize).await {
                 Ok(msgs) => msgs,
                 Err(e) => {
                     return Response::Error {
@@ -101,7 +102,7 @@ impl RequestHandler {
                 let mut notified = std::pin::pin!(notified);
                 notified.as_mut().enable();
 
-                match topic.read(partition, offset, max_messages).await {
+                match topic.read(partition, offset, max_messages_usize).await {
                     Ok(msgs) if !msgs.is_empty() => break msgs,
                     Ok(_) => {
                         // No data yet — wait for a write or timeout
@@ -115,7 +116,7 @@ impl RequestHandler {
                             _ = notified => { /* retry read */ }
                             _ = tokio::time::sleep(remaining) => {
                                 // Final attempt before returning empty
-                                match topic.read(partition, offset, max_messages).await {
+                                match topic.read(partition, offset, max_messages_usize).await {
                                     Ok(msgs) => break msgs,
                                     Err(e) => {
                                         return Response::Error {

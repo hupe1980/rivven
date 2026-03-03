@@ -71,6 +71,9 @@ impl Drop for KeyMaterial {
     fn drop(&mut self) {
         // Volatile write prevents the compiler from optimizing away the zeroing
         for byte in self.bytes.iter_mut() {
+            // SAFETY: `byte` is a valid mutable reference into `self.bytes`,
+            // a stack-allocated `[u8; KEY_SIZE]`. The volatile write is
+            // guaranteed not to be elided by the compiler.
             unsafe { std::ptr::write_volatile(byte, 0) };
         }
         std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);

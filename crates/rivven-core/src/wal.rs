@@ -402,6 +402,8 @@ pub struct GroupCommitWal {
     write_notify: Arc<Notify>,
     /// Statistics
     stats: Arc<WalStats>,
+    /// Background worker handle — awaited during shutdown to guarantee drain
+    worker_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl GroupCommitWal {
@@ -423,6 +425,7 @@ impl GroupCommitWal {
             shutdown: AtomicBool::new(false),
             write_notify: Arc::new(Notify::new()),
             stats: Arc::new(WalStats::new()),
+            worker_handle: tokio::sync::Mutex::new(None),
         });
 
         // Start background group commit worker
@@ -736,9 +739,17 @@ impl GroupCommitWal {
     }
 
     /// Shutdown the WAL
+    ///
+    /// Signals the background worker to stop, then **awaits** it so that all
+    /// buffered writes are drained and flushed before this method returns.
     pub async fn shutdown(&self) -> io::Result<()> {
         self.shutdown.store(true, Ordering::Release);
         self.write_notify.notify_waiters();
+
+        // Wait for the background worker to finish its drain-and-flush.
+        if let Some(handle) = self.worker_handle.lock().await.take() {
+            let _ = handle.await;
+        }
 
         // Final sync
         let mut writer = self.writer.lock().await;
@@ -812,7 +823,7 @@ impl GroupCommitWal {
     fn start_group_commit_worker(self: Arc<Self>, mut rx: mpsc::Receiver<WriteRequest>) {
         let wal = self.clone();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let mut pending: VecDeque<WriteRequest> = VecDeque::new();
             let mut batch_buffer = BytesMut::with_capacity(wal.config.max_batch_size);
             let mut group_start: Option<Instant> = None;
@@ -820,8 +831,11 @@ impl GroupCommitWal {
             loop {
                 // Check shutdown early
                 if wal.shutdown.load(Ordering::Acquire) {
-                    // Drain any remaining messages from channel
-                    while let Ok(request) = rx.try_recv() {
+                    // Close the receiver so any future write_tx.send() returns
+                    // an error immediately, preventing new enqueues.
+                    rx.close();
+                    // Drain all messages that were already enqueued before close
+                    while let Some(request) = rx.recv().await {
                         pending.push_back(request);
                     }
                     // Flush remaining and exit
@@ -873,6 +887,12 @@ impl GroupCommitWal {
                 }
             }
         });
+
+        // Store the handle so shutdown() can await it.
+        // Uses a blocking try_lock since this is called once at init.
+        if let Ok(mut guard) = self.worker_handle.try_lock() {
+            *guard = Some(handle);
+        }
     }
 
     /// Flush a batch of pending writes
@@ -1367,7 +1387,15 @@ impl WalReader {
     pub async fn read_all(&mut self) -> io::Result<Vec<WalRecord>> {
         let data = tokio::fs::read(&self.path).await?;
         let mut records = Vec::new();
-        let mut lsn = 0u64;
+
+        // Derive the starting LSN from the WAL filename (e.g., "00000000000000000042.wal" → 42).
+        // Falls back to 0 for non-standard filenames.
+        let start_lsn = self
+            .path
+            .file_stem()
+            .and_then(|s| s.to_string_lossy().parse::<u64>().ok())
+            .unwrap_or(0);
+        let mut lsn = start_lsn;
 
         while self.position + RECORD_HEADER_SIZE as u64 <= data.len() as u64 {
             let offset = self.position as usize;
@@ -1424,7 +1452,12 @@ impl WalReader {
     pub async fn seek_to_lsn(&mut self, target_lsn: u64) -> io::Result<()> {
         let data = tokio::fs::read(&self.path).await?;
         let mut position = 0usize;
-        let mut current_lsn = 0u64;
+        // Derive start LSN from filename (matches read_all behaviour).
+        let mut current_lsn = self
+            .path
+            .file_stem()
+            .and_then(|s| s.to_string_lossy().parse::<u64>().ok())
+            .unwrap_or(0);
 
         while position + RECORD_HEADER_SIZE <= data.len() {
             let magic = u32::from_be_bytes([

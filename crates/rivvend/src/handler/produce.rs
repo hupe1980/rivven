@@ -393,4 +393,323 @@ impl RequestHandler {
         self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
         result
     }
+
+    /// Handle a batch publish — appends all records atomically and returns
+    /// a single `PublishedBatch` response with the base offset.
+    pub(crate) async fn handle_publish_batch(
+        &self,
+        topic_name: String,
+        partition: Option<u32>,
+        records: Vec<rivven_protocol::BatchRecord>,
+        leader_epoch: Option<u64>,
+    ) -> Response {
+        if records.is_empty() {
+            return Response::PublishedBatch {
+                base_offset: 0,
+                partition: 0,
+                record_count: 0,
+            };
+        }
+
+        // Compute total message size for backpressure
+        let msg_size: usize = records
+            .iter()
+            .map(|r| r.value.len() + r.key.as_ref().map_or(0, |k| k.len()))
+            .sum();
+        let current = self.pending_bytes.fetch_add(msg_size, Ordering::AcqRel);
+        if current + msg_size > self.max_pending_bytes {
+            self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
+            warn!(
+                "PublishBatch rejected: pending bytes {} + {} exceeds limit {}",
+                current, msg_size, self.max_pending_bytes
+            );
+            return Response::Error {
+                message: "BUFFER_FULL: Server publish buffer is full, retry later".to_string(),
+            };
+        }
+
+        // Validate topic name
+        if let Err(e) = Validator::validate_topic_name(&topic_name) {
+            self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
+            return Response::Error {
+                message: format!("INVALID_TOPIC_NAME: {}", e),
+            };
+        }
+
+        // Resolve topic
+        let topic = match self.resolve_topic(topic_name).await {
+            Ok(t) => t,
+            Err(e) => {
+                self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
+                return Response::Error { message: e };
+            }
+        };
+
+        // Determine partition (using first record's key for hash)
+        let partition_id = partition.unwrap_or_else(|| {
+            self.partitioner.partition(
+                topic.name(),
+                records[0].key.as_ref().map(|k| k.as_ref()),
+                topic.num_partitions() as u32,
+            )
+        });
+
+        if let Err(e) = Validator::validate_partition(partition_id, topic.num_partitions() as u32) {
+            self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
+            return Response::Error {
+                message: format!("INVALID_PARTITION: {}", e),
+            };
+        }
+
+        // Epoch fencing
+        if let Some(client_epoch) = leader_epoch {
+            if let Some(ref checker) = self.leader_epoch_checker {
+                if let Some(server_epoch) = checker(topic.name(), partition_id) {
+                    if client_epoch < server_epoch {
+                        self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
+                        return Response::Error {
+                            message: format!(
+                                "FENCED_LEADER_EPOCH: client epoch {} < server epoch {}",
+                                client_epoch, server_epoch
+                            ),
+                        };
+                    }
+                }
+            }
+        }
+
+        // Append all records
+        let record_count = records.len() as u32;
+        let mut base_offset = 0u64;
+        for (i, record) in records.into_iter().enumerate() {
+            let message = if let Some(k) = record.key {
+                Message::with_key(k, record.value)
+            } else {
+                Message::new(record.value)
+            };
+
+            if let Err(e) = self.wal_write(topic.name(), partition_id, &message).await {
+                self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
+                error!("WAL write failed in batch (record {}): {}", i, e);
+                return Response::Error {
+                    message: format!("WAL_ERROR: {}", e),
+                };
+            }
+
+            match topic.append(partition_id, message).await {
+                Ok(offset) => {
+                    if i == 0 {
+                        base_offset = offset;
+                    }
+                }
+                Err(e) => {
+                    self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
+                    error!("Failed to append record {} in batch: {}", i, e);
+                    return Response::Error {
+                        message: e.to_string(),
+                    };
+                }
+            }
+        }
+
+        self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
+
+        debug!(
+            "PublishBatch: {} records at base offset {} partition {}",
+            record_count, base_offset, partition_id
+        );
+
+        Response::PublishedBatch {
+            base_offset,
+            partition: partition_id,
+            record_count,
+        }
+    }
+
+    /// Handle idempotent batch publish with sequence validation.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn handle_idempotent_publish_batch(
+        &self,
+        topic_name: String,
+        partition: Option<u32>,
+        records: Vec<rivven_protocol::BatchRecord>,
+        producer_id: u64,
+        producer_epoch: u16,
+        base_sequence: i32,
+        leader_epoch: Option<u64>,
+    ) -> Response {
+        if records.is_empty() {
+            return Response::IdempotentPublishedBatch {
+                base_offset: 0,
+                partition: 0,
+                record_count: 0,
+                duplicate: false,
+            };
+        }
+
+        // Backpressure
+        let msg_size: usize = records
+            .iter()
+            .map(|r| r.value.len() + r.key.as_ref().map_or(0, |k| k.len()))
+            .sum();
+        let current = self.pending_bytes.fetch_add(msg_size, Ordering::AcqRel);
+        if current + msg_size > self.max_pending_bytes {
+            self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
+            return Response::Error {
+                message: "BUFFER_FULL: Server publish buffer is full, retry later".to_string(),
+            };
+        }
+
+        // Validate topic name
+        if let Err(e) = Validator::validate_topic_name(&topic_name) {
+            self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
+            return Response::Error {
+                message: format!("INVALID_TOPIC_NAME: {}", e),
+            };
+        }
+
+        // Resolve topic
+        let topic = match self.resolve_topic(topic_name).await {
+            Ok(t) => t,
+            Err(e) => {
+                self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
+                return Response::Error { message: e };
+            }
+        };
+
+        // Determine partition
+        let partition_id = partition.unwrap_or_else(|| {
+            self.partitioner.partition(
+                topic.name(),
+                records[0].key.as_ref().map(|k| k.as_ref()),
+                topic.num_partitions() as u32,
+            )
+        });
+
+        if let Err(e) = Validator::validate_partition(partition_id, topic.num_partitions() as u32) {
+            self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
+            return Response::Error {
+                message: format!("INVALID_PARTITION: {}", e),
+            };
+        }
+
+        // Epoch fencing
+        if let Some(client_epoch) = leader_epoch {
+            if let Some(ref checker) = self.leader_epoch_checker {
+                if let Some(server_epoch) = checker(topic.name(), partition_id) {
+                    if client_epoch < server_epoch {
+                        self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
+                        return Response::Error {
+                            message: format!(
+                                "FENCED_LEADER_EPOCH: client epoch {} < server epoch {}",
+                                client_epoch, server_epoch
+                            ),
+                        };
+                    }
+                }
+            }
+        }
+
+        // Validate base sequence first (check for batch-level duplicate)
+        let validation = self.idempotent_manager.validate_produce(
+            producer_id,
+            producer_epoch,
+            partition_id,
+            base_sequence,
+            0,
+        );
+
+        match validation {
+            SequenceResult::Valid => { /* proceed */ }
+            SequenceResult::Duplicate { cached_offset } => {
+                self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
+                return Response::IdempotentPublishedBatch {
+                    base_offset: cached_offset,
+                    partition: partition_id,
+                    record_count: records.len() as u32,
+                    duplicate: true,
+                };
+            }
+            SequenceResult::OutOfOrder { expected, received } => {
+                self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
+                return Response::Error {
+                    message: format!(
+                        "OUT_OF_ORDER_SEQUENCE: expected {}, got {}",
+                        expected, received
+                    ),
+                };
+            }
+            SequenceResult::Fenced {
+                current_epoch,
+                received_epoch,
+            } => {
+                self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
+                return Response::Error {
+                    message: format!(
+                        "PRODUCER_FENCED: current epoch {}, received {}",
+                        current_epoch, received_epoch
+                    ),
+                };
+            }
+            SequenceResult::UnknownProducer => {
+                self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
+                return Response::Error {
+                    message: format!(
+                        "UNKNOWN_PRODUCER_ID: producer {} not initialized",
+                        producer_id
+                    ),
+                };
+            }
+        }
+
+        // Append all records with incremented sequences
+        let record_count = records.len() as u32;
+        let mut base_offset = 0u64;
+        for (i, record) in records.into_iter().enumerate() {
+            let seq = base_sequence + i as i32;
+            let message = if let Some(k) = record.key {
+                Message::with_key(k, record.value)
+            } else {
+                Message::new(record.value)
+            };
+
+            if let Err(e) = self.wal_write(topic.name(), partition_id, &message).await {
+                self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
+                return Response::Error {
+                    message: format!("WAL_ERROR: {}", e),
+                };
+            }
+
+            match topic.append(partition_id, message).await {
+                Ok(offset) => {
+                    // Record each produce for idempotent tracking
+                    self.idempotent_manager.record_produce(
+                        producer_id,
+                        producer_epoch,
+                        partition_id,
+                        seq,
+                        offset,
+                    );
+                    if i == 0 {
+                        base_offset = offset;
+                    }
+                }
+                Err(e) => {
+                    self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
+                    return Response::Error {
+                        message: e.to_string(),
+                    };
+                }
+            }
+        }
+
+        self.pending_bytes.fetch_sub(msg_size, Ordering::AcqRel);
+
+        Response::IdempotentPublishedBatch {
+            base_offset,
+            partition: partition_id,
+            record_count,
+            duplicate: false,
+        }
+    }
 }

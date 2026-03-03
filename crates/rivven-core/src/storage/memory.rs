@@ -38,8 +38,8 @@ impl StorageBackend for MemoryStorage {
         offset: u64,
         data: &[u8],
     ) -> crate::Result<()> {
-        // recover from poisoned lock instead of panicking
-        let mut guard = self.data.write().unwrap_or_else(|e| e.into_inner());
+        // parking_lot::RwLock::write() returns the guard directly (no Result)
+        let mut guard = self.data.write();
         guard
             .entry((topic.to_string(), partition))
             .or_default()

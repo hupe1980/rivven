@@ -309,7 +309,7 @@ impl SinkRunner {
         topic: &str,
         partition: u32,
         offset: u64,
-        max_messages: usize,
+        max_messages: u32,
     ) -> Result<Vec<rivven_client::MessageData>> {
         self.broker
             .consume_batch(topic, partition, offset, max_messages)
@@ -344,7 +344,7 @@ impl SinkRunner {
             #[serde(default = "default_format")]
             format: String,
             #[serde(default = "default_batch_size")]
-            batch_size: usize,
+            batch_size: u32,
             #[serde(default = "default_true")]
             include_metadata: bool,
             #[serde(default = "default_true")]
@@ -356,7 +356,7 @@ impl SinkRunner {
         fn default_format() -> String {
             "pretty".to_string()
         }
-        fn default_batch_size() -> usize {
+        fn default_batch_size() -> u32 {
             100
         }
         fn default_true() -> bool {
@@ -532,8 +532,9 @@ impl SinkRunner {
                 }
             }
 
-            // Commit ALL dirty partition offsets periodically (every 100 events)
-            if received_any && self.events_consumed().is_multiple_of(100) {
+            // Commit ALL dirty partition offsets periodically
+            let interval = self.config.offset_commit_interval.max(1);
+            if received_any && self.events_consumed().is_multiple_of(interval) {
                 if let Err(e) = self.commit_all_offsets().await {
                     warn!("Sink '{}' failed to commit offsets: {}", self.name, e);
                 }
@@ -589,12 +590,12 @@ impl SinkRunner {
             }
         }
 
-        let batch_size: usize = self
+        let batch_size: u32 = self
             .config
             .config
             .get("batch_size")
             .and_then(|v| v.as_u64())
-            .unwrap_or(100) as usize;
+            .unwrap_or(100) as u32;
 
         let content_type: String = self
             .config
@@ -767,12 +768,12 @@ impl SinkRunner {
         // Track consecutive errors for consistent failure behavior
         const MAX_CONSECUTIVE_ERRORS: u64 = 50;
         let mut consecutive_errors: u64 = 0;
-        let batch_size: usize = self
+        let batch_size: u32 = self
             .config
             .config
             .get("batch_size")
             .and_then(|v| v.as_u64())
-            .unwrap_or(100) as usize;
+            .unwrap_or(100) as u32;
 
         loop {
             // Check for shutdown
@@ -916,8 +917,9 @@ impl SinkRunner {
                 }
             }
 
-            // Commit ALL dirty partition offsets periodically (every 100 events)
-            if received_any && self.events_consumed().is_multiple_of(100) {
+            // Commit ALL dirty partition offsets periodically
+            let interval = self.config.offset_commit_interval.max(1);
+            if received_any && self.events_consumed().is_multiple_of(interval) {
                 if let Err(e) = self.commit_all_offsets().await {
                     warn!("Sink '{}' failed to commit offsets: {}", self.name, e);
                 }

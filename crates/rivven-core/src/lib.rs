@@ -139,7 +139,7 @@ pub use auth::{
     ScramState, Session,
 };
 pub use io_uring::{
-    is_io_uring_available, AsyncReader, AsyncWriter, BatchExecutor, BatchReadResult, BatchStats,
+    is_io_uring_available, AsyncReader, BatchExecutor, BatchReadResult, BatchStats, BlockingWriter,
     IoBatch, IoOperation, IoUringConfig, IoUringStats, IoUringStatsSnapshot, PortableWalWriter,
     SegmentReader,
 };

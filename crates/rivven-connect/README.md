@@ -49,6 +49,14 @@ The token-bucket rate limiter on source and sink hot paths is **fully lock-free*
 
 Batch size estimation uses `SourceEvent::estimated_size()` — a heuristic that walks field lengths without serialization. This eliminates the `serde_json::to_vec()` allocation per event during batch splitting, keeping the hot path allocation-free.
 
+### Resilience
+
+- **Connection pooling**: `BrokerClient` maintains a pool of broker connections (default 4) so multiple connector tasks can perform I/O concurrently without serializing through a single mutex
+- **Source publish retry**: Source connectors retry failed broker publishes up to 3 times with exponential backoff before failing the event
+- **Dead Letter Queue (DLQ)**: When `dead_letter_topic` is configured, events that fail all publish retries are routed to the DLQ topic instead of halting the pipeline — preventing data loss in CDC connectors where the replication slot advances past failed events
+- **Storage upload retry**: Object storage sinks use `put_with_retry()` — 3 attempts with exponential backoff for transient upload failures (S3, GCS, Azure)
+- **Fatal error detection**: `wait_for_fatal_error` uses `futures::future::select_all` for efficient, non-polling detection of connector task failures
+
 ## Security Architecture
 
 `rivven-connect` runs as a **separate process** from the Rivven broker. This design:
@@ -228,7 +236,7 @@ sinks:
       compression: snappy       # none | snappy | gzip | lz4 | zstd | brotli
       partitioning: time        # none | identity | bucket | time
       partition_fields: [event_date]
-      commit_mode: append       # append | overwrite | upsert
+      commit_mode: append       # append | overwrite (upsert not yet supported)
       s3:
         region: us-west-2
         endpoint: http://minio:9000  # For MinIO
@@ -919,6 +927,7 @@ sources:
   <name>:
     connector: <connector-type>
     topic: <output-topic>            # Required: destination topic
+    dead_letter_topic: <dlq-topic>   # Optional: DLQ for failed publishes
     config:
       # Connector-specific configuration
       topic_routing: <pattern>       # Optional: dynamic topic routing (CDC only)
@@ -1030,6 +1039,7 @@ sinks:
     connector: <connector-type>
     topics: [<topic1>, <topic2>]     # Required: topics to consume
     consumer_group: <group-id>       # Required: for offset tracking
+    dead_letter_topic: <dlq-topic>   # Optional: DLQ for failed events
     config:
       # Connector-specific configuration
 ```

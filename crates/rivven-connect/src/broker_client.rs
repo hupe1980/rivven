@@ -11,14 +11,20 @@ use rivven_client::Client;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-/// Resilient broker client with automatic reconnection
+/// Resilient broker client with automatic reconnection.
+///
+/// Uses a pool of clients to avoid serializing all broker operations
+/// through a single mutex (CONNECT-01). Each operation acquires a
+/// client from the pool, releases it on success, or discards it
+/// on connection error.
 pub struct BrokerClient {
     config: BrokerConfig,
     retry_config: RetryConfig,
-    client: Mutex<Option<Client>>,
+    pool: tokio::sync::Mutex<Vec<Client>>,
+    pool_size: usize,
     status: RwLock<ConnectorStatus>,
     reconnect_count: AtomicU64,
     last_error: RwLock<Option<String>>,
@@ -44,8 +50,8 @@ impl BrokerClient {
 
     /// Close the connection
     pub async fn close(&self) {
-        let mut guard = self.client.lock().await;
-        *guard = None;
+        let mut pool = self.pool.lock().await;
+        pool.clear();
         *self.status.write().await = ConnectorStatus::Stopped;
     }
 
@@ -56,7 +62,7 @@ impl BrokerClient {
 
     /// Check if connected
     pub async fn is_connected(&self) -> bool {
-        self.client.lock().await.is_some()
+        !self.pool.lock().await.is_empty()
     }
 
     /// Publish a message with a key to a topic
@@ -66,26 +72,26 @@ impl BrokerClient {
         key: Option<impl Into<bytes::Bytes>>,
         value: impl Into<bytes::Bytes>,
     ) -> Result<u64> {
-        let mut guard = self.client.lock().await;
         let value = value.into();
         let key = key.map(|k| k.into());
-
-        let client = guard
-            .as_mut()
-            .ok_or_else(|| ConnectError::broker("Not connected to broker"))?;
+        let mut client = self.acquire_client().await?;
 
         match client.publish_with_key(topic, key, value).await {
-            Ok(offset) => Ok(offset),
+            Ok(offset) => {
+                self.return_client(client).await;
+                Ok(offset)
+            }
             Err(e) => {
                 if Self::is_connection_error(&e) {
-                    drop(guard);
-                    self.invalidate().await;
+                    // Drop the broken client (don't return to pool)
+                    drop(client);
                     *self.status.write().await = ConnectorStatus::Unhealthy;
                     Err(ConnectError::broker(format!(
                         "Connection error during publish: {}",
                         e
                     )))
                 } else {
+                    self.return_client(client).await;
                     Err(ConnectError::broker(format!("Publish failed: {}", e)))
                 }
             }
@@ -94,19 +100,51 @@ impl BrokerClient {
 }
 
 impl BrokerClient {
-    /// Create a new broker client
+    /// Create a new broker client with a connection pool (CONNECT-01).
+    ///
+    /// The pool starts empty; call `connect()` to populate it.
+    /// Default pool size is 4 connections.
     pub fn new(config: BrokerConfig, retry_config: RetryConfig) -> Self {
         Self {
             config,
             retry_config,
-            client: Mutex::new(None),
+            pool: tokio::sync::Mutex::new(Vec::new()),
+            pool_size: 4,
             status: RwLock::new(ConnectorStatus::Starting),
             reconnect_count: AtomicU64::new(0),
             last_error: RwLock::new(None),
         }
     }
 
-    /// Connect to the broker with bootstrap server failover and retries
+    /// Acquire a client from the pool, or create a new one.
+    async fn acquire_client(&self) -> Result<Client> {
+        {
+            let mut pool = self.pool.lock().await;
+            if let Some(client) = pool.pop() {
+                return Ok(client);
+            }
+        }
+        // Pool empty — create a new connection
+        let (client, _server) = self
+            .try_connect_with_failover()
+            .await
+            .map_err(|e| ConnectError::broker(format!("Failed to acquire connection: {}", e)))?;
+        self.reconnect_count.fetch_add(1, Ordering::Relaxed);
+        Ok(client)
+    }
+
+    /// Return a healthy client to the pool.
+    async fn return_client(&self, client: Client) {
+        let mut pool = self.pool.lock().await;
+        if pool.len() < self.pool_size {
+            pool.push(client);
+        }
+        // else: pool full, drop the extra connection
+    }
+
+    /// Connect to the broker with bootstrap server failover and retries.
+    ///
+    /// Populates the connection pool with the initial connection.
     pub async fn connect(&self) -> Result<()> {
         let mut attempt = 0u32;
         let mut backoff = Duration::from_millis(self.retry_config.initial_backoff_ms);
@@ -117,8 +155,8 @@ impl BrokerClient {
             // Try each bootstrap server in order
             match self.try_connect_with_failover().await {
                 Ok((client, server)) => {
-                    let mut guard = self.client.lock().await;
-                    *guard = Some(client);
+                    let mut pool = self.pool.lock().await;
+                    pool.push(client);
                     *self.status.write().await = ConnectorStatus::Running;
                     *self.last_error.write().await = None;
 
@@ -259,37 +297,35 @@ impl BrokerClient {
             || msg.contains("eof")
     }
 
-    /// Invalidate client to force reconnection
+    /// Invalidate all pooled clients to force reconnection
     pub async fn invalidate(&self) {
-        let mut guard = self.client.lock().await;
-        *guard = None;
+        let mut pool = self.pool.lock().await;
+        pool.clear();
     }
 
     /// Publish a message to a topic
     ///
-    /// Returns Ok(offset) on success, or an error if publishing fails.
-    /// On connection errors, the client is invalidated to trigger reconnection.
+    /// Acquires a client from the pool, publishes, and returns the client.
+    /// On connection errors, the client is discarded (not returned to pool).
     pub async fn publish(&self, topic: &str, value: impl Into<bytes::Bytes>) -> Result<u64> {
-        let mut guard = self.client.lock().await;
+        let mut client = self.acquire_client().await?;
         let value = value.into();
 
-        let client = guard
-            .as_mut()
-            .ok_or_else(|| ConnectError::broker("Not connected to broker"))?;
-
         match client.publish(topic, value).await {
-            Ok(offset) => Ok(offset),
+            Ok(offset) => {
+                self.return_client(client).await;
+                Ok(offset)
+            }
             Err(e) => {
                 if Self::is_connection_error(&e) {
-                    // Invalidate connection to trigger reconnect
-                    drop(guard);
-                    self.invalidate().await;
+                    drop(client);
                     *self.status.write().await = ConnectorStatus::Unhealthy;
                     Err(ConnectError::broker(format!(
                         "Connection error during publish: {}",
                         e
                     )))
                 } else {
+                    self.return_client(client).await;
                     Err(ConnectError::broker(format!("Publish failed: {}", e)))
                 }
             }
@@ -298,11 +334,7 @@ impl BrokerClient {
 
     /// Create a topic if it doesn't exist
     pub async fn create_topic(&self, name: &str, partitions: u32) -> Result<()> {
-        let mut guard = self.client.lock().await;
-
-        let client = guard
-            .as_mut()
-            .ok_or_else(|| ConnectError::broker("Not connected to broker"))?;
+        let mut client = self.acquire_client().await?;
 
         client
             .create_topic(name, Some(partitions))
@@ -311,68 +343,61 @@ impl BrokerClient {
                 ConnectError::Topic(format!("Failed to create topic '{}': {}", name, e))
             })?;
 
+        self.return_client(client).await;
         Ok(())
     }
 
     /// Check if a topic exists
     pub async fn topic_exists(&self, name: &str) -> Result<bool> {
-        let mut guard = self.client.lock().await;
-
-        let client = guard
-            .as_mut()
-            .ok_or_else(|| ConnectError::broker("Not connected to broker"))?;
+        let mut client = self.acquire_client().await?;
 
         let topics = client
             .list_topics()
             .await
             .map_err(|e| ConnectError::broker(format!("Failed to list topics: {}", e)))?;
 
+        self.return_client(client).await;
         Ok(topics.iter().any(|t| t == name))
     }
 
     /// List all topics
     pub async fn list_topics(&self) -> Result<Vec<String>> {
-        let mut guard = self.client.lock().await;
+        let mut client = self.acquire_client().await?;
 
-        let client = guard
-            .as_mut()
-            .ok_or_else(|| ConnectError::broker("Not connected to broker"))?;
-
-        client
+        let result = client
             .list_topics()
             .await
-            .map_err(|e| ConnectError::broker(format!("Failed to list topics: {}", e)))
+            .map_err(|e| ConnectError::broker(format!("Failed to list topics: {}", e)));
+
+        self.return_client(client).await;
+        result
     }
 
     /// Consume messages from a topic/partition with batch size
-    ///
-    /// Returns consumed messages or an error. On connection errors, the client
-    /// is invalidated to trigger reconnection.
     pub async fn consume_batch(
         &self,
         topic: &str,
         partition: u32,
         offset: u64,
-        max_messages: usize,
+        max_messages: u32,
     ) -> Result<Vec<rivven_client::MessageData>> {
-        let mut guard = self.client.lock().await;
-
-        let client = guard
-            .as_mut()
-            .ok_or_else(|| ConnectError::broker("Not connected to broker"))?;
+        let mut client = self.acquire_client().await?;
 
         match client.consume(topic, partition, offset, max_messages).await {
-            Ok(messages) => Ok(messages),
+            Ok(messages) => {
+                self.return_client(client).await;
+                Ok(messages)
+            }
             Err(e) => {
                 if Self::is_connection_error(&e) {
-                    drop(guard);
-                    self.invalidate().await;
+                    drop(client);
                     *self.status.write().await = ConnectorStatus::Unhealthy;
                     Err(ConnectError::broker(format!(
                         "Connection error during consume: {}",
                         e
                     )))
                 } else {
+                    self.return_client(client).await;
                     Err(ConnectError::broker(format!("Consume failed: {}", e)))
                 }
             }
@@ -387,16 +412,15 @@ impl BrokerClient {
         partition: u32,
         offset: u64,
     ) -> Result<()> {
-        let mut guard = self.client.lock().await;
+        let mut client = self.acquire_client().await?;
 
-        let client = guard
-            .as_mut()
-            .ok_or_else(|| ConnectError::broker("Not connected to broker"))?;
-
-        client
+        let result = client
             .commit_offset(consumer_group, topic, partition, offset)
             .await
-            .map_err(|e| ConnectError::broker(format!("Commit offset failed: {}", e)))
+            .map_err(|e| ConnectError::broker(format!("Commit offset failed: {}", e)));
+
+        self.return_client(client).await;
+        result
     }
 
     /// Get consumer group offset for a topic/partition
@@ -406,16 +430,11 @@ impl BrokerClient {
         topic: &str,
         partition: u32,
     ) -> Result<Option<u64>> {
-        let mut guard = self.client.lock().await;
+        let mut client = self.acquire_client().await?;
 
-        let client = guard
-            .as_mut()
-            .ok_or_else(|| ConnectError::broker("Not connected to broker"))?;
-
-        match client.get_offset(consumer_group, topic, partition).await {
+        let result = match client.get_offset(consumer_group, topic, partition).await {
             Ok(offset) => Ok(offset),
             Err(e) => {
-                // Offset not found is not an error, just return None
                 let msg = e.to_string().to_lowercase();
                 if msg.contains("not found") || msg.contains("no offset") {
                     Ok(None)
@@ -423,68 +442,57 @@ impl BrokerClient {
                     Err(ConnectError::broker(format!("Get offset failed: {}", e)))
                 }
             }
-        }
+        };
+
+        self.return_client(client).await;
+        result
     }
 
-    /// Get earliest and latest offsets for a topic/partition
     /// Get the number of partitions for a topic
     pub async fn get_topic_partition_count(&self, topic: &str) -> Result<u32> {
-        let mut guard = self.client.lock().await;
-
-        let client = guard
-            .as_mut()
-            .ok_or_else(|| ConnectError::broker("Not connected to broker"))?;
+        let mut client = self.acquire_client().await?;
 
         let (_name, partitions) = client.get_metadata(topic).await.map_err(|e| {
             ConnectError::broker(format!("Failed to get metadata for '{}': {}", topic, e))
         })?;
 
+        self.return_client(client).await;
         Ok(partitions)
     }
 
+    /// Get earliest and latest offsets for a topic/partition.
     ///
     /// Returns (earliest, latest) where:
     /// - earliest: First available offset (messages before this are deleted/compacted)
     /// - latest: Next offset to be assigned (one past the last message)
     pub async fn get_offset_bounds(&self, topic: &str, partition: u32) -> Result<(u64, u64)> {
-        let mut guard = self.client.lock().await;
+        let mut client = self.acquire_client().await?;
 
-        let client = guard
-            .as_mut()
-            .ok_or_else(|| ConnectError::broker("Not connected to broker"))?;
-
-        client
+        let result = client
             .get_offset_bounds(topic, partition)
             .await
-            .map_err(|e| ConnectError::broker(format!("Get offset bounds failed: {}", e)))
+            .map_err(|e| ConnectError::broker(format!("Get offset bounds failed: {}", e)));
+
+        self.return_client(client).await;
+        result
     }
 
     /// Get the first offset with timestamp >= the given timestamp
-    ///
-    /// # Arguments
-    /// * `topic` - The topic name
-    /// * `partition` - The partition number
-    /// * `timestamp_ms` - Timestamp in milliseconds since Unix epoch
-    ///
-    /// # Returns
-    /// * `Some(offset)` - The first offset with message timestamp >= timestamp_ms
-    /// * `None` - No messages found with timestamp >= timestamp_ms
     pub async fn get_offset_for_timestamp(
         &self,
         topic: &str,
         partition: u32,
         timestamp_ms: i64,
     ) -> Result<Option<u64>> {
-        let mut guard = self.client.lock().await;
+        let mut client = self.acquire_client().await?;
 
-        let client = guard
-            .as_mut()
-            .ok_or_else(|| ConnectError::broker("Not connected to broker"))?;
-
-        client
+        let result = client
             .get_offset_for_timestamp(topic, partition, timestamp_ms)
             .await
-            .map_err(|e| ConnectError::broker(format!("Get offset for timestamp failed: {}", e)))
+            .map_err(|e| ConnectError::broker(format!("Get offset for timestamp failed: {}", e)));
+
+        self.return_client(client).await;
+        result
     }
 }
 

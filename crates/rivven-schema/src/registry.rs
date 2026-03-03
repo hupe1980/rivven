@@ -40,8 +40,8 @@ use crate::metrics::{MetricsConfig, RegistryMetrics};
 pub struct SchemaRegistry {
     /// Storage backend
     storage: Storage,
-    /// Default compatibility level
-    default_compatibility: CompatibilityLevel,
+    /// Default compatibility level (interior mutability for shared access)
+    default_compatibility: RwLock<CompatibilityLevel>,
     /// Per-subject compatibility overrides
     subject_compatibility: DashMap<String, CompatibilityLevel>,
     /// Schema normalization enabled
@@ -77,7 +77,7 @@ impl SchemaRegistry {
 
         Ok(Self {
             storage,
-            default_compatibility: config.compatibility,
+            default_compatibility: RwLock::new(config.compatibility),
             subject_compatibility: DashMap::new(),
             normalize: config.normalize_schemas,
             cache_by_id: DashMap::new(),
@@ -444,25 +444,33 @@ impl SchemaRegistry {
             }
         }
 
-        // Allocate new schema ID
-        let id = self.storage.next_schema_id().await?;
-
-        // Create and store schema with references
-        let schema_obj = Schema::new(id, schema_type, normalized_schema.clone())
+        // Create a schema object with a placeholder ID — the actual ID is
+        // allocated atomically inside `register_schema_atomic` to eliminate
+        // the separate `next_schema_id()` write and the partial-state window.
+        let schema_obj = Schema::new(SchemaId::new(0), schema_type, normalized_schema.clone())
             .with_fingerprint(fp_hex.clone())
             .with_references(references);
 
-        self.storage.store_schema(schema_obj.clone()).await?;
-
-        // Register under subject
-        let version = self.storage.register_subject_version(&subject, id).await?;
+        // Atomic registration: allocates the schema ID AND writes
+        // schema + subject-version in a single durable operation.
+        // This prevents partial state (orphaned schemas or missing
+        // subject-versions) from crashes between separate writes.
+        let (id, version) = self
+            .storage
+            .register_schema_atomic(schema_obj.clone(), &subject)
+            .await?;
 
         // Track subject in context
         self.add_subject_to_context(&context, &subject);
 
         // Update cache (evict if needed to honour max_cache_size)
+        // Re-fetch the schema from storage to get the correct ID assigned
+        // by register_schema_atomic.
         self.evict_cache_if_needed();
-        self.cache_by_id.insert(id.0, schema_obj);
+        let cached_schema = Schema::new(id, schema_type, normalized_schema)
+            .with_fingerprint(fp_hex.clone())
+            .with_references(schema_obj.references.clone());
+        self.cache_by_id.insert(id.0, cached_schema);
         self.cache_by_fingerprint.insert(fp_hex, id.0);
 
         // Record metrics
@@ -687,7 +695,7 @@ impl SchemaRegistry {
         self.subject_compatibility
             .get(&subject.0)
             .map(|c| *c)
-            .unwrap_or(self.default_compatibility)
+            .unwrap_or(*self.default_compatibility.read())
     }
 
     /// Set compatibility level for a subject
@@ -699,9 +707,14 @@ impl SchemaRegistry {
         self.subject_compatibility.insert(subject.into().0, level);
     }
 
+    /// Set global default compatibility level
+    pub fn set_default_compatibility(&self, level: CompatibilityLevel) {
+        *self.default_compatibility.write() = level;
+    }
+
     /// Get global default compatibility level
     pub fn get_default_compatibility(&self) -> CompatibilityLevel {
-        self.default_compatibility
+        *self.default_compatibility.read()
     }
 
     // ========================================================================
