@@ -825,9 +825,8 @@ impl SourceRunner {
                                     }
                                 }
                                 if !published {
-                                    if self.dead_letter_topic.is_some() {
-                                        let dlq_topic =
-                                            self.dead_letter_topic.as_ref().unwrap().clone();
+                                    if let Some(dlq_topic) = &self.dead_letter_topic {
+                                        let dlq_topic = dlq_topic.clone();
                                         warn!(
                                             "HTTP source '{}' routing failed event to DLQ topic '{}'",
                                             self.name, dlq_topic
@@ -1044,8 +1043,8 @@ impl SourceRunner {
                                 }
                             }
                             if !published {
-                                if self.dead_letter_topic.is_some() {
-                                    let dlq_topic = self.dead_letter_topic.as_ref().unwrap().clone();
+                                if let Some(dlq_topic) = &self.dead_letter_topic {
+                                    let dlq_topic = dlq_topic.clone();
                                     warn!(
                                         "Source '{}' routing failed event to DLQ topic '{}'",
                                         self.name, dlq_topic

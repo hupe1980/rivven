@@ -284,7 +284,43 @@ if $INTEGRATION; then
             docker container prune -f > /dev/null 2>&1 || true
         fi
 
-        run_check "Integration Tests" cargo test --all-features --workspace -- --test-threads=1
+        # Run integration tests in batches to avoid terminal session timeouts.
+        # Each batch targets a subset of test files so no single cargo
+        # invocation runs longer than ~15 minutes.
+        INTEG_PKG="rivven-integration-tests"
+        INTEG_FLAGS="--all-features -- --test-threads=1"
+
+        run_check "Integration: CDC" \
+            cargo test -p $INTEG_PKG $INTEG_FLAGS \
+                --test cdc_mariadb --test cdc_mysql --test cdc_postgres
+
+        run_check "Integration: Cluster & Consensus" \
+            cargo test -p $INTEG_PKG $INTEG_FLAGS \
+                --test cluster_consensus --test chaos --test client_protocol
+
+        run_check "Integration: Connect" \
+            cargo test -p $INTEG_PKG $INTEG_FLAGS \
+                --test connect_distributed --test connect_e2e --test kafka_connector \
+                --test mqtt_connector
+
+        run_check "Integration: Core" \
+            cargo test -p $INTEG_PKG $INTEG_FLAGS \
+                --test admin_api --test compression --test consumer_groups \
+                --test e2e_pipeline --test externalize_blob
+
+        run_check "Integration: Protocol & Schema" \
+            cargo test -p $INTEG_PKG $INTEG_FLAGS \
+                --test protobuf_protocol --test schema_avro --test schema_protobuf \
+                --test quotas
+
+        run_check "Integration: Security & Auth" \
+            cargo test -p $INTEG_PKG $INTEG_FLAGS \
+                --test rbac --test security --test tls
+
+        run_check "Integration: Storage & Data" \
+            cargo test -p $INTEG_PKG $INTEG_FLAGS \
+                --test tiered_storage --test rdbc_connectors --test transactions \
+                --test observability --test stress
     else
         print_err "Docker not available - integration tests require Docker"
         exit 1
