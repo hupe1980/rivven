@@ -41,9 +41,9 @@ use crate::types::{
     SchemaType, ValidationLevel, ValidationReport, ValidationResult, ValidationRule,
     ValidationRuleType,
 };
+use parking_lot::Mutex;
 use serde::Deserialize;
 use std::collections::HashMap;
-use parking_lot::Mutex;
 use tracing::debug;
 
 /// Configuration for the validation engine

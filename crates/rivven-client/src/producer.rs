@@ -44,13 +44,13 @@
 
 use crate::client::ClientStream;
 use crate::{Error, Request, Response, Result};
-use rivven_protocol::BatchRecord;
 use bytes::Bytes;
 use rand::Rng;
 #[cfg(feature = "compression")]
 use rivven_core::compression::{CompressionAlgorithm, CompressionConfig, Compressor};
 #[cfg(feature = "tls")]
 use rivven_core::tls::TlsConfig;
+use rivven_protocol::BatchRecord;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -509,7 +509,9 @@ impl StickyPartitioner {
 
             // Topology changed — reset
             if total != num_partitions {
-                state.total_partitions.store(num_partitions, Ordering::Relaxed);
+                state
+                    .total_partitions
+                    .store(num_partitions, Ordering::Relaxed);
                 let new_part = rand_partition(num_partitions);
                 state.partition.store(new_part, Ordering::Relaxed);
                 state.batch_count.store(1, Ordering::Relaxed);
@@ -2387,10 +2389,8 @@ mod tests {
         let partitioner = StickyPartitioner::new();
 
         // Same key should always map to same partition
-        let p1 = partitioner
-            .partition("topic", Some(b"key1".as_slice()), 10);
-        let p2 = partitioner
-            .partition("topic", Some(b"key1".as_slice()), 10);
+        let p1 = partitioner.partition("topic", Some(b"key1".as_slice()), 10);
+        let p2 = partitioner.partition("topic", Some(b"key1".as_slice()), 10);
         assert_eq!(p1, p2);
     }
 

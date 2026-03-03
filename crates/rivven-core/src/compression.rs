@@ -456,10 +456,8 @@ fn compress_lz4_into(data: &[u8], out: &mut BytesMut) -> Result<usize> {
     // Compress directly into the BytesMut tail
     let offset = out.len();
     out.resize(offset + get_maximum_output_size(data.len()), 0);
-    let compressed_len =
-        lz4_flex::block::compress_into(data, &mut out[offset..]).map_err(|e| {
-            CompressionError::Lz4Error(e.to_string())
-        })?;
+    let compressed_len = lz4_flex::block::compress_into(data, &mut out[offset..])
+        .map_err(|e| CompressionError::Lz4Error(e.to_string()))?;
     out.truncate(offset + compressed_len);
     Ok(4 + compressed_len)
 }
@@ -860,9 +858,7 @@ impl Compressor {
 
         // Upper bound on compressed output so we can pre-allocate once
         let max_compressed = match algorithm {
-            CompressionAlgorithm::Lz4 => {
-                4 + lz4_flex::block::get_maximum_output_size(data.len())
-            }
+            CompressionAlgorithm::Lz4 => 4 + lz4_flex::block::get_maximum_output_size(data.len()),
             CompressionAlgorithm::Zstd => zstd::zstd_safe::compress_bound(data.len()),
             CompressionAlgorithm::Snappy => snap::raw::max_compress_len(data.len()),
             CompressionAlgorithm::None => unreachable!("None handled before compress_into_buf"),

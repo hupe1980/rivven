@@ -481,7 +481,6 @@ pub enum Request {
     // =========================================================================
     // Batch Publish (hot-path optimization)
     // =========================================================================
-
     /// Publish a batch of records to a single (topic, partition) in one
     /// wire message — eliminates per-record topic cloning and serialization
     /// overhead compared to sending N individual `Publish` requests.
@@ -1114,7 +1113,6 @@ pub enum Response {
     // =========================================================================
     // Batch Publish Responses
     // =========================================================================
-
     /// Result of a [`Request::PublishBatch`].
     ///
     /// All records are written to contiguous offsets starting at `base_offset`.
@@ -1354,15 +1352,11 @@ impl Request {
                 check_name(group_id, "group_id")?;
                 check_name(member_id, "member_id")?;
             }
-            Request::PublishBatch {
-                topic, records, ..
-            } => {
+            Request::PublishBatch { topic, records, .. } => {
                 check_name(topic, "topic")?;
                 check_list(records.len(), "records")?;
             }
-            Request::IdempotentPublishBatch {
-                topic, records, ..
-            } => {
+            Request::IdempotentPublishBatch { topic, records, .. } => {
                 check_name(topic, "topic")?;
                 check_list(records.len(), "records")?;
             }

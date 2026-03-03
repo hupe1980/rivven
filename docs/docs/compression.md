@@ -42,8 +42,8 @@ Producer-side compression in `rivven-client` is controlled by the `compression` 
 
 ```toml
 [dependencies]
-rivven-client = { version = "0.0.21" }                    # compression included
-rivven-client = { version = "0.0.21", features = [] }     # no compression
+rivven-client = { version = "0.0.22" }                    # compression included
+rivven-client = { version = "0.0.22", features = [] }     # no compression
 ```
 
 When disabled, `CompressionType` config is accepted but ignored — all batches are sent uncompressed.

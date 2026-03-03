@@ -602,7 +602,7 @@ async fn delete_subject(
     Query(params): Query<QueryParams>,
     auth: Option<Extension<AuthState>>,
 ) -> Result<Json<Vec<u32>>, (StatusCode, Json<ErrorResponse>)> {
-        enforce_permission(&auth, &subject, SchemaPermission::Delete, &state)?;
+    enforce_permission(&auth, &subject, SchemaPermission::Delete, &state)?;
 
     // Check mode
     if *state.mode.read() == RegistryMode::ReadOnly {
@@ -641,7 +641,7 @@ async fn undelete_subject(
     Path(subject): Path<String>,
     auth: Option<Extension<AuthState>>,
 ) -> Result<Json<Vec<u32>>, (StatusCode, Json<ErrorResponse>)> {
-        enforce_permission(&auth, &subject, SchemaPermission::Create, &state)?;
+    enforce_permission(&auth, &subject, SchemaPermission::Create, &state)?;
 
     // Check mode
     if *state.mode.read() == RegistryMode::ReadOnly {
@@ -680,7 +680,7 @@ async fn register_schema(
     auth: Option<Extension<AuthState>>,
     Json(req): Json<RegisterSchemaRequest>,
 ) -> Result<Json<RegisterSchemaResponse>, (StatusCode, Json<ErrorResponse>)> {
-        enforce_permission(&auth, &subject, SchemaPermission::Create, &state)?;
+    enforce_permission(&auth, &subject, SchemaPermission::Create, &state)?;
 
     // Check mode
     if *state.mode.read() == RegistryMode::ReadOnly {
@@ -759,7 +759,7 @@ async fn delete_version(
     Query(params): Query<QueryParams>,
     auth: Option<Extension<AuthState>>,
 ) -> Result<Json<u32>, (StatusCode, Json<ErrorResponse>)> {
-        enforce_permission(&auth, &subject, SchemaPermission::Delete, &state)?;
+    enforce_permission(&auth, &subject, SchemaPermission::Delete, &state)?;
 
     // Check mode
     if *state.mode.read() == RegistryMode::ReadOnly {
@@ -866,7 +866,7 @@ async fn update_global_config(
     auth: Option<Extension<AuthState>>,
     Json(req): Json<ConfigRequest>,
 ) -> Result<Json<ConfigResponse>, (StatusCode, Json<ErrorResponse>)> {
-        enforce_permission(&auth, "_global", SchemaPermission::Alter, &state)?;
+    enforce_permission(&auth, "_global", SchemaPermission::Alter, &state)?;
 
     let level: CompatibilityLevel = req.compatibility.parse().map_err(|_| {
         (
@@ -903,7 +903,7 @@ async fn update_subject_config(
     auth: Option<Extension<AuthState>>,
     Json(req): Json<ConfigRequest>,
 ) -> Result<Json<ConfigResponse>, (StatusCode, Json<ErrorResponse>)> {
-        enforce_permission(&auth, &subject, SchemaPermission::Alter, &state)?;
+    enforce_permission(&auth, &subject, SchemaPermission::Alter, &state)?;
 
     let level: CompatibilityLevel = req.compatibility.parse().map_err(|_| {
         (
@@ -935,7 +935,7 @@ async fn update_mode(
     auth: Option<Extension<AuthState>>,
     Json(req): Json<ModeRequest>,
 ) -> Result<Json<ModeResponse>, (StatusCode, Json<ErrorResponse>)> {
-        enforce_permission(&auth, "_global", SchemaPermission::Alter, &state)?;
+    enforce_permission(&auth, "_global", SchemaPermission::Alter, &state)?;
 
     let mode = match req.mode.to_uppercase().as_str() {
         "READWRITE" => RegistryMode::ReadWrite,
@@ -995,7 +995,7 @@ async fn set_version_state(
     auth: Option<Extension<AuthState>>,
     Json(req): Json<VersionStateRequest>,
 ) -> Result<Json<VersionStateResponse>, (StatusCode, Json<ErrorResponse>)> {
-        enforce_permission(&auth, &subject, SchemaPermission::Alter, &state)?;
+    enforce_permission(&auth, &subject, SchemaPermission::Alter, &state)?;
 
     let version_state: VersionState = req.state.parse().map_err(|_| {
         (
@@ -1023,7 +1023,7 @@ async fn deprecate_version(
     Path((subject, version)): Path<(String, u32)>,
     auth: Option<Extension<AuthState>>,
 ) -> Result<Json<VersionStateResponse>, (StatusCode, Json<ErrorResponse>)> {
-        enforce_permission(&auth, &subject, SchemaPermission::Alter, &state)?;
+    enforce_permission(&auth, &subject, SchemaPermission::Alter, &state)?;
 
     state
         .registry
@@ -1041,7 +1041,7 @@ async fn disable_version(
     Path((subject, version)): Path<(String, u32)>,
     auth: Option<Extension<AuthState>>,
 ) -> Result<Json<VersionStateResponse>, (StatusCode, Json<ErrorResponse>)> {
-        enforce_permission(&auth, &subject, SchemaPermission::Alter, &state)?;
+    enforce_permission(&auth, &subject, SchemaPermission::Alter, &state)?;
 
     state
         .registry
@@ -1059,7 +1059,7 @@ async fn enable_version(
     Path((subject, version)): Path<(String, u32)>,
     auth: Option<Extension<AuthState>>,
 ) -> Result<Json<VersionStateResponse>, (StatusCode, Json<ErrorResponse>)> {
-        enforce_permission(&auth, &subject, SchemaPermission::Alter, &state)?;
+    enforce_permission(&auth, &subject, SchemaPermission::Alter, &state)?;
 
     state
         .registry
@@ -1173,7 +1173,7 @@ async fn add_validation_rule(
     auth: Option<Extension<AuthState>>,
     Json(req): Json<AddValidationRuleRequest>,
 ) -> Result<Json<ValidationRuleResponse>, (StatusCode, Json<ErrorResponse>)> {
-        enforce_permission(&auth, "_global", SchemaPermission::Create, &state)?;
+    enforce_permission(&auth, "_global", SchemaPermission::Create, &state)?;
 
     let rule_type: ValidationRuleType = req.rule_type.parse().map_err(|_| {
         (
@@ -1241,7 +1241,7 @@ async fn delete_validation_rule(
     Path(name): Path<String>,
     auth: Option<Extension<AuthState>>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-        enforce_permission(&auth, "_global", SchemaPermission::Delete, &state)?;
+    enforce_permission(&auth, "_global", SchemaPermission::Delete, &state)?;
 
     let removed = state
         .registry
@@ -1298,7 +1298,7 @@ async fn create_context(
     auth: Option<Extension<AuthState>>,
     Json(req): Json<CreateContextRequest>,
 ) -> Result<Json<ContextResponse>, (StatusCode, Json<ErrorResponse>)> {
-        enforce_permission(&auth, "_global", SchemaPermission::Create, &state)?;
+    enforce_permission(&auth, "_global", SchemaPermission::Create, &state)?;
 
     let mut context = SchemaContext::new(&req.name);
     if let Some(desc) = &req.description {
@@ -1347,7 +1347,7 @@ async fn delete_context(
     Path(context_name): Path<String>,
     auth: Option<Extension<AuthState>>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-        enforce_permission(&auth, "_global", SchemaPermission::Delete, &state)?;
+    enforce_permission(&auth, "_global", SchemaPermission::Delete, &state)?;
 
     state
         .registry

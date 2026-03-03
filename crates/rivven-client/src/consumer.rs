@@ -1222,7 +1222,9 @@ impl Consumer {
 
     /// Get the current offset position for a (topic, partition) pair.
     pub fn position(&self, topic: &str, partition: u32) -> Option<u64> {
-        self.offsets.get(&(Arc::<str>::from(topic), partition)).copied()
+        self.offsets
+            .get(&(Arc::<str>::from(topic), partition))
+            .copied()
     }
 
     /// Get current partition assignments.

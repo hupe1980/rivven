@@ -472,7 +472,11 @@ impl HotTier {
             let last = entries.len() - 1;
             entries.move_index(idx, last);
             // Access by index (now at `last`) — avoids a second hash lookup
-            let data = entries.get_index(last).expect("element was just moved to this index").1.clone();
+            let data = entries
+                .get_index(last)
+                .expect("element was just moved to this index")
+                .1
+                .clone();
             Some(data)
         } else {
             None
@@ -2226,7 +2230,9 @@ impl TieredStorage {
                     .store(topic, partition, base_offset, metadata.end_offset, &data)
                     .await?;
             }
-            StorageTier::Cold => unreachable!("cannot migrate TO cold tier via this path — use promote_to_cold()"),
+            StorageTier::Cold => {
+                unreachable!("cannot migrate TO cold tier via this path — use promote_to_cold()")
+            }
         }
 
         // Update metadata

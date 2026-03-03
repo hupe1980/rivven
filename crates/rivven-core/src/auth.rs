@@ -290,8 +290,9 @@ impl PasswordHash {
     pub fn new(password: &str) -> AuthResult<Self> {
         let rng = SystemRandom::new();
         let mut salt = vec![0u8; 32];
-        rng.fill(&mut salt)
-            .map_err(|_| AuthError::Internal("OS entropy source unavailable — cannot generate salt".into()))?;
+        rng.fill(&mut salt).map_err(|_| {
+            AuthError::Internal("OS entropy source unavailable — cannot generate salt".into())
+        })?;
 
         Ok(Self::with_salt(password, &salt, 600_000))
     }
@@ -1289,7 +1290,8 @@ impl AuthManager {
             None => {
                 // Unknown principal - still do constant-time password check
                 // to prevent timing attacks that enumerate users
-                let dummy = PasswordHash::new("dummy").unwrap_or_else(|_| PasswordHash::with_salt("dummy", &[0u8; 32], 600_000));
+                let dummy = PasswordHash::new("dummy")
+                    .unwrap_or_else(|_| PasswordHash::with_salt("dummy", &[0u8; 32], 600_000));
                 let _ = dummy.verify(password);
                 self.record_auth_failure(username, client_ip);
                 return Err(AuthError::AuthenticationFailed);
@@ -1762,8 +1764,11 @@ impl SaslScramAuth {
                 );
                 let rng = SystemRandom::new();
                 let mut fake_salt = vec![0u8; 32];
-                rng.fill(&mut fake_salt)
-                    .map_err(|_| AuthError::Internal("OS entropy source unavailable — cannot generate salt".into()))?;
+                rng.fill(&mut fake_salt).map_err(|_| {
+                    AuthError::Internal(
+                        "OS entropy source unavailable — cannot generate salt".into(),
+                    )
+                })?;
                 // Use the same iteration count as real users (600000)
                 // to prevent leaking user existence via timing differences.
                 (fake_salt, 600_000)
@@ -1773,8 +1778,9 @@ impl SaslScramAuth {
         // Generate server nonce (random bytes, base64 encoded)
         let rng = SystemRandom::new();
         let mut server_nonce_bytes = vec![0u8; 24];
-        rng.fill(&mut server_nonce_bytes)
-            .map_err(|_| AuthError::Internal("OS entropy source unavailable — cannot generate nonce".into()))?;
+        rng.fill(&mut server_nonce_bytes).map_err(|_| {
+            AuthError::Internal("OS entropy source unavailable — cannot generate nonce".into())
+        })?;
         let server_nonce = base64_encode(&server_nonce_bytes);
         let combined_nonce = format!("{}{}", client_nonce, server_nonce);
 
