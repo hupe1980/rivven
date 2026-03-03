@@ -99,12 +99,27 @@ impl TestBroker {
             }
         });
 
-        // Wait for server to be ready (ClusterServer needs more time for Raft init)
+        // Wait for server to be ready (ClusterServer needs more time for Raft init).
+        // We check both TCP connectivity AND that the spawned task is still alive
+        // to avoid connecting to a stale server from a previous test on the same port.
+        let mut ready = false;
         for _ in 0..100 {
+            if handle.is_finished() {
+                // Server task exited — port collision or other fatal error.
+                break;
+            }
             if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                ready = true;
                 break;
             }
             sleep(Duration::from_millis(50)).await;
+        }
+
+        if !ready {
+            anyhow::bail!(
+                "Test broker failed to start on {} — server task exited early (port collision?)",
+                addr
+            );
         }
 
         // Receive the server's shutdown handle (sent from inside the spawn)
@@ -291,12 +306,25 @@ impl TestSecureBroker {
             }
         });
 
-        // Wait for server to be ready
+        // Wait for server to be ready — also verify the task hasn't exited
+        // early (e.g. port collision) to avoid connecting to a stale server.
+        let mut ready = false;
         for _ in 0..50 {
+            if handle.is_finished() {
+                break;
+            }
             if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                ready = true;
                 break;
             }
             sleep(Duration::from_millis(20)).await;
+        }
+
+        if !ready {
+            anyhow::bail!(
+                "Test secure broker failed to start on {} — server task exited early (port collision?)",
+                addr
+            );
         }
 
         Ok(Self {
@@ -430,12 +458,25 @@ impl TestTlsBroker {
             }
         });
 
-        // Wait for server to be ready
+        // Wait for server to be ready — also verify the task hasn't exited
+        // early (e.g. port collision) to avoid connecting to a stale server.
+        let mut ready = false;
         for _ in 0..50 {
+            if handle.is_finished() {
+                break;
+            }
             if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                ready = true;
                 break;
             }
             sleep(Duration::from_millis(20)).await;
+        }
+
+        if !ready {
+            anyhow::bail!(
+                "Test TLS broker failed to start on {} — server task exited early (port collision?)",
+                addr
+            );
         }
 
         Ok(Self {
@@ -576,14 +617,26 @@ impl TestMetricsBroker {
             }
         });
 
-        // Wait for both servers to be ready
+        // Wait for both servers to be ready — also verify the task hasn't exited
+        // early (e.g. port collision) to avoid connecting to stale servers.
+        let mut ready = false;
         for _ in 0..50 {
+            if handle.is_finished() {
+                break;
+            }
             let client_ready = tokio::net::TcpStream::connect(client_addr).await.is_ok();
             let api_ready = tokio::net::TcpStream::connect(api_addr).await.is_ok();
             if client_ready && api_ready {
+                ready = true;
                 break;
             }
             sleep(Duration::from_millis(20)).await;
+        }
+
+        if !ready {
+            anyhow::bail!(
+                "Test metrics broker failed to start — server task exited early (port collision?)"
+            );
         }
 
         Ok(Self {
@@ -1663,12 +1716,25 @@ impl TestSchemaRegistry {
             }
         });
 
-        // Wait for server to be ready
+        // Wait for server to be ready — also verify the task hasn't exited
+        // early (e.g. port collision) to avoid connecting to a stale server.
+        let mut ready = false;
         for _ in 0..50 {
+            if handle.is_finished() {
+                break;
+            }
             if tokio::net::TcpStream::connect(server_addr).await.is_ok() {
+                ready = true;
                 break;
             }
             sleep(Duration::from_millis(20)).await;
+        }
+
+        if !ready {
+            anyhow::bail!(
+                "Test schema registry failed to start on {} — server task exited early (port collision?)",
+                server_addr
+            );
         }
 
         Ok(Self {
