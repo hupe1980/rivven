@@ -7,7 +7,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Partition assignments for SyncGroup: Vec<(member_id, Vec<(topic, Vec<partition>)>)>
+/// Partition assignments for SyncGroup: `Vec<(member_id, Vec<(topic, Vec<partition>)>)>`
 pub type SyncGroupAssignments = Vec<(String, Vec<(String, Vec<u32>)>)>;
 
 /// Quota alteration request
@@ -453,7 +453,7 @@ pub enum Request {
         /// This member's ID
         member_id: String,
         /// Assignments (only sent by leader; empty for followers).
-        /// Each entry is (member_id, Vec<(topic, Vec<partition>)>).
+        /// Each entry is `(member_id, Vec<(topic, Vec<partition>)>)`.
         assignments: SyncGroupAssignments,
     },
 
@@ -493,8 +493,8 @@ pub enum Request {
         leader_epoch: Option<u64>,
     },
 
-    /// Idempotent batch publish — combines [`IdempotentPublish`] semantics
-    /// with the batching efficiency of [`PublishBatch`].
+    /// Idempotent batch publish — combines [`Request::IdempotentPublish`] semantics
+    /// with the batching efficiency of [`Request::PublishBatch`].
     ///
     /// Records are assigned sequence numbers `base_sequence..base_sequence + N - 1`.
     IdempotentPublishBatch {
@@ -1097,7 +1097,7 @@ pub enum Response {
 
     /// SyncGroup response — partition assignments for this member.
     SyncGroupResult {
-        /// This member's partition assignments: Vec<(topic, Vec<partition>)>
+        /// This member's partition assignments: `Vec<(topic, Vec<partition>)>`
         assignments: Vec<(String, Vec<u32>)>,
     },
 

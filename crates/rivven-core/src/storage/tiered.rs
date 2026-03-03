@@ -1772,7 +1772,7 @@ impl TieredStorage {
 
     /// Read messages from storage, deserializing the length-prefixed framing.
     ///
-    /// Unlike [`read`], which returns raw segment blobs, this method parses the
+    /// Unlike [`Self::read`], which returns raw segment blobs, this method parses the
     /// 4-byte big-endian length-prefix framing written by `Partition::append`
     /// and returns fully deserialized [`Message`](crate::Message) objects.
     pub async fn read_messages(
